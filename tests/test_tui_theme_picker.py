@@ -73,6 +73,48 @@ def test_theme_selection_persists_and_ctrl_t_returns_to_most_recent_dark(
     assert state.last_dark_theme == "wisp-ember"
 
 
+def test_ctrl_t_does_not_commit_while_picker_owns_a_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    async def scenario() -> tuple[str, str]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.submit_command_line("/theme")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+            preview = app.theme
+            await pilot.press("ctrl+t", "escape")
+            await pilot.pause()
+            return preview, app.theme
+
+    preview, restored = anyio.run(scenario)
+    assert preview == "wisp-orchid"
+    assert restored == "wisp"
+    assert load_theme_state(home_dir=tmp_path).active_theme is None
+
+
+def test_multiline_theme_prefix_remains_prompt_content() -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    prompt = "/theme\nember"
+
+    async def scenario() -> str:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.submit_command_line(prompt)
+            await pilot.pause()
+            queued = await app._input_controller.receive_stream.receive()
+            assert isinstance(queued, str)
+            return queued
+
+    assert anyio.run(scenario) == prompt
+
+
 def test_theme_picker_commit_preserves_viewport_and_uses_latest_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

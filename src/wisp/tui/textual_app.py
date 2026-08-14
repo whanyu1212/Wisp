@@ -948,6 +948,8 @@ class TextualTui(App[None]):
     def _submit_local_theme_command(self, text: str) -> bool:
         """Handle Textual-only ``/theme`` without crossing the RPC boundary."""
 
+        if "\n" in text or "\r" in text:
+            return False
         parts = text.strip().split()
         if not parts or parts[0].casefold() != "/theme":
             return False
@@ -1523,6 +1525,8 @@ class TextualTui(App[None]):
     def action_toggle_theme(self) -> None:
         """Toggle Paper against the most recently committed dark theme."""
 
+        if self._theme_picker_original is not None:
+            return
         next_name = self._last_dark_theme if self.theme == PAPER_THEME_NAME else PAPER_THEME_NAME
         self._commit_theme(next_name, announce=True)
 
