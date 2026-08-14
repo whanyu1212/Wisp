@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from unittest.mock import patch
+from weakref import WeakKeyDictionary
 
 import textual
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -140,7 +141,9 @@ class _HotpathCollector:
     layout_ms: list[float] = field(default_factory=list)
     compositor_ms: list[float] = field(default_factory=list)
     content_height_calls: dict[str, int] = field(default_factory=dict)
-    markdown_owners: dict[_SafeAssistantMarkdown, StreamMessage] = field(default_factory=dict)
+    markdown_owners: WeakKeyDictionary[_SafeAssistantMarkdown, StreamMessage] = field(
+        default_factory=WeakKeyDictionary
+    )
     active_markdown_renders: int = 0
     settled_markdown_renders: int = 0
     markdown_source_rebuild_count: int = 0

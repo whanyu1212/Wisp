@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+import gc
 import pstats
 from functools import partial
 from pathlib import Path
 
 import anyio
 import pytest
+from rich.theme import Theme
 from textual.screen import Screen
 from textual.widget import Widget
 
-from benchmarks.tui_stream_hotpaths import BenchmarkConfig, TimingDistribution, run_benchmark
+from benchmarks.tui_stream_hotpaths import (
+    BenchmarkConfig,
+    TimingDistribution,
+    _HotpathCollector,
+    run_benchmark,
+)
 from wisp.tui.textual_renderer import TextualTuiRenderer
-from wisp.tui.widgets import StreamMessage, _SafeAssistantMarkdown
+from wisp.tui.widgets import (
+    StreamMessage,
+    _AssistantMarkdown,
+    _SafeAssistantMarkdown,
+)
 
 pytestmark = pytest.mark.benchmark
 
@@ -28,6 +39,30 @@ def test_timing_distribution_handles_empty_and_nearest_rank_samples() -> None:
     assert distribution.p95_ms == 19
     assert distribution.p99_ms == 20
     assert distribution.max_ms == 20
+
+
+def test_hotpath_collector_does_not_retain_superseded_markdown() -> None:
+    collector = _HotpathCollector(
+        target_screen=Screen(),
+        settled_stream_messages=set(),
+    )
+    markdown = _SafeAssistantMarkdown(
+        "benchmark",
+        _AssistantMarkdown(
+            "benchmark",
+            theme=Theme(),
+            code_theme="monokai",
+            native_ansi=False,
+        ),
+    )
+    collector.markdown_owners[markdown] = StreamMessage()
+
+    assert len(collector.markdown_owners) == 1
+
+    del markdown
+    gc.collect()
+
+    assert len(collector.markdown_owners) == 0
 
 
 def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() -> None:
