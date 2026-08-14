@@ -1160,7 +1160,9 @@ def test_light_theme_secondary_remains_legible() -> None:
     assert contrast_ratio(WISP_THEME_LIGHT.secondary, WISP_THEME_LIGHT.background) >= 4.5
 
 
-@pytest.mark.parametrize("color_attr", ["primary", "success", "accent", "warning", "error"])
+@pytest.mark.parametrize(
+    "color_attr", ["primary", "secondary", "success", "accent", "warning", "error"]
+)
 def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr: str) -> None:
     from wisp.tui.theme import WISP_THEME_DARK, contrast_ratio
 

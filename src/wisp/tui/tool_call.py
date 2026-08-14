@@ -16,7 +16,22 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
+from pygments import lex
+from pygments.lexers.shell import BashLexer
+from pygments.token import (
+    Comment,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    Punctuation,
+    String,
+    Text,
+    is_token_subtype,
+)
 from textual.content import Content
+
+type ToolActionStatus = Literal["pending", "done", "error", "denied", "cancelled"]
 
 _VALUE_LIMIT = 64
 _PATH_LIMIT = 80
@@ -25,8 +40,21 @@ _GENERIC_MAX_ITEMS = 8
 _BUILTIN_LIMIT = 200
 _NUMBER_LIMIT = 24
 _TOOL_MUTED_STYLE = "$text-muted"
+_TOOL_TEXT_STYLE = "$text"
+_TOOL_PRIMARY_STYLE = "$primary"
+_TOOL_ACCENT_STYLE = "$accent"
+_TOOL_SECONDARY_STYLE = "$secondary"
+_TOOL_WARNING_STYLE = "$warning"
 
-type ToolActionStatus = Literal["pending", "done", "error", "denied", "cancelled"]
+_ACTION_STYLES: dict[ToolActionStatus, str] = {
+    "pending": "bold $accent",
+    "done": "bold $success",
+    "error": "bold $error",
+    "denied": "bold $warning",
+    "cancelled": "bold $warning",
+}
+
+_BASH_LEXER = BashLexer(stripnl=False, ensurenl=False)
 
 _ACTION_WORDS: dict[str, dict[ToolActionStatus, str]] = {
     "bash": {
@@ -119,9 +147,9 @@ def _format_tool_call_action_from_rendered(
     """Build an action from an already-bounded literal argument snapshot."""
 
     words = _ACTION_WORDS.get(name)
-    content = Content.styled((words or _EXTENSION_ACTION_WORDS)[status], "b")
+    content = Content.styled((words or _EXTENSION_ACTION_WORDS)[status], _ACTION_STYLES[status])
     if words is None:
-        content += Content(" ") + Content(name)
+        content += Content(" ") + Content.styled(name, _TOOL_ACCENT_STYLE)
     if not arguments_available:
         return content + Content.styled("  (arguments unavailable)", _TOOL_MUTED_STYLE)
     if rendered_arguments.plain:
@@ -137,14 +165,14 @@ def format_tool_call_arguments(name: str, arguments: object) -> Content:
 
     if not isinstance(arguments, Mapping):
         text = _clip(_one_line(_safe_text(arguments)), _VALUE_LIMIT)
-        return Content.styled(text, _TOOL_MUTED_STYLE)
+        return Content.styled(text, _TOOL_TEXT_STYLE)
     formatter = _FORMATTERS.get(name)
     if formatter is None:
         return _format_generic(arguments)
     rendered = formatter(arguments)
     if len(rendered.plain) <= _BUILTIN_LIMIT:
         return rendered
-    return Content.styled(_clip(rendered.plain, _BUILTIN_LIMIT), _TOOL_MUTED_STYLE)
+    return _clip_content(rendered, _BUILTIN_LIMIT)
 
 
 def _format_read(arguments: Mapping[object, object]) -> Content:
@@ -154,7 +182,7 @@ def _format_read(arguments: Mapping[object, object]) -> Content:
     if offset is not None or limit is not None:
         start = offset or 1
         end = start + limit - 1 if limit is not None else ""
-        content += Content.styled(f":{start}-{end}", _TOOL_MUTED_STYLE)
+        content += Content.styled(f":{start}-{end}", _TOOL_SECONDARY_STYLE)
     return content
 
 
@@ -162,7 +190,7 @@ def _format_grep(arguments: Mapping[object, object]) -> Content:
     pattern = _value(arguments.get("pattern"), default="")
     content = (
         Content.styled("/", _TOOL_MUTED_STYLE)
-        + Content(pattern)
+        + Content.styled(pattern, _TOOL_ACCENT_STYLE)
         + Content.styled("/ in ", _TOOL_MUTED_STYLE)
     )
     content += _path_content(arguments.get("path"), default=".")
@@ -170,7 +198,7 @@ def _format_grep(arguments: Mapping[object, object]) -> Content:
     if glob:
         content += (
             Content.styled(" (", _TOOL_MUTED_STYLE)
-            + Content(glob)
+            + Content.styled(glob, _TOOL_SECONDARY_STYLE)
             + Content.styled(")", _TOOL_MUTED_STYLE)
         )
     if arguments.get("ignore_case") is True:
@@ -188,7 +216,9 @@ def _format_grep(arguments: Mapping[object, object]) -> Content:
 
 def _format_find(arguments: Mapping[object, object]) -> Content:
     pattern = _value(arguments.get("pattern"), default="*")
-    content = Content(pattern) + Content.styled(" in ", _TOOL_MUTED_STYLE)
+    content = Content.styled(pattern, _TOOL_ACCENT_STYLE) + Content.styled(
+        " in ", _TOOL_MUTED_STYLE
+    )
     content += _path_content(arguments.get("path"), default=".")
     max_results = _positive_int(arguments.get("max_results"))
     if max_results is not None:
@@ -207,8 +237,11 @@ def _format_bash(arguments: Mapping[object, object]) -> Content:
     raw_operation = arguments.get("operation")
     operation = raw_operation if isinstance(raw_operation, str) else "run"
     if operation in {"poll", "cancel"}:
-        content = Content.styled(f"{operation} ", _TOOL_MUTED_STYLE)
-        content += Content(_value(arguments.get("process_id"), default="<process>"))
+        content = Content.styled(f"{operation} ", _TOOL_SECONDARY_STYLE)
+        content += Content.styled(
+            _value(arguments.get("process_id"), default="<process>"),
+            _TOOL_PRIMARY_STYLE,
+        )
         if operation == "poll":
             wait = _nonnegative_number_text(arguments.get("wait_seconds"))
             if wait is not None:
@@ -217,8 +250,8 @@ def _format_bash(arguments: Mapping[object, object]) -> Content:
 
     content = Content("")
     if operation == "start":
-        content += Content.styled("start ", _TOOL_MUTED_STYLE)
-    content += Content(_value(arguments.get("command"), default=""))
+        content += Content.styled("start ", _TOOL_SECONDARY_STYLE)
+    content += _highlight_bash(_value(arguments.get("command"), default=""))
     if operation == "start":
         lifetime = _positive_number_text(arguments.get("lifetime_seconds"))
         if lifetime is not None:
@@ -239,7 +272,7 @@ def _format_edit(arguments: Mapping[object, object]) -> Content:
     if isinstance(edits, Sequence) and not isinstance(edits, str | bytes):
         count = len(edits)
         noun = "edit" if count == 1 else "edits"
-        content += Content.styled(f" · {count} {noun}", _TOOL_MUTED_STYLE)
+        content += Content.styled(f" · {count} {noun}", _TOOL_SECONDARY_STYLE)
     return content
 
 
@@ -248,20 +281,84 @@ def _format_write(arguments: Mapping[object, object]) -> Content:
 
 
 def _format_generic(arguments: Mapping[object, object]) -> Content:
-    parts: list[str] = []
+    content = Content("")
     for index, (key, value) in enumerate(arguments.items()):
         if index >= _GENERIC_MAX_ITEMS:
-            parts.append("…")
+            if content.plain:
+                content += Content.styled(", ", _TOOL_MUTED_STYLE)
+            content += Content.styled("…", _TOOL_MUTED_STYLE)
             break
         key_text = _clip(_one_line(_safe_text(key)), _VALUE_LIMIT)
         value_text = _clip(_one_line(_safe_text(value)), _VALUE_LIMIT)
-        parts.append(f"{key_text}={value_text}")
-    return Content.styled(_clip(", ".join(parts), _GENERIC_LIMIT), _TOOL_MUTED_STYLE)
+        if content.plain:
+            content += Content.styled(", ", _TOOL_MUTED_STYLE)
+        content += Content.styled(key_text, _TOOL_SECONDARY_STYLE)
+        content += Content.styled("=", _TOOL_MUTED_STYLE)
+        content += Content.styled(value_text, _TOOL_TEXT_STYLE)
+    return _clip_content(content, _GENERIC_LIMIT)
 
 
 def _path_content(value: object, *, default: str = "") -> Content:
     text = _safe_text(value) if isinstance(value, str) else default
-    return Content(_clip_middle(_one_line(text), _PATH_LIMIT))
+    return Content.styled(_clip_middle(_one_line(text), _PATH_LIMIT), _TOOL_PRIMARY_STYLE)
+
+
+def _highlight_bash(command: str) -> Content:
+    """Apply bounded, presentation-only Bash highlighting without parsing markup."""
+
+    content = Content("")
+    command_position = True
+    assignment_value = False
+    expect_path = False
+    for token_type, token_text in lex(command, _BASH_LEXER):
+        if not token_text:
+            continue
+        if is_token_subtype(token_type, Text.Whitespace):
+            content += Content(token_text)
+            if assignment_value:
+                assignment_value = False
+            continue
+        if is_token_subtype(token_type, Comment):
+            style = _TOOL_MUTED_STYLE
+        elif is_token_subtype(token_type, String):
+            style = _TOOL_WARNING_STYLE
+        elif is_token_subtype(token_type, Name.Variable):
+            style = _TOOL_SECONDARY_STYLE
+        elif is_token_subtype(token_type, Number):
+            style = _TOOL_SECONDARY_STYLE
+        elif is_token_subtype(token_type, Keyword) or is_token_subtype(token_type, Name.Builtin):
+            style = _TOOL_ACCENT_STYLE
+            command_position = False
+        elif is_token_subtype(token_type, Operator) or is_token_subtype(token_type, Punctuation):
+            style = _TOOL_MUTED_STYLE
+            if token_text == "=" and command_position:
+                assignment_value = True
+            if any(separator in token_text for separator in ("|", ";", "&&", "||")):
+                command_position = True
+            expect_path = any(marker in token_text for marker in (">", "<"))
+        elif token_text in {"|", "||", "&&", ";", ">", ">>", "<", "<<"}:
+            style = _TOOL_MUTED_STYLE
+            if token_text in {"|", "||", "&&", ";"}:
+                command_position = True
+            expect_path = token_text in {">", ">>", "<", "<<"}
+        elif assignment_value:
+            style = _TOOL_TEXT_STYLE
+        elif command_position:
+            style = _TOOL_ACCENT_STYLE
+            command_position = False
+        elif token_text.startswith("-"):
+            style = _TOOL_SECONDARY_STYLE
+        elif expect_path or _looks_like_path(token_text):
+            style = _TOOL_PRIMARY_STYLE
+            expect_path = False
+        else:
+            style = _TOOL_TEXT_STYLE
+        content += Content.styled(token_text, style)
+    return content
+
+
+def _looks_like_path(value: str) -> bool:
+    return "/" in value or value.startswith((".", "~"))
 
 
 def _value(value: object, *, default: str) -> str:
@@ -319,6 +416,12 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 1]}…"
+
+
+def _clip_content(content: Content, limit: int) -> Content:
+    if len(content.plain) <= limit:
+        return content
+    return content[: limit - 1] + Content.styled("…", _TOOL_MUTED_STYLE)
 
 
 def _clip_middle(text: str, limit: int) -> str:

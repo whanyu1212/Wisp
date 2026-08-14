@@ -39,6 +39,7 @@ dependencies = [
     "openai>=2.44.0",
     "packaging>=26.0",
     "prompt-toolkit>=3.0.52",
+    "pygments>=2.20.0",
     "pyyaml>=6.0.2",
     "pydantic>=2.13.4",
     "rich>=15.0.0",
@@ -69,6 +70,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.20",
     "types-jsonschema>=4.26",
+    "types-pygments>=2.19",
     "types-pyyaml>=6.0.12",
 ]
 

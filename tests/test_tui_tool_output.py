@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import signal
 
+from textual.content import Content
+
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
@@ -23,6 +25,16 @@ from wisp.tui.tool_output import (
     render_tool_result,
     tool_result_failed,
 )
+
+
+def _plain(rendered: str | Content) -> str:
+    return rendered.plain if isinstance(rendered, Content) else rendered
+
+
+def _span_style(content: Content, text: str) -> str:
+    return next(
+        str(span.style) for span in content.spans if text in content.plain[span.start : span.end]
+    )
 
 
 def test_render_error_leads_with_exit_code_when_present() -> None:
@@ -274,7 +286,7 @@ def test_render_generic_matches_widget_default_bounds() -> None:
 def test_render_tool_result_routes_error_to_error_renderer() -> None:
     output = "\n".join(f"line-{i}" for i in range(40))
     via_dispatch = render_tool_result("bash", {}, output, is_error=True, exit_code=3)
-    assert via_dispatch == render_error(output, exit_code=3)
+    assert _plain(via_dispatch) == render_error(output, exit_code=3)
 
 
 def test_render_tool_result_routes_success_to_generic() -> None:
@@ -288,9 +300,10 @@ def test_render_tool_result_treats_nonzero_exit_as_failure() -> None:
     # surface the exit status. The dispatcher routes on exit_code, not is_error.
     output = "\n".join(f"line-{i}" for i in range(40))
     via_dispatch = render_tool_result("bash", {}, output, is_error=False, exit_code=2)
-    assert via_dispatch == render_error(output, exit_code=2)
-    assert "exit 2" in via_dispatch
-    assert "line-39" in via_dispatch  # the tail (the failure) is shown
+    assert _plain(via_dispatch) == render_error(output, exit_code=2)
+    assert isinstance(via_dispatch, Content)
+    assert _span_style(via_dispatch, "exit 2") == "$error"
+    assert _span_style(via_dispatch, "line-39") == "$text"
 
 
 def test_render_tool_result_treats_timed_out_process_as_failure() -> None:
@@ -366,7 +379,27 @@ def test_render_tool_result_shows_summary_in_place_of_output() -> None:
         exit_code=None,
         summary="read 40 lines from foo.py",
     )
-    assert via_dispatch == "read 40 lines from foo.py"
+    assert isinstance(via_dispatch, Content)
+    assert via_dispatch.plain == "read 40 lines from foo.py"
+    assert _span_style(via_dispatch, "read 40 lines from foo.py") == "$success"
+
+
+def test_render_tool_result_keeps_markup_like_summary_literal() -> None:
+    summary = "read [red]literal[/red]"
+
+    rendered = render_tool_result(
+        "read",
+        {},
+        "ignored",
+        is_error=False,
+        exit_code=None,
+        summary=summary,
+    )
+
+    assert isinstance(rendered, Content)
+    assert rendered.plain == summary
+    assert _span_style(rendered, summary) == "$success"
+    assert all("red" not in str(span.style).lower() for span in rendered.spans)
 
 
 def test_render_tool_result_no_summary_falls_back_to_generic() -> None:
@@ -390,7 +423,7 @@ def test_render_tool_result_failed_read_uses_error_not_summary() -> None:
         summary="read 40 lines from foo.py",
     )
     assert result == render_error("read failed: file not found", exit_code=None)
-    assert "read 40 lines" not in result
+    assert "read 40 lines" not in _plain(result)
 
 
 def test_render_grep_result_keeps_summary_and_match_evidence() -> None:
@@ -405,8 +438,14 @@ def test_render_grep_result_keeps_summary_and_match_evidence() -> None:
         summary="grep: 2 matches",
     )
 
-    assert rendered == "grep: 2 matches\nsrc/a.py:1:TODO first\nsrc/b.py:2:TODO second"
-    assert full_tool_result_for_display("grep", output, None, summary="grep: 2 matches") == rendered
+    assert isinstance(rendered, Content)
+    assert rendered.plain == "grep: 2 matches\nsrc/a.py:1:TODO first\nsrc/b.py:2:TODO second"
+    assert _span_style(rendered, "grep: 2 matches") == "$success"
+    assert _span_style(rendered, "src/a.py") == "$text"
+    assert (
+        full_tool_result_for_display("grep", output, None, summary="grep: 2 matches")
+        == rendered.plain
+    )
 
 
 def test_render_long_grep_result_reports_hidden_match_lines() -> None:
@@ -421,11 +460,12 @@ def test_render_long_grep_result_reports_hidden_match_lines() -> None:
         summary="grep: 20 matches",
     )
 
-    assert rendered.startswith("grep: 20 matches\nsrc/file.py:0:match")
-    assert "src/file.py:7:match" in rendered
-    assert "src/file.py:8:match" not in rendered
-    assert "12 more lines" in rendered
-    assert "bytes hidden" in rendered
+    plain = _plain(rendered)
+    assert plain.startswith("grep: 20 matches\nsrc/file.py:0:match")
+    assert "src/file.py:7:match" in plain
+    assert "src/file.py:8:match" not in plain
+    assert "12 more lines" in plain
+    assert "bytes hidden" in plain
 
 
 def test_render_zero_match_grep_does_not_repeat_raw_empty_result() -> None:
@@ -438,7 +478,7 @@ def test_render_zero_match_grep_does_not_repeat_raw_empty_result() -> None:
         summary="grep: no matches",
     )
 
-    assert rendered == "grep: no matches"
+    assert _plain(rendered) == "grep: no matches"
     assert (
         full_tool_result_for_display(
             "grep",
