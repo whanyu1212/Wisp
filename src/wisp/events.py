@@ -256,7 +256,7 @@ class ContextEstimate(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    method: Literal["chars_div_4_v1"] = "chars_div_4_v1"
+    method: Literal["chars_div_4_v1", "utf8_bytes_div_4_v2"] = "chars_div_4_v1"
     system_tokens: int = Field(ge=0)
     message_tokens: int = Field(ge=0)
     tool_schema_tokens: int = Field(ge=0)

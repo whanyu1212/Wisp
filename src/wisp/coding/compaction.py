@@ -25,11 +25,9 @@ from wisp.sessions.replay import SessionContextRow, SessionReplay
 from wisp.tools.truncation import truncate_text_tail
 
 MAX_COMPACTION_TOOL_RESULT_CHARS = 2_000
-# Mirrors the chars-per-token heuristic in ``agent.context.estimate_context`` so a
-# truncation pass can target "shave N tokens" in the same units the budget check
-# uses, without importing the estimator module (context.py already depends on
-# nothing in this module, and the reverse would be a cycle).
-_ESTIMATE_CHARS_PER_TOKEN = 4
+# Mirrors the UTF-8-bytes-per-token heuristic in ``agent.context.estimate_context``
+# so truncation can target "shave N tokens" in the same units as the budget check.
+_ESTIMATE_BYTES_PER_TOKEN = 4
 # Always keep at least this many characters of a truncated tool result — enough
 # for the truncation marker plus a sliver of the original tail to stay legible.
 _MIN_TRUNCATED_TOOL_RESULT_CHARS = 200
@@ -266,8 +264,8 @@ def truncate_active_turn_tool_results(
     that point is the terminal overflow error this was meant to avoid.
     """
 
-    target_chars = max(0, excess_tokens) * _ESTIMATE_CHARS_PER_TOKEN
-    if target_chars == 0:
+    target_bytes = max(0, excess_tokens) * _ESTIMATE_BYTES_PER_TOKEN
+    if target_bytes == 0:
         return tuple(messages)
 
     candidates = sorted(
@@ -276,34 +274,44 @@ def truncate_active_turn_tool_results(
             for index, message in enumerate(messages)
             if message.role == "tool" and len(message.content) > _MIN_TRUNCATED_TOOL_RESULT_CHARS
         ),
-        key=lambda index: len(messages[index].content),
+        key=lambda index: _utf8_size(messages[index].content),
         reverse=True,
     )
     if not candidates:
         return None
 
     truncated = list(messages)
-    reclaimed = 0
+    reclaimed_bytes = 0
     changed = False
     for index in candidates:
-        if reclaimed >= target_chars:
+        if reclaimed_bytes >= target_bytes:
             break
         message = truncated[index]
-        remaining_target = target_chars - reclaimed
-        max_chars = max(
-            _MIN_TRUNCATED_TOOL_RESULT_CHARS,
-            len(message.content) - remaining_target,
-        )
-        result = truncate_text_tail(message.content, max_bytes=max_chars, max_lines=10_000_000)
+        safe_content = _surrogate_safe_text(message.content)
+        content_bytes = _utf8_size(safe_content)
+        remaining_target = target_bytes - reclaimed_bytes
+        minimum_bytes = _utf8_size(message.content[-_MIN_TRUNCATED_TOOL_RESULT_CHARS:])
+        max_bytes = max(minimum_bytes, content_bytes - remaining_target)
+        result = truncate_text_tail(safe_content, max_bytes=max_bytes, max_lines=10_000_000)
         if not result.truncated:
             continue
-        reclaimed += len(message.content) - len(result.text)
+        reclaimed_bytes += content_bytes - _utf8_size(result.text)
         truncated[index] = message.model_copy(update={"content": result.text})
         changed = True
 
     if not changed:
         return None
     return tuple(truncated)
+
+
+def _surrogate_safe_text(text: str) -> str:
+    """Preserve malformed Unicode scalar values as deterministic escapes."""
+
+    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8", errors="backslashreplace"))
 
 
 def build_compaction_checkpoint_prompt(*, instructions: str | None = None) -> str:

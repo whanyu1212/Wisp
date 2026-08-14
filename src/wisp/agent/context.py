@@ -17,7 +17,7 @@ def estimate_context(
     tools: Sequence[ToolSpec] = (),
     tool_results: Sequence[ToolCallResult] = (),
 ) -> ContextEstimate:
-    """Estimate normalized request context with a stable chars-per-token heuristic."""
+    """Estimate normalized request context with a stable UTF-8-bytes-per-token heuristic."""
 
     system_payloads = [
         _message_payload(message) for message in messages if message.role == "system"
@@ -45,6 +45,7 @@ def estimate_context(
     message_tokens = _payload_tokens(message_payloads)
     tool_schema_tokens = _payload_tokens(tool_payloads)
     return ContextEstimate(
+        method="utf8_bytes_div_4_v2",
         system_tokens=system_tokens,
         message_tokens=message_tokens,
         tool_schema_tokens=tool_schema_tokens,
@@ -101,13 +102,13 @@ def context_fingerprint(
             for tool in tools
         ],
     }
-    encoded = json.dumps(
+    text = json.dumps(
         payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode()
-    return sha256(encoded).hexdigest()
+    )
+    return sha256(_utf8_bytes(text)).hexdigest()
 
 
 def _message_payload(message: Message) -> dict[str, object]:
@@ -132,7 +133,13 @@ def _payload_tokens(payload: object) -> int:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return math.ceil(len(text) / 4)
+    return math.ceil(len(_utf8_bytes(text)) / 4)
+
+
+def _utf8_bytes(text: str) -> bytes:
+    """Encode valid Unicode normally and preserve lone surrogates as JSON escapes."""
+
+    return text.encode("utf-8", errors="backslashreplace")
 
 
 __all__ = ["build_context_budget", "context_fingerprint", "estimate_context"]
