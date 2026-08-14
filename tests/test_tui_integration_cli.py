@@ -3485,19 +3485,27 @@ def test_textual_stream_completion_skips_identical_final_rerender(
     monkeypatch: MonkeyPatch,
 ) -> None:
     replacements: list[str] = []
+    incremental_rendered = asyncio.Event()
+    original_append = StreamMessage.append_markdown
     original_replace = StreamMessage.replace_markdown
+
+    async def track_append(stream: StreamMessage, fragment: str) -> None:
+        await original_append(stream, fragment)
+        incremental_rendered.set()
 
     async def track_replace(stream: StreamMessage, content: str) -> None:
         replacements.append(content)
         await original_replace(stream, content)
 
+    monkeypatch.setattr(StreamMessage, "append_markdown", track_append)
     monkeypatch.setattr(StreamMessage, "replace_markdown", track_replace)
 
     async def scenario() -> tuple[str, int]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test() as pilot:
+        async with app_instance.run_test():
             renderer.token_delta("same final content")
-            await pilot.pause()
+            with anyio.fail_after(2):
+                await incremental_rendered.wait()
             renderer.end_token_stream_with_content("same final content")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
