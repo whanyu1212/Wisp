@@ -39,25 +39,46 @@ def test_loads_instruction_body_without_frontmatter(tmp_path: Path) -> None:
     assert resource.truncated is False
 
 
-def test_loads_all_bundled_wisp_development_resources(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("skill_name", "resource_names"),
+    [
+        (
+            "wisp-development",
+            (
+                "references/architecture.md",
+                "references/extension-api.md",
+                "references/safety.md",
+                "references/authoring.md",
+                "references/verification.md",
+            ),
+        ),
+        (
+            "github-pr-delivery",
+            (
+                "references/preflight-and-packaging.md",
+                "references/ci.md",
+                "references/review.md",
+                "references/readiness.md",
+            ),
+        ),
+    ],
+)
+def test_loads_all_bundled_skill_resources(
+    tmp_path: Path,
+    skill_name: str,
+    resource_names: tuple[str, ...],
+) -> None:
     catalog = discover_skills(
         home_dir=tmp_path,
         project_root=None,
         protected_paths=(),
         package_root=bundled_skills_root(),
     )
-    entry = catalog.get("wisp-development")
+    entry = catalog.get(skill_name)
 
     assert entry is not None
     assert entry.source == "package:wisp"
-    for resource_name in (
-        None,
-        "references/architecture.md",
-        "references/extension-api.md",
-        "references/safety.md",
-        "references/authoring.md",
-        "references/verification.md",
-    ):
+    for resource_name in (None, *resource_names):
         resource = load_skill_resource(
             entry,
             resource_name,

@@ -43,8 +43,9 @@ def test_skills_lists_user_catalog_in_name_order(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith(
-        "Skills (3):\nalpha [user:agents]\n  Alpha tasks.\nwisp-development [package:wisp]\n"
+        "Skills (4):\nalpha [user:agents]\n  Alpha tasks.\ngithub-pr-delivery [package:wisp]\n"
     )
+    assert "wisp-development [package:wisp]\n" in result.stdout
     assert "zebra [user:wisp]\n  Zebra tasks.\n" in result.stdout
     assert "Project skills skipped" in result.stdout
 
@@ -159,7 +160,8 @@ def test_skills_lists_package_catalog_when_no_filesystem_skills_exist(tmp_path: 
     result = CliRunner().invoke(app, ["skills"], env=_env(home, trusted="1"))
 
     assert result.exit_code == 0, result.output
-    assert result.stdout.startswith("Skills (1):\nwisp-development [package:wisp]\n")
+    assert result.stdout.startswith("Skills (2):\ngithub-pr-delivery [package:wisp]\n")
+    assert "wisp-development [package:wisp]\n" in result.stdout
 
 
 def test_skills_strips_terminal_control_characters(
