@@ -57,10 +57,29 @@ uv run python -m pstats profiles/tui-stream-300.prof
 
 `--mounted-history` remains accepted as a compatibility alias for `--retained-history`.
 
+Compare production Rich Markdown streaming with the literal-text floor through the same Textual
+controller, transcript, pacing, and follow behavior:
+
+```bash
+uv run python -m benchmarks.tui_stream_renderers --messages 2000 --runs 3
+```
+
+The harness rotates mode order between runs and restores its temporary plain-render patch after
+each scenario.
+
 The instrumentation is installed and restored inside the benchmark process; production TUI code
-is unchanged. Treat JSON and profile files as machine-local evidence. Compare timings only on the
-same machine, Python/Textual versions, viewport, and arguments, and report individual samples
-alongside medians rather than promoting one run to a portable threshold.
+is unchanged. In addition to paced wall time, each sample reports `stream_cpu_ms`, which uses
+process CPU time to exclude intentional sleeps without pretending CPU cost is a latency metric.
+`content_height_calls` attributes Textual height measurements by concrete widget class.
+`markdown_source_rebuild_count` counts source-to-renderable rebuilds separately from Rich visual
+renders, while `markdown_renders` splits those visual renders between the mutable streaming widget
+(`active`) and `StreamMessage` widgets mounted before streaming (`settled`). A zero settled count is
+valid when Textual reuses prior measurements during the measured phase.
+
+Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
+Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
+rather than promoting one run to a portable threshold. Counts provide attribution evidence, not
+portable performance thresholds.
 
 Compare absolute timings only on the same machine. `warm_newest_page_read_ms` and
 `older_page_read_ms` measure cache-backed paging after the cold initial read.

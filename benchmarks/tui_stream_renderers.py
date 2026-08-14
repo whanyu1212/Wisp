@@ -18,8 +18,8 @@ from unittest.mock import patch
 
 import anyio
 from textual.content import Content
-from tui_long_session import ScenarioConfig, ScenarioReport, run_scenario
 
+from benchmarks.tui_long_session import ScenarioConfig, ScenarioReport, run_scenario
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE
 from wisp.tui.widgets import StreamMessage
 

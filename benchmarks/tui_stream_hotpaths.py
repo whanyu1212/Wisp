@@ -13,21 +13,29 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from unittest.mock import patch
+from weakref import WeakKeyDictionary
 
 import textual
+from rich.console import Console, ConsoleOptions, RenderResult
 from textual.geometry import Size
 from textual.pilot import Pilot
 from textual.screen import Screen
+from textual.widget import Widget
 
 from benchmarks.support import environment
 from benchmarks.tui_long_session import append_benchmark_messages
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import StreamMessage, Transcript, WorkingIndicator
+from wisp.tui.widgets import (
+    StreamMessage,
+    Transcript,
+    WorkingIndicator,
+    _SafeAssistantMarkdown,
+)
 
 
 @dataclass(frozen=True)
@@ -69,13 +77,27 @@ class BenchmarkConfig:
 
 
 @dataclass(frozen=True)
+class MarkdownRenderCounts:
+    """Rich Markdown visual renders split by mutable and settled widgets."""
+
+    active: int
+    settled: int
+    total: int
+
+
+@dataclass(frozen=True)
 class StreamHotpathSample:
     run: int
     retained_history_entries: int
     mounted_history_entries: int
     mounted_widget_count: int
     stream_total_ms: float
+    stream_cpu_ms: float
     stream_update_count: int
+    content_height_call_count: int
+    content_height_calls: dict[str, int]
+    markdown_renders: MarkdownRenderCounts
+    markdown_source_rebuild_count: int
     event_loop_delay: TimingDistribution
     layout_passes: TimingDistribution
     compositor_renders: TimingDistribution
@@ -91,6 +113,10 @@ class StreamHotpathSummary:
     mounted_history_entries: int
     sample_count: int
     stream_total_median_ms: float
+    stream_cpu_median_ms: float
+    content_height_call_count_median: float
+    active_markdown_render_median: float
+    settled_markdown_render_median: float
     event_loop_p95_median_ms: float
     event_loop_max_median_ms: float
     layout_total_median_ms: float
@@ -109,10 +135,18 @@ class StreamHotpathReport:
 
 
 @dataclass
-class _TimingCollector:
+class _HotpathCollector:
     target_screen: Screen[object]
-    layout_ms: list[float]
-    compositor_ms: list[float]
+    settled_stream_messages: set[StreamMessage]
+    layout_ms: list[float] = field(default_factory=list)
+    compositor_ms: list[float] = field(default_factory=list)
+    content_height_calls: dict[str, int] = field(default_factory=dict)
+    markdown_owners: WeakKeyDictionary[_SafeAssistantMarkdown, StreamMessage] = field(
+        default_factory=WeakKeyDictionary
+    )
+    active_markdown_renders: int = 0
+    settled_markdown_renders: int = 0
+    markdown_source_rebuild_count: int = 0
 
 
 def _nearest_rank(ordered: Sequence[float], percentile: float) -> float:
@@ -126,12 +160,19 @@ def _milliseconds(started_ns: int) -> float:
     return (time.perf_counter_ns() - started_ns) / 1_000_000
 
 
+def _is_on_target_screen(widget: Widget, target_screen: Screen[object]) -> bool:
+    return widget.is_mounted and widget.screen is target_screen
+
+
 @contextmanager
-def _measure_textual_hotpaths(collector: _TimingCollector) -> Iterator[None]:
-    """Time private Textual seams only while one benchmark stream is active."""
+def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
+    """Measure private Textual seams only while one benchmark stream is active."""
 
     original_layout = Screen._refresh_layout
     original_compositor = Screen._compositor_refresh
+    original_content_height = Widget.get_content_height
+    original_markdown_render = _SafeAssistantMarkdown.__rich_console__
+    original_source_render = StreamMessage._render_source
 
     def refresh_layout(
         screen: Screen[object], size: Size | None = None, scroll: bool = False
@@ -151,9 +192,46 @@ def _measure_textual_hotpaths(collector: _TimingCollector) -> Iterator[None]:
             if screen is collector.target_screen:
                 collector.compositor_ms.append(_milliseconds(started))
 
+    def get_content_height(
+        widget: Widget,
+        container: Size,
+        viewport: Size,
+        width: int,
+    ) -> int:
+        if _is_on_target_screen(widget, collector.target_screen):
+            widget_name = type(widget).__name__
+            collector.content_height_calls[widget_name] = (
+                collector.content_height_calls.get(widget_name, 0) + 1
+            )
+        return original_content_height(widget, container, viewport, width)
+
+    def render_markdown(
+        markdown: _SafeAssistantMarkdown,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        widget = collector.markdown_owners.get(markdown)
+        if widget is not None and _is_on_target_screen(widget, collector.target_screen):
+            if widget in collector.settled_stream_messages:
+                collector.settled_markdown_renders += 1
+            else:
+                collector.active_markdown_renders += 1
+        yield from original_markdown_render(markdown, console, options)
+
+    def render_source(widget: StreamMessage) -> None:
+        if _is_on_target_screen(widget, collector.target_screen):
+            collector.markdown_source_rebuild_count += 1
+        original_source_render(widget)
+        visual = widget._selection_visual
+        if visual is not None and isinstance(visual._markdown_renderable, _SafeAssistantMarkdown):
+            collector.markdown_owners[visual._markdown_renderable] = widget
+
     with (
         patch.object(Screen, "_refresh_layout", refresh_layout),
         patch.object(Screen, "_compositor_refresh", compositor_refresh),
+        patch.object(Widget, "get_content_height", get_content_height),
+        patch.object(_SafeAssistantMarkdown, "__rich_console__", render_markdown),
+        patch.object(StreamMessage, "_render_source", render_source),
     ):
         yield
 
@@ -287,7 +365,15 @@ async def _measure_stream(
     mounted_widget_count: int,
     profile_output: Path | None,
 ) -> StreamHotpathSample:
-    collector = _TimingCollector(app.screen, [], [])
+    settled_stream_messages = set(transcript.query(StreamMessage))
+    collector = _HotpathCollector(
+        target_screen=app.screen,
+        settled_stream_messages=settled_stream_messages,
+    )
+    for widget in settled_stream_messages:
+        visual = widget._selection_visual
+        if visual is not None and isinstance(visual._markdown_renderable, _SafeAssistantMarkdown):
+            collector.markdown_owners[visual._markdown_renderable] = widget
     heartbeat_delays: list[float] = []
     heartbeat_stopped = asyncio.Event()
     profiler = cProfile.Profile() if profile_output is not None else None
@@ -300,6 +386,7 @@ async def _measure_stream(
     )
     await asyncio.sleep(0)
     started = time.perf_counter_ns()
+    started_cpu = time.process_time_ns()
     try:
         with _measure_textual_hotpaths(collector):
             if profiler is not None:
@@ -315,6 +402,7 @@ async def _measure_stream(
                 if profiler is not None:
                     profiler.disable()
     finally:
+        stream_cpu_ms = (time.process_time_ns() - started_cpu) / 1_000_000
         heartbeat_stopped.set()
         await heartbeat_task
     stream_total_ms = _milliseconds(started)
@@ -328,7 +416,16 @@ async def _measure_stream(
         mounted_history_entries=mounted_history_entries,
         mounted_widget_count=mounted_widget_count,
         stream_total_ms=stream_total_ms,
+        stream_cpu_ms=stream_cpu_ms,
         stream_update_count=app.last_stream_write_count,
+        content_height_call_count=sum(collector.content_height_calls.values()),
+        content_height_calls=dict(sorted(collector.content_height_calls.items())),
+        markdown_renders=MarkdownRenderCounts(
+            active=collector.active_markdown_renders,
+            settled=collector.settled_markdown_renders,
+            total=collector.active_markdown_renders + collector.settled_markdown_renders,
+        ),
+        markdown_source_rebuild_count=collector.markdown_source_rebuild_count,
         event_loop_delay=TimingDistribution.from_samples(heartbeat_delays),
         layout_passes=TimingDistribution.from_samples(collector.layout_ms),
         compositor_renders=TimingDistribution.from_samples(collector.compositor_ms),
@@ -369,6 +466,16 @@ def _summarize(
                 sample_count=len(selected),
                 stream_total_median_ms=statistics.median(
                     sample.stream_total_ms for sample in selected
+                ),
+                stream_cpu_median_ms=statistics.median(sample.stream_cpu_ms for sample in selected),
+                content_height_call_count_median=statistics.median(
+                    sample.content_height_call_count for sample in selected
+                ),
+                active_markdown_render_median=statistics.median(
+                    sample.markdown_renders.active for sample in selected
+                ),
+                settled_markdown_render_median=statistics.median(
+                    sample.markdown_renders.settled for sample in selected
                 ),
                 event_loop_p95_median_ms=statistics.median(
                     sample.event_loop_delay.p95_ms for sample in selected
