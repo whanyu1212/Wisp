@@ -3550,6 +3550,76 @@ def test_textual_stream_completion_skips_identical_final_rerender(
     assert replacements == []
 
 
+def test_textual_completion_removes_working_indicator_after_stream_settlement(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    ordering: list[str] = []
+
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        original_settle = app_instance.settle_stream_widget
+        original_hide = app_instance._transcript_controller.hide_working_indicator_if_current
+
+        def track_settle(widget: Widget) -> None:
+            ordering.append("stream settled")
+            original_settle(widget)
+
+        def track_hide(indicator: WorkingIndicator) -> None:
+            ordering.append("indicator removed")
+            original_hide(indicator)
+
+        monkeypatch.setattr(app_instance, "settle_stream_widget", track_settle)
+        monkeypatch.setattr(
+            app_instance._transcript_controller,
+            "hide_working_indicator_if_current",
+            track_hide,
+        )
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.token_delta("final response")
+            renderer.end_token_stream_with_content("final response")
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            renderer.event(RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True))
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="idle",
+                    input_hint="wisp> ",
+                    input_mode="idle",
+                    queued_follow_ups=0,
+                )
+            )
+            indicator_retained = app_instance._transcript_controller.working_indicator is not None
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            indicator_removed = app_instance._transcript_controller.working_indicator is None
+            return indicator_retained, indicator_removed
+
+    indicator_retained, indicator_removed = anyio.run(scenario)
+
+    assert indicator_retained
+    assert indicator_removed
+    assert ordering == ["stream settled", "indicator removed"]
+
+
+def test_old_stream_completion_does_not_remove_a_new_prompt_indicator() -> None:
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            renderer.token_delta("first response")
+            renderer.end_token_stream_with_content("first response")
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            renderer.running()
+            replacement = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return (
+                replacement is not None
+                and app_instance._transcript_controller.working_indicator is replacement
+            )
+
+    assert anyio.run(scenario)
+
+
 def test_textual_stream_widget_is_available_before_async_finalization() -> None:
     async def scenario() -> bool:
         app_instance, renderer = create_textual_tui()

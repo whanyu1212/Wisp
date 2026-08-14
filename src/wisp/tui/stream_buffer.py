@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,7 @@ class _StreamTurn:
     last_render_seconds: float | None = None
     discarded: bool = False
     incremental_write_failed: bool = False
+    settled_callbacks: list[Callable[[], None]] = field(default_factory=list)
 
 
 class MarkdownStreamController:
@@ -139,6 +141,14 @@ class MarkdownStreamController:
             if not self._cancel_drain(turn):
                 self._queue_finalize(turn)
 
+    def defer_until_latest_stream_settles(self, callback: Callable[[], None]) -> bool:
+        """Run ``callback`` after the newest flushed stream finishes final layout."""
+
+        if not self._finalizing_turns:
+            return False
+        self._finalizing_turns[-1].settled_callbacks.append(callback)
+        return True
+
     def discard(self) -> None:
         """Stop a replaced transcript without rendering stale output."""
 
@@ -150,6 +160,7 @@ class MarkdownStreamController:
             self._cancel_drain(turn)
         for finalizing in self._finalizing_turns:
             finalizing.discarded = True
+            self._run_settled_callbacks(finalizing)
         anchored_turn = self._anchored_turn
         if anchored_turn is not None:
             self._release_stream_anchor(anchored_turn)
@@ -251,6 +262,16 @@ class MarkdownStreamController:
             candidate for candidate in self._finalizing_turns if candidate is not turn
         ]
 
+    @staticmethod
+    def _run_settled_callbacks(turn: _StreamTurn) -> None:
+        callbacks = tuple(turn.settled_callbacks)
+        turn.settled_callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as error:
+                turn.widget.log.error(f"Stream settlement callback failed: {error}")
+
     def _queue_next_finalizer(self) -> None:
         while self._finalizing_turns and self._finalizing_turns[0].discarded:
             self._forget_finalizing_turn(self._finalizing_turns[0])
@@ -346,6 +367,7 @@ class MarkdownStreamController:
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
         finally:
+            self._run_settled_callbacks(turn)
             if self._anchored_turn is turn and not self._app.call_after_refresh(
                 self._release_stream_anchor,
                 turn,

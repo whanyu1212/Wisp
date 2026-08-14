@@ -113,6 +113,7 @@ class TextualTuiRenderer:
         self._progress_turn: int | None = None
         self._response_started = False
         self._retry_attempt = 0
+        self._stream_completion_pending = False
         self._overflow_recovery_failed = False
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
@@ -126,7 +127,7 @@ class TextualTuiRenderer:
         self.app.set_input_hint(snapshot.input_hint)
         self.app.set_status(snapshot)
         if snapshot.input_mode not in {"running", "approval", "trust"}:
-            self._finish_progress()
+            self._finish_progress(force=False)
         if snapshot.input_mode not in {"approval", "trust"}:
             self.app.hide_decision()
 
@@ -145,18 +146,26 @@ class TextualTuiRenderer:
             self.app.load_file_suggestions(self._visible_cwd)
 
     def _begin_progress(self) -> None:
+        self._stream_completion_pending = False
         self._progress_active = True
         self._progress_turn = None
         self._response_started = False
         self._retry_attempt = 0
         self.app.restart_working_indicator()
 
-    def _finish_progress(self) -> None:
+    def _finish_progress(self, *, after_stream: bool = False, force: bool = True) -> None:
         self._progress_active = False
         self._progress_turn = None
         self._response_started = False
         self._retry_attempt = 0
-        self.app.hide_working_indicator()
+        if after_stream:
+            if self._stream_completion_pending:
+                return
+            self._stream_completion_pending = True
+            self.app.hide_working_indicator_after_stream()
+        elif force or not self._stream_completion_pending:
+            self._stream_completion_pending = False
+            self.app.hide_working_indicator()
 
     def _suspend_progress(self) -> None:
         self.app.hide_working_indicator()
@@ -617,9 +626,12 @@ class TextualTuiRenderer:
             )
             self._history.record_live_tool_result(event.call_id, widget=card)
         elif isinstance(event, AgentCompleted):
-            self._finish_progress()
+            self._finish_progress(
+                after_stream=event.outcome == "completed",
+                force=event.outcome != "completed",
+            )
         elif isinstance(event, ErrorEvent):
-            self._finish_progress()
+            self._finish_progress(force=True)
             if not (
                 self._overflow_recovery_failed
                 and event.message.startswith("Context overflow recovery failed:")
@@ -627,7 +639,7 @@ class TextualTuiRenderer:
                 self.app.write_error(f"error: {event.message}")
         elif isinstance(event, RpcCommandFinished):
             if event.command_type in {"prompt", "compact"}:
-                self._finish_progress()
+                self._finish_progress(force=not event.ok)
             if not event.ok and event.command_type != "compact":
                 self._suspend_progress()
                 self._abort_pending_tools("command failed")
