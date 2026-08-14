@@ -4279,6 +4279,30 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
     assert result.data == {"count": 2, "files": ["a/first.py"]}
 
 
+def test_find_tool_python_fallback_orders_directory_prefix_with_platform_separator(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(search_tools_module.os, "sep", "\\")
+    original_display = search_tools_module.display_tool_path
+    monkeypatch.setattr(
+        search_tools_module,
+        "display_tool_path",
+        lambda path, context: original_display(path, context).replace("/", "\\"),
+    )
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.py").write_text("", encoding="utf-8")
+    (tmp_path / "a0.py").write_text("", encoding="utf-8")
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.py", "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data == {"count": 2, "files": ["a0.py"]}
+
+
 def test_find_tool_python_fallback_runs_off_event_loop(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

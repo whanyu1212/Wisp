@@ -632,7 +632,9 @@ def _iter_find_directory(path: Path, context: ToolContext) -> Iterable[Path]:
     # directories by that prefix, alongside file names, makes this depth-first
     # traversal equivalent to sorting all display paths without retaining them all.
     children.sort(
-        key=lambda entry: f"{entry.name}/" if entry.is_dir(follow_symlinks=False) else entry.name
+        key=lambda entry: (
+            f"{entry.name}{os.sep}" if entry.is_dir(follow_symlinks=False) else entry.name
+        )
     )
     for entry in children:
         candidate = Path(entry.path)

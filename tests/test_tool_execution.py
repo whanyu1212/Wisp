@@ -295,6 +295,22 @@ def test_executor_reads_only_recognized_result_metadata() -> None:
     assert ended.summary == "read 1 line of 2 from file.py"
 
 
+def test_executor_preserves_exact_ls_entry_count_for_summary() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="ls",
+            result=ToolResult(
+                text="a\nb\n[truncated]",
+                data={"entries": ["a", "b"], "entry_count": 100, "path": "big/"},
+                truncated=True,
+            ),
+        )
+    )
+
+    assert ended.is_error is False
+    assert ended.summary == "ls: 100 entries in big/ (+ more)"
+
+
 def test_executor_rejects_hostile_metadata_subclasses_inside_extension_boundary() -> None:
     ended = _run_executor(
         _ResultTool(
