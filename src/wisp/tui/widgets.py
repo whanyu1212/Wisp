@@ -1849,11 +1849,15 @@ class Transcript(VerticalScroll):
     def request_history_at_top(
         self,
         navigation: HistoryNavigation | None = None,
+        *,
+        rearm: bool = False,
     ) -> None:
         """Request another page only when the settled viewport remains at the top."""
 
         if navigation is not None:
             self._history_navigation = self._current_navigation(navigation)
+        if rearm:
+            self._history_request_armed = True
         if self.scroll_y == 0:
             self._request_more_history_if_needed()
 
@@ -1965,7 +1969,7 @@ class Transcript(VerticalScroll):
             )
             self._history_navigation = navigation
         self.scroll_page_up(animate=False)
-        self.request_history_at_top()
+        self.request_history_at_top(rearm=True)
         return navigation
 
     def prepare_wheel_up(
@@ -1984,7 +1988,7 @@ class Transcript(VerticalScroll):
                 reader_generation=self._follow_generation,
             )
             if request_history:
-                self.request_history_at_top(navigation)
+                self.request_history_at_top(navigation, rearm=True)
             return navigation
         return None
 

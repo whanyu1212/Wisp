@@ -3793,6 +3793,33 @@ def test_textual_wheel_burst_is_preserved_while_history_page_loads() -> None:
     assert 0 < scroll_y < max_scroll_y
 
 
+def test_textual_wheel_rearms_history_without_scrolling_down_first() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            renderer.set_history_page_request_hook(request_history_page)
+            transcript.history_page_loaded(has_more=True)
+
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=1,
+            )
+            with anyio.fail_after(5):
+                while requests == 0:
+                    await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 1
+
+
 def test_textual_close_exits_when_stream_shutdown_fails(monkeypatch: MonkeyPatch) -> None:
     async def scenario() -> bool:
         app_instance = TextualTui()
