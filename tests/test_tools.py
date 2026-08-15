@@ -4293,7 +4293,11 @@ def test_find_tool_python_fallback_bounds_retained_matches(
     monkeypatch.setenv("PATH", "")
     visited: list[str] = []
 
-    def files(_path: Path, _context: ToolContext) -> Iterable[Path]:
+    def files(
+        _path: Path,
+        _context: ToolContext,
+        **_kwargs: object,
+    ) -> Iterable[Path]:
         for name in ("skip.txt", "c.py", "secret.key", "b.py", "a.py"):
             visited.append(name)
             yield tmp_path / name

@@ -5,6 +5,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 
 import anyio
 import pytest
@@ -317,6 +318,28 @@ def test_recursive_tools_search_unignored_common_directory_names(tmp_path: Path)
     assert find.data["files"] == expected_files
 
 
+def test_recursive_tools_preserve_ignore_source_precedence_across_levels(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text("higher/a.txt\n", encoding="utf-8")
+    (tmp_path / ".rgignore").write_text("lower/a.txt\n", encoding="utf-8")
+    lower = tmp_path / "lower"
+    lower.mkdir()
+    (lower / ".gitignore").write_text("!a.txt\n", encoding="utf-8")
+    (lower / "a.txt").write_text("needle\n", encoding="utf-8")
+    higher = tmp_path / "higher"
+    higher.mkdir()
+    (higher / ".rgignore").write_text("!a.txt\n", encoding="utf-8")
+    (higher / "a.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["higher/a.txt:1:needle"]
+    assert find.data["files"] == ["higher/a.txt"]
+
+
 def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
     generated = tmp_path / "generated"
@@ -456,6 +479,72 @@ def test_recursive_tools_reject_directory_over_entry_limit(
         run_tool(FindTool(), {"path": "."}, ToolContext(cwd=tmp_path))
 
 
+def test_find_worker_stops_after_awaiting_task_is_cancelled(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    started = Event()
+    stopped = Event()
+
+    def fake_iter_files(
+        *args: object,
+        cancel_event: Event | None = None,
+        **kwargs: object,
+    ) -> Iterator[Path]:
+        started.set()
+        assert cancel_event is not None
+        cancel_event.wait(2)
+        stopped.set()
+        if False:
+            yield tmp_path / "unreachable"
+
+    monkeypatch.setattr(search_module, "_iter_files", fake_iter_files)
+
+    async def scenario() -> None:
+        async def invoke() -> None:
+            await FindTool().run({"path": "."}, ToolContext(cwd=tmp_path))
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(invoke)
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            tasks.cancel_scope.cancel()
+        assert await anyio.to_thread.run_sync(stopped.wait, 1)
+
+    anyio.run(scenario)
+
+
+def test_find_cancellation_reaches_ancestor_ignore_loading(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    (tmp_path / "nested").mkdir()
+    started = Event()
+    stopped = Event()
+
+    def fake_read_ignore_specs(
+        *args: object,
+        cancel_event: Event | None = None,
+        **kwargs: object,
+    ) -> tuple[object, ...]:
+        started.set()
+        assert cancel_event is not None
+        cancel_event.wait(2)
+        stopped.set()
+        return ()
+
+    monkeypatch.setattr(search_module, "_read_ignore_specs", fake_read_ignore_specs)
+
+    async def scenario() -> None:
+        async def invoke() -> None:
+            await FindTool().run({"path": "nested"}, ToolContext(cwd=tmp_path))
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(invoke)
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            tasks.cancel_scope.cancel()
+        assert await anyio.to_thread.run_sync(stopped.wait, 1)
+
+    anyio.run(scenario)
+
+
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
 
@@ -500,6 +589,19 @@ def test_grep_skips_binary_file_after_pending_match(tmp_path: Path) -> None:
     result = run_tool(
         GrepTool(),
         {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["matches"] == ["text.txt:1:needle"]
+
+
+def test_grep_detects_binary_before_match_count_truncation(tmp_path: Path) -> None:
+    (tmp_path / "binary.dat").write_bytes(b"needle\nneedle\n" + (b"x" * 100) + b"\0")
+    (tmp_path / "text.txt").write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "literal": True, "max_results": 1},
         ToolContext(cwd=tmp_path),
     )
 

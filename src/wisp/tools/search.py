@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 
 import anyio
 import regex as bounded_regex
@@ -154,15 +155,20 @@ class FindTool:
         if max_results is None or max_results < 1:
             raise ToolError("find.max_results must be greater than or equal to 1")
 
-        return await anyio.to_thread.run_sync(
-            lambda: _python_find(
-                path=path,
-                pattern=pattern,
-                max_results=max_results,
-                context=context,
-            ),
-            abandon_on_cancel=True,
-        )
+        cancel_event = Event()
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: _python_find(
+                    path=path,
+                    pattern=pattern,
+                    max_results=max_results,
+                    context=context,
+                    cancel_event=cancel_event,
+                ),
+                abandon_on_cancel=True,
+            )
+        finally:
+            cancel_event.set()
 
 
 class LsTool:
@@ -423,6 +429,7 @@ def _python_find(
     pattern: str,
     max_results: int,
     context: ToolContext,
+    cancel_event: Event | None = None,
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
@@ -434,7 +441,11 @@ def _python_find(
         max_results + 1,
         (
             display_tool_path(candidate, context)
-            for candidate in _iter_files(secure_path, context)
+            for candidate in _iter_files(
+                secure_path,
+                context,
+                cancel_event=cancel_event,
+            )
             if _matches_glob(candidate, pattern, context)
         ),
     )
@@ -497,18 +508,26 @@ def _iter_files(
     context: ToolContext,
     *,
     ignore_override_glob: str | None = None,
+    cancel_event: Event | None = None,
 ) -> Iterable[Path]:
     """Yield regular files through a descriptor-relative, non-following walk."""
 
     secure_path = _coerce_secure_path(path, context)
+    if cancel_event is not None and cancel_event.is_set():
+        return
     try:
         with open_directory(secure_path) as descriptor:
             yield from _walk_directory(
                 descriptor,
                 secure_path.path,
                 context,
-                ignore_specs=_ancestor_ignore_specs(secure_path.path, context),
+                ignore_specs=_ancestor_ignore_specs(
+                    secure_path.path,
+                    context,
+                    cancel_event=cancel_event,
+                ),
                 ignore_override_glob=ignore_override_glob,
+                cancel_event=cancel_event,
             )
             return
     except ToolError as directory_error:
@@ -525,9 +544,15 @@ def _iter_files(
 class _IgnoreSpec:
     base: Path
     spec: GitIgnoreSpec
+    priority: int
 
 
-def _ancestor_ignore_specs(path: Path, context: ToolContext) -> tuple[_IgnoreSpec, ...]:
+def _ancestor_ignore_specs(
+    path: Path,
+    context: ToolContext,
+    *,
+    cancel_event: Event | None = None,
+) -> tuple[_IgnoreSpec, ...]:
     cwd = context.cwd.resolve(strict=False)
     try:
         relative = path.relative_to(cwd)
@@ -536,10 +561,19 @@ def _ancestor_ignore_specs(path: Path, context: ToolContext) -> tuple[_IgnoreSpe
     specs: list[_IgnoreSpec] = []
     current = cwd
     for part in relative.parts:
+        if cancel_event is not None and cancel_event.is_set():
+            return tuple(specs)
         selected = secure_tool_path(str(current), context)
         try:
             with open_directory(selected) as descriptor:
-                specs.extend(_read_ignore_specs(descriptor, current, context))
+                specs.extend(
+                    _read_ignore_specs(
+                        descriptor,
+                        current,
+                        context,
+                        cancel_event=cancel_event,
+                    )
+                )
         except _SearchInputLimitError:
             raise
         except ToolError:
@@ -555,10 +589,22 @@ def _walk_directory(
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
     ignore_override_glob: str | None,
+    cancel_event: Event | None = None,
 ) -> Iterable[Path]:
-    ignore_specs += _read_ignore_specs(descriptor, path, context)
+    if cancel_event is not None and cancel_event.is_set():
+        return
+    ignore_specs += _read_ignore_specs(
+        descriptor,
+        path,
+        context,
+        cancel_event=cancel_event,
+    )
     try:
-        retained = _bounded_sorted_directory_entries(descriptor, path)
+        retained = _bounded_sorted_directory_entries(
+            descriptor,
+            path,
+            cancel_event=cancel_event,
+        )
     except OSError as exc:
         raise ToolError(f"Could not list directory {path}: {exc}") from exc
 
@@ -569,6 +615,8 @@ def _walk_directory(
         | getattr(os, "O_CLOEXEC", 0)
     )
     for entry in retained:
+        if cancel_event is not None and cancel_event.is_set():
+            return
         name = entry.name
         candidate = path / name
         try:
@@ -594,6 +642,7 @@ def _walk_directory(
                             context,
                             ignore_specs=ignore_specs,
                             ignore_override_glob=ignore_override_glob,
+                            cancel_event=cancel_event,
                         )
                 except _SearchInputLimitError:
                     raise
@@ -613,6 +662,7 @@ def _walk_directory(
                     context,
                     ignore_specs=ignore_specs,
                     ignore_override_glob=ignore_override_glob,
+                    cancel_event=cancel_event,
                 )
             finally:
                 os.close(child)
@@ -639,11 +689,16 @@ def _walk_directory(
 
 
 def _bounded_sorted_directory_entries(
-    descriptor: int | Path, source: Path
+    descriptor: int | Path,
+    source: Path,
+    *,
+    cancel_event: Event | None = None,
 ) -> list[os.DirEntry[str]]:
     retained: list[os.DirEntry[str]] = []
     with os.scandir(descriptor) as entries:
         for entry in entries:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             retained.append(entry)
             if len(retained) > _MAX_DIRECTORY_ENTRIES:
                 raise _DirectoryEntryLimitError(
@@ -667,14 +722,27 @@ def _read_bounded_ignore_lines(descriptor: int, source: str) -> tuple[str, ...]:
 
 
 def _read_ignore_specs(
-    descriptor: int | Path, directory: Path, context: ToolContext
+    descriptor: int | Path,
+    directory: Path,
+    context: ToolContext,
+    *,
+    cancel_event: Event | None = None,
 ) -> tuple[_IgnoreSpec, ...]:
+    if cancel_event is not None and cancel_event.is_set():
+        return ()
     specs: list[_IgnoreSpec] = []
-    repository_exclude = _read_repository_exclude(descriptor, directory, context)
+    repository_exclude = _read_repository_exclude(
+        descriptor,
+        directory,
+        context,
+        cancel_event=cancel_event,
+    )
     if repository_exclude is not None:
         specs.append(repository_exclude)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    for name in _IGNORE_FILES:
+    for priority, name in enumerate(_IGNORE_FILES, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            return tuple(specs)
         try:
             if isinstance(descriptor, int):
                 ignore_fd = os.open(name, flags, dir_fd=descriptor)
@@ -692,15 +760,29 @@ def _read_ignore_specs(
             raise
         except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
             continue
-        specs.append(_IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines)))
+        if cancel_event is not None and cancel_event.is_set():
+            return tuple(specs)
+        specs.append(
+            _IgnoreSpec(
+                directory,
+                GitIgnoreSpec.from_lines(lines),
+                priority,
+            )
+        )
     return tuple(specs)
 
 
 def _read_repository_exclude(
-    descriptor: int | Path, directory: Path, context: ToolContext
+    descriptor: int | Path,
+    directory: Path,
+    context: ToolContext,
+    *,
+    cancel_event: Event | None = None,
 ) -> _IgnoreSpec | None:
     """Securely load a repository-local ``.git/info/exclude`` file."""
 
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     try:
         if isinstance(descriptor, int):
             directory_flags = (
@@ -735,12 +817,18 @@ def _read_repository_exclude(
         raise
     except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
         return None
-    return _IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines))
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+    return _IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines), 0)
+
+
+def _ordered_ignore_specs(ignore_specs: tuple[_IgnoreSpec, ...]) -> list[_IgnoreSpec]:
+    return sorted(ignore_specs, key=lambda rules: rules.priority)
 
 
 def _is_ignored(path: Path, *, is_directory: bool, ignore_specs: tuple[_IgnoreSpec, ...]) -> bool:
     ignored = False
-    for rules in ignore_specs:
+    for rules in _ordered_ignore_specs(ignore_specs):
         try:
             relative = path.relative_to(rules.base).as_posix()
         except ValueError:
@@ -758,7 +846,7 @@ def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...])
 
     ignored = False
     exclusion_allows_reinclude = False
-    for rules in ignore_specs:
+    for rules in _ordered_ignore_specs(ignore_specs):
         try:
             relative = path.relative_to(rules.base).as_posix().rstrip("/") + "/"
         except ValueError:
@@ -774,7 +862,7 @@ def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...])
     if not ignored or not exclusion_allows_reinclude:
         return False
 
-    for rules in ignore_specs:
+    for rules in _ordered_ignore_specs(ignore_specs):
         try:
             relative_directory = path.relative_to(rules.base).as_posix().rstrip("/") + "/"
         except ValueError:
