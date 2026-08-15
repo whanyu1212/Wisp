@@ -5,7 +5,13 @@ import math
 
 import pytest
 
-from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
+from wisp.agent.context import (
+    build_context_budget,
+    context_fingerprint,
+    estimate_context,
+    estimate_context_budget,
+    observe_context,
+)
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
@@ -80,6 +86,63 @@ def test_context_estimate_accounts_for_system_messages_tools_and_results() -> No
 def _serialized_tokens(payload: object) -> int:
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return math.ceil(len(text.encode("utf-8")) / 4)
+
+
+def test_provider_observation_anchors_prefix_and_estimates_only_trailing_context() -> None:
+    prefix = (Message(role="system", content="system"), Message(role="user", content="hello"))
+    trailing = Message(role="assistant", content="world 🌍")
+    observation = observe_context(
+        prefix,
+        provider="test",
+        model="model",
+        input_tokens=123,
+    )
+
+    budget = estimate_context_budget(
+        (*prefix, trailing),
+        context_window=1_000,
+        reserve_tokens=100,
+        observation=observation,
+        provider="test",
+        model="model",
+    )
+
+    trailing_tokens = estimate_context((trailing,)).total_tokens
+    assert budget.observed_tokens == 123
+    assert budget.observed_is_current is True
+    assert budget.trailing_estimated_tokens == trailing_tokens
+    assert budget.effective_tokens == 123 + trailing_tokens
+    assert budget.accounting_method == "provider_observed_plus_estimate"
+    assert budget.remaining_tokens == 1_000 - 100 - 123 - trailing_tokens
+
+
+@pytest.mark.parametrize("change", ["prefix", "tools", "provider", "model"])
+def test_stale_provider_observation_falls_back_to_full_estimate(change: str) -> None:
+    prefix = (Message(role="user", content="hello"),)
+    tools = (ToolSpec(name="read", description="Read", input_schema={"type": "object"}),)
+    observation = observe_context(prefix, tools, provider="test", model="model", input_tokens=10)
+    messages = (Message(role="user", content="changed"),) if change == "prefix" else prefix
+    active_tools = (
+        (ToolSpec(name="grep", description="Search", input_schema={"type": "object"}),)
+        if change == "tools"
+        else tools
+    )
+    provider = "other" if change == "provider" else "test"
+    model = "other" if change == "model" else "model"
+
+    budget = estimate_context_budget(
+        messages,
+        active_tools,
+        context_window=100,
+        reserve_tokens=10,
+        observation=observation,
+        provider=provider,
+        model=model,
+    )
+
+    assert budget.observed_is_current is False
+    assert budget.effective_tokens == budget.estimate.total_tokens
+    assert budget.accounting_method == "fully_estimated"
 
 
 def test_context_estimate_accepts_legacy_method_values() -> None:
@@ -249,6 +312,40 @@ def test_auto_compaction_skips_when_reserve_consumes_context_window(reserve: int
     assert should_auto_compact(budget, enabled=True) is False
 
 
+def test_session_stats_reject_persisted_observation_after_provider_change() -> None:
+    prefix = (Message(role="user", content="hello"),)
+    observation = observe_context(prefix, provider="old", model="model", input_tokens=12)
+    entries: tuple[SessionEntry, ...] = (
+        MessageSessionEntry(id="user", session_id="s", message=prefix[0]),
+        MessageSessionEntry(
+            id="assistant",
+            session_id="s",
+            message=Message(
+                role="assistant",
+                content="answer",
+                finish_reason="stop",
+                context_observation=observation,
+            ),
+        ),
+    )
+    replay = replay_session_entries(entries)
+
+    stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=100,
+        reserve_tokens=10,
+        provider="new",
+        model="model",
+    )
+
+    assert stats.context.observed_is_current is False
+    assert stats.context.accounting_method == "fully_estimated"
+
+
 def test_session_stats_reports_threshold_policy_eligibility() -> None:
     entries: tuple[SessionEntry, ...] = (
         MessageSessionEntry(
@@ -366,7 +463,7 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
         ).schema_version
         == 9
     )
-    with pytest.raises(ValueError, match="require schema_version 9 through 31"):
+    with pytest.raises(ValueError, match="require schema_version 9 through 32"):
         wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
 
 

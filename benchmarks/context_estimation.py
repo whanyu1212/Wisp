@@ -42,7 +42,9 @@ class BenchmarkReport:
     samples: tuple[BenchmarkSample, ...]
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True)
+        payload = asdict(self)
+        payload["accuracy"] = [asdict(sample) for sample in run_accuracy_benchmark()]
+        return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:
@@ -167,3 +169,120 @@ def main(arguments: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+
+
+@dataclass(frozen=True)
+class AccuracySample:
+    """Fallback-estimator error against a checked-in tokenizer fixture."""
+
+    workload: str
+    reference: str
+    known_tokens: int
+    estimated_tokens: int
+    signed_error: int
+    absolute_error: int
+    error_percent: float
+    direction: str
+
+
+def run_accuracy_benchmark() -> tuple[AccuracySample, ...]:
+    """Measure fallback error on representative cl100k_base fixture counts.
+
+    Counts are generated offline from the canonical JSON payloads using tiktoken's
+    ``cl100k_base`` encoding. They calibrate this fallback; they are not universal
+    guarantees for every provider tokenizer.
+    """
+
+    return tuple(_accuracy_sample(*fixture) for fixture in _ACCURACY_FIXTURES)
+
+
+def _accuracy_sample(
+    workload: str,
+    messages: tuple[Message, ...],
+    tools: tuple[ToolSpec, ...],
+    known_tokens: int,
+) -> AccuracySample:
+    estimated = estimate_context(messages, tools).total_tokens
+    error = estimated - known_tokens
+    return AccuracySample(
+        workload=workload,
+        reference="cl100k_base",
+        known_tokens=known_tokens,
+        estimated_tokens=estimated,
+        signed_error=error,
+        absolute_error=abs(error),
+        error_percent=(error / known_tokens) * 100,
+        direction="over" if error > 0 else "under" if error < 0 else "exact",
+    )
+
+
+_ACCURACY_FIXTURES = (
+    (
+        "source_code",
+        (
+            Message(
+                role="user",
+                content=(
+                    "Implement:\n```python\ndef greet(name: str) -> str:\n"
+                    '    return f"Hello, {name}!"\n```'
+                ),
+            ),
+        ),
+        (),
+        39,
+    ),
+    (
+        "json_schema",
+        (),
+        (
+            ToolSpec(
+                name="create_user",
+                description="Create a user record",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "roles": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["name"],
+                },
+            ),
+        ),
+        47,
+    ),
+    (
+        "large_tool_result",
+        (
+            Message(role="user", content="Inspect the output."),
+            Message(
+                role="tool",
+                content="line of diagnostic output\n" * 200,
+                tool_call_id="call-1",
+            ),
+        ),
+        (),
+        1028,
+    ),
+    (
+        "cjk",
+        (Message(role="user", content="请分析这个函数并解释为什么它在边界条件下失败。"),),
+        (),
+        33,
+    ),
+    (
+        "emoji",
+        (Message(role="user", content="Debug 👩‍💻🚀 ✅ vs ❌; family 👨‍👩‍👧‍👦 and é"),),
+        (),
+        47,
+    ),
+    (
+        "mixed_conversation",
+        (
+            Message(role="user", content="Review 配置 🌍"),
+            Message(role="assistant", content="I found two issues."),
+            Message(role="user", content='Return JSON: {"修复": true}'),
+        ),
+        (),
+        45,
+    ),
+)

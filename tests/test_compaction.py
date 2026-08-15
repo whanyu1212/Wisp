@@ -991,8 +991,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 31
-    assert completed.schema_version == 31
+    assert started.schema_version == 32
+    assert completed.schema_version == 32
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -1051,7 +1051,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 through 31"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 32"):
         wisp_event_from_json(payload)
 
 
@@ -1214,7 +1214,7 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
                 ProviderResponseStarted(model="model"),
                 ProviderResponseCompleted(
                     content="answer two",
-                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                    usage=ProviderUsage(input_tokens=81, output_tokens=11, total_tokens=92),
                 ),
             ],
             [
@@ -1293,7 +1293,7 @@ def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) 
                 ProviderResponseStarted(model="model"),
                 ProviderResponseCompleted(
                     content="answer two",
-                    usage=ProviderUsage(input_tokens=70, output_tokens=10, total_tokens=80),
+                    usage=ProviderUsage(input_tokens=60, output_tokens=10, total_tokens=70),
                 ),
             ]
         ],

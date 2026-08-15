@@ -12,7 +12,12 @@ from wisp.agent.configuration import (
     validate_agent_runtime_limits,
     validate_non_negative_integer,
 )
-from wisp.agent.context import build_context_budget, estimate_context
+from wisp.agent.context import (
+    build_context_budget,
+    estimate_context,
+    observe_context,
+    trailing_context_estimate,
+)
 from wisp.agent.execution import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
@@ -511,15 +516,41 @@ async def run_agent_loop(
                 break
             lifecycle = _ProviderResponseLifecycle()
 
-            estimate = estimate_context((*messages, *state.continuation_messages), config.tools)
+            request_messages = (*messages, *state.continuation_messages)
+            selected_model = config.model or config.provider.default_model
+            previous_observation = next(
+                (
+                    message.context_observation
+                    for message in reversed(request_messages)
+                    if message.context_observation is not None
+                ),
+                None,
+            )
+            estimate = estimate_context(request_messages, config.tools)
+            trailing_estimate = (
+                trailing_context_estimate(request_messages, config.tools, previous_observation)
+                if previous_observation is not None
+                and previous_observation.provider == config.provider.name
+                and previous_observation.model == selected_model
+                else None
+            )
             yield ContextEstimated(
                 turn=turn,
                 provider=config.provider.name,
-                model=config.model or config.provider.default_model,
+                model=selected_model,
                 budget=build_context_budget(
                     estimate,
                     context_window=config.context_window,
                     reserve_tokens=config.context_reserve_tokens,
+                    observed_tokens=(
+                        previous_observation.input_tokens
+                        if previous_observation is not None
+                        else None
+                    ),
+                    observed_is_current=trailing_estimate is not None,
+                    trailing_estimated_tokens=(
+                        trailing_estimate.total_tokens if trailing_estimate is not None else None
+                    ),
                 ),
             )
 
@@ -643,6 +674,17 @@ async def run_agent_loop(
             continuation_tool_calls = tuple(
                 snapshot.model_copy(deep=True) for snapshot in tool_call_snapshots
             )
+            context_observation = (
+                observe_context(
+                    request_messages,
+                    config.tools,
+                    provider=config.provider.name,
+                    model=selected_model,
+                    input_tokens=usage.input_tokens,
+                )
+                if usage is not None
+                else None
+            )
             yield MessageCompleted(
                 turn=turn,
                 content=completed_content,
@@ -650,6 +692,7 @@ async def run_agent_loop(
                 response_id=response_id,
                 usage=usage,
                 cost=cost,
+                context_observation=context_observation,
                 tool_calls=tool_call_snapshots,
             )
             continuation_message = Message(
@@ -659,19 +702,20 @@ async def run_agent_loop(
                 finish_reason=response.finish_reason,
                 usage=usage,
                 cost=cost,
+                context_observation=context_observation,
                 tool_calls=continuation_tool_calls,
             )
             state.record_response(completed, continuation_message)
             if usage is not None and config.context_window is not None:
-                pressure_ratio = usage.total_tokens / config.context_window
+                pressure_ratio = usage.input_tokens / config.context_window
                 if pressure_ratio >= config.context_pressure_threshold:
                     yield ContextPressure(
                         turn=turn,
                         provider=config.provider.name,
                         model=config.model or config.provider.default_model,
                         context_window=config.context_window,
-                        observed_tokens=usage.total_tokens,
-                        remaining_tokens=max(0, config.context_window - usage.total_tokens),
+                        observed_tokens=usage.input_tokens,
+                        remaining_tokens=max(0, config.context_window - usage.input_tokens),
                         pressure_ratio=pressure_ratio,
                     )
 

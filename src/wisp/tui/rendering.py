@@ -1180,9 +1180,13 @@ def format_compaction_status(stats: SessionStats) -> str:
 
     context = stats.context
     current_tokens = (
-        context.observed_tokens
-        if context.observed_is_current and context.observed_tokens is not None
-        else context.estimate.total_tokens
+        context.effective_tokens
+        if context.effective_tokens is not None
+        else (
+            context.observed_tokens
+            if context.observed_is_current and context.observed_tokens is not None
+            else context.estimate.total_tokens
+        )
     )
     window = (
         _format_token_count(context.context_window)
@@ -1204,11 +1208,11 @@ def format_compaction_status(stats: SessionStats) -> str:
             else f"unavailable - {policy.threshold_ineligible_reason or 'not available'}"
         )
     )
-    usage_source = (
-        "provider observation"
-        if context.observed_is_current and context.observed_tokens is not None
-        else "deterministic estimate"
-    )
+    usage_source = {
+        "provider_observed": "provider observation",
+        "provider_observed_plus_estimate": "provider observation + trailing estimate",
+        "fully_estimated": "deterministic estimate",
+    }[context.accounting_method]
     return "\n".join(
         (
             (
@@ -1294,12 +1298,15 @@ def _footer_context_text(
 ) -> str:
     if context is None:
         return ""
-    observed = context.observed_tokens
-    use_observed = context.observed_is_current and observed is not None
-    total_tokens = context.estimate.total_tokens
-    if use_observed:
-        assert observed is not None
-        total_tokens = observed
+    use_observed = context.observed_is_current and context.observed_tokens is not None
+    observed_tokens = context.observed_tokens
+    total_tokens = context.effective_tokens
+    if total_tokens is None:
+        total_tokens = (
+            observed_tokens
+            if use_observed and observed_tokens is not None
+            else context.estimate.total_tokens
+        )
     approximate = not use_observed or context.context_window is None
     marker = "~" if approximate else ""
     text = f"ctx {marker}{_format_token_count(total_tokens)}"
@@ -1307,7 +1314,7 @@ def _footer_context_text(
         text += f"/{_format_token_count(context.context_window)}"
     if include_percent:
         percent = context.estimated_percent
-        if use_observed and context.context_window:
+        if context.context_window:
             percent = total_tokens / context.context_window * 100
         if percent is not None:
             text += f" ({percent:.0f}%)"

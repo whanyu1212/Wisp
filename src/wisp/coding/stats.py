@@ -7,11 +7,23 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
+from wisp.agent.context import (
+    build_context_budget,
+    context_fingerprint,
+    estimate_context,
+    estimate_context_budget,
+)
 from wisp.agent.messages import Message
 from wisp.coding.compaction import NothingToCompactError, plan_manual_compaction
 from wisp.coding.costs import aggregate_session_cost
-from wisp.events import CompactionPolicyStatus, ContextBudget, SessionStats, TokenUsage, UsageCost
+from wisp.events import (
+    CompactionPolicyStatus,
+    ContextBudget,
+    ContextObservation,
+    SessionStats,
+    TokenUsage,
+    UsageCost,
+)
 from wisp.providers.base import ToolSpec
 from wisp.sessions.entries import (
     CompactionSessionEntry,
@@ -31,6 +43,8 @@ def build_session_stats(
     tools: Sequence[ToolSpec],
     context_window: int | None,
     reserve_tokens: int,
+    provider: str | None = None,
+    model: str | None = None,
     observed_tokens: int | None = None,
     observed_is_current: bool = False,
     observed_entry_id: str | None = None,
@@ -42,28 +56,39 @@ def build_session_stats(
     usage_records = tuple(_usage_records(entries))
     entries_by_id = {entry.id: entry for entry in entries}
     active_entries = tuple(entries_by_id[entry_id] for entry_id in replay.path_entry_ids)
-    durable_observation, durable_entry_id, durable_observation_is_latest = _latest_observation(
+    durable_observation, durable_entry_id, legacy_tokens, legacy_is_latest = _latest_observation(
         active_entries
     )
-    if observed_tokens is None:
-        observed_tokens = durable_observation
-    if observed_tokens != durable_observation or not durable_observation_is_latest:
-        observed_is_current = False
-    if observed_entry_id is not None and observed_entry_id != durable_entry_id:
-        observed_is_current = False
-    if (
-        observed_context_fingerprint is not None
-        and observed_context_fingerprint != context_fingerprint(provider_messages, tools)
-    ):
-        observed_is_current = False
-    estimate = estimate_context(provider_messages, tools)
-    context = build_context_budget(
-        estimate,
-        context_window=context_window,
-        reserve_tokens=reserve_tokens,
-        observed_tokens=observed_tokens,
-        observed_is_current=observed_is_current,
-    )
+    if durable_observation is not None:
+        context = estimate_context_budget(
+            provider_messages,
+            tools,
+            context_window=context_window,
+            reserve_tokens=reserve_tokens,
+            observation=durable_observation,
+            provider=provider if provider is not None else durable_observation.provider,
+            model=model if provider is not None else durable_observation.model,
+        )
+    else:
+        if observed_tokens is None:
+            observed_tokens = legacy_tokens
+        if observed_tokens != legacy_tokens or not legacy_is_latest:
+            observed_is_current = False
+        if observed_entry_id is not None and observed_entry_id != durable_entry_id:
+            observed_is_current = False
+        if (
+            observed_context_fingerprint is not None
+            and observed_context_fingerprint != context_fingerprint(provider_messages, tools)
+        ):
+            observed_is_current = False
+        estimate = estimate_context(provider_messages, tools)
+        context = build_context_budget(
+            estimate,
+            context_window=context_window,
+            reserve_tokens=reserve_tokens,
+            observed_tokens=observed_tokens,
+            observed_is_current=observed_is_current,
+        )
     return SessionStats(
         session_id=session_id,
         entry_count=len(entries),
@@ -190,7 +215,7 @@ def _sum_complete_optional(records: Sequence[TokenUsage], field: str) -> int | N
 
 def _latest_observation(
     entries: Sequence[SessionEntry],
-) -> tuple[int | None, str | None, bool]:
+) -> tuple[ContextObservation | None, str | None, int | None, bool]:
     boundary = max(
         (index for index, entry in enumerate(entries) if entry.kind == "compaction"),
         default=-1,
@@ -200,10 +225,14 @@ def _latest_observation(
         for entry in entries[boundary + 1 :]
         if isinstance(entry, MessageSessionEntry) and entry.message.role != "system"
     ]
+    latest_observation: ContextObservation | None = None
     latest_usage: int | None = None
     latest_usage_index: int | None = None
     latest_entry_id: str | None = None
     for index, (entry_id, message) in enumerate(context_messages):
+        if message.context_observation is not None:
+            latest_observation = message.context_observation
+            latest_entry_id = entry_id
         if (
             message.role == "assistant"
             and message.finish_reason not in {"error", "cancelled"}
@@ -213,7 +242,12 @@ def _latest_observation(
             latest_usage = message.usage.total_tokens
             latest_entry_id = entry_id
             latest_usage_index = index
-    return latest_usage, latest_entry_id, latest_usage_index == len(context_messages) - 1
+    return (
+        latest_observation,
+        latest_entry_id,
+        latest_usage,
+        latest_usage_index == len(context_messages) - 1,
+    )
 
 
 __all__ = ["build_session_stats"]

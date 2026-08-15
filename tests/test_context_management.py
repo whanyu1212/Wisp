@@ -136,9 +136,9 @@ def test_context_pressure_emits_after_completed_message_at_threshold() -> None:
                 ProviderResponseCompleted(
                     content="done",
                     usage=ProviderUsage(
-                        input_tokens=75,
+                        input_tokens=80,
                         output_tokens=5,
-                        total_tokens=80,
+                        total_tokens=85,
                     ),
                 ),
             ]
@@ -398,8 +398,8 @@ def test_context_events_round_trip_on_current_schema() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == 31
-    assert overflow.schema_version == 31
+    assert pressure.schema_version == 32
+    assert overflow.schema_version == 32
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
     assert (

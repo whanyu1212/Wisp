@@ -20,6 +20,7 @@ from pydantic import (
 from wisp.events import (
     CompactionReason,
     ContextBudget,
+    ContextObservation,
     FinishReason,
     JsonObject,
     MessageCompleted,
@@ -55,6 +56,7 @@ class Message(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+    context_observation: ContextObservation | None = None
     skill_invocation: SkillInvocationEvidence | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -146,6 +148,7 @@ def message_from_completion_event(
             finish_reason=event.finish_reason,
             usage=event.usage,
             cost=event.cost,
+            context_observation=event.context_observation,
             created_at=event.timestamp,
         )
     return Message(
