@@ -53,6 +53,7 @@ from wisp.events import (
     ContextBudget,
     ContextEstimated,
     ContextObservation,
+    ContextOverflow,
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
@@ -60,6 +61,7 @@ from wisp.events import (
     QueueMessageInjected,
     QueueMode,
     QueueUpdated,
+    RunOutcome,
     SessionSaved,
     SessionStats,
     SkillInvoked,
@@ -802,6 +804,7 @@ class CodingSession:
             pause_after_tool_round=provider_auto_compaction,
         )
 
+        terminal_outcome: RunOutcome = "completed"
         while True:
             saw_loop_error = False
             attempt_had_tool_round = False
@@ -820,6 +823,10 @@ class CodingSession:
                         attempt_had_delta = True
                     elif isinstance(event, ErrorEvent):
                         saw_loop_error = True
+                    elif isinstance(event, ContextOverflow):
+                        overflow_error = ContextOverflowError(event.message)
+                    elif isinstance(event, TurnCompleted):
+                        terminal_outcome = event.outcome
                     elif isinstance(event, MessageCompleted) and (
                         event.tool_calls or event.finish_reason == "tool_calls"
                     ):
@@ -1085,7 +1092,7 @@ class CodingSession:
         completed = AgentCompleted(
             session_id=session.session_id,
             turns=turns,
-            outcome="completed",
+            outcome=terminal_outcome,
         )
         if auto_compaction_status.skip_final_save:
             yield await self._emit_recoverable_event(completed, session=session)

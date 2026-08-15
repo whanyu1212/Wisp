@@ -225,17 +225,16 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
 
     async def run() -> list[object]:
         events: list[object] = []
-        with pytest.raises(ContextOverflowError):
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=provider,
-                    tool_executor=NeverToolExecutor(),
-                    model="test-model",
-                    context_window=100,
-                ),
-                messages=(Message(role="user", content="hello"),),
-            ):
-                events.append(event)
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                model="test-model",
+                context_window=100,
+            ),
+            messages=(Message(role="user", content="hello"),),
+        ):
+            events.append(event)
         return events
 
     events = anyio.run(run)
@@ -244,6 +243,7 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
         "turn.started",
         "context.estimated",
         "message.started",
+        "message.completed",
         "context.overflow",
         "error",
         "turn.completed",
@@ -263,17 +263,16 @@ def test_deferred_context_overflow_leaves_terminal_events_to_the_session() -> No
 
     async def run() -> list[object]:
         events: list[object] = []
-        with pytest.raises(ContextOverflowError):
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=provider,
-                    tool_executor=NeverToolExecutor(),
-                    context_window=100,
-                    defer_context_overflow_errors=True,
-                ),
-                messages=(Message(role="user", content="hello"),),
-            ):
-                events.append(event)
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                context_window=100,
+                defer_context_overflow_errors=True,
+            ),
+            messages=(Message(role="user", content="hello"),),
+        ):
+            events.append(event)
         return events
 
     events = anyio.run(run)
@@ -282,6 +281,7 @@ def test_deferred_context_overflow_leaves_terminal_events_to_the_session() -> No
         "turn.started",
         "context.estimated",
         "message.started",
+        "message.completed",
         "context.overflow",
     ]
 

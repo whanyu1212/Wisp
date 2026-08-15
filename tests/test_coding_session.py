@@ -39,7 +39,6 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import (
-    ProviderError,
     ProviderProtocolError,
     ToolCall,
     ToolCallResult,
@@ -1298,20 +1297,26 @@ def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_pa
 
     async def run_agent() -> list[object]:
         agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
-        events: list[object] = []
-        with pytest.raises(ProviderError, match="upstream failed"):
-            async for event in agent.run("hello"):
-                events.append(event)
-        return events
+        return [event async for event in agent.run("hello")]
 
     events = anyio.run(run_agent)
 
-    assert not any(isinstance(event, MessageCompleted) for event in events)
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completion.content == "partial"
+    assert completion.finish_reason == "error"
     assert [event.type for event in events[-3:]] == [
-        "error",
         "turn.completed",
+        "session.saved",
         "agent.completed",
     ]
+    assert cast(AgentCompleted, events[-1]).outcome == "failed"
+
+    session_started = next(event for event in events if isinstance(event, AgentStarted))
+    replayed = JsonlSessionStore(tmp_path).load(session_started.session_id).read_context_messages()
+    assistant_messages = [message for message in replayed if message.role == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].content == "partial"
+    assert assistant_messages[0].finish_reason == "error"
 
 
 def test_coding_session_retries_uncertain_completion_write_without_duplicate(

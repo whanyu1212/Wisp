@@ -942,17 +942,14 @@ def test_openai_provider_raises_after_exhausting_opening_retries() -> None:
     )
 
     async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(APIConnectionError):
-            async for event in provider.stream([Message(role="user", content="hello")]):
-                events.append(event)
-        return events
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
     events = anyio.run(run)
 
     assert provider.attempts == 2
-    assert len(events) == 1
+    assert len(events) == 2
     assert isinstance(events[0], ProviderRetrying)
+    assert isinstance(events[1], ProviderResponseFailed)
 
 
 def test_openai_provider_stops_retrying_when_cancelled_during_backoff() -> None:

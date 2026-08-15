@@ -20,7 +20,6 @@ from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
-    ProviderError,
     ProviderProtocolError,
     ToolCall,
     ToolCallResult,
@@ -429,14 +428,17 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
             pass
 
         provider.opening_errors.append(httpx.ConnectError("temporary failure"))
-        with pytest.raises(httpx.ConnectError, match="temporary failure"):
-            async for _event in provider.stream(
+        failed = [
+            event
+            async for event in provider.stream(
                 messages,
                 tool_results=[tool_result],
                 previous_response_id="response-1",
                 prompt_cache_key="wisp:session-1",
-            ):
-                pass
+            )
+        ]
+        assert len(failed) == 1
+        assert isinstance(failed[0], ProviderResponseFailed)
 
         provider.events = [
             {"type": "response.created", "response": {"id": "response-2"}},
@@ -648,13 +650,12 @@ def test_openai_codex_provider_does_not_start_before_http_success(tmp_path: Path
                 auth_resolver=StoredProviderAuthResolver(store),
                 client=client,
             )
-            events: list[object] = []
-            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(401\)"):
-                async for event in provider.stream([Message(role="user", content="hi")]):
-                    events.append(event)
-            return events
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
-    assert anyio.run(run) == []
+    events = anyio.run(run)
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderResponseFailed)
+    assert "OpenAI Codex API error (401)" in events[0].message
 
 
 def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: Path) -> None:
@@ -894,13 +895,12 @@ def test_openai_codex_provider_does_not_retry_terminal_quota_error(tmp_path: Pat
                 auth_resolver=StoredProviderAuthResolver(store),
                 client=client,
             )
-            events: list[object] = []
-            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(429\)"):
-                async for event in provider.stream([Message(role="user", content="hi")]):
-                    events.append(event)
-            return events
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
-    assert anyio.run(run) == []
+    events = anyio.run(run)
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderResponseFailed)
+    assert "OpenAI Codex API error (429)" in events[0].message
     assert attempts == 1
 
 
@@ -924,17 +924,14 @@ def test_openai_codex_provider_raises_after_exhausting_opening_retries(tmp_path:
                     max_delay_seconds=1,
                 ),
             )
-            events: list[object] = []
-            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(503\)"):
-                async for event in provider.stream([Message(role="user", content="hi")]):
-                    events.append(event)
-            return events
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
     events = anyio.run(run)
 
     assert attempts == 2
-    assert len(events) == 1
+    assert len(events) == 2
     assert isinstance(events[0], ProviderRetrying)
+    assert isinstance(events[1], ProviderResponseFailed)
 
 
 def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path) -> None:

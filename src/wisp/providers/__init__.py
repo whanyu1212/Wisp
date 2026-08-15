@@ -6,6 +6,7 @@ from .anthropic import AnthropicProvider
 from .base import ContextOverflowError, ToolCallResult, ToolSpec
 from .events import (
     ProviderEvent,
+    ProviderFailureKind,
     ProviderFinishReason,
     ProviderResponseCompleted,
     ProviderResponseFailed,
@@ -31,6 +32,7 @@ __all__ = [
     "OpenAIProvider",
     "OpenAICompatibleProvider",
     "ProviderEvent",
+    "ProviderFailureKind",
     "ProviderFinishReason",
     "ProviderRequest",
     "ProviderResponseCompleted",

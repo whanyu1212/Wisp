@@ -28,7 +28,7 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
-from wisp.providers.base import ProviderError, ProviderProtocolError, ToolCallResult, ToolSpec
+from wisp.providers.base import ProviderProtocolError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -414,16 +414,59 @@ def test_pure_loop_validates_failed_terminal_response_id() -> None:
         ]
     )
 
-    async def run_expected(error: type[Exception], match: str) -> None:
-        with pytest.raises(error, match=match):
+    async def run_failed() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run_failed)
+    assert [event.type for event in events[-3:]] == [
+        "message.completed",
+        "error",
+        "turn.completed",
+    ]
+
+    async def run_invalid() -> None:
+        with pytest.raises(ProviderProtocolError, match="conflicting response ids"):
             async for _ in run_agent_loop(
                 AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
                 messages=(Message(role="user", content="hi"),),
             ):
                 pass
 
-    anyio.run(run_expected, ProviderError, "upstream failed")
-    anyio.run(run_expected, ProviderProtocolError, "conflicting response ids")
+    anyio.run(run_invalid)
+
+
+def test_failed_response_does_not_execute_streamed_tool_calls() -> None:
+    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseFailed(message="truncated"),
+            ]
+        ]
+    )
+    executor = RecordingToolExecutor()
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert executor.calls == []
+    assert not any(event.type in {"tool.call", "tool.execution.started"} for event in events)
 
 
 def test_failed_response_id_does_not_leak_into_a_later_run() -> None:
@@ -441,12 +484,11 @@ def test_failed_response_id_does_not_leak_into_a_later_run() -> None:
     )
 
     async def fail() -> None:
-        with pytest.raises(ProviderError, match="upstream failed"):
-            async for _ in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
-                messages=(Message(role="user", content="first"),),
-            ):
-                pass
+        async for _ in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="first"),),
+        ):
+            pass
 
     async def succeed() -> None:
         async for _ in run_agent_loop(
@@ -778,7 +820,8 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     estimates = [event for event in events if isinstance(event, ContextEstimated)]
     assert len(estimates) == 2
     assert estimates[1].budget.estimate.total_tokens > estimates[0].budget.estimate.total_tokens
-    assert estimates[1].budget.estimate.message_tokens >= len("reasoning" * 100) // 4
+    assert estimates[1].budget.estimate.message_tokens < len("reasoning" * 100) // 4
+    assert all("reasoning" not in message.content for message in provider.calls[1].messages)
     # The promoted exit_code reaches the event AND crosses the wire: the TUI
     # renderer only sees events after they are serialized (agent subprocess →
     # JSON → client), so the presentation signal must survive round-tripping.

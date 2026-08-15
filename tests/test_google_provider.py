@@ -439,17 +439,16 @@ def test_google_provider_raises_after_exhausting_opening_retries() -> None:
     )
 
     async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(httpx.ConnectError):
-            async for event in provider.stream([WispMessage(role="user", content="hello")]):
-                events.append(event)
-        return events
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
 
     events = anyio.run(run)
 
     assert provider.attempts == 2
-    assert len(events) == 1
+    assert len(events) == 2
     assert isinstance(events[0], ProviderRetrying)
+    assert isinstance(events[1], ProviderResponseFailed)
 
 
 def test_wisp_owned_google_client_leaves_sdk_retries_unset() -> None:

@@ -8,6 +8,7 @@ from typing import Literal
 
 JsonObject = Mapping[str, object]
 ProviderFinishReason = Literal["stop", "tool_calls", "length"]
+ProviderFailureKind = Literal["error", "context_overflow", "aborted"]
 RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
 
 
@@ -97,6 +98,7 @@ class ProviderResponseFailed:
     message: str
     partial_content: str = ""
     response_id: str | None = None
+    failure_kind: ProviderFailureKind = "error"
 
 
 type ProviderEvent = (
@@ -113,6 +115,7 @@ type ProviderEvent = (
 __all__ = [
     "JsonObject",
     "ProviderEvent",
+    "ProviderFailureKind",
     "ProviderFinishReason",
     "ProviderResponseCompleted",
     "ProviderResponseFailed",
