@@ -11,6 +11,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.tools import file_ops as file_ops_module
+from wisp.tools import search as search_module
 from wisp.tools import secure_fs as secure_fs_module
 from wisp.tools.context import ToolContext
 from wisp.tools.file_ops import EditTool, ReadTool, WriteTool
@@ -282,6 +283,40 @@ def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
     assert find.data["files"] == ["foo/bar.txt"]
 
 
+def test_recursive_tools_do_not_reinclude_below_ignored_parent(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("foo/\n!foo/bar.txt\n", encoding="utf-8")
+    foo = tmp_path / "foo"
+    foo.mkdir()
+    (foo / "bar.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.text == "No matches"
+    assert find.text == "No files found"
+
+
+def test_recursive_tools_search_unignored_common_directory_names(tmp_path: Path) -> None:
+    for name in ("build", "node_modules", "target", "vendor"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "result.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    expected_files = [
+        "build/result.txt",
+        "node_modules/result.txt",
+        "target/result.txt",
+        "vendor/result.txt",
+    ]
+    assert grep.data["matches"] == [f"{path}:1:needle" for path in expected_files]
+    assert find.data["files"] == expected_files
+
+
 def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
     generated = tmp_path / "generated"
@@ -298,6 +333,77 @@ def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
 
     assert default.text == "No matches"
     assert explicit.data["matches"] == ["generated/result.txt:1:needle"]
+
+
+def test_recursive_tools_reject_oversized_ignore_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 32)
+    (tmp_path / ".gitignore").write_text("x" * 33, encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match=r"\.gitignore exceeds 32 bytes"):
+        run_tool(FindTool(), {"path": "."}, context)
+
+
+def test_recursive_tools_reject_too_many_repository_exclude_patterns(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_PATTERNS", 2)
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    (info / "exclude").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match=r"exclude exceeds 2 patterns"):
+        run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+
+
+def test_subdirectory_search_propagates_ancestor_ignore_file_limit(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 8)
+    (tmp_path / ".gitignore").write_text("x" * 9, encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+
+    with pytest.raises(ToolError, match=r"\.gitignore exceeds 8 bytes"):
+        run_tool(
+            FindTool(),
+            {"path": "nested"},
+            ToolContext(cwd=tmp_path),
+        )
+
+
+def test_path_fallback_propagates_nested_ignore_file_limit(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 8)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".gitignore").write_text("x" * 9, encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match=r"nested/\.gitignore exceeds 8 bytes"):
+        tuple(
+            search_module._walk_directory(
+                tmp_path,
+                tmp_path,
+                context,
+                ignore_specs=(),
+                ignore_override_glob=None,
+            )
+        )
+
+
+def test_recursive_tools_reject_directory_over_entry_limit(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_module, "_MAX_DIRECTORY_ENTRIES", 2)
+    for name in ("one.txt", "two.txt", "three.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match=r"exceeds 2 entries"):
+        run_tool(FindTool(), {"path": "."}, ToolContext(cwd=tmp_path))
 
 
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:

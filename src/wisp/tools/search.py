@@ -25,6 +25,8 @@ from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
 from wisp.tools.truncation import truncate_text
 
+# The TUI file picker imports this curated pruning set to keep indexing bounded.
+# Recursive grep/find use repository ignore rules instead of pruning these names.
 IGNORED_DIRS = {
     ".git",
     ".codegraph",
@@ -45,6 +47,21 @@ RG_MATCH_SEPARATOR = "\x1f"
 RG_CONTEXT_SEPARATOR = "\x1e"
 _REGEX_TIMEOUT_SECONDS = 0.05
 _IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
+_MAX_IGNORE_FILE_BYTES = 1_000_000
+_MAX_IGNORE_FILE_PATTERNS = 10_000
+_MAX_DIRECTORY_ENTRIES = 100_000
+
+
+class _SearchInputLimitError(ToolError):
+    """Raised when repository-controlled search input exceeds a safety budget."""
+
+
+class _IgnoreFileLimitError(_SearchInputLimitError):
+    """Raised when a repository ignore source exceeds its safety budget."""
+
+
+class _DirectoryEntryLimitError(_SearchInputLimitError):
+    """Raised when one repository directory exceeds its traversal budget."""
 
 
 class GrepTool:
@@ -508,6 +525,8 @@ def _ancestor_ignore_specs(path: Path, context: ToolContext) -> tuple[_IgnoreSpe
         try:
             with open_directory(selected) as descriptor:
                 specs.extend(_read_ignore_specs(descriptor, current, context))
+        except _SearchInputLimitError:
+            raise
         except ToolError:
             return tuple(specs)
         current /= part
@@ -524,8 +543,7 @@ def _walk_directory(
 ) -> Iterable[Path]:
     ignore_specs += _read_ignore_specs(descriptor, path, context)
     try:
-        with os.scandir(descriptor) as entries:
-            retained = sorted(entries, key=lambda entry: entry.name)
+        retained = _bounded_sorted_directory_entries(descriptor, path)
     except OSError as exc:
         raise ToolError(f"Could not list directory {path}: {exc}") from exc
 
@@ -545,14 +563,10 @@ def _walk_directory(
         if stat.S_ISLNK(info.st_mode):
             continue
         if stat.S_ISDIR(info.st_mode):
-            if (
-                name in IGNORED_DIRS
-                or _is_hidden(name)
-                or (
-                    _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
-                    and not _may_reinclude_descendant(candidate, ignore_specs)
-                    and ignore_override_glob is None
-                )
+            if _is_hidden(name) or (
+                _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
+                and not _may_reinclude_descendant(candidate, ignore_specs)
+                and ignore_override_glob is None
             ):
                 continue
             if isinstance(descriptor, Path):
@@ -566,6 +580,8 @@ def _walk_directory(
                             ignore_specs=ignore_specs,
                             ignore_override_glob=ignore_override_glob,
                         )
+                except _SearchInputLimitError:
+                    raise
                 except ToolError:
                     continue
                 continue
@@ -601,6 +617,34 @@ def _walk_directory(
             yield candidate
 
 
+def _bounded_sorted_directory_entries(
+    descriptor: int | Path, source: Path
+) -> list[os.DirEntry[str]]:
+    retained: list[os.DirEntry[str]] = []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            retained.append(entry)
+            if len(retained) > _MAX_DIRECTORY_ENTRIES:
+                raise _DirectoryEntryLimitError(
+                    f"Directory {source} exceeds {_MAX_DIRECTORY_ENTRIES} entries"
+                )
+    retained.sort(key=lambda entry: entry.name)
+    return retained
+
+
+def _read_bounded_ignore_lines(descriptor: int, source: str) -> tuple[str, ...]:
+    with os.fdopen(os.dup(descriptor), "rb") as file:
+        content = file.read(_MAX_IGNORE_FILE_BYTES + 1)
+    if len(content) > _MAX_IGNORE_FILE_BYTES:
+        raise _IgnoreFileLimitError(f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_BYTES} bytes")
+    lines = content.decode("utf-8").splitlines(keepends=True)
+    if len(lines) > _MAX_IGNORE_FILE_PATTERNS:
+        raise _IgnoreFileLimitError(
+            f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_PATTERNS} patterns"
+        )
+    return tuple(lines)
+
+
 def _read_ignore_specs(
     descriptor: int | Path, directory: Path, context: ToolContext
 ) -> tuple[_IgnoreSpec, ...]:
@@ -616,15 +660,15 @@ def _read_ignore_specs(
                 try:
                     if not stat.S_ISREG(os.fstat(ignore_fd).st_mode):
                         continue
-                    with os.fdopen(os.dup(ignore_fd), "r", encoding="utf-8") as file:
-                        lines = tuple(file)
+                    lines = _read_bounded_ignore_lines(ignore_fd, str(directory / name))
                 finally:
                     os.close(ignore_fd)
             else:
                 ignore_path = secure_tool_path(str(directory / name), context)
                 with open_file(ignore_path) as ignore_fd:
-                    with os.fdopen(os.dup(ignore_fd), "r", encoding="utf-8") as file:
-                        lines = tuple(file)
+                    lines = _read_bounded_ignore_lines(ignore_fd, str(directory / name))
+        except _IgnoreFileLimitError:
+            raise
         except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
             continue
         specs.append(_IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines)))
@@ -653,8 +697,9 @@ def _read_repository_exclude(
                     try:
                         if not stat.S_ISREG(os.fstat(exclude_fd).st_mode):
                             return None
-                        with os.fdopen(os.dup(exclude_fd), "r", encoding="utf-8") as file:
-                            lines = tuple(file)
+                        lines = _read_bounded_ignore_lines(
+                            exclude_fd, str(directory / ".git" / "info" / "exclude")
+                        )
                     finally:
                         os.close(exclude_fd)
                 finally:
@@ -664,8 +709,9 @@ def _read_repository_exclude(
         else:
             exclude_path = secure_tool_path(str(directory / ".git" / "info" / "exclude"), context)
             with open_file(exclude_path) as exclude_fd:
-                with os.fdopen(os.dup(exclude_fd), "r", encoding="utf-8") as file:
-                    lines = tuple(file)
+                lines = _read_bounded_ignore_lines(exclude_fd, str(exclude_path.path))
+    except _IgnoreFileLimitError:
+        raise
     except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
         return None
     return _IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines))
@@ -688,6 +734,24 @@ def _is_ignored(path: Path, *, is_directory: bool, ignore_specs: tuple[_IgnoreSp
 
 def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...]) -> bool:
     """Return whether a negated rule could make an entry below ``path`` visible."""
+
+    ignored = False
+    exclusion_allows_reinclude = False
+    for rules in ignore_specs:
+        try:
+            relative = path.relative_to(rules.base).as_posix().rstrip("/") + "/"
+        except ValueError:
+            continue
+        match = rules.spec.check_file(relative)
+        if match.include is None:
+            continue
+        ignored = match.include
+        exclusion_allows_reinclude = False
+        if ignored and match.index is not None:
+            source = rules.spec.patterns[match.index].pattern
+            exclusion_allows_reinclude = isinstance(source, str) and source.rstrip().endswith("/**")
+    if not ignored or not exclusion_allows_reinclude:
+        return False
 
     for rules in ignore_specs:
         try:
