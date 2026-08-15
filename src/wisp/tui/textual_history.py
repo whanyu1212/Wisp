@@ -387,6 +387,11 @@ class TextualHistoryController:
         recovered = self._exclude_retained_overlap(recovered)
         if not recovered:
             return True
+        if len(recovered) > self._window.visible_append_capacity:
+            # Keep the reader's mounted slice stable. Entries appended beyond it
+            # would remain invisible while falsely completing recovery; returning
+            # to live output will instead perform the deferred latest-page reload.
+            return False
         if (
             self._window.is_at_oldest
             and len(self._window.entries) + len(recovered) > self._window.retained_capacity

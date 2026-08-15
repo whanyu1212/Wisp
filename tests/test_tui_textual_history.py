@@ -733,3 +733,31 @@ def test_history_recovery_does_not_evict_the_oldest_full_retained_window() -> No
     assert not recovered
     assert surface.history_labels[:-1] == [f"assistant: retained {index}" for index in range(60)]
     assert surface.widgets[-1].label == "assistant: surviving"
+
+
+def test_history_recovery_defers_entries_outside_the_mounted_slice() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    retained = _messages("assistant", "retained", TUI_TRANSCRIPT_WINDOW_SIZE)
+    controller.replace_entries(retained, session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    recovered = controller.recover_evicted_entries(
+        (
+            *retained,
+            HistoricalTranscriptMessage(role="assistant", content="evicted"),
+            HistoricalTranscriptMessage(role="assistant", content="surviving"),
+        )
+    )
+
+    assert not recovered
+    assert surface.history_labels[:-1] == [
+        f"assistant: retained {index}" for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+    ]
+    assert surface.widgets[-1].label == "assistant: surviving"
