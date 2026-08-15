@@ -282,6 +282,24 @@ def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
     assert find.data["files"] == ["foo/bar.txt"]
 
 
+def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "result.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    default = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    explicit = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "glob": "generated/result.txt"},
+        context,
+    )
+
+    assert default.text == "No matches"
+    assert explicit.data["matches"] == ["generated/result.txt:1:needle"]
+
+
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
 

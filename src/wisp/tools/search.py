@@ -192,7 +192,12 @@ def _python_grep(
     output: list[str] = []
     output_bytes = 0
     match_count = 0
-    for file_path in _iter_files(secure_path, context):
+    files = (
+        _iter_files(secure_path, context)
+        if glob is None
+        else _iter_files(secure_path, context, ignore_override_glob=glob)
+    )
+    for file_path in files:
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
         file_match_start = match_count
@@ -455,7 +460,12 @@ def _coerce_secure_path(path: Path | SecureToolPath, context: ToolContext) -> Se
     return secure_tool_path(str(path), context)
 
 
-def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[Path]:
+def _iter_files(
+    path: Path | SecureToolPath,
+    context: ToolContext,
+    *,
+    ignore_override_glob: str | None = None,
+) -> Iterable[Path]:
     """Yield regular files through a descriptor-relative, non-following walk."""
 
     secure_path = _coerce_secure_path(path, context)
@@ -466,6 +476,7 @@ def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[P
                 secure_path.path,
                 context,
                 ignore_specs=_ancestor_ignore_specs(secure_path.path, context),
+                ignore_override_glob=ignore_override_glob,
             )
             return
     except ToolError as directory_error:
@@ -509,6 +520,7 @@ def _walk_directory(
     context: ToolContext,
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
+    ignore_override_glob: str | None,
 ) -> Iterable[Path]:
     ignore_specs += _read_ignore_specs(descriptor, path, context)
     try:
@@ -539,6 +551,7 @@ def _walk_directory(
                 or (
                     _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
                     and not _may_reinclude_descendant(candidate, ignore_specs)
+                    and ignore_override_glob is None
                 )
             ):
                 continue
@@ -551,6 +564,7 @@ def _walk_directory(
                             candidate,
                             context,
                             ignore_specs=ignore_specs,
+                            ignore_override_glob=ignore_override_glob,
                         )
                 except ToolError:
                     continue
@@ -567,6 +581,7 @@ def _walk_directory(
                     candidate,
                     context,
                     ignore_specs=ignore_specs,
+                    ignore_override_glob=ignore_override_glob,
                 )
             finally:
                 os.close(child)
@@ -574,7 +589,13 @@ def _walk_directory(
         if (
             stat.S_ISREG(info.st_mode)
             and not _is_hidden(name)
-            and not _is_ignored(candidate, is_directory=False, ignore_specs=ignore_specs)
+            and (
+                not _is_ignored(candidate, is_directory=False, ignore_specs=ignore_specs)
+                or (
+                    ignore_override_glob is not None
+                    and _matches_glob(candidate, ignore_override_glob, context)
+                )
+            )
             and _is_path_within_tool_cwd(candidate, context)
         ):
             yield candidate
