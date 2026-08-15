@@ -2557,12 +2557,31 @@ class TextualTui(App[None]):
         generation: int,
         epoch: int,
     ) -> None:
-        if (
+        if not (
             generation == self._history_layout_generation
             and epoch == self._transcript_epoch
             and transcript is self._transcript
         ):
-            transcript.request_history_at_top()
+            return
+        viewport_height = transcript.scrollable_content_region.height
+        if viewport_height <= 0 or any(child.region.height <= 0 for child in transcript.children):
+            self.call_after_refresh(
+                self._request_history_if_still_at_top,
+                transcript,
+                generation,
+                epoch,
+            )
+            return
+        # A mounted widget occupies at least one row, so child count is a stable
+        # lower bound even while Textual is still updating virtual geometry.
+        # Never request another page merely because scroll_y has not caught up.
+        if (
+            len(transcript.children) > viewport_height
+            or transcript.virtual_size.height > viewport_height
+            or transcript.max_scroll_y > 0
+        ):
+            return
+        transcript.request_history_at_top()
 
     def _continue_oldest_navigation(self, generation: int, epoch: int) -> None:
         """Advance one retained or durable step toward the session beginning."""
