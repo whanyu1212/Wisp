@@ -328,20 +328,21 @@ class TextualTui(App[None]):
         outline-left: heavy $accent;
     }
 
-    /* The focusable editor owns its own visible card. The visual and pointer
-       hit targets therefore match at every edge and corner. */
+    /* The editor and footer remain separate widgets but share one flat surface.
+       Keeping the editor as the focus owner preserves overlay and cursor behavior. */
     #input {
         height: auto;
         max-height: 8;
-        border: round $secondary;
-        background: $background;
-        padding: 0 1;
+        border: none;
+        border-top: heavy $secondary;
+        background: $surface;
+        padding: 0 2;
         transition: border 200ms;
     }
 
     #input:focus {
-        border: round $accent;
-        background: $background;
+        border-top: heavy $accent;
+        background: $surface;
     }
 
     #status {
@@ -349,6 +350,7 @@ class TextualTui(App[None]):
         height: 1;
         padding: 0 2;
         color: $text-muted;
+        background: $surface;
     }
 
     HelpPanel {

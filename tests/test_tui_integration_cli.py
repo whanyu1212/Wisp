@@ -7351,14 +7351,15 @@ def test_textual_startup_text_wraps_instead_of_truncating_when_narrow(width: int
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
-    # The prompt editor owns its complete frame, including the focused accent.
-    async def scenario() -> dict[str, tuple[str, str, str, str, float]]:
-        styles: dict[str, tuple[str, str, str, str, float]] = {}
+    # The editor and footer share a surface while the editor's top rail owns focus.
+    async def scenario() -> dict[str, tuple[str, str, str, str, str, float]]:
+        styles: dict[str, tuple[str, str, str, str, str, float]] = {}
         for theme in ("wisp", "wisp-light"):
             app_instance = TextualTui()
             async with app_instance.run_test() as pilot:
                 app_instance.theme = theme
                 input_widget = app_instance.query_one("#input", Input)
+                footer = app_instance.query_one("#status")
                 app_instance.screen.set_focus(None)
                 await pilot.pause(0.25)
                 idle_background = input_widget.styles.background.hex
@@ -7370,6 +7371,7 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
                 styles[theme] = (
                     idle_background,
                     input_widget.styles.background.hex,
+                    footer.styles.background.hex,
                     idle_border,
                     input_widget.styles.border_top[1].hex,
                     transition.duration,
@@ -7378,12 +7380,13 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
 
     styles = anyio.run(scenario)
     expected = {
-        "wisp": ("#0E1216", "#0E1216", "#3FB8B8"),
-        "wisp-light": ("#FBFCFD", "#FBFCFD", "#2E7676"),
+        "wisp": ("#151B21", "#151B21", "#3FB8B8"),
+        "wisp-light": ("#FFFFFF", "#FFFFFF", "#2E7676"),
     }
     for theme, (
         idle_background,
         focused_background,
+        footer_background,
         idle_border,
         focused_border,
         delay,
@@ -7391,6 +7394,7 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
         expected_idle, expected_focused, expected_accent = expected[theme]
         assert idle_background == expected_idle
         assert focused_background == expected_focused
+        assert footer_background == expected_focused
         assert idle_border != focused_border
         assert focused_border == expected_accent
         assert delay == 0.2
@@ -7424,7 +7428,7 @@ def test_textual_transcript_hides_scrollbar_chrome_without_disabling_scrolling()
 def test_textual_input_is_pinned_to_the_bottom() -> None:
     # Regression: a wrapping Container defaulted to height:1fr and floated the
     # input into the middle. The transcript owns the free space while the
-    # bordered editor and single-row footer hug the bottom.
+    # top-railed editor and single-row footer hug the bottom.
     async def scenario() -> tuple[int, int, int, int]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=(74, 24)) as pilot:
@@ -7478,41 +7482,43 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
     assert running_placeholder == "❯ Add a follow-up…"
 
 
-def test_textual_prompt_editor_owns_complete_frame() -> None:
-    async def scenario() -> tuple[object, int]:
+def test_textual_composer_uses_flat_top_rail_without_wrapper() -> None:
+    async def scenario() -> tuple[object, str, str, int]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
-            return input_widget.styles.border, len(list(app_instance.query("#composer")))
+            footer = app_instance.query_one("#status")
+            return (
+                input_widget.styles.border,
+                input_widget.styles.background.hex,
+                footer.styles.background.hex,
+                len(list(app_instance.query("#composer"))),
+            )
 
-    input_border, composer_count = anyio.run(scenario)
-    assert input_border.top[0] == "round"
-    assert input_border.bottom[0] == "round"
-    assert input_border.left[0] == "round"
-    assert input_border.right[0] == "round"
+    input_border, input_background, footer_background, composer_count = anyio.run(scenario)
+    assert input_border.top[0] == "heavy"
+    assert not input_border.bottom[0]
+    assert not input_border.left[0]
+    assert not input_border.right[0]
+    assert input_background == footer_background
     assert composer_count == 0
 
 
 @pytest.mark.parametrize("terminal_width", [40, 120])
-def test_textual_prompt_editor_border_clicks_focus_every_cell(terminal_width: int) -> None:
-    async def scenario() -> list[tuple[int, int]]:
+def test_textual_prompt_editor_top_rail_clicks_focus_every_cell(terminal_width: int) -> None:
+    async def scenario() -> list[int]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=(terminal_width, 24)) as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
             width = input_widget.region.width
-            height = input_widget.region.height
-            border = {(x, 0) for x in range(width)}
-            border.update((x, height - 1) for x in range(width))
-            border.update((0, y) for y in range(height))
-            border.update((width - 1, y) for y in range(height))
-            missed: list[tuple[int, int]] = []
-            for offset in sorted(border):
+            missed: list[int] = []
+            for x in range(width):
                 app_instance.screen.set_focus(None)
-                clicked = await pilot.click("#input", offset=offset)
+                clicked = await pilot.click("#input", offset=(x, 0))
                 if not clicked or not input_widget.has_focus:
-                    missed.append(offset)
+                    missed.append(x)
             return missed
 
     assert anyio.run(scenario) == []
