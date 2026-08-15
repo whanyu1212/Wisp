@@ -371,7 +371,7 @@ class TextualHistoryController:
             self._surface.finish_history_render()
         return True
 
-    def recover_evicted_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
+    def recover_evicted_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> bool:
         """Insert the durable prefix missing from a bounded live transcript.
 
         A tail reload replaces the retained window only while the reader follows
@@ -386,7 +386,15 @@ class TextualHistoryController:
         recovered = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
         recovered = self._exclude_retained_overlap(recovered)
         if not recovered:
-            return
+            return True
+        if (
+            self._window.is_at_oldest
+            and len(self._window.entries) + len(recovered) > self._window.retained_capacity
+        ):
+            # The reader is viewing the oldest retained entries. Appending a
+            # latest-page prefix here would evict that exact edge and replace the
+            # anchor under their viewport; defer tail reconciliation instead.
+            return False
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
@@ -395,6 +403,7 @@ class TextualHistoryController:
         finally:
             self._surface.finish_history_render()
             self._surface.finish_history_prepend()
+        return True
 
     def capture_latest_reload_live_entries(self) -> None:
         """Capture live output at the point the durable latest-page request starts."""

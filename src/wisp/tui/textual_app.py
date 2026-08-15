@@ -492,6 +492,7 @@ class TextualTui(App[None]):
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
         self._live_history_recovery_navigation: HistoryNavigation | None = None
+        self._live_history_recovery_blocked = False
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
@@ -936,6 +937,7 @@ class TextualTui(App[None]):
         self._cancel_oldest_navigation()
         if not preserve_live_history_recovery:
             self._live_history_recovery_navigation = None
+            self._live_history_recovery_blocked = False
         return self._transcript_navigation_generation
 
     def _cancel_oldest_navigation(self) -> None:
@@ -2016,6 +2018,7 @@ class TextualTui(App[None]):
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
         self._live_history_recovery_navigation = None
+        self._live_history_recovery_blocked = False
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
         self._cancel_oldest_navigation()
@@ -2138,6 +2141,7 @@ class TextualTui(App[None]):
             or transcript.is_following
             or transcript.scroll_y != 0
             or transcript.can_page_to_older_history
+            or self._live_history_recovery_blocked
         ):
             return
         pending = self._live_history_recovery_navigation
@@ -2210,6 +2214,14 @@ class TextualTui(App[None]):
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
         self._live_history_recovery_navigation = None
+        self._live_history_recovery_blocked = False
+
+    def live_history_recovery_deferred(self) -> None:
+        """Release an unsafe oldest-window recovery without losing tail reload work."""
+
+        self._live_history_reload_pending = False
+        self._live_history_recovery_navigation = None
+        self._live_history_recovery_blocked = True
 
     def live_history_reload_failed(self) -> None:
         """Release a failed request while retaining recovery work for a later retry."""
