@@ -85,7 +85,11 @@ class InProcessWisp(RpcController):
         """
 
         selected_options = options or InProcessOptions()
-        cwd = selected_options.cwd or selected_options.project_context_root or Path.cwd()
+        cwd = (
+            (selected_options.cwd or selected_options.project_context_root or Path.cwd())
+            .expanduser()
+            .resolve(strict=False)
+        )
         project_root = selected_options.project_context_root
         if project_root is None:
             project_root = await anyio.to_thread.run_sync(
@@ -93,6 +97,8 @@ class InProcessWisp(RpcController):
                 cwd,
                 abandon_on_cancel=True,
             )
+        else:
+            project_root = project_root.expanduser().resolve(strict=False)
         startup_trusted = await anyio.to_thread.run_sync(
             trusted_noninteractive,
             project_root,

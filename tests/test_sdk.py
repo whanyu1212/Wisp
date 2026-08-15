@@ -98,7 +98,7 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
     main_thread = get_ident()
     call_threads: dict[str, int] = {}
     expected_config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
-    workspace = tmp_path / "workspace"
+    workspace = Path.home() / "workspace"
     workspace.mkdir()
 
     def resolve_project_root(cwd: Path) -> Path:
@@ -142,7 +142,9 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
     monkeypatch.setattr(InProcessWisp, "_start", classmethod(fake_start))
 
     async def scenario() -> None:
-        result = await InProcessWisp.from_environment(options=InProcessOptions(cwd=workspace))
+        result = await InProcessWisp.from_environment(
+            options=InProcessOptions(cwd=Path("~/workspace"))
+        )
         assert result is expected_config
 
     anyio.run(scenario)
