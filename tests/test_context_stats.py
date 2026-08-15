@@ -254,6 +254,33 @@ def test_unicode_context_fingerprint_remains_compatible() -> None:
     )
 
 
+def test_hybrid_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
+    prefix = (Message(role="user", content="prefix"),)
+    trailing = Message(role="assistant", content="trailing content")
+    observation = observe_context(
+        prefix,
+        provider="anthropic",
+        model="model",
+        input_tokens=80,
+    )
+
+    budget = estimate_context_budget(
+        (*prefix, trailing),
+        context_window=100,
+        reserve_tokens=10,
+        observation=observation,
+        provider="anthropic",
+        model="model",
+    )
+
+    trailing_tokens = estimate_context((trailing,)).total_tokens
+    assert budget.accounting_method == "provider_observed_plus_estimate"
+    assert budget.trailing_estimated_tokens == trailing_tokens
+    assert budget.effective_tokens == 80 + trailing_tokens
+    assert budget.remaining_tokens == 10 - trailing_tokens
+    assert budget.over_budget is (trailing_tokens >= 10)
+
+
 def test_context_budget_is_permissive_for_unknown_models_and_tracks_reserve() -> None:
     estimate = estimate_context((Message(role="user", content="x" * 400),))
 

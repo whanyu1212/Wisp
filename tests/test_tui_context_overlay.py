@@ -121,6 +121,24 @@ def test_context_presentation_reports_cache_telemetry_honestly(
     )
 
 
+def test_context_presentation_uses_hybrid_effective_tokens() -> None:
+    stats = _stats(observed=80_000, remaining=30_000)
+    context = stats.context.model_copy(
+        update={
+            "trailing_estimated_tokens": 15_000,
+            "effective_tokens": 95_000,
+            "accounting_method": "provider_observed_plus_estimate",
+        }
+    )
+
+    view = context_status_presentation(stats.model_copy(update={"context": context}))
+
+    assert view.current_tokens == 95_000
+    assert view.percentage == pytest.approx(74.21875)
+    assert view.remaining == "25k"
+    assert view.source == "provider observation + trailing estimate"
+
+
 def test_context_presentation_recomputes_remaining_from_displayed_observation() -> None:
     view = context_status_presentation(
         _stats(observed=122_000, remaining=40_000, over_budget=False)

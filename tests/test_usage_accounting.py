@@ -117,11 +117,13 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
 
     initial = _usage_from_anthropic_start(start)
     assert initial.total_tokens == 102_050
+    assert initial.context_input_tokens == 102_050
     completed = _usage_from_anthropic_delta(delta, initial)
     assert completed == ProviderUsage(
         input_tokens=50,
         output_tokens=7,
         total_tokens=102_057,
+        context_input_tokens=102_050,
         cache_read_input_tokens=100_000,
         cache_write_input_tokens=2_000,
         reasoning_output_tokens=5,
@@ -136,6 +138,7 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
         input_tokens=50,
         output_tokens=9,
         total_tokens=102_059,
+        context_input_tokens=102_050,
         cache_read_input_tokens=100_000,
         cache_write_input_tokens=2_000,
         reasoning_output_tokens=5,

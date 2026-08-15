@@ -167,10 +167,6 @@ def main(arguments: Sequence[str] | None = None) -> None:
         parsed.output.write_text(f"{payload}\n", encoding="utf-8")
 
 
-if __name__ == "__main__":
-    main(sys.argv[1:])
-
-
 @dataclass(frozen=True)
 class AccuracySample:
     """Fallback-estimator error against a checked-in tokenizer fixture."""
@@ -286,3 +282,7 @@ _ACCURACY_FIXTURES = (
         45,
     ),
 )
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

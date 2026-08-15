@@ -1181,7 +1181,8 @@ def format_compaction_status(stats: SessionStats) -> str:
     context = stats.context
     current_tokens = (
         context.effective_tokens
-        if context.effective_tokens is not None
+        if context.accounting_method == "provider_observed_plus_estimate"
+        and context.effective_tokens is not None
         else (
             context.observed_tokens
             if context.observed_is_current and context.observed_tokens is not None
@@ -1300,13 +1301,14 @@ def _footer_context_text(
         return ""
     use_observed = context.observed_is_current and context.observed_tokens is not None
     observed_tokens = context.observed_tokens
-    total_tokens = context.effective_tokens
-    if total_tokens is None:
-        total_tokens = (
-            observed_tokens
-            if use_observed and observed_tokens is not None
-            else context.estimate.total_tokens
-        )
+    total_tokens = (
+        context.effective_tokens
+        if context.accounting_method == "provider_observed_plus_estimate"
+        and context.effective_tokens is not None
+        else observed_tokens
+        if use_observed and observed_tokens is not None
+        else context.estimate.total_tokens
+    )
     approximate = not use_observed or context.context_window is None
     marker = "~" if approximate else ""
     text = f"ctx {marker}{_format_token_count(total_tokens)}"

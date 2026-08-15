@@ -680,7 +680,12 @@ async def run_agent_loop(
                     config.tools,
                     provider=config.provider.name,
                     model=selected_model,
-                    input_tokens=usage.input_tokens,
+                    input_tokens=(
+                        response.usage.context_input_tokens
+                        if response.usage is not None
+                        and response.usage.context_input_tokens is not None
+                        else usage.input_tokens
+                    ),
                 )
                 if usage is not None
                 else None

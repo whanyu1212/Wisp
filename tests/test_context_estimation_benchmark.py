@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from benchmarks.context_estimation import (
@@ -49,3 +54,24 @@ def test_context_estimation_accuracy_covers_representative_workloads() -> None:
     assert (
         '"accuracy"' in run_benchmark(BenchmarkConfig(message_counts=(1,), iterations=1)).to_json()
     )
+
+
+def test_context_estimation_module_entrypoint_reports_accuracy() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "benchmarks.context_estimation",
+            "--messages",
+            "1",
+            "--iterations",
+            "1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["accuracy"]
