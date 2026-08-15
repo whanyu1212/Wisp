@@ -17,6 +17,9 @@ class ToolResult:
     truncated: bool = False
 
 
+_INVALID_ARGUMENT_RECOVERY_HINT = "Retry with arguments that match the tool's input schema."
+
+
 class ToolError(RuntimeError):
     """A safe, optionally actionable tool failure returned to the model."""
 
@@ -32,3 +35,15 @@ class ToolError(RuntimeError):
         self.failure_code = failure_code
         self.retryable = retryable
         self.recovery_hint = recovery_hint
+
+
+class ToolArgumentError(ToolError):
+    """A schema-valid call whose argument values fail tool-level validation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            failure_code="invalid_arguments",
+            retryable=True,
+            recovery_hint=_INVALID_ARGUMENT_RECOVERY_HINT,
+        )

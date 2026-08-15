@@ -601,6 +601,35 @@ def test_file_tools_can_opt_out_of_cwd_containment(tmp_path: Path) -> None:
     assert result.text == "outside\n"
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (ReadTool(), {"path": "notes.txt", "offset": "first"}),
+        (GrepTool(), {"pattern": "text", "max_results": 0}),
+        (
+            EditTool(),
+            {"path": "notes.txt", "edits": [{"oldText": "", "newText": "text"}]},
+        ),
+        (BashTool(), {"command": "pwd", "timeout": 0}),
+    ],
+)
+def test_builtin_argument_validation_is_actionable(
+    tmp_path: Path,
+    tool: object,
+    arguments: dict[str, object],
+) -> None:
+    (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(tool, arguments, ToolContext(cwd=tmp_path))
+
+    assert caught.value.failure_code == "invalid_arguments"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == (
+        "Retry with arguments that match the tool's input schema."
+    )
+
+
 def test_builtin_tools_have_safety_metadata() -> None:
     assert {tool.name: tool.safety for tool in (ReadTool(), GrepTool(), FindTool(), LsTool())} == {
         "read": "read",

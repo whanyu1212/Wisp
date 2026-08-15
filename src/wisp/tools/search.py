@@ -22,7 +22,7 @@ from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, is_protected_path
 from wisp.tools.process_manager import ProcessSupervisor
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
 from wisp.tools.truncation import truncate_text
 
@@ -108,9 +108,9 @@ class GrepTool:
         context_lines = _optional_int(arguments, "context", default=0)
         max_results = _optional_int(arguments, "max_results", default=100)
         if context_lines is None or context_lines < 0:
-            raise ToolError("grep.context must be greater than or equal to 0")
+            raise ToolArgumentError("grep.context must be greater than or equal to 0")
         if max_results is None or max_results < 1:
-            raise ToolError("grep.max_results must be greater than or equal to 1")
+            raise ToolArgumentError("grep.max_results must be greater than or equal to 1")
 
         cancel_event = Event()
         try:
@@ -160,7 +160,7 @@ class FindTool:
         pattern = _optional_string(arguments, "pattern") or "*"
         max_results = _optional_int(arguments, "max_results", default=100)
         if max_results is None or max_results < 1:
-            raise ToolError("find.max_results must be greater than or equal to 1")
+            raise ToolArgumentError("find.max_results must be greater than or equal to 1")
 
         cancel_event = Event()
         try:

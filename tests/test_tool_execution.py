@@ -29,7 +29,7 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -249,6 +249,33 @@ def test_executor_projects_actionable_tool_failure_metadata() -> None:
     assert ended.retryable is True
     assert ended.recovery_hint == "Retry with literal=true."
     assert ended.output == "Invalid grep pattern\nRecovery: Retry with literal=true."
+
+
+def test_executor_reserves_output_space_for_recovery_hint() -> None:
+    hint = "Retry with literal=true."
+    ended = _run_executor(
+        _RaisingTool(
+            ToolError(
+                "x" * 2_100,
+                failure_code="invalid_pattern",
+                retryable=True,
+                recovery_hint=hint,
+            )
+        )
+    )
+
+    assert len(ended.output) == 2_000
+    assert ended.output.endswith(f"\nRecovery: {hint}")
+    assert "...\nRecovery:" in ended.output
+
+
+def test_executor_classifies_tool_argument_errors() -> None:
+    ended = _run_executor(_RaisingTool(ToolArgumentError("limit must be an integer")))
+
+    assert ended.failure_code == "invalid_arguments"
+    assert ended.retryable is True
+    assert ended.recovery_hint == "Retry with arguments that match the tool's input schema."
+    assert ended.output.endswith(f"\nRecovery: {ended.recovery_hint}")
 
 
 def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:

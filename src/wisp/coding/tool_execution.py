@@ -625,11 +625,12 @@ def _failure_outcome(
     retryable: bool = False,
     recovery_hint: str | None = None,
 ) -> _ToolRunOutcome:
-    output = message
-    if recovery_hint is not None:
-        output = f"{message}\nRecovery: {recovery_hint}"
-    if len(output) > _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS:
-        output = output[: _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS - 3] + "..."
+    if recovery_hint is None:
+        output = _truncate_failure_text(message, _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS)
+    else:
+        recovery = f"\nRecovery: {recovery_hint}"
+        message_budget = _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS - len(recovery)
+        output = f"{_truncate_failure_text(message, message_budget)}{recovery}"
     return _ToolRunOutcome(
         output=output,
         is_error=True,
@@ -637,6 +638,14 @@ def _failure_outcome(
         retryable=retryable,
         recovery_hint=recovery_hint,
     )
+
+
+def _truncate_failure_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
 
 
 def _tool_exception_outcome(exc: Exception) -> _ToolRunOutcome:

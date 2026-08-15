@@ -15,7 +15,7 @@ import anyio
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
 from wisp.tools.context import ToolContext
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.secure_fs import (
     OpenParent,
     SecureToolPath,
@@ -71,9 +71,9 @@ class ReadTool:
         limit = _optional_int(arguments, "limit")
 
         if offset is None or offset < 1:
-            raise ToolError("read.offset must be greater than or equal to 1")
+            raise ToolArgumentError("read.offset must be greater than or equal to 1")
         if limit is not None and limit < 1:
-            raise ToolError("read.limit must be greater than or equal to 1")
+            raise ToolArgumentError("read.limit must be greater than or equal to 1")
         try:
             slice_result = await anyio.to_thread.run_sync(
                 lambda: _secure_read_line_slice(path, offset, limit, context),
@@ -885,20 +885,20 @@ def _read_line_slice(
 def _parse_edits(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
     raw_edits = arguments.get("edits")
     if not isinstance(raw_edits, list):
-        raise ToolError("edits must be a list")
+        raise ToolArgumentError("edits must be a list")
     if not raw_edits:
-        raise ToolError("edits must not be empty")
+        raise ToolArgumentError("edits must not be empty")
 
     edits: list[tuple[str, str]] = []
     for raw_edit in raw_edits:
         if not isinstance(raw_edit, Mapping):
-            raise ToolError("each edit must be an object")
+            raise ToolArgumentError("each edit must be an object")
         old_text = raw_edit.get("oldText")
         new_text = raw_edit.get("newText")
         if not isinstance(old_text, str) or old_text == "":
-            raise ToolError("each edit.oldText must be a non-empty string")
+            raise ToolArgumentError("each edit.oldText must be a non-empty string")
         if not isinstance(new_text, str):
-            raise ToolError("each edit.newText must be a string")
+            raise ToolArgumentError("each edit.newText must be a string")
         edits.append((old_text, new_text))
     return edits
 
