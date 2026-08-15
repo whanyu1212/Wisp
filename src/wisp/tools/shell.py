@@ -14,7 +14,7 @@ from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.process import _format_process_output_bounded, _run_shell
 from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()
@@ -120,7 +120,7 @@ class BashTool:
         command = _required_string(arguments, "command")
         timeout = _optional_int(arguments, "timeout", default=_DEFAULT_BASH_TIMEOUT_SECONDS)
         if timeout is None or timeout < 1:
-            raise ToolError("bash.timeout must be greater than or equal to 1")
+            raise ToolArgumentError("bash.timeout must be greater than or equal to 1")
 
         if self._process_supervisor is None:
             # Preserve the direct-construction and monkeypatch seam used by
@@ -201,9 +201,9 @@ class BashTool:
             default=_DEFAULT_MANAGED_YIELD_SECONDS,
         )
         if lifetime_seconds is None or lifetime_seconds <= 0:
-            raise ToolError("bash.lifetime_seconds must be greater than zero")
+            raise ToolArgumentError("bash.lifetime_seconds must be greater than zero")
         if yield_seconds is None or yield_seconds < 0:
-            raise ToolError("bash.yield_seconds must be greater than or equal to zero")
+            raise ToolArgumentError("bash.yield_seconds must be greater than or equal to zero")
 
         process_id = await supervisor.start(
             command,
@@ -229,7 +229,7 @@ class BashTool:
             default=_DEFAULT_MANAGED_WAIT_SECONDS,
         )
         if wait_seconds is None or wait_seconds < 0:
-            raise ToolError("bash.wait_seconds must be greater than or equal to zero")
+            raise ToolArgumentError("bash.wait_seconds must be greater than or equal to zero")
         update = await supervisor.poll(process_id, wait_seconds=wait_seconds)
         return _managed_update_result(update, context=context)
 
@@ -250,9 +250,9 @@ def _bash_operation(arguments: ToolArguments) -> BashOperation:
     if value is None:
         return "run"
     if not isinstance(value, str):
-        raise ToolError("bash.operation must be a string")
+        raise ToolArgumentError("bash.operation must be a string")
     if value not in _BASH_OPERATIONS:
-        raise ToolError("bash.operation must be one of: run, start, poll, cancel")
+        raise ToolArgumentError("bash.operation must be one of: run, start, poll, cancel")
     return cast(BashOperation, value)
 
 
@@ -266,10 +266,10 @@ def _optional_number(
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ToolError(f"bash.{name} must be a number")
+        raise ToolArgumentError(f"bash.{name} must be a number")
     number = float(value)
     if not math.isfinite(number):
-        raise ToolError(f"bash.{name} must be finite")
+        raise ToolArgumentError(f"bash.{name} must be finite")
     return number
 
 

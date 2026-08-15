@@ -39,7 +39,11 @@ def resolve_tool_path(
         try:
             resolved.relative_to(cwd)
         except ValueError as exc:
-            raise ToolError(f"Path is outside the tool working directory: {selected}") from exc
+            raise ToolError(
+                f"Path is outside the tool working directory: {selected}",
+                failure_code="path_outside_workspace",
+                recovery_hint="Use a path inside the session working directory.",
+            ) from exc
     # Check the lexical candidate (pre-symlink-dereference), not the resolved
     # target: a protected name such as ``.env`` must be denied even when it is a
     # symlink to an innocuously named file. is_protected_path also re-checks the

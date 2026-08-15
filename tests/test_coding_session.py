@@ -2733,7 +2733,10 @@ def test_coding_session_returns_error_result_for_invalid_tool_arguments(tmp_path
     assert provider.calls[1][0] == (
         ToolCallResult(
             call_id="call-1",
-            output="Invalid JSON arguments for tool echo: Expecting value",
+            output=(
+                "Invalid JSON arguments for tool echo: Expecting value\n"
+                "Recovery: Retry with arguments that match the tool's input schema."
+            ),
             is_error=True,
         ),
     )

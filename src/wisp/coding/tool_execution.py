@@ -15,6 +15,7 @@ from wisp.events import (
 )
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
+from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
@@ -42,6 +43,21 @@ _MAX_EXIT_CODE = (1 << 31) - 1
 _MAX_PROCESS_ID_BYTES = 256
 _MAX_PROCESS_ERROR_BYTES = 2_000
 _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES = len("\n[truncated]")
+_FAILURE_CODES: frozenset[ToolFailureCode] = frozenset(
+    (
+        "approval_denied",
+        "internal_error",
+        "invalid_arguments",
+        "invalid_pattern",
+        "invalid_result",
+        "not_found",
+        "path_outside_workspace",
+        "policy_denied",
+        "stale_input",
+        "timeout",
+        "unknown_tool",
+    )
+)
 _PROCESS_STATES: frozenset[ManagedProcessState] = frozenset(
     ("running", "completed", "failed", "timed_out", "cancelled")
 )
@@ -81,6 +97,9 @@ class _ToolRunOutcome:
 
     output: str
     is_error: bool = False
+    failure_code: ToolFailureCode | None = None
+    retryable: bool = False
+    recovery_hint: str | None = None
     exit_code: int | None = None
     output_has_exit_status: bool = False
     before_text: str | None = None
@@ -144,17 +163,27 @@ class ConfiguredToolExecutor:
         outcome: _ToolRunOutcome
 
         if tool_call.parse_error is not None:
-            outcome = _ToolRunOutcome(tool_call.parse_error, is_error=True)
+            outcome = _failure_outcome(
+                tool_call.parse_error,
+                failure_code="invalid_arguments",
+                retryable=True,
+                recovery_hint="Retry with arguments that match the tool's input schema.",
+            )
         elif self._registry is None:
-            outcome = _ToolRunOutcome("Tool execution is not configured", is_error=True)
+            outcome = _failure_outcome(
+                "Tool execution is not configured",
+                failure_code="internal_error",
+            )
         else:
             try:
                 tool = self._registry.get(tool_call.name)
             except UnknownToolError as exc:
-                outcome = _ToolRunOutcome(str(exc), is_error=True)
+                outcome = _failure_outcome(str(exc), failure_code="unknown_tool")
             else:
                 if not self._policy.allows(tool):
-                    outcome = _ToolRunOutcome(self._policy.block_reason(tool), is_error=True)
+                    outcome = _failure_outcome(
+                        self._policy.block_reason(tool), failure_code="policy_denied"
+                    )
                 elif self._approval_policy.requires_approval(
                     tool
                 ) and not self._approval_policy.approves(tool):
@@ -188,9 +217,9 @@ class ConfiguredToolExecutor:
                             tool_name=tool_call.name,
                         )
                     else:
-                        outcome = _ToolRunOutcome(
+                        outcome = _failure_outcome(
                             decision.reason or "Tool execution was not approved",
-                            is_error=True,
+                            failure_code="approval_denied",
                         )
                 else:
                     outcome = await self._run_tool(
@@ -205,6 +234,9 @@ class ConfiguredToolExecutor:
             name=tool_call.name,
             output=outcome.output,
             is_error=outcome.is_error,
+            failure_code=outcome.failure_code,
+            retryable=outcome.retryable,
+            recovery_hint=outcome.recovery_hint,
             exit_code=outcome.exit_code,
             output_has_exit_status=outcome.output_has_exit_status,
             before_text=outcome.before_text,
@@ -233,14 +265,16 @@ class ConfiguredToolExecutor:
         try:
             result = await tool.run(arguments, self._context)
         except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
-            return _ToolRunOutcome(_model_visible_tool_error(exc), is_error=True)
+            return _tool_exception_outcome(exc)
 
         # Access and copy extension-owned fields in isolation. A malformed result must
         # remain an ordinary recoverable tool error.
         try:
             raw_snapshot = _read_tool_result(result, tool_name=tool_name)
         except Exception:  # noqa: BLE001 - malformed extension result
-            return _ToolRunOutcome("Tool returned an invalid result", is_error=True)
+            return _failure_outcome(
+                "Tool returned an invalid result", failure_code="invalid_result"
+            )
 
         try:
             snapshot = _normalize_tool_result(
@@ -292,7 +326,9 @@ class ConfiguredToolExecutor:
                 ),
             )
         except _MalformedToolResultError:
-            return _ToolRunOutcome("Tool returned an invalid result", is_error=True)
+            return _failure_outcome(
+                "Tool returned an invalid result", failure_code="invalid_result"
+            )
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
 
@@ -582,24 +618,67 @@ def _copy_bounded_int(
         target[key] = value
 
 
-def _model_visible_tool_error(exc: Exception) -> str:
-    """Return bounded tool-facing detail only for explicitly model-safe errors."""
+def _failure_outcome(
+    message: str,
+    *,
+    failure_code: ToolFailureCode | None,
+    retryable: bool = False,
+    recovery_hint: str | None = None,
+) -> _ToolRunOutcome:
+    if recovery_hint is None:
+        output = _truncate_failure_text(message, _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS)
+    else:
+        recovery = f"\nRecovery: {recovery_hint}"
+        message_budget = _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS - len(recovery)
+        output = f"{_truncate_failure_text(message, message_budget)}{recovery}"
+    return _ToolRunOutcome(
+        output=output,
+        is_error=True,
+        failure_code=failure_code,
+        retryable=retryable,
+        recovery_hint=recovery_hint,
+    )
+
+
+def _truncate_failure_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
+
+
+def _tool_exception_outcome(exc: Exception) -> _ToolRunOutcome:
+    """Expose only validated metadata from explicitly model-safe tool errors."""
 
     if not isinstance(exc, ToolError):
-        return "Tool execution failed"
+        return _failure_outcome("Tool execution failed", failure_code="internal_error")
     try:
         message = str(exc)
-    except Exception:  # pragma: no cover - defensive against hostile subclasses
-        return "Tool execution failed"
-    if not message:
-        return "Tool execution failed"
-    try:
+        failure_code = exc.failure_code
+        retryable = exc.retryable
+        recovery_hint = exc.recovery_hint
+        if not message:
+            raise ValueError
         message.encode("utf-8")
-    except UnicodeEncodeError:
-        return "Tool execution failed"
-    if len(message) <= _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS:
-        return message
-    return message[: _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS - 3] + "..."
+        if failure_code is not None and failure_code not in _FAILURE_CODES:
+            raise ValueError
+        if type(retryable) is not bool:
+            raise ValueError
+        if failure_code is None and (retryable or recovery_hint is not None):
+            raise ValueError
+        if recovery_hint is not None:
+            if type(recovery_hint) is not str or len(recovery_hint) > 500:
+                raise ValueError
+            recovery_hint.encode("utf-8")
+    except Exception:  # noqa: BLE001 - defensive against hostile subclasses
+        return _failure_outcome("Tool execution failed", failure_code="internal_error")
+    return _failure_outcome(
+        message,
+        failure_code=failure_code,
+        retryable=retryable,
+        recovery_hint=recovery_hint,
+    )
 
 
 def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:

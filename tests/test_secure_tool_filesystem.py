@@ -31,6 +31,42 @@ def mark_git_repository(root: Path) -> None:
     (root / ".git").mkdir()
 
 
+def test_read_missing_ancestor_is_actionable(tmp_path: Path) -> None:
+    with pytest.raises(ToolError) as caught:
+        run_tool(
+            ReadTool(),
+            {"path": "missing/notes.txt"},
+            ToolContext(cwd=tmp_path),
+        )
+
+    assert caught.value.failure_code == "not_found"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == "Check the path with find or ls, then retry."
+
+
+def test_windows_read_missing_leaf_is_actionable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = secure_fs_module.secure_tool_path("missing.txt", ToolContext(cwd=tmp_path))
+    monkeypatch.setattr(secure_fs_module.os, "name", "nt")
+    monkeypatch.setattr(secure_fs_module, "_open_windows_directory_guards", lambda _path: [])
+
+    from wisp.skills import filesystem as skill_filesystem
+
+    def missing(_path: Path) -> int:
+        raise FileNotFoundError(errno.ENOENT, "missing")
+
+    monkeypatch.setattr(skill_filesystem, "open_path_file", missing)
+
+    with pytest.raises(ToolError) as caught:
+        with secure_fs_module.open_file(path):
+            pass
+
+    assert caught.value.failure_code == "not_found"
+    assert caught.value.retryable is True
+
+
 def test_read_rejects_final_symlink_even_when_outside_access_is_allowed(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("secret\n", encoding="utf-8")

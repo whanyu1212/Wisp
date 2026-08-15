@@ -25,8 +25,9 @@ from wisp.skills.models import (
     SkillInvocationEvidence,
     SkillSource,
 )
+from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[32] = 32
+EVENT_SCHEMA_VERSION: Literal[33] = 33
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -50,6 +51,7 @@ SKILL_CATALOG_SCHEMA_VERSION = 29
 MCP_STATUS_SCHEMA_VERSION = 30
 PACKAGE_SKILLS_SCHEMA_VERSION = 31
 CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
+TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -61,6 +63,8 @@ QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 _PROCESS_METADATA_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
+_TOOL_RESULT_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
+_TOOL_FAILURE_METADATA_FIELDS = frozenset({"failure_code", "retryable", "recovery_hint"})
 _PROCESS_METADATA_FIELDS = frozenset(
     {
         "process_id",
@@ -123,6 +127,7 @@ class WispEvent(BaseModel):
         30,
         31,
         32,
+        33,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -757,6 +762,11 @@ class _ToolResultEvent(WispEvent):
     name: str
     output: str
     is_error: bool
+    # Typed recovery metadata for ordinary tool failures. These fields stay separate
+    # from output so RPC consumers can classify failures without parsing prose.
+    failure_code: ToolFailureCode | None = None
+    retryable: bool = False
+    recovery_hint: str | None = Field(default=None, max_length=500)
     # Process exit status for shell-like tools, promoted from ToolResult.data by
     # the executor. None for tools without exit-code semantics and error paths
     # that produced no ToolResult. This stays a narrow JSON-safe scalar rather
@@ -786,6 +796,17 @@ class _ToolResultEvent(WispEvent):
     stdout_dropped_bytes: int = Field(default=0, ge=0)
     stderr_dropped_bytes: int = Field(default=0, ge=0)
 
+    @model_validator(mode="after")
+    def _validate_failure_metadata(self) -> Self:
+        has_failure_metadata = (
+            self.failure_code is not None or self.retryable or self.recovery_hint is not None
+        )
+        if has_failure_metadata and not self.is_error:
+            raise ValueError("Tool failure metadata requires is_error=true")
+        if (self.retryable or self.recovery_hint is not None) and self.failure_code is None:
+            raise ValueError("Retry metadata requires a tool failure code")
+        return self
+
     def _result_payload(self) -> JsonObject:
         """Return only fields declared by the shared result contract."""
 
@@ -801,6 +822,9 @@ class _ToolResultEvent(WispEvent):
         data = cast(dict[str, object], handler(self))
         if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
             _strip_process_metadata_fields(data)
+        if self.schema_version < TOOL_FAILURE_METADATA_SCHEMA_VERSION:
+            for field in _TOOL_FAILURE_METADATA_FIELDS:
+                data.pop(field, None)
         return data
 
 
@@ -1544,6 +1568,7 @@ def _require_current_schema(data: JsonObject) -> None:
         )
     _reject_legacy_session_name_fields(data, version=version)
     _reject_legacy_process_metadata(data, version=version)
+    _reject_legacy_tool_failure_metadata(data, version=version)
     if data.get("type") in {"compaction.started", "compaction.completed"}:
         if not 8 <= version <= EVENT_SCHEMA_VERSION:
             raise ValueError(
@@ -1740,6 +1765,19 @@ def _reject_legacy_session_name_fields(data: JsonObject, *, version: int) -> Non
             "RPC session name fields require schema_version "
             f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
         )
+
+
+def _reject_legacy_tool_failure_metadata(data: JsonObject, *, version: int) -> None:
+    if version >= TOOL_FAILURE_METADATA_SCHEMA_VERSION:
+        return
+    if data.get("type") not in _TOOL_RESULT_EVENT_TYPES:
+        return
+    if not any(field in data for field in _TOOL_FAILURE_METADATA_FIELDS):
+        return
+    raise ValueError(
+        "Tool failure metadata requires schema_version "
+        f"{TOOL_FAILURE_METADATA_SCHEMA_VERSION} or newer"
+    )
 
 
 def _reject_legacy_process_metadata(data: JsonObject, *, version: int) -> None:

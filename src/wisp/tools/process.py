@@ -210,7 +210,14 @@ async def _run_shell(
         cleanup_succeeded = await _await_process_cleanup(_kill_process_tree_and_wait(process))
         if not cleanup_succeeded:
             raise ToolError("Failed to terminate process tree") from exc
-        raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
+        raise ToolError(
+            f"Command timed out after {timeout:g} seconds",
+            failure_code="timeout",
+            retryable=True,
+            recovery_hint=(
+                "The result is inconclusive; retry with a suitable timeout if appropriate."
+            ),
+        ) from exc
     except asyncio.CancelledError:
         cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
         cleanup_succeeded = await _await_task_after_cancellation(cleanup_task)

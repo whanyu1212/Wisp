@@ -15,7 +15,7 @@ import anyio
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
 from wisp.tools.context import ToolContext
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.secure_fs import (
     OpenParent,
     SecureToolPath,
@@ -71,9 +71,9 @@ class ReadTool:
         limit = _optional_int(arguments, "limit")
 
         if offset is None or offset < 1:
-            raise ToolError("read.offset must be greater than or equal to 1")
+            raise ToolArgumentError("read.offset must be greater than or equal to 1")
         if limit is not None and limit < 1:
-            raise ToolError("read.limit must be greater than or equal to 1")
+            raise ToolArgumentError("read.limit must be greater than or equal to 1")
         try:
             slice_result = await anyio.to_thread.run_sync(
                 lambda: _secure_read_line_slice(path, offset, limit, context),
@@ -548,7 +548,12 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
         if initial is None:
-            raise ToolError(f"File does not exist: {path.display}")
+            raise ToolError(
+                f"File does not exist: {path.display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            )
         descriptor = _open_existing(parent, initial)
         try:
             opened = os.fstat(descriptor)
@@ -709,7 +714,12 @@ def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> 
     with open_windows_parent(path):
         initial = _windows_leaf_info(path)
         if initial is None:
-            raise ToolError(f"File does not exist: {path.display}")
+            raise ToolError(
+                f"File does not exist: {path.display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            )
         initial_version = file_version(initial)
         with open_file(path) as descriptor:
             opened = os.fstat(descriptor)
@@ -735,7 +745,10 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
         occurrences = _find_occurrences(original, old_text)
         if len(occurrences) != 1:
             raise ToolError(
-                f"edit.oldText must match exactly once; found {len(occurrences)} matches"
+                f"edit.oldText must match exactly once; found {len(occurrences)} matches",
+                failure_code="stale_input",
+                retryable=True,
+                recovery_hint="Reread the relevant file range and retry with current exact text.",
             )
         start = occurrences[0]
         replacements.append((start, start + len(old_text), new_text))
@@ -743,7 +756,7 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
     previous_end = -1
     for start, end, _new_text in replacements:
         if start < previous_end:
-            raise ToolError("edit replacements must not overlap")
+            raise ToolArgumentError("edit replacements must not overlap")
         previous_end = end
     parts: list[str] = []
     cursor = 0
@@ -872,20 +885,20 @@ def _read_line_slice(
 def _parse_edits(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
     raw_edits = arguments.get("edits")
     if not isinstance(raw_edits, list):
-        raise ToolError("edits must be a list")
+        raise ToolArgumentError("edits must be a list")
     if not raw_edits:
-        raise ToolError("edits must not be empty")
+        raise ToolArgumentError("edits must not be empty")
 
     edits: list[tuple[str, str]] = []
     for raw_edit in raw_edits:
         if not isinstance(raw_edit, Mapping):
-            raise ToolError("each edit must be an object")
+            raise ToolArgumentError("each edit must be an object")
         old_text = raw_edit.get("oldText")
         new_text = raw_edit.get("newText")
         if not isinstance(old_text, str) or old_text == "":
-            raise ToolError("each edit.oldText must be a non-empty string")
+            raise ToolArgumentError("each edit.oldText must be a non-empty string")
         if not isinstance(new_text, str):
-            raise ToolError("each edit.newText must be a string")
+            raise ToolArgumentError("each edit.newText must be a string")
         edits.append((old_text, new_text))
     return edits
 

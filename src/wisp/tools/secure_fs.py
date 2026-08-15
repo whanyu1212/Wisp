@@ -80,7 +80,11 @@ def secure_tool_path(
         try:
             absolute.relative_to(cwd)
         except ValueError as exc:
-            raise ToolError(f"Path is outside the tool working directory: {raw}") from exc
+            raise ToolError(
+                f"Path is outside the tool working directory: {raw}",
+                failure_code="path_outside_workspace",
+                recovery_hint="Use a path inside the session working directory.",
+            ) from exc
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
     if write and context.allowed_write_paths is not None:
@@ -95,6 +99,15 @@ def secure_tool_path(
     except ValueError:
         display = str(absolute)
     return SecureToolPath(absolute, raw, display)
+
+
+def _not_found_error(path: SecureToolPath) -> ToolError:
+    return ToolError(
+        f"File does not exist: {path.display}",
+        failure_code="not_found",
+        retryable=True,
+        recovery_hint="Check the path with find or ls, then retry.",
+    )
 
 
 def _require_supported() -> None:
@@ -152,6 +165,8 @@ def open_windows_parent(path: SecureToolPath, *, create: bool = False) -> Iterat
             guards.append(open_windows_skill_directory_guard(current))
         yield current
     except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            raise _not_found_error(path) from exc
         raise ToolError(f"Could not securely open parent for {path.display}: {exc}") from exc
     finally:
         _close_windows_guards(guards)
@@ -189,6 +204,13 @@ def _open_child_directory(
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise ToolError(f"Path contains a symbolic link or non-directory: {display}") from exc
+        if exc.errno == errno.ENOENT:
+            raise ToolError(
+                f"File does not exist: {display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            ) from exc
         raise ToolError(f"Could not open directory {display}: {exc}") from exc
 
 
@@ -229,6 +251,8 @@ def open_file(path: SecureToolPath) -> Iterator[int]:
         try:
             guards = _open_windows_directory_guards(path.path.parent)
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise _not_found_error(path) from exc
             raise ToolError(f"Could not securely open file {path.display}: {exc}") from exc
         descriptor = -1
         try:
@@ -239,6 +263,8 @@ def open_file(path: SecureToolPath) -> Iterator[int]:
                 raise ToolError(f"Not a regular file: {path.display}")
             yield descriptor
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise _not_found_error(path) from exc
             raise ToolError(f"Could not securely open file {path.display}: {exc}") from exc
         finally:
             if descriptor >= 0:
@@ -250,7 +276,7 @@ def open_file(path: SecureToolPath) -> Iterator[int]:
         try:
             descriptor = os.open(parent.leaf, _FILE_FLAGS, dir_fd=parent.fd)
         except FileNotFoundError as exc:
-            raise ToolError(f"File does not exist: {path.display}") from exc
+            raise _not_found_error(path) from exc
         except OSError as exc:
             if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                 raise ToolError(f"Symbolic links are not allowed: {path.selected}") from exc
@@ -271,6 +297,8 @@ def open_directory(path: SecureToolPath) -> Iterator[int | Path]:
         try:
             guards = _open_windows_directory_guards(path.path)
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise _not_found_error(path) from exc
             raise ToolError(f"Could not securely open directory {path.display}: {exc}") from exc
         try:
             yield path.path

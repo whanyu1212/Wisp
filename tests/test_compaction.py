@@ -991,8 +991,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 32
-    assert completed.schema_version == 32
+    assert started.schema_version == 33
+    assert completed.schema_version == 33
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -1051,7 +1051,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 through 32"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 33"):
         wisp_event_from_json(payload)
 
 

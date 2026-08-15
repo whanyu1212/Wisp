@@ -29,7 +29,7 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -227,14 +227,74 @@ def test_executor_keeps_explicit_tool_errors_model_visible_and_bounded() -> None
     ended = _run_executor(_RaisingTool(ToolError(detail)))
 
     assert ended.is_error is True
+    assert ended.failure_code is None
     assert ended.output.endswith("...")
     assert len(ended.output) == 2_000
+
+
+def test_executor_projects_actionable_tool_failure_metadata() -> None:
+    ended = _run_executor(
+        _RaisingTool(
+            ToolError(
+                "Invalid grep pattern",
+                failure_code="invalid_pattern",
+                retryable=True,
+                recovery_hint="Retry with literal=true.",
+            )
+        )
+    )
+
+    assert ended.is_error is True
+    assert ended.failure_code == "invalid_pattern"
+    assert ended.retryable is True
+    assert ended.recovery_hint == "Retry with literal=true."
+    assert ended.output == "Invalid grep pattern\nRecovery: Retry with literal=true."
+
+
+def test_executor_reserves_output_space_for_recovery_hint() -> None:
+    hint = "Retry with literal=true."
+    ended = _run_executor(
+        _RaisingTool(
+            ToolError(
+                "x" * 2_100,
+                failure_code="invalid_pattern",
+                retryable=True,
+                recovery_hint=hint,
+            )
+        )
+    )
+
+    assert len(ended.output) == 2_000
+    assert ended.output.endswith(f"\nRecovery: {hint}")
+    assert "...\nRecovery:" in ended.output
+
+
+def test_executor_classifies_tool_argument_errors() -> None:
+    ended = _run_executor(_RaisingTool(ToolArgumentError("limit must be an integer")))
+
+    assert ended.failure_code == "invalid_arguments"
+    assert ended.retryable is True
+    assert ended.recovery_hint == "Retry with arguments that match the tool's input schema."
+    assert ended.output.endswith(f"\nRecovery: {ended.recovery_hint}")
+
+
+def test_executor_degrades_inconsistent_tool_error_metadata() -> None:
+    ended = _run_executor(
+        _RaisingTool(ToolError("retry me", retryable=True, recovery_hint="secret hint"))
+    )
+
+    assert ended.is_error is True
+    assert ended.failure_code == "internal_error"
+    assert ended.retryable is False
+    assert ended.recovery_hint is None
+    assert ended.output == "Tool execution failed"
 
 
 def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:
     ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
 
     assert ended.is_error is True
+    assert ended.failure_code == "internal_error"
     assert ended.output == "Tool execution failed"
     assert "secret" not in ended.output
 

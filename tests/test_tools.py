@@ -572,8 +572,11 @@ def test_file_tools_reject_paths_outside_cwd(tmp_path: Path) -> None:
     )
 
     for tool, arguments in cases:
-        with pytest.raises(ToolError, match="outside the tool working directory"):
+        with pytest.raises(ToolError, match="outside the tool working directory") as raised:
             run_tool(tool, arguments, context)
+        assert raised.value.failure_code == "path_outside_workspace"
+        assert raised.value.retryable is False
+        assert raised.value.recovery_hint == "Use a path inside the session working directory."
 
 
 def test_file_tools_allow_absolute_paths_inside_cwd(tmp_path: Path) -> None:
@@ -596,6 +599,79 @@ def test_file_tools_can_opt_out_of_cwd_containment(tmp_path: Path) -> None:
     result = run_tool(ReadTool(), {"path": str(outside_file)}, context)
 
     assert result.text == "outside\n"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (ReadTool(), {"path": "notes.txt", "offset": "first"}),
+        (GrepTool(), {"pattern": "text", "max_results": 0}),
+        (
+            EditTool(),
+            {"path": "notes.txt", "edits": [{"oldText": "", "newText": "text"}]},
+        ),
+        (BashTool(), {"command": "pwd", "timeout": 0}),
+    ],
+)
+def test_builtin_argument_validation_is_actionable(
+    tmp_path: Path,
+    tool: object,
+    arguments: dict[str, object],
+) -> None:
+    (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(tool, arguments, ToolContext(cwd=tmp_path))
+
+    assert caught.value.failure_code == "invalid_arguments"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == (
+        "Retry with arguments that match the tool's input schema."
+    )
+
+
+def test_overlapping_edit_arguments_are_actionable(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("abc", encoding="utf-8")
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(
+            EditTool(),
+            {
+                "path": "notes.txt",
+                "edits": [
+                    {"oldText": "abc", "newText": "first"},
+                    {"oldText": "bc", "newText": "second"},
+                ],
+            },
+            ToolContext(cwd=tmp_path),
+        )
+
+    assert caught.value.failure_code == "invalid_arguments"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == (
+        "Retry with arguments that match the tool's input schema."
+    )
+
+
+def test_grep_regex_timeout_is_actionable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class _TimingOutExpression:
+        def search(self, *_args: object, **_kwargs: object) -> object:
+            raise TimeoutError
+
+    (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
+    monkeypatch.setattr(
+        search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _TimingOutExpression()
+    )
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(GrepTool(), {"pattern": "(text)+"}, ToolContext(cwd=tmp_path))
+
+    assert caught.value.failure_code == "invalid_pattern"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == "Retry with literal=true or a simpler regex pattern."
 
 
 def test_builtin_tools_have_safety_metadata() -> None:
@@ -674,12 +750,15 @@ def test_edit_tool_rejects_non_unique_replacement(tmp_path: Path) -> None:
     path.write_text("same same\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
-    with pytest.raises(ToolError, match="found 2 matches"):
+    with pytest.raises(ToolError, match="found 2 matches") as raised:
         run_tool(
             EditTool(),
             {"path": "dupes.txt", "edits": [{"oldText": "same", "newText": "once"}]},
             context,
         )
+    assert raised.value.failure_code == "stale_input"
+    assert raised.value.retryable is True
+    assert "Reread" in str(raised.value.recovery_hint)
 
 
 def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
@@ -3850,6 +3929,17 @@ def test_grep_tool_python_fallback_preserves_whitespace_only_patterns(
     )
 
     assert result.text == "data.txt:1:\tindent"
+
+
+def test_grep_tool_reports_actionable_invalid_pattern(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="Invalid grep pattern") as raised:
+        run_tool(GrepTool(), {"pattern": "unclosed("}, context)
+
+    assert raised.value.failure_code == "invalid_pattern"
+    assert raised.value.retryable is True
+    assert raised.value.recovery_hint == "Retry with literal=true when searching for exact text."
 
 
 def test_grep_tool_rejects_empty_pattern(tmp_path: Path) -> None:
