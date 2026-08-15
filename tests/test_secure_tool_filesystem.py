@@ -141,7 +141,9 @@ def test_known_file_access_works_below_execute_only_parent(tmp_path: Path) -> No
     context = ToolContext(cwd=tmp_path)
 
     try:
-        assert run_tool(ReadTool(), {"path": "execute-only/target.txt"}, context).text == "original\n"
+        assert (
+            run_tool(ReadTool(), {"path": "execute-only/target.txt"}, context).text == "original\n"
+        )
         run_tool(
             WriteTool(),
             {"path": "execute-only/target.txt", "content": "replacement\n"},
