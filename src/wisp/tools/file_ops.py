@@ -290,14 +290,21 @@ def _atomic_write(
         initial_version: tuple[int, int, int, int, int] | None = None
         mode: int | None = None
         if initial is not None:
-            descriptor = _open_existing(parent, initial)
+            initial_version = file_version(initial)
+            mode = initial.st_mode
             try:
-                opened = os.fstat(descriptor)
-                initial_version = file_version(opened)
-                mode = opened.st_mode
-                before_text = _snapshot_descriptor(descriptor)
-            finally:
-                os.close(descriptor)
+                descriptor = _open_existing(parent, initial)
+            except ToolError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+            else:
+                try:
+                    opened = os.fstat(descriptor)
+                    initial_version = file_version(opened)
+                    mode = opened.st_mode
+                    before_text = _snapshot_descriptor(descriptor)
+                finally:
+                    os.close(descriptor)
 
         temporary, file_id = _write_temporary(parent, content, mode=mode)
         published = False
@@ -442,11 +449,17 @@ def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool
         initial_version: tuple[int, int, int, int, int] | None = None
         mode: int | None = None
         if initial is not None:
-            with open_file(path) as descriptor:
-                opened = os.fstat(descriptor)
-                initial_version = file_version(opened)
-                mode = opened.st_mode
-                before_text = _snapshot_descriptor(descriptor)
+            initial_version = file_version(initial)
+            mode = initial.st_mode
+            try:
+                with open_file(path) as descriptor:
+                    opened = os.fstat(descriptor)
+                    initial_version = file_version(opened)
+                    mode = opened.st_mode
+                    before_text = _snapshot_descriptor(descriptor)
+            except ToolError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
         temporary, file_id = _write_windows_temporary(path, content, mode=mode)
         published = False
         try:

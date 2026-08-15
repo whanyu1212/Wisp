@@ -101,6 +101,24 @@ def test_overwrite_preserves_existing_permission_bits(tmp_path: Path) -> None:
     assert target.stat().st_mode & 0o777 == 0o640
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit semantics")
+def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    target.chmod(0o200)
+
+    result = run_tool(
+        WriteTool(),
+        {"path": "target.txt", "content": "replacement\n"},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert "before_text" not in result.data
+    assert target.stat().st_mode & 0o777 == 0o200
+    target.chmod(0o600)
+    assert target.read_text(encoding="utf-8") == "replacement\n"
+
+
 def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("original\n", encoding="utf-8")
@@ -217,6 +235,21 @@ def test_recursive_tools_honor_repository_ignore_files(tmp_path: Path) -> None:
     assert find.data["files"] == ["visible.py"]
 
 
+def test_subdirectory_search_inherits_ancestor_ignore_files(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("subdir/ignored.txt\n", encoding="utf-8")
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    (subdir / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (subdir / "visible.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": "subdir", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": "subdir", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["subdir/visible.txt:1:needle"]
+    assert find.data["files"] == ["subdir/visible.txt"]
+
+
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
 
@@ -224,6 +257,17 @@ def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> Non
         run_tool(
             GrepTool(),
             {"path": ".", "pattern": "(a+)+$"},
+            ToolContext(cwd=tmp_path),
+        )
+
+
+def test_grep_rejects_unbounded_newline_free_file(tmp_path: Path) -> None:
+    (tmp_path / "minified.txt").write_text("x" * 1_000_001, encoding="utf-8")
+
+    with pytest.raises(ToolError, match="line longer than 1000000 characters"):
+        run_tool(
+            GrepTool(),
+            {"path": ".", "pattern": "needle", "literal": True},
             ToolContext(cwd=tmp_path),
         )
 

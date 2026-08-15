@@ -268,10 +268,13 @@ def _python_grep(
 
 
 _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
+_PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
-def _iter_utf8_splitlines(path: Path | int) -> Iterator[str]:
+def _iter_utf8_splitlines(
+    path: Path | int, *, max_line_chars: int = _PYTHON_GREP_MAX_LINE_CHARS
+) -> Iterator[str]:
     """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
 
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -288,6 +291,8 @@ def _iter_utf8_splitlines(path: Path | int) -> Iterator[str]:
                 if decoded.startswith("\n"):
                     decoded = decoded[1:]
             pending_cr = yield from _yield_splitline_chunk(decoded, line_parts)
+            if sum(map(len, line_parts)) > max_line_chars:
+                raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
         decoded = decoder.decode(b"", final=True)
     if pending_cr:
         yield "".join(line_parts)
@@ -295,6 +300,8 @@ def _iter_utf8_splitlines(path: Path | int) -> Iterator[str]:
         if decoded.startswith("\n"):
             decoded = decoded[1:]
     _ = yield from _yield_splitline_chunk(decoded, line_parts, final=True)
+    if sum(map(len, line_parts)) > max_line_chars:
+        raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
     if line_parts:
         yield "".join(line_parts)
 
@@ -426,7 +433,7 @@ def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[P
                 descriptor,
                 secure_path.path,
                 context,
-                ignore_specs=(),
+                ignore_specs=_ancestor_ignore_specs(secure_path.path, context),
             )
             return
     except ToolError as directory_error:
@@ -443,6 +450,25 @@ def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[P
 class _IgnoreSpec:
     base: Path
     spec: GitIgnoreSpec
+
+
+def _ancestor_ignore_specs(path: Path, context: ToolContext) -> tuple[_IgnoreSpec, ...]:
+    cwd = context.cwd.resolve(strict=False)
+    try:
+        relative = path.relative_to(cwd)
+    except ValueError:
+        return ()
+    specs: list[_IgnoreSpec] = []
+    current = cwd
+    for part in relative.parts:
+        selected = secure_tool_path(str(current), context)
+        try:
+            with open_directory(selected) as descriptor:
+                specs.extend(_read_ignore_specs(descriptor, current, context))
+        except ToolError:
+            return tuple(specs)
+        current /= part
+    return tuple(specs)
 
 
 def _walk_directory(
