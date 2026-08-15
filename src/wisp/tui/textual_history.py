@@ -478,7 +478,11 @@ class TextualHistoryController:
 
         retained = tuple(item.entry for item in self._window.entries)
         for overlap in range(min(len(entries), len(retained)), 0, -1):
-            if retained[-overlap:] == entries[:overlap]:
+            if all(
+                _history_entry_id(left) is not None
+                and _history_entry_id(left) == _history_entry_id(right)
+                for left, right in zip(retained[-overlap:], entries[:overlap], strict=True)
+            ):
                 return entries[overlap:]
         return entries
 
@@ -776,6 +780,14 @@ class TextualHistoryController:
             ),
             entry.truncated,
         )
+
+
+def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
+    if isinstance(entry, HistoricalTranscriptMessage):
+        return entry.entry_id
+    if isinstance(entry, HistoricalSkillInvocation):
+        return entry.entry_id
+    return entry.card_id
 
 
 def _history_entry_matches_live(

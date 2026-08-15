@@ -25,6 +25,7 @@ class HistoricalTranscriptMessage:
 
     role: Literal["user", "assistant"]
     content: str
+    entry_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ def history_from_rpc_messages(
                         request_truncated=entry.request_truncated,
                         instructions_truncated=entry.instructions_truncated,
                     ),
+                    entry_id=entry.entry_id,
                 )
             )
     return tuple(rendered)
@@ -119,7 +121,11 @@ def history_entries_from_rpc_messages(
                 )
             else:
                 rendered.append(
-                    HistoricalTranscriptMessage(role="user", content=_content_for_history(message))
+                    HistoricalTranscriptMessage(
+                        role="user",
+                        content=_content_for_history(message),
+                        entry_id=message.entry_id,
+                    )
                 )
         elif message.role == "assistant":
             if message.content or message.content_truncated:
@@ -127,6 +133,7 @@ def history_entries_from_rpc_messages(
                     HistoricalTranscriptMessage(
                         role="assistant",
                         content=_content_for_history(message),
+                        entry_id=message.entry_id,
                     )
                 )
             pending_tool_calls.update(

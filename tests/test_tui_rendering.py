@@ -236,6 +236,9 @@ def test_history_entries_from_rpc_messages_pairs_tool_calls_and_results() -> Non
             truncated=True,
         ),
     )
+    assert isinstance(entries[0], HistoricalTranscriptMessage)
+    assert isinstance(entries[1], HistoricalTranscriptMessage)
+    assert (entries[0].entry_id, entries[1].entry_id) == ("user-1", "assistant-1")
     assert history_from_rpc_messages(tuple()) == ()
 
 
