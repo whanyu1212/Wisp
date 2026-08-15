@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from wisp.config import WispConfig
 from wisp.providers.base import Provider
@@ -38,6 +39,7 @@ def resolve_coding_session_configuration(
     providers: ProviderRegistry,
     models: ModelRegistry | None,
     trusted: bool,
+    cwd: Path | None = None,
     skill_catalog: SkillCatalog | None = None,
     provider_name: str | None = None,
     model: str | None = None,
@@ -73,7 +75,7 @@ def resolve_coding_session_configuration(
         model=selected_model,
         effort=selected_effort,
         models=models,
-        tool_context=ToolContext.from_config(config),
+        tool_context=ToolContext.from_config(config, cwd=cwd),
         skill_catalog=skill_catalog or SkillCatalog(),
         trusted=trusted,
         context_reserve_tokens=config.context_reserve_tokens,
