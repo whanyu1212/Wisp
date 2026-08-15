@@ -630,6 +630,27 @@ def test_builtin_argument_validation_is_actionable(
     )
 
 
+def test_grep_regex_timeout_is_actionable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class _TimingOutExpression:
+        def search(self, *_args: object, **_kwargs: object) -> object:
+            raise TimeoutError
+
+    (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
+    monkeypatch.setattr(
+        search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _TimingOutExpression()
+    )
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(GrepTool(), {"pattern": "(text)+"}, ToolContext(cwd=tmp_path))
+
+    assert caught.value.failure_code == "invalid_pattern"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == "Retry with literal=true or a simpler regex pattern."
+
+
 def test_builtin_tools_have_safety_metadata() -> None:
     assert {tool.name: tool.safety for tool in (ReadTool(), GrepTool(), FindTool(), LsTool())} == {
         "read": "read",

@@ -1118,7 +1118,12 @@ def _build_matcher(
         try:
             return expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS) is not None
         except TimeoutError as exc:
-            raise ToolError("grep pattern exceeded the regex evaluation time limit") from exc
+            raise ToolError(
+                "grep pattern exceeded the regex evaluation time limit",
+                failure_code="invalid_pattern",
+                retryable=True,
+                recovery_hint="Retry with literal=true or a simpler regex pattern.",
+            ) from exc
 
     return regex_matcher
 

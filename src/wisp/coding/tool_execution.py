@@ -665,6 +665,8 @@ def _tool_exception_outcome(exc: Exception) -> _ToolRunOutcome:
             raise ValueError
         if type(retryable) is not bool:
             raise ValueError
+        if failure_code is None and (retryable or recovery_hint is not None):
+            raise ValueError
         if recovery_hint is not None:
             if type(recovery_hint) is not str or len(recovery_hint) > 500:
                 raise ValueError

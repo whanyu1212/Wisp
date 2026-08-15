@@ -278,6 +278,18 @@ def test_executor_classifies_tool_argument_errors() -> None:
     assert ended.output.endswith(f"\nRecovery: {ended.recovery_hint}")
 
 
+def test_executor_degrades_inconsistent_tool_error_metadata() -> None:
+    ended = _run_executor(
+        _RaisingTool(ToolError("retry me", retryable=True, recovery_hint="secret hint"))
+    )
+
+    assert ended.is_error is True
+    assert ended.failure_code == "internal_error"
+    assert ended.retryable is False
+    assert ended.recovery_hint is None
+    assert ended.output == "Tool execution failed"
+
+
 def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:
     ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
 
