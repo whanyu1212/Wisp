@@ -21,6 +21,7 @@ from wisp.tools.secure_fs import (
     file_version,
     open_file,
     open_parent,
+    open_windows_parent,
     secure_tool_path,
     stat_leaf,
 )
@@ -160,6 +161,15 @@ def _check_conflicting_paths(context: ToolContext) -> None:
     for conflict in context.conflicting_write_paths:
         candidate = secure_tool_path(str(conflict), context)
         try:
+            if os.name == "nt":
+                with open_windows_parent(candidate):
+                    try:
+                        candidate.path.lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ToolError(f"Conflicting write path already exists: {conflict}")
+                continue
             with open_parent(candidate) as parent:
                 if stat_leaf(parent) is not None:
                     raise ToolError(f"Conflicting write path already exists: {conflict}")
@@ -265,6 +275,8 @@ def _atomic_write(
     context: ToolContext,
 ) -> _WriteOutcome:
     _check_conflicting_paths(context)
+    if os.name == "nt":
+        return _atomic_write_windows(path, content, overwrite=overwrite)
     with open_parent(path, create=True) as parent:
         initial = stat_leaf(parent)
         if initial is not None and stat.S_ISLNK(initial.st_mode):
@@ -323,6 +335,9 @@ def _atomic_write(
 
 
 def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
+    if os.name == "nt":
+        _atomic_edit_windows(path, edits)
+        return
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
         if initial is None:
@@ -339,29 +354,8 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
         finally:
             os.close(descriptor)
 
-        replacements: list[tuple[int, int, str]] = []
-        for old_text, new_text in edits:
-            occurrences = _find_occurrences(original, old_text)
-            if len(occurrences) != 1:
-                raise ToolError(
-                    f"edit.oldText must match exactly once; found {len(occurrences)} matches"
-                )
-            start = occurrences[0]
-            replacements.append((start, start + len(old_text), new_text))
-        replacements.sort(key=lambda replacement: replacement[0])
-        previous_end = -1
-        for start, end, _new_text in replacements:
-            if start < previous_end:
-                raise ToolError("edit replacements must not overlap")
-            previous_end = end
-        parts: list[str] = []
-        cursor = 0
-        for start, end, new_text in replacements:
-            parts.extend((original[cursor:start], new_text))
-            cursor = end
-        parts.append(original[cursor:])
-
-        temporary, _file_id = _write_temporary(parent, "".join(parts), mode=mode)
+        replacement = _apply_edits(original, edits)
+        temporary, _file_id = _write_temporary(parent, replacement, mode=mode)
         published = False
         try:
             current = stat_leaf(parent)
@@ -380,6 +374,156 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
             raise ToolError(f"Could not edit file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_temporary(parent, temporary, published=published)
+
+
+def _windows_leaf_info(path: SecureToolPath) -> os.stat_result | None:
+    try:
+        info = path.path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ToolError(f"Could not inspect path {path.display}: {exc}") from exc
+    if path.path.is_symlink() or path.path.is_junction():
+        raise ToolError(f"Symbolic links and junctions are not allowed: {path.selected}")
+    return info
+
+
+def _write_windows_temporary(
+    path: SecureToolPath, content: str, *, mode: int | None
+) -> tuple[Path, tuple[int, int]]:
+    for _attempt in range(10):
+        temporary = path.path.parent / f".wisp-write-{uuid4().hex}"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            break
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
+    else:
+        raise ToolError(f"Could not allocate temporary file for write: {path.selected}")
+    try:
+        if mode is not None:
+            os.chmod(temporary, stat.S_IMODE(mode))
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
+            descriptor = -1
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+            info = os.fstat(file.fileno())
+        return temporary, (info.st_dev, info.st_ino)
+    except BaseException as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        if isinstance(exc, OSError):
+            raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
+        raise
+
+
+def _cleanup_windows_temporary(temporary: Path, *, destination: Path, published: bool) -> None:
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError as exc:
+        if published:
+            raise ToolError(
+                "File was published but temporary-link cleanup failed; "
+                f"destination: {destination}; temporary: {temporary}: {exc}"
+            ) from exc
+        raise ToolError(f"Could not clean up failed write {temporary}: {exc}") from exc
+
+
+def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool) -> _WriteOutcome:
+    with open_windows_parent(path, create=True):
+        initial = _windows_leaf_info(path)
+        if not overwrite and initial is not None:
+            raise ToolError(f"File already exists: {path.selected}")
+        before_text: str | None = None
+        initial_version: tuple[int, int, int, int, int] | None = None
+        mode: int | None = None
+        if initial is not None:
+            with open_file(path) as descriptor:
+                opened = os.fstat(descriptor)
+                initial_version = file_version(opened)
+                mode = opened.st_mode
+                before_text = _snapshot_descriptor(descriptor)
+        temporary, file_id = _write_windows_temporary(path, content, mode=mode)
+        published = False
+        try:
+            current = _windows_leaf_info(path)
+            current_version = None if current is None else file_version(current)
+            if current_version != initial_version:
+                raise ToolError(f"File changed while writing: {path.selected}")
+            if overwrite:
+                os.replace(temporary, path.path)
+            else:
+                try:
+                    os.link(temporary, path.path)
+                except FileExistsError as exc:
+                    raise ToolError(f"File already exists: {path.selected}") from exc
+            published = True
+        except ToolError:
+            raise
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
+        finally:
+            _cleanup_windows_temporary(temporary, destination=path.path, published=published)
+        return _WriteOutcome(initial is None, before_text, file_id if not overwrite else None)
+
+
+def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
+    with open_windows_parent(path):
+        initial = _windows_leaf_info(path)
+        if initial is None:
+            raise ToolError(f"File does not exist: {path.display}")
+        with open_file(path) as descriptor:
+            opened = os.fstat(descriptor)
+            version = file_version(opened)
+            mode = opened.st_mode
+            try:
+                original = _read_descriptor(descriptor)
+            except UnicodeDecodeError as exc:
+                raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
+        replacement = _apply_edits(original, edits)
+        temporary, _file_id = _write_windows_temporary(path, replacement, mode=mode)
+        published = False
+        try:
+            current = _windows_leaf_info(path)
+            if current is None or file_version(current) != version:
+                raise ToolError(f"File changed while editing: {path.selected}")
+            os.replace(temporary, path.path)
+            published = True
+        except ToolError:
+            raise
+        except OSError as exc:
+            raise ToolError(f"Could not edit file: {path.selected}: {exc}") from exc
+        finally:
+            _cleanup_windows_temporary(temporary, destination=path.path, published=published)
+
+
+def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
+    replacements: list[tuple[int, int, str]] = []
+    for old_text, new_text in edits:
+        occurrences = _find_occurrences(original, old_text)
+        if len(occurrences) != 1:
+            raise ToolError(
+                f"edit.oldText must match exactly once; found {len(occurrences)} matches"
+            )
+        start = occurrences[0]
+        replacements.append((start, start + len(old_text), new_text))
+    replacements.sort(key=lambda replacement: replacement[0])
+    previous_end = -1
+    for start, end, _new_text in replacements:
+        if start < previous_end:
+            raise ToolError("edit replacements must not overlap")
+        previous_end = end
+    parts: list[str] = []
+    cursor = 0
+    for start, end, new_text in replacements:
+        parts.extend((original[cursor:start], new_text))
+        cursor = end
+    parts.append(original[cursor:])
+    return "".join(parts)
 
 
 class EditTool:

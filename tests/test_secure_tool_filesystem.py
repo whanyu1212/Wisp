@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import anyio
@@ -113,6 +115,29 @@ def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:
         )
 
     assert target.read_text(encoding="utf-8") == "original\n"
+
+
+def test_guarded_windows_atomic_write_and_edit_algorithm(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    secure_path = secure_fs_module.secure_tool_path("target.txt", ToolContext(cwd=tmp_path))
+
+    @contextmanager
+    def held_parent(_path: object, *, create: bool = False) -> Iterator[Path]:
+        del create
+        yield tmp_path
+
+    monkeypatch.setattr(file_ops_module, "open_windows_parent", held_parent)
+
+    outcome = file_ops_module._atomic_write_windows(secure_path, "replacement\n", overwrite=True)
+    file_ops_module._atomic_edit_windows(secure_path, [("replacement", "edited")])
+
+    assert outcome.created is False
+    assert outcome.before_text == "original\n"
+    assert target.read_text(encoding="utf-8") == "edited\n"
+    assert not list(tmp_path.glob(".wisp-write-*"))
 
 
 def test_write_allows_missing_conflict_parent(tmp_path: Path) -> None:

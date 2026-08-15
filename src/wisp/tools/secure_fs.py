@@ -121,6 +121,36 @@ def _close_windows_guards(guards: list[int]) -> None:
         close_windows_handle(guard)
 
 
+@contextmanager
+def open_windows_parent(path: SecureToolPath, *, create: bool = False) -> Iterator[Path]:
+    """Hold verified Windows handles for every target ancestor."""
+
+    if os.name != "nt":
+        raise ToolError("Windows guarded parent access is unavailable on this platform")
+    from wisp.skills.filesystem import open_windows_skill_directory_guard
+
+    parts = _parts(path.path)
+    if not parts:
+        raise ToolError(f"Path has no file name: {path.selected}")
+    current = Path(path.path.anchor)
+    guards: list[int] = []
+    try:
+        guards.append(open_windows_skill_directory_guard(current))
+        for part in parts[:-1]:
+            current /= part
+            if create:
+                try:
+                    current.mkdir()
+                except FileExistsError:
+                    pass
+            guards.append(open_windows_skill_directory_guard(current))
+        yield current
+    except OSError as exc:
+        raise ToolError(f"Could not securely open parent for {path.display}: {exc}") from exc
+    finally:
+        _close_windows_guards(guards)
+
+
 def _parts(path: Path) -> tuple[str, ...]:
     anchor = Path(path.anchor)
     try:
@@ -269,6 +299,7 @@ __all__ = [
     "open_directory",
     "open_file",
     "open_parent",
+    "open_windows_parent",
     "secure_tool_path",
     "stat_leaf",
 ]
