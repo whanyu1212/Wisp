@@ -49,7 +49,6 @@ from wisp.providers.base import (
     ContextOverflowError,
     PromptCacheKeyProvider,
     Provider,
-    ProviderError,
     ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
@@ -245,13 +244,21 @@ def _resolve_provider_response_id(
 
 @dataclass(frozen=True, slots=True)
 class _CompletedProviderResponse:
-    """Validated provider response assembled from one streamed lifecycle."""
+    """Validated successful provider response assembled from one stream."""
 
     response: ProviderResponseCompleted
     content: str
-    thinking: str
     response_id: str | None
     response_model: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedProviderResponse:
+    """Validated terminal provider failure assembled from one stream."""
+
+    response: ProviderResponseFailed
+    content: str
+    response_id: str | None
 
 
 @dataclass(slots=True)
@@ -264,7 +271,6 @@ class _ProviderResponseLifecycle:
     terminal: ProviderResponseCompleted | ProviderResponseFailed | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     text: list[str] = field(default_factory=list)
-    thinking: list[str] = field(default_factory=list)
 
     def require_open(self) -> None:
         if self.terminal is not None:
@@ -291,7 +297,7 @@ class _ProviderResponseLifecycle:
     def add_thinking(self, delta: str) -> None:
         self.require_open()
         _require_provider_response_started(self.started)
-        self.thinking.append(delta)
+        del delta
 
     def add_tool_call(self, tool_call: ToolCall) -> None:
         self.require_open()
@@ -300,23 +306,28 @@ class _ProviderResponseLifecycle:
 
     def complete(self, event: ProviderResponseCompleted | ProviderResponseFailed) -> None:
         self.require_open()
-        _require_provider_response_started(self.started)
+        if isinstance(event, ProviderResponseCompleted):
+            _require_provider_response_started(self.started)
         self.terminal = event
 
-    def finish(self) -> _CompletedProviderResponse:
-        if not self.started:
-            raise ProviderProtocolError("Provider stream ended before response_started")
+    def finish(self) -> _CompletedProviderResponse | _FailedProviderResponse:
         if self.terminal is None:
+            if not self.started:
+                raise ProviderProtocolError("Provider stream ended before response_started")
             raise ProviderProtocolError("Provider stream ended without a terminal response")
         if isinstance(self.terminal, ProviderResponseFailed):
-            _resolve_provider_response_id(
+            response_id = _resolve_provider_response_id(
                 started_response_id=self.started_response_id,
                 terminal_response_id=self.terminal.response_id,
                 tool_calls=self.tool_calls,
             )
-            if is_context_overflow_message(self.terminal.message):
-                raise ContextOverflowError(self.terminal.message)
-            raise ProviderError(self.terminal.message)
+            return _FailedProviderResponse(
+                response=self.terminal,
+                content=self.terminal.partial_content or "".join(self.text),
+                response_id=response_id,
+            )
+        if not self.started:
+            raise ProviderProtocolError("Provider stream ended before response_started")
         if tuple(self.tool_calls) != self.terminal.tool_calls:
             raise ProviderProtocolError(
                 "Provider terminal tool calls do not match streamed tool calls"
@@ -329,7 +340,6 @@ class _ProviderResponseLifecycle:
         return _CompletedProviderResponse(
             response=self.terminal,
             content=self.terminal.content or "".join(self.text),
-            thinking="".join(self.thinking),
             response_id=response_id,
             response_model=self.response_model,
         )
@@ -614,6 +624,38 @@ async def run_agent_loop(
                     yield event
                 break
             completed = lifecycle.finish()
+            if isinstance(completed, _FailedProviderResponse):
+                failure = completed.response
+                failure_kind = (
+                    "context_overflow"
+                    if failure.failure_kind == "context_overflow"
+                    or is_context_overflow_message(failure.message)
+                    else failure.failure_kind
+                )
+                if lifecycle.started:
+                    yield MessageCompleted(
+                        turn=turn,
+                        content=completed.content,
+                        finish_reason="error",
+                        response_id=completed.response_id,
+                    )
+                if failure_kind == "context_overflow":
+                    yield ContextOverflow(
+                        turn=turn,
+                        provider=config.provider.name,
+                        model=config.model or config.provider.default_model,
+                        context_window=config.context_window,
+                        message=failure.message,
+                    )
+                    if config.defer_context_overflow_errors:
+                        return
+                yield ErrorEvent(message=failure.message)
+                yield TurnCompleted(
+                    turn=turn,
+                    outcome="cancelled" if failure_kind == "aborted" else "failed",
+                    finish_reason="cancelled" if failure_kind == "aborted" else "error",
+                )
+                return
             response = completed.response
             completed_content = completed.content
             tool_calls = response.tool_calls
@@ -702,7 +744,7 @@ async def run_agent_loop(
             )
             continuation_message = Message(
                 role="assistant",
-                content=completed_content + completed.thinking,
+                content=completed_content,
                 response_id=response_id,
                 finish_reason=response.finish_reason,
                 usage=usage,

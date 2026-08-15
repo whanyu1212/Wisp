@@ -639,6 +639,7 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
         "turn.started",
         "context.estimated",
         "message.started",
+        "message.completed",
         "context.overflow",
         "compaction.started",
         "session.saved",

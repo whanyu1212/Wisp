@@ -27,7 +27,12 @@ from wisp.openai_compatible import (
     validate_openai_compatible_provider_name,
 )
 from wisp.providers.auth import ProviderAuthResolver
-from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ToolCallResult,
+    ToolSpec,
+    is_context_overflow_message,
+)
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
     JsonObject,
@@ -127,14 +132,21 @@ class OpenAICompatibleProvider:
             except OpenAIError as exc:
                 decision = _retry_decision(exc)
                 if decision is None or retry_number >= self._retry_policy.max_retries:
-                    raise
+                    yield ProviderResponseFailed(
+                        message=str(exc),
+                        failure_kind=(
+                            "context_overflow" if is_context_overflow_message(str(exc)) else "error"
+                        ),
+                    )
+                    return
                 delay = retry_delay_seconds(
                     self._retry_policy,
                     retry_number=retry_number + 1,
                     retry_after_seconds=decision.retry_after_seconds,
                 )
                 if delay is None:
-                    raise
+                    yield ProviderResponseFailed(message=str(exc))
+                    return
                 yield ProviderRetrying(
                     attempt=retry_number + 2,
                     max_attempts=self._retry_policy.max_retries + 1,

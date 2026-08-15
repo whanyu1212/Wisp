@@ -14,6 +14,7 @@ from wisp.agent.execution import ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator, run_agent_loop
 from wisp.agent.messages import (
     Message,
+    completion_event_has_history,
     message_from_completion_event,
     normalize_provider_history,
 )
@@ -481,9 +482,12 @@ class AgentHarness:
                         assert event is not None
 
                         segment.observe(event, run)
-                        if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                        if isinstance(
+                            event, MessageCompleted | ToolExecutionEnded
+                        ) and completion_event_has_history(event):
                             # ToolResultReady copies the terminal tool payload; retain it now
-                            # so closing at this visible boundary cannot lose output.
+                            # so closing at this visible boundary cannot lose output. Empty
+                            # failed assistant completions settle lifecycle state only.
                             self._messages.append(message_from_completion_event(event))
                         yield event
                         if (
