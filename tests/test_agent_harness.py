@@ -891,6 +891,48 @@ def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> Non
     ]
 
 
+def test_harness_cancel_after_tool_execution_end_preserves_tool_output() -> None:
+    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    harness = _harness(
+        provider,
+        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
+    )
+
+    async def run() -> list[object]:
+        emitted: list[object] = []
+        async for event in harness.prompt("initial"):
+            emitted.append(event)
+            if isinstance(event, ToolExecutionEnded):
+                assert harness.cancel()
+        return emitted
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial"),
+        ("assistant", "checking"),
+        ("tool", "tool output"),
+    ]
+    tool_message = harness.messages[-1]
+    assert tool_message.tool_call_id == "call-1"
+    assert tool_message.tool_name == "lookup"
+    assert tool_message.is_error is False
+
+
 def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]

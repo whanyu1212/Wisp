@@ -483,27 +483,7 @@ async def _execute_tool_call(
 
     terminal = lifecycle.finish()
     yield terminal
-    yield ToolResultReady(
-        call_id=terminal.call_id,
-        name=terminal.name,
-        output=terminal.output,
-        is_error=terminal.is_error,
-        exit_code=terminal.exit_code,
-        output_has_exit_status=terminal.output_has_exit_status,
-        before_text=terminal.before_text,
-        created=terminal.created,
-        summary=terminal.summary,
-        truncated=terminal.truncated,
-        process_id=terminal.process_id,
-        process_state=terminal.process_state,
-        process_error=terminal.process_error,
-        stdout=terminal.stdout,
-        stderr=terminal.stderr,
-        stdout_truncated=terminal.stdout_truncated,
-        stderr_truncated=terminal.stderr_truncated,
-        stdout_dropped_bytes=terminal.stdout_dropped_bytes,
-        stderr_dropped_bytes=terminal.stderr_dropped_bytes,
-    )
+    yield ToolResultReady.from_execution_ended(terminal)
 
 
 async def run_agent_loop(
@@ -648,6 +628,21 @@ async def run_agent_loop(
                         completed.response_model,
                         reason="estimation_failed",
                     )
+            tool_call_snapshots = tuple(
+                ToolCallSnapshot(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    arguments=dict(tool_call.arguments),
+                    parse_error=tool_call.parse_error,
+                )
+                for tool_call in tool_calls
+            )
+            # Completion events cross a public yield boundary. Deep-copy the
+            # snapshots before yielding so consumer mutation cannot alter provider
+            # continuation state.
+            continuation_tool_calls = tuple(
+                snapshot.model_copy(deep=True) for snapshot in tool_call_snapshots
+            )
             yield MessageCompleted(
                 turn=turn,
                 content=completed_content,
@@ -655,15 +650,7 @@ async def run_agent_loop(
                 response_id=response_id,
                 usage=usage,
                 cost=cost,
-                tool_calls=tuple(
-                    ToolCallSnapshot(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=dict(tool_call.arguments),
-                        parse_error=tool_call.parse_error,
-                    )
-                    for tool_call in tool_calls
-                ),
+                tool_calls=tool_call_snapshots,
             )
             continuation_message = Message(
                 role="assistant",
@@ -672,15 +659,7 @@ async def run_agent_loop(
                 finish_reason=response.finish_reason,
                 usage=usage,
                 cost=cost,
-                tool_calls=tuple(
-                    ToolCallSnapshot(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=dict(tool_call.arguments),
-                        parse_error=tool_call.parse_error,
-                    )
-                    for tool_call in tool_calls
-                ),
+                tool_calls=continuation_tool_calls,
             )
             state.record_response(completed, continuation_message)
             if usage is not None and config.context_window is not None:

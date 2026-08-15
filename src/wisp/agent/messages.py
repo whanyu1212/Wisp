@@ -26,7 +26,6 @@ from wisp.events import (
     TokenUsage,
     ToolCallSnapshot,
     ToolExecutionEnded,
-    ToolResultReady,
     UsageCost,
     utc_now,
 )
@@ -134,7 +133,7 @@ class CompactionRecord(BaseModel):
 
 
 def message_from_completion_event(
-    event: MessageCompleted | ToolExecutionEnded | ToolResultReady,
+    event: MessageCompleted | ToolExecutionEnded,
 ) -> Message:
     """Build the provider-visible message completed by a lifecycle event."""
 
