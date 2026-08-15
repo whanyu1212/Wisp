@@ -24,6 +24,12 @@ _DIRECTORY_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
+_TRAVERSAL_FLAGS = (
+    getattr(os, "O_PATH", os.O_RDONLY)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _SUPPORTED = (
     os.name != "nt"
@@ -159,17 +165,27 @@ def _parts(path: Path) -> tuple[str, ...]:
         raise ToolError(f"Could not anchor filesystem path: {path}") from exc
 
 
-def _open_root(path: Path) -> int:
+def _open_root(path: Path, *, readable: bool = False) -> int:
     _require_supported()
     try:
-        return os.open(path.anchor, _DIRECTORY_FLAGS)
+        return os.open(path.anchor, _DIRECTORY_FLAGS if readable else _TRAVERSAL_FLAGS)
     except OSError as exc:
         raise ToolError(f"Could not open filesystem root for {path}: {exc}") from exc
 
 
-def _open_child_directory(parent_fd: int, name: str, *, display: str) -> int:
+def _open_child_directory(
+    parent_fd: int,
+    name: str,
+    *,
+    display: str,
+    readable: bool = False,
+) -> int:
     try:
-        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        return os.open(
+            name,
+            _DIRECTORY_FLAGS if readable else _TRAVERSAL_FLAGS,
+            dir_fd=parent_fd,
+        )
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise ToolError(f"Path contains a symbolic link or non-directory: {display}") from exc
@@ -262,12 +278,18 @@ def open_directory(path: SecureToolPath) -> Iterator[int | Path]:
             _close_windows_guards(guards)
         return
 
-    current = _open_root(path.path)
+    parts = _parts(path.path)
+    current = _open_root(path.path, readable=not parts)
     walked = Path(path.path.anchor)
     try:
-        for part in _parts(path.path):
+        for index, part in enumerate(parts):
             walked /= part
-            child = _open_child_directory(current, part, display=str(walked))
+            child = _open_child_directory(
+                current,
+                part,
+                display=str(walked),
+                readable=index == len(parts) - 1,
+            )
             os.close(current)
             current = child
         yield current

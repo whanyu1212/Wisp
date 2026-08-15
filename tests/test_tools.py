@@ -3867,7 +3867,11 @@ def test_grep_tool_python_fallback_stops_after_extra_match(
     first.write_text("match\nmatch\n", encoding="utf-8")
     visited_later = False
 
-    def files(_path: Path, _context: ToolContext) -> Iterable[Path]:
+    def files(
+        _path: Path,
+        _context: ToolContext,
+        **_kwargs: object,
+    ) -> Iterable[Path]:
         nonlocal visited_later
         yield first
         visited_later = True

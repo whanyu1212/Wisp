@@ -110,19 +110,24 @@ class GrepTool:
         if max_results is None or max_results < 1:
             raise ToolError("grep.max_results must be greater than or equal to 1")
 
-        return await anyio.to_thread.run_sync(
-            lambda: _python_grep(
-                pattern=pattern,
-                path=path,
-                glob=glob,
-                ignore_case=ignore_case,
-                literal=literal,
-                context_lines=context_lines,
-                max_results=max_results,
-                context=context,
-            ),
-            abandon_on_cancel=True,
-        )
+        cancel_event = Event()
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: _python_grep(
+                    pattern=pattern,
+                    path=path,
+                    glob=glob,
+                    ignore_case=ignore_case,
+                    literal=literal,
+                    context_lines=context_lines,
+                    max_results=max_results,
+                    context=context,
+                    cancel_event=cancel_event,
+                ),
+                abandon_on_cancel=True,
+            )
+        finally:
+            cancel_event.set()
 
 
 class FindTool:
@@ -210,6 +215,7 @@ def _python_grep(
     context_lines: int,
     max_results: int,
     context: ToolContext,
+    cancel_event: Event | None = None,
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
@@ -221,15 +227,18 @@ def _python_grep(
     match_count = 0
     ignore_override_glob = glob if glob is not None and not _is_exclusion_glob(glob) else None
     files = (
-        _iter_files(secure_path, context)
+        _iter_files(secure_path, context, cancel_event=cancel_event)
         if ignore_override_glob is None
         else _iter_files(
             secure_path,
             context,
             ignore_override_glob=ignore_override_glob,
+            cancel_event=cancel_event,
         )
     )
     for file_path in files:
+        if cancel_event is not None and cancel_event.is_set():
+            return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
         file_match_start = match_count
@@ -250,6 +259,11 @@ def _python_grep(
             with open_file(candidate) as descriptor:
                 lines = _iter_utf8_splitlines(descriptor)
                 for line_number, line in enumerate(lines, start=1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        return ToolResult(
+                            text="Search cancelled",
+                            data={"count": 0, "matches": []},
+                        )
                     if file_buffer.exhausted or file_had_extra_match:
                         break
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Mapping
@@ -157,6 +158,15 @@ class _WriteOutcome:
     file_id: tuple[int, int] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ReplacementMetadata:
+    mode: int
+    uid: int
+    gid: int
+    xattrs: tuple[tuple[str, bytes], ...] = ()
+    flags: int | None = None
+
+
 def _check_conflicting_paths(context: ToolContext) -> None:
     for conflict in context.conflicting_write_paths:
         candidate = secure_tool_path(str(conflict), context)
@@ -193,9 +203,53 @@ def _open_existing(parent: OpenParent, info: os.stat_result) -> int:
     return descriptor
 
 
+def _open_metadata_descriptor(parent: OpenParent, expected: os.stat_result) -> int | None:
+    if not hasattr(os, "O_PATH"):
+        return None
+    flags = os.O_PATH | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(parent.leaf, flags, dir_fd=parent.fd)
+    except OSError as exc:
+        raise ToolError(f"Could not open file metadata {parent.path.display}: {exc}") from exc
+    opened = os.fstat(descriptor)
+    if file_version(opened) != file_version(expected):
+        os.close(descriptor)
+        raise ToolError(f"File changed while opening: {parent.path.selected}")
+    return descriptor
+
+
 def _read_descriptor(descriptor: int) -> str:
     with os.fdopen(os.dup(descriptor), "r", encoding="utf-8", newline="") as file:
         return file.read()
+
+
+def _write_existing_in_place(
+    parent: OpenParent,
+    content: str,
+    *,
+    expected: tuple[int, int, int, int, int],
+) -> None:
+    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(parent.leaf, flags, dir_fd=parent.fd)
+    except OSError as exc:
+        raise ToolError(f"Could not open file {parent.path.display}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or file_version(opened) != expected:
+            raise ToolError(f"File changed while writing: {parent.path.selected}")
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(os.dup(descriptor), "w", encoding="utf-8", newline="") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        current = stat_leaf(parent)
+        if current is None or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ToolError(f"File changed while writing: {parent.path.selected}")
+    except OSError as exc:
+        raise ToolError(f"Could not write file {parent.path.selected}: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def _snapshot_descriptor(descriptor: int) -> str | None:
@@ -226,17 +280,69 @@ def _allocate_temporary(parent: OpenParent) -> tuple[int, str]:
     raise ToolError(f"Could not allocate temporary file for write: {parent.path.selected}")
 
 
+def _snapshot_replacement_metadata(
+    descriptor: int,
+    info: os.stat_result,
+) -> _ReplacementMetadata:
+    xattrs: list[tuple[str, bytes]] = []
+    listxattr = getattr(os, "listxattr", None)
+    getxattr = getattr(os, "getxattr", None)
+    if listxattr is not None and getxattr is not None:
+        source: int | str = descriptor
+        try:
+            names = listxattr(source)
+        except OSError as exc:
+            proc_descriptor = f"/proc/self/fd/{descriptor}"
+            if exc.errno != errno.EBADF or not Path(proc_descriptor).exists():
+                raise ToolError(f"Could not read existing file metadata: {exc}") from exc
+            source = proc_descriptor
+            names = listxattr(source)
+        try:
+            xattrs = [(name, getxattr(source, name)) for name in names]
+        except OSError as exc:
+            raise ToolError(f"Could not read existing file metadata: {exc}") from exc
+    return _ReplacementMetadata(
+        mode=info.st_mode,
+        uid=info.st_uid,
+        gid=info.st_gid,
+        xattrs=tuple(xattrs),
+        flags=getattr(info, "st_flags", None),
+    )
+
+
+def _apply_replacement_metadata(
+    descriptor: int,
+    metadata: _ReplacementMetadata,
+) -> None:
+    try:
+        if hasattr(os, "fchown"):
+            os.fchown(descriptor, metadata.uid, metadata.gid)
+        os.fchmod(descriptor, stat.S_IMODE(metadata.mode))
+        setxattr = getattr(os, "setxattr", None)
+        if setxattr is not None:
+            for name, value in metadata.xattrs:
+                setxattr(descriptor, name, value)
+        fchflags = getattr(os, "fchflags", None)
+        if fchflags is not None and metadata.flags is not None:
+            fchflags(descriptor, metadata.flags)
+    except OSError as exc:
+        raise ToolError(f"Could not preserve existing file metadata: {exc}") from exc
+
+
 def _write_temporary(
-    parent: OpenParent, content: str, *, mode: int | None
+    parent: OpenParent,
+    content: str,
+    *,
+    metadata: _ReplacementMetadata | None,
 ) -> tuple[str, tuple[int, int]]:
     descriptor, name = _allocate_temporary(parent)
     try:
-        if mode is not None:
-            os.fchmod(descriptor, stat.S_IMODE(mode))
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
             descriptor = -1
             file.write(content)
             file.flush()
+            if metadata is not None:
+                _apply_replacement_metadata(file.fileno(), metadata)
             os.fsync(file.fileno())
             info = os.fstat(file.fileno())
             file_id = (info.st_dev, info.st_ino)
@@ -288,25 +394,48 @@ def _atomic_write(
 
         before_text: str | None = None
         initial_version: tuple[int, int, int, int, int] | None = None
-        mode: int | None = None
+        metadata: _ReplacementMetadata | None = None
         if initial is not None:
             initial_version = file_version(initial)
-            mode = initial.st_mode
+            metadata = _ReplacementMetadata(
+                mode=initial.st_mode,
+                uid=initial.st_uid,
+                gid=initial.st_gid,
+                flags=getattr(initial, "st_flags", None),
+            )
             try:
                 descriptor = _open_existing(parent, initial)
             except ToolError as exc:
                 if not isinstance(exc.__cause__, PermissionError):
                     raise
+                metadata_descriptor = _open_metadata_descriptor(parent, initial)
+                if metadata_descriptor is not None:
+                    try:
+                        opened = os.fstat(metadata_descriptor)
+                        initial_version = file_version(opened)
+                        metadata = _snapshot_replacement_metadata(metadata_descriptor, opened)
+                    finally:
+                        os.close(metadata_descriptor)
             else:
                 try:
                     opened = os.fstat(descriptor)
                     initial_version = file_version(opened)
-                    mode = opened.st_mode
+                    metadata = _snapshot_replacement_metadata(descriptor, opened)
                     before_text = _snapshot_descriptor(descriptor)
                 finally:
                     os.close(descriptor)
 
-        temporary, file_id = _write_temporary(parent, content, mode=mode)
+        try:
+            temporary, file_id = _write_temporary(parent, content, metadata=metadata)
+        except ToolError as exc:
+            if (
+                overwrite
+                and initial_version is not None
+                and isinstance(exc.__cause__, PermissionError)
+            ):
+                _write_existing_in_place(parent, content, expected=initial_version)
+                return _WriteOutcome(False, before_text, None)
+            raise
         published = False
         try:
             current = stat_leaf(parent)
@@ -353,7 +482,7 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
         try:
             opened = os.fstat(descriptor)
             version = file_version(opened)
-            mode = opened.st_mode
+            metadata = _snapshot_replacement_metadata(descriptor, opened)
             try:
                 original = _read_descriptor(descriptor)
             except UnicodeDecodeError as exc:
@@ -362,7 +491,13 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
             os.close(descriptor)
 
         replacement = _apply_edits(original, edits)
-        temporary, _file_id = _write_temporary(parent, replacement, mode=mode)
+        try:
+            temporary, _file_id = _write_temporary(parent, replacement, metadata=metadata)
+        except ToolError as exc:
+            if isinstance(exc.__cause__, PermissionError):
+                _write_existing_in_place(parent, replacement, expected=version)
+                return
+            raise
         published = False
         try:
             current = stat_leaf(parent)

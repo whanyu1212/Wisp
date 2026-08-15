@@ -103,6 +103,64 @@ def test_overwrite_preserves_existing_permission_bits(tmp_path: Path) -> None:
     assert target.stat().st_mode & 0o777 == 0o640
 
 
+@pytest.mark.skipif(
+    not all(hasattr(os, name) for name in ("setxattr", "getxattr", "listxattr")),
+    reason="requires descriptor-based extended attributes",
+)
+def test_write_and_edit_preserve_existing_extended_attributes(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    attribute = "user.wisp-test"
+    os.setxattr(target, attribute, b"retained")
+    original = target.stat()
+    context = ToolContext(cwd=tmp_path)
+
+    run_tool(WriteTool(), {"path": "target.txt", "content": "replacement\n"}, context)
+    assert os.getxattr(target, attribute) == b"retained"
+    assert (target.stat().st_uid, target.stat().st_gid) == (original.st_uid, original.st_gid)
+
+    run_tool(
+        EditTool(),
+        {"path": "target.txt", "edits": [{"oldText": "replacement", "newText": "edited"}]},
+        context,
+    )
+    assert os.getxattr(target, attribute) == b"retained"
+    assert (target.stat().st_uid, target.stat().st_gid) == (original.st_uid, original.st_gid)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "O_PATH"),
+    reason="requires POSIX traversal-only directory descriptors",
+)
+def test_known_file_access_works_below_execute_only_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "execute-only"
+    parent.mkdir()
+    target = parent / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    parent.chmod(0o111)
+    context = ToolContext(cwd=tmp_path)
+
+    try:
+        assert run_tool(ReadTool(), {"path": "execute-only/target.txt"}, context).text == "original\n"
+        run_tool(
+            WriteTool(),
+            {"path": "execute-only/target.txt", "content": "replacement\n"},
+            context,
+        )
+        run_tool(
+            EditTool(),
+            {
+                "path": "execute-only/target.txt",
+                "edits": [{"oldText": "replacement", "newText": "edited"}],
+            },
+            context,
+        )
+    finally:
+        parent.chmod(0o755)
+
+    assert target.read_text(encoding="utf-8") == "edited\n"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit semantics")
 def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
@@ -477,6 +535,42 @@ def test_recursive_tools_reject_directory_over_entry_limit(
 
     with pytest.raises(ToolError, match=r"exceeds 2 entries"):
         run_tool(FindTool(), {"path": "."}, ToolContext(cwd=tmp_path))
+
+
+def test_grep_worker_stops_after_awaiting_task_is_cancelled(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    started = Event()
+    stopped = Event()
+
+    def fake_iter_files(
+        *args: object,
+        cancel_event: Event | None = None,
+        **kwargs: object,
+    ) -> Iterator[Path]:
+        started.set()
+        assert cancel_event is not None
+        cancel_event.wait(2)
+        stopped.set()
+        if False:
+            yield tmp_path / "unreachable"
+
+    monkeypatch.setattr(search_module, "_iter_files", fake_iter_files)
+
+    async def scenario() -> None:
+        async def invoke() -> None:
+            await GrepTool().run(
+                {"path": ".", "pattern": "needle"},
+                ToolContext(cwd=tmp_path),
+            )
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(invoke)
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            tasks.cancel_scope.cancel()
+        assert await anyio.to_thread.run_sync(stopped.wait, 1)
+
+    anyio.run(scenario)
 
 
 def test_find_worker_stops_after_awaiting_task_is_cancelled(
