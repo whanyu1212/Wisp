@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from wisp.tool_types import ToolFailureCode
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -16,4 +18,17 @@ class ToolResult:
 
 
 class ToolError(RuntimeError):
-    """Raised with a message intended to be safe to return to the model."""
+    """A safe, optionally actionable tool failure returned to the model."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: ToolFailureCode | None = None,
+        retryable: bool = False,
+        recovery_hint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.retryable = retryable
+        self.recovery_hint = recovery_hint

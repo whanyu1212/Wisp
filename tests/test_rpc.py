@@ -720,6 +720,48 @@ def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
         wisp_event_from_json(event.model_copy(update={"schema_version": 23}).model_dump_json())
 
 
+def test_tool_failure_metadata_round_trips_only_at_schema_v33() -> None:
+    event = ToolResultReady(
+        call_id="call-1",
+        name="grep",
+        output="Invalid grep pattern\nRecovery: Retry with literal=true.",
+        is_error=True,
+        failure_code="invalid_pattern",
+        retryable=True,
+        recovery_hint="Retry with literal=true.",
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    legacy = event.model_copy(update={"schema_version": 32})
+    payload = json.loads(legacy.model_dump_json())
+    assert "failure_code" not in payload
+    assert "retryable" not in payload
+    assert "recovery_hint" not in payload
+
+    payload["failure_code"] = "invalid_pattern"
+    with pytest.raises(ValueError, match="Tool failure metadata requires schema_version 33"):
+        wisp_event_from_json(json.dumps(payload))
+
+
+def test_tool_failure_metadata_requires_an_error_and_failure_code() -> None:
+    with pytest.raises(ValidationError, match="requires is_error=true"):
+        ToolResultReady(
+            call_id="call-1",
+            name="grep",
+            output="bad pattern",
+            is_error=False,
+            failure_code="invalid_pattern",
+        )
+    with pytest.raises(ValidationError, match="requires a tool failure code"):
+        ToolResultReady(
+            call_id="call-1",
+            name="grep",
+            output="bad pattern",
+            is_error=True,
+            retryable=True,
+        )
+
+
 @pytest.mark.parametrize("event_type", ["tool.result", "tool.execution.ended"])
 @pytest.mark.parametrize(
     ("field", "value"),

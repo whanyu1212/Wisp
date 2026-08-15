@@ -204,7 +204,7 @@ def test_token_usage_round_trips_on_current_schema_events() -> None:
         usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
     )
 
-    assert event.schema_version == 32
+    assert event.schema_version == 33
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 

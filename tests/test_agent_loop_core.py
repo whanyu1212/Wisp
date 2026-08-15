@@ -831,6 +831,9 @@ def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
         "name": "bash",
         "output": "Command exited with code 2: output",
         "is_error": True,
+        "failure_code": None,
+        "retryable": False,
+        "recovery_hint": None,
         "exit_code": 2,
         "output_has_exit_status": True,
         "before_text": "before\n",
@@ -1045,7 +1048,12 @@ def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def time_out(*_args: object, **_kwargs: object) -> object:
-        raise ToolError("Command timed out after 30 seconds")
+        raise ToolError(
+            "Command timed out after 30 seconds",
+            failure_code="timeout",
+            retryable=True,
+            recovery_hint="The result is inconclusive; retry with a suitable timeout.",
+        )
 
     monkeypatch.setattr(shell_module, "_run_shell", time_out)
 
@@ -1057,11 +1065,14 @@ def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
     )
 
     tool_result = provider.calls[1].tool_results[0]
-    assert tool_result.output == "Command timed out after 30 seconds"
+    assert tool_result.output.startswith("Command timed out after 30 seconds")
+    assert "Recovery:" in tool_result.output
     assert tool_result.is_error is True
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.output == tool_result.output
     assert result.is_error is True
+    assert result.failure_code == "timeout"
+    assert result.retryable is True
     assert result.exit_code is None
 
 

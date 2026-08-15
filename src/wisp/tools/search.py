@@ -1107,7 +1107,12 @@ def _build_matcher(
     try:
         expression = bounded_regex.compile(pattern, flags=flags)
     except bounded_regex.error as exc:
-        raise ToolError(f"Invalid grep pattern: {exc}") from exc
+        raise ToolError(
+            f"Invalid grep pattern: {exc}",
+            failure_code="invalid_pattern",
+            retryable=True,
+            recovery_hint="Retry with literal=true when searching for exact text.",
+        ) from exc
 
     def regex_matcher(line: str) -> bool:
         try:

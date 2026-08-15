@@ -548,7 +548,12 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
         if initial is None:
-            raise ToolError(f"File does not exist: {path.display}")
+            raise ToolError(
+                f"File does not exist: {path.display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            )
         descriptor = _open_existing(parent, initial)
         try:
             opened = os.fstat(descriptor)
@@ -709,7 +714,12 @@ def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> 
     with open_windows_parent(path):
         initial = _windows_leaf_info(path)
         if initial is None:
-            raise ToolError(f"File does not exist: {path.display}")
+            raise ToolError(
+                f"File does not exist: {path.display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            )
         initial_version = file_version(initial)
         with open_file(path) as descriptor:
             opened = os.fstat(descriptor)
@@ -735,7 +745,10 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
         occurrences = _find_occurrences(original, old_text)
         if len(occurrences) != 1:
             raise ToolError(
-                f"edit.oldText must match exactly once; found {len(occurrences)} matches"
+                f"edit.oldText must match exactly once; found {len(occurrences)} matches",
+                failure_code="stale_input",
+                retryable=True,
+                recovery_hint="Reread the relevant file range and retry with current exact text.",
             )
         start = occurrences[0]
         replacements.append((start, start + len(old_text), new_text))

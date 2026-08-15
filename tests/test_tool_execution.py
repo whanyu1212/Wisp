@@ -227,14 +227,35 @@ def test_executor_keeps_explicit_tool_errors_model_visible_and_bounded() -> None
     ended = _run_executor(_RaisingTool(ToolError(detail)))
 
     assert ended.is_error is True
+    assert ended.failure_code is None
     assert ended.output.endswith("...")
     assert len(ended.output) == 2_000
+
+
+def test_executor_projects_actionable_tool_failure_metadata() -> None:
+    ended = _run_executor(
+        _RaisingTool(
+            ToolError(
+                "Invalid grep pattern",
+                failure_code="invalid_pattern",
+                retryable=True,
+                recovery_hint="Retry with literal=true.",
+            )
+        )
+    )
+
+    assert ended.is_error is True
+    assert ended.failure_code == "invalid_pattern"
+    assert ended.retryable is True
+    assert ended.recovery_hint == "Retry with literal=true."
+    assert ended.output == "Invalid grep pattern\nRecovery: Retry with literal=true."
 
 
 def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:
     ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
 
     assert ended.is_error is True
+    assert ended.failure_code == "internal_error"
     assert ended.output == "Tool execution failed"
     assert "secret" not in ended.output
 

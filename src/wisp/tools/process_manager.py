@@ -352,7 +352,14 @@ class ProcessSupervisor:
                 release_ownership = cleanup_succeeded
                 if not cleanup_succeeded:
                     raise ToolError(PROCESS_TREE_CLEANUP_ERROR) from exc
-                raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
+                raise ToolError(
+                    f"Command timed out after {timeout:g} seconds",
+                    failure_code="timeout",
+                    retryable=True,
+                    recovery_hint=(
+                        "The result is inconclusive; retry with a suitable timeout if appropriate."
+                    ),
+                ) from exc
             except BaseException:
                 cleanup_task = asyncio.create_task(self._terminate_one_shot(process, wait=True))
                 try:

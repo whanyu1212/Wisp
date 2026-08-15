@@ -80,7 +80,11 @@ def secure_tool_path(
         try:
             absolute.relative_to(cwd)
         except ValueError as exc:
-            raise ToolError(f"Path is outside the tool working directory: {raw}") from exc
+            raise ToolError(
+                f"Path is outside the tool working directory: {raw}",
+                failure_code="path_outside_workspace",
+                recovery_hint="Use a path inside the session working directory.",
+            ) from exc
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
     if write and context.allowed_write_paths is not None:
@@ -250,7 +254,12 @@ def open_file(path: SecureToolPath) -> Iterator[int]:
         try:
             descriptor = os.open(parent.leaf, _FILE_FLAGS, dir_fd=parent.fd)
         except FileNotFoundError as exc:
-            raise ToolError(f"File does not exist: {path.display}") from exc
+            raise ToolError(
+                f"File does not exist: {path.display}",
+                failure_code="not_found",
+                retryable=True,
+                recovery_hint="Check the path with find or ls, then retry.",
+            ) from exc
         except OSError as exc:
             if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                 raise ToolError(f"Symbolic links are not allowed: {path.selected}") from exc
