@@ -57,7 +57,9 @@ class OverlaySurface(Protocol):
 class ComposerSurface(Protocol):
     """Prompt editor operations needed during overlay transitions."""
 
-    display: bool
+    def hide(self) -> None: ...
+
+    def show(self) -> None: ...
 
     def focus(self, scroll_visible: bool = True) -> object: ...
 
@@ -140,7 +142,7 @@ class TextualOverlayController:
             self._viewport_state = self._transcript.viewport_state()
         self._active_operation = None
         self._active_overlay = kind
-        self._composer.display = False
+        self._composer.hide()
 
     def close(self, kind: OverlayKind, *, restore_composer: bool = True) -> bool:
         """Close ``kind`` and restore its owned presentation state.
@@ -171,7 +173,7 @@ class TextualOverlayController:
         self._clear_viewport_state()
         self._active_overlay = None
         self._active_operation = operation
-        self._composer.display = False
+        self._composer.hide()
 
     def finish_operation(self, operation: OverlayOperation) -> bool:
         """Finish only the matching operation, ignoring stale completions."""
@@ -219,7 +221,7 @@ class TextualOverlayController:
         self._on_overlay_displaced(active)
 
     def _restore_composer(self) -> None:
-        self._composer.display = True
+        self._composer.show()
         self._composer.focus()
 
     def _restore_viewport_for(self, kind: OverlayKind) -> None:

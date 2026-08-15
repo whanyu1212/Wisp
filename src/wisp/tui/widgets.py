@@ -2833,7 +2833,6 @@ class _TextualFooterParts:
     left: str
     activity: str
     center: str
-    model: str
     billing_route: str
     session_cost: str
     context_wide: str
@@ -2845,10 +2844,7 @@ class _TextualFooterParts:
 
 
 def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
-    activity_parts = ["plan"] if snapshot.mode == "plan" else []
-    if snapshot.queued_follow_ups:
-        activity_parts.append(f"queued {snapshot.queued_follow_ups}")
-    activity = " · ".join(activity_parts)
+    activity = f"queued {snapshot.queued_follow_ups}" if snapshot.queued_follow_ups else ""
     cwd = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
     left = " · ".join(part for part in (cwd, activity) if part)
     center = (
@@ -2864,7 +2860,6 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
         left=left,
         activity=activity,
         center=center,
-        model=_sanitize_footer_text(snapshot.model or ""),
         billing_route=billing_route,
         session_cost=session_cost,
         context_wide=context_wide,
@@ -2969,17 +2964,11 @@ def _format_textual_footer_line(
     *,
     width: int | None,
 ) -> str:
-    full_right = _joined_footer_fields(
-        parts.model,
-        parts.billing,
-        parts.context_wide,
-    )
-    without_model = _joined_footer_fields(parts.billing, parts.context_wide)
+    full_right = _joined_footer_fields(parts.billing, parts.context_wide)
     compact_context = _joined_footer_fields(parts.billing, parts.context_compact)
     candidates = [
         (parts.left, parts.center, full_right),
         (parts.left, "", full_right),
-        (parts.left, "", without_model),
         (parts.left, "", compact_context),
     ]
     if parts.activity and parts.activity != parts.left:
@@ -2991,7 +2980,6 @@ def _format_textual_footer_line(
                 parts.billing_route,
                 parts.session_cost,
                 parts.context_compact,
-                parts.model,
             )
             if right
         )
@@ -3003,7 +2991,6 @@ def _format_textual_footer_line(
             parts.billing_route,
             parts.session_cost,
             parts.context_compact,
-            parts.model,
         )
         if right
     )
@@ -3021,9 +3008,139 @@ def _format_textual_footer_line(
         or parts.session_cost
         or parts.context_compact
         or parts.left
-        or parts.model
     )
     return _truncate_to_cell_width(fallback, selected_width)
+
+
+def _composer_metadata_fields(
+    snapshot: TuiViewSnapshot,
+    *,
+    width: int | None,
+) -> tuple[str, str, str]:
+    """Return mode, model, and provider fields that fit the composer meta row."""
+
+    mode = "Plan" if snapshot.mode == "plan" else "Build"
+    model = _sanitize_footer_text(snapshot.model or "")
+    provider = _sanitize_footer_text(snapshot.provider or "")
+    fields = (mode, model, provider)
+    if width is None:
+        return fields
+
+    selected_width = max(1, width)
+    if cell_len(_joined_footer_fields(*fields)) <= selected_width:
+        return fields
+    if cell_len(_joined_footer_fields(mode, model)) <= selected_width:
+        return mode, model, ""
+    if model:
+        available_model_width = selected_width - cell_len(mode) - cell_len(" · ")
+        if available_model_width > 0:
+            return mode, _truncate_to_cell_width(model, available_model_width), ""
+    return _truncate_to_cell_width(mode, selected_width), "", ""
+
+
+class ComposerMeta(Static):
+    """Mode and model metadata displayed inside the composer surface."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__(id=id, markup=False)
+        self._snapshot = TuiViewSnapshot(status="idle", input_hint="wisp> ")
+
+    def on_mount(self) -> None:
+        self._render_metadata()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._render_metadata()
+
+    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        self._snapshot = snapshot
+        self._render_metadata()
+
+    def refresh_theme(self) -> None:
+        """Re-resolve the mode accent after a live theme change."""
+
+        self._render_metadata()
+
+    def _render_metadata(self) -> None:
+        width = self.content_size.width
+        mode, model, provider = _composer_metadata_fields(
+            self._snapshot,
+            width=width if width > 0 else None,
+        )
+        rendered = Text()
+        theme = self.app.current_theme
+        for value, color in (
+            (mode, theme.accent),
+            (model, theme.foreground),
+            (provider, None),
+        ):
+            if not value:
+                continue
+            if rendered:
+                rendered.append(" · ")
+            start = len(rendered)
+            rendered.append(value)
+            if color is not None:
+                rendered.stylize(color, start, len(rendered))
+        self.update(rendered)
+
+
+class ComposerPanel(Vertical):
+    """Focusable composer body that groups the editor and its metadata."""
+
+    def __init__(
+        self,
+        *,
+        placeholder: str = "",
+        id: str | None = None,  # noqa: A002 - Textual's parameter name
+    ) -> None:
+        super().__init__(id=id)
+        self._input = PromptEditor(placeholder=placeholder, id="input")
+        self._metadata = ComposerMeta(id="composer-meta")
+
+    def compose(self) -> ComposeResult:
+        yield self._input
+        yield self._metadata
+
+    def on_mount(self) -> None:
+        self._update_layout()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_layout()
+
+    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        self._metadata.set_snapshot(snapshot)
+
+    def refresh_theme(self) -> None:
+        self._metadata.refresh_theme()
+
+    def hide(self) -> None:
+        """Hide all focusable composer content while an overlay owns the input slot."""
+
+        self._input.display = False
+        self.display = False
+
+    def show(self) -> None:
+        """Restore the composer and its input after its overlay closes."""
+
+        self.display = True
+        self._input.display = True
+
+    def focus(self, scroll_visible: bool = True) -> ComposerPanel:
+        self._input.focus(scroll_visible=scroll_visible)
+        return self
+
+    def on_click(self, event: events.Click) -> None:
+        """Make the panel's rail and padding a focus affordance, not dead space."""
+
+        if event.control is self:
+            self.focus()
+
+    def _update_layout(self) -> None:
+        # At twelve rows the metadata would consume enough transcript height to
+        # alter PageUp semantics. Keep the writing surface and hide only identity
+        # chrome until the terminal has room for both.
+        self.set_class(self.app.size.height < 16, "-compact")
+        self._input.styles.max_height = max(6, self.app.size.height // 3)
 
 
 class StatusBar(Static):
