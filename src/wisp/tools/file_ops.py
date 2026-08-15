@@ -756,7 +756,7 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
     previous_end = -1
     for start, end, _new_text in replacements:
         if start < previous_end:
-            raise ToolError("edit replacements must not overlap")
+            raise ToolArgumentError("edit replacements must not overlap")
         previous_end = end
     parts: list[str] = []
     cursor = 0

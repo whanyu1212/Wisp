@@ -630,6 +630,29 @@ def test_builtin_argument_validation_is_actionable(
     )
 
 
+def test_overlapping_edit_arguments_are_actionable(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("abc", encoding="utf-8")
+
+    with pytest.raises(ToolError) as caught:
+        run_tool(
+            EditTool(),
+            {
+                "path": "notes.txt",
+                "edits": [
+                    {"oldText": "abc", "newText": "first"},
+                    {"oldText": "bc", "newText": "second"},
+                ],
+            },
+            ToolContext(cwd=tmp_path),
+        )
+
+    assert caught.value.failure_code == "invalid_arguments"
+    assert caught.value.retryable is True
+    assert caught.value.recovery_hint == (
+        "Retry with arguments that match the tool's input schema."
+    )
+
+
 def test_grep_regex_timeout_is_actionable(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
