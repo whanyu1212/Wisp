@@ -93,6 +93,102 @@ def test_overwrite_publish_failure_preserves_original(
     assert not list(tmp_path.glob(".wisp-write-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor-relative writes")
+def test_write_and_edit_preserve_existing_hard_links(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    alias = tmp_path / "alias.txt"
+    os.link(target, alias)
+    original_id = (target.stat().st_dev, target.stat().st_ino)
+    context = ToolContext(cwd=tmp_path)
+
+    run_tool(WriteTool(), {"path": "target.txt", "content": "replacement\n"}, context)
+    assert alias.read_text(encoding="utf-8") == "replacement\n"
+
+    run_tool(
+        EditTool(),
+        {"path": "target.txt", "edits": [{"oldText": "replacement", "newText": "edited"}]},
+        context,
+    )
+
+    assert target.read_text(encoding="utf-8") == "edited\n"
+    assert alias.read_text(encoding="utf-8") == "edited\n"
+    assert (target.stat().st_dev, target.stat().st_ino) == original_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor-relative opens")
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (WriteTool(), {"path": "target.txt", "content": "replacement\n"}),
+        (
+            EditTool(),
+            {"path": "target.txt", "edits": [{"oldText": "original", "newText": "edited"}]},
+        ),
+    ],
+)
+def test_update_rejects_leaf_replaced_before_open(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    tool: object,
+    arguments: dict[str, object],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    real_open = file_ops_module.os.open
+    raced = False
+
+    def replace_before_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal raced
+        if not raced and path == "target.txt" and flags & os.O_ACCMODE == os.O_RDONLY:
+            raced = True
+            target.unlink()
+            os.link(outside, target)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(file_ops_module.os, "open", replace_before_open)
+
+    with pytest.raises(ToolError, match="File changed while opening"):
+        run_tool(tool, arguments, ToolContext(cwd=workspace))
+
+    assert raced is True
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+    assert target.read_text(encoding="utf-8") == "outside\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX hard-link dispatch")
+def test_failed_encoding_leaves_existing_hard_links_unchanged(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("original\n", encoding="utf-8")
+    alias = tmp_path / "alias.txt"
+    os.link(target, alias)
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(UnicodeEncodeError):
+        run_tool(WriteTool(), {"path": "target.txt", "content": "bad\ud800"}, context)
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert alias.read_text(encoding="utf-8") == "original\n"
+
+    with pytest.raises(UnicodeEncodeError):
+        run_tool(
+            EditTool(),
+            {"path": "target.txt", "edits": [{"oldText": "original", "newText": "bad\ud800"}]},
+            context,
+        )
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert alias.read_text(encoding="utf-8") == "original\n"
+
+
 def test_overwrite_preserves_existing_permission_bits(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("original\n", encoding="utf-8")
@@ -206,6 +302,9 @@ def test_guarded_windows_atomic_write_and_edit_algorithm(
 ) -> None:
     target = tmp_path / "target.txt"
     target.write_text("original\n", encoding="utf-8")
+    alias = tmp_path / "alias.txt"
+    os.link(target, alias)
+    original_id = (target.stat().st_dev, target.stat().st_ino)
     secure_path = secure_fs_module.secure_tool_path("target.txt", ToolContext(cwd=tmp_path))
 
     @contextmanager
@@ -221,6 +320,8 @@ def test_guarded_windows_atomic_write_and_edit_algorithm(
     assert outcome.created is False
     assert outcome.before_text == "original\n"
     assert target.read_text(encoding="utf-8") == "edited\n"
+    assert alias.read_text(encoding="utf-8") == "edited\n"
+    assert (target.stat().st_dev, target.stat().st_ino) == original_id
     assert not list(tmp_path.glob(".wisp-write-*"))
 
 

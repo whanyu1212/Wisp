@@ -197,9 +197,13 @@ def _open_existing(parent: OpenParent, info: os.stat_result) -> int:
         descriptor = os.open(parent.leaf, flags, dir_fd=parent.fd)
     except OSError as exc:
         raise ToolError(f"Could not open file {parent.path.display}: {exc}") from exc
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode):
         os.close(descriptor)
         raise ToolError(f"Not a regular file: {parent.path.display}")
+    if file_version(opened) != file_version(info):
+        os.close(descriptor)
+        raise ToolError(f"File changed while opening: {parent.path.selected}")
     return descriptor
 
 
@@ -229,6 +233,7 @@ def _write_existing_in_place(
     *,
     expected: tuple[int, int, int, int, int],
 ) -> None:
+    encoded = memoryview(content.encode("utf-8"))
     flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(parent.leaf, flags, dir_fd=parent.fd)
@@ -239,15 +244,59 @@ def _write_existing_in_place(
         if not stat.S_ISREG(opened.st_mode) or file_version(opened) != expected:
             raise ToolError(f"File changed while writing: {parent.path.selected}")
         os.ftruncate(descriptor, 0)
-        with os.fdopen(os.dup(descriptor), "w", encoding="utf-8", newline="") as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
+        while encoded:
+            written = os.write(descriptor, encoded)
+            if written <= 0:
+                raise OSError("write made no progress")
+            encoded = encoded[written:]
+        os.fsync(descriptor)
         current = stat_leaf(parent)
         if current is None or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise ToolError(f"File changed while writing: {parent.path.selected}")
     except OSError as exc:
         raise ToolError(f"Could not write file {parent.path.selected}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _write_path_existing_in_place(
+    path: SecureToolPath,
+    content: str,
+    *,
+    expected: tuple[int, int, int, int, int],
+    operation: str,
+) -> None:
+    encoded = memoryview(content.encode("utf-8"))
+    try:
+        if os.name == "nt":
+            from wisp.skills.filesystem import open_windows_writable_file
+
+            descriptor = open_windows_writable_file(path.path)
+        else:
+            descriptor = os.open(path.path, os.O_WRONLY)
+    except OSError as exc:
+        raise ToolError(f"Could not open file {path.display}: {exc}") from exc
+    try:
+        if os.name == "nt":
+            from wisp.skills.filesystem import resolved_open_file
+
+            if resolved_open_file(descriptor, path=path.path) != path.path.resolve(strict=False):
+                raise ToolError(f"File changed while {operation}: {path.selected}")
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or file_version(opened) != expected:
+            raise ToolError(f"File changed while {operation}: {path.selected}")
+        os.ftruncate(descriptor, 0)
+        while encoded:
+            written = os.write(descriptor, encoded)
+            if written <= 0:
+                raise OSError("write made no progress")
+            encoded = encoded[written:]
+        os.fsync(descriptor)
+        current = _windows_leaf_info(path)
+        if current is None or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ToolError(f"File changed while {operation}: {path.selected}")
+    except OSError as exc:
+        raise ToolError(f"Could not update file {path.selected}: {exc}") from exc
     finally:
         os.close(descriptor)
 
@@ -395,8 +444,10 @@ def _atomic_write(
         before_text: str | None = None
         initial_version: tuple[int, int, int, int, int] | None = None
         metadata: _ReplacementMetadata | None = None
+        link_count = 0
         if initial is not None:
             initial_version = file_version(initial)
+            link_count = initial.st_nlink
             metadata = _ReplacementMetadata(
                 mode=initial.st_mode,
                 uid=initial.st_uid,
@@ -413,6 +464,7 @@ def _atomic_write(
                     try:
                         opened = os.fstat(metadata_descriptor)
                         initial_version = file_version(opened)
+                        link_count = opened.st_nlink
                         metadata = _snapshot_replacement_metadata(metadata_descriptor, opened)
                     finally:
                         os.close(metadata_descriptor)
@@ -420,10 +472,15 @@ def _atomic_write(
                 try:
                     opened = os.fstat(descriptor)
                     initial_version = file_version(opened)
+                    link_count = opened.st_nlink
                     metadata = _snapshot_replacement_metadata(descriptor, opened)
                     before_text = _snapshot_descriptor(descriptor)
                 finally:
                     os.close(descriptor)
+
+        if overwrite and initial_version is not None and link_count > 1:
+            _write_existing_in_place(parent, content, expected=initial_version)
+            return _WriteOutcome(False, before_text, None)
 
         try:
             temporary, file_id = _write_temporary(parent, content, metadata=metadata)
@@ -482,6 +539,7 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
         try:
             opened = os.fstat(descriptor)
             version = file_version(opened)
+            link_count = opened.st_nlink
             metadata = _snapshot_replacement_metadata(descriptor, opened)
             try:
                 original = _read_descriptor(descriptor)
@@ -491,6 +549,9 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
             os.close(descriptor)
 
         replacement = _apply_edits(original, edits)
+        if link_count > 1:
+            _write_existing_in_place(parent, replacement, expected=version)
+            return
         try:
             temporary, _file_id = _write_temporary(parent, replacement, metadata=metadata)
         except ToolError as exc:
@@ -589,12 +650,23 @@ def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool
             try:
                 with open_file(path) as descriptor:
                     opened = os.fstat(descriptor)
-                    initial_version = file_version(opened)
+                    opened_version = file_version(opened)
+                    if opened_version != initial_version:
+                        raise ToolError(f"File changed while opening: {path.selected}")
+                    initial_version = opened_version
                     mode = opened.st_mode
                     before_text = _snapshot_descriptor(descriptor)
             except ToolError as exc:
                 if not isinstance(exc.__cause__, PermissionError):
                     raise
+        if overwrite and initial_version is not None:
+            _write_path_existing_in_place(
+                path,
+                content,
+                expected=initial_version,
+                operation="writing",
+            )
+            return _WriteOutcome(False, before_text, None)
         temporary, file_id = _write_windows_temporary(path, content, mode=mode)
         published = False
         try:
@@ -624,29 +696,23 @@ def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> 
         initial = _windows_leaf_info(path)
         if initial is None:
             raise ToolError(f"File does not exist: {path.display}")
+        initial_version = file_version(initial)
         with open_file(path) as descriptor:
             opened = os.fstat(descriptor)
             version = file_version(opened)
-            mode = opened.st_mode
+            if version != initial_version:
+                raise ToolError(f"File changed while opening: {path.selected}")
             try:
                 original = _read_descriptor(descriptor)
             except UnicodeDecodeError as exc:
                 raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
         replacement = _apply_edits(original, edits)
-        temporary, _file_id = _write_windows_temporary(path, replacement, mode=mode)
-        published = False
-        try:
-            current = _windows_leaf_info(path)
-            if current is None or file_version(current) != version:
-                raise ToolError(f"File changed while editing: {path.selected}")
-            os.replace(temporary, path.path)
-            published = True
-        except ToolError:
-            raise
-        except OSError as exc:
-            raise ToolError(f"Could not edit file: {path.selected}: {exc}") from exc
-        finally:
-            _cleanup_windows_temporary(temporary, destination=path.path, published=published)
+        _write_path_existing_in_place(
+            path,
+            replacement,
+            expected=version,
+            operation="editing",
+        )
 
 
 def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:

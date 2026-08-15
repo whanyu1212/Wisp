@@ -70,18 +70,24 @@ def open_windows_skill_directory_guard(path: Path) -> int:
     return handle
 
 
-def open_windows_file(path: Path) -> int:
-    handle = open_windows_file_handle(path)
+def open_windows_file(path: Path, *, writable: bool = False) -> int:
+    handle = open_windows_file_handle(path, writable=writable)
     try:
         if windows_handle_is_reparse_point(handle, path=path):
             raise OSError(errno.ELOOP, "skill resource is a reparse point", path)
-        return windows_handle_to_fd(handle)
+        return windows_handle_to_fd(handle, writable=writable)
     except BaseException:
         close_windows_handle(handle)
         raise
 
 
-def open_windows_file_handle(path: Path) -> int:
+def open_windows_writable_file(path: Path) -> int:
+    """Open an existing non-reparse file for in-place writes."""
+
+    return open_windows_file(path, writable=True)
+
+
+def open_windows_file_handle(path: Path, *, writable: bool = False) -> int:
     ctypes = importlib.import_module("ctypes")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
@@ -97,7 +103,7 @@ def open_windows_file_handle(path: Path) -> int:
     create_file.restype = ctypes.c_void_p
     handle = create_file(
         str(path),
-        0x80000000,  # GENERIC_READ
+        0x40000080 if writable else 0x80000000,  # write + attributes, or read
         0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately omit DELETE
         None,
         3,  # OPEN_EXISTING
@@ -141,9 +147,10 @@ def windows_handle_is_reparse_point(handle: int, *, path: Path) -> bool:
     return bool(info.file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
-def windows_handle_to_fd(handle: int) -> int:
+def windows_handle_to_fd(handle: int, *, writable: bool = False) -> int:
     msvcrt = importlib.import_module("msvcrt")
-    return int(msvcrt.open_osfhandle(handle, os.O_RDONLY))
+    flags = (os.O_WRONLY | getattr(os, "O_BINARY", 0)) if writable else os.O_RDONLY
+    return int(msvcrt.open_osfhandle(handle, flags))
 
 
 def open_windows_directory_guard(path: Path) -> int:
@@ -226,6 +233,7 @@ __all__ = [
     "open_path_file",
     "open_relative",
     "open_windows_directory_guard",
+    "open_windows_writable_file",
     "resolved_open_file",
     "resolved_windows_handle",
     "windows_handle_is_reparse_point",
