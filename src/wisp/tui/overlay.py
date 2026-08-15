@@ -27,6 +27,7 @@ class OverlayKind(StrEnum):
     prompt_history = "prompt_history"
     theme_picker = "theme_picker"
     context_status = "context_status"
+    diff_viewer = "diff_viewer"
     operation_indicator = "operation_indicator"
 
 

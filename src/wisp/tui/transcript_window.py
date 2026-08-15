@@ -57,6 +57,12 @@ class TranscriptWindow[Entry]:
         return tuple(self._entries[self._start : self._start + self.capacity])
 
     @property
+    def visible_append_capacity(self) -> int:
+        """Return how many appended entries fit in the current mounted slice."""
+
+        return self.capacity - len(self.visible)
+
+    @property
     def is_at_oldest(self) -> bool:
         return self._start == 0
 

@@ -13,17 +13,31 @@ _DARK_DIFF_VARIABLES = {
     "diff-add-fg": "#8fbfa8",
     "diff-add-bg": "#16241e",
     "diff-add-token-bg": "#22432f",
+    "diff-add-gutter-bg": "#102018",
+    "diff-add-sign-fg": "#b4d8c3",
     "diff-del-fg": "#cf95a1",
     "diff-del-bg": "#241a1d",
     "diff-del-token-bg": "#4a2630",
+    "diff-del-gutter-bg": "#30181d",
+    "diff-del-sign-fg": "#e3adb8",
+    "diff-line-number-fg": "#a1a9b0",
+    "diff-context-fg": "#b2b9c0",
+    "diff-hunk-fg": "#9dc3d3",
 }
 _LIGHT_DIFF_VARIABLES = {
     "diff-add-fg": "#265c48",
     "diff-add-bg": "#eaf5ee",
     "diff-add-token-bg": "#c3e4d0",
+    "diff-add-gutter-bg": "#d7ecdf",
+    "diff-add-sign-fg": "#1d6149",
     "diff-del-fg": "#8a3548",
     "diff-del-bg": "#fbecef",
     "diff-del-token-bg": "#f4ccd4",
+    "diff-del-gutter-bg": "#f5dce2",
+    "diff-del-sign-fg": "#842f43",
+    "diff-line-number-fg": "#4e5a63",
+    "diff-context-fg": "#45515a",
+    "diff-hunk-fg": "#315e73",
 }
 
 

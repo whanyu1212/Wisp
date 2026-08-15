@@ -95,11 +95,24 @@ def test_append_only_moves_window_for_tail_following() -> None:
     window.replace(range(6))
     window.shift_older()
 
+    assert window.visible_append_capacity == 0
     window.append((6,), follow_tail=False)
 
     assert window.visible == (2, 3, 4)
     window.append((7,), follow_tail=True)
     assert window.visible == (5, 6, 7)
+
+
+def test_underfilled_window_reports_visible_append_capacity() -> None:
+    window = TranscriptWindow[int](capacity=3, shift=1)
+    window.replace((0, 1))
+
+    assert window.visible_append_capacity == 1
+
+    window.append((2,), follow_tail=False)
+
+    assert window.visible == (0, 1, 2)
+    assert window.visible_append_capacity == 0
 
 
 def test_prepend_evicts_newest_entries_when_retention_is_full() -> None:

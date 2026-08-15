@@ -597,3 +597,167 @@ def test_history_controller_releases_evicted_live_widget_identity() -> None:
     )
 
     assert surface.history_labels == ["assistant: evicted response"]
+
+
+def test_history_controller_recovers_evicted_prefix_while_reader_is_browsing() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    controller.recover_evicted_entries(
+        (
+            HistoricalTranscriptMessage(role="assistant", content="evicted"),
+            HistoricalTranscriptMessage(role="assistant", content="surviving"),
+        )
+    )
+
+    assert [widget.label for widget in surface.widgets] == [
+        "assistant: evicted",
+        "assistant: surviving",
+    ]
+    assert surface.prepend_starts == surface.prepend_finishes == 1
+    assert surface.follow_requests == 0
+
+
+def test_history_recovery_drops_prefix_already_retained_before_live_entries() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    retained = HistoricalTranscriptMessage(
+        role="assistant",
+        content="retained",
+        entry_id="retained",
+    )
+    controller.replace_entries((retained,), session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    controller.recover_evicted_entries(
+        (
+            retained,
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="evicted",
+                entry_id="evicted",
+            ),
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="surviving",
+                entry_id="surviving",
+            ),
+        )
+    )
+
+    assert [widget.label for widget in surface.widgets] == [
+        "resumed session: Windowed",
+        "assistant: retained",
+        "assistant: evicted",
+        "assistant: surviving",
+    ]
+
+
+def test_history_recovery_keeps_distinct_repeated_message_after_retained_history() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    retained = HistoricalTranscriptMessage(
+        role="assistant",
+        content="repeated",
+        entry_id="retained",
+    )
+    controller.replace_entries((retained,), session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: repeated", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "repeated", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    controller.recover_evicted_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="repeated",
+                entry_id="evicted",
+            ),
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="surviving",
+                entry_id="surviving",
+            ),
+        )
+    )
+
+    assert [widget.label for widget in surface.widgets] == [
+        "resumed session: Windowed",
+        "assistant: repeated",
+        "assistant: repeated",
+        "assistant: surviving",
+    ]
+
+
+def test_history_recovery_does_not_evict_the_oldest_full_retained_window() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    retained = _messages("assistant", "retained", TUI_TRANSCRIPT_WINDOW_SIZE)
+    controller.replace_entries(retained, session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    recovered = controller.recover_evicted_entries(
+        (
+            *retained,
+            HistoricalTranscriptMessage(role="assistant", content="evicted"),
+            HistoricalTranscriptMessage(role="assistant", content="surviving"),
+        )
+    )
+
+    assert not recovered
+    assert surface.history_labels[:-1] == [f"assistant: retained {index}" for index in range(60)]
+    assert surface.widgets[-1].label == "assistant: surviving"
+
+
+def test_history_recovery_defers_entries_outside_the_mounted_slice() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    retained = _messages("assistant", "retained", TUI_TRANSCRIPT_WINDOW_SIZE)
+    controller.replace_entries(retained, session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    recovered = controller.recover_evicted_entries(
+        (
+            *retained,
+            HistoricalTranscriptMessage(role="assistant", content="evicted"),
+            HistoricalTranscriptMessage(role="assistant", content="surviving"),
+        )
+    )
+
+    assert not recovered
+    assert surface.history_labels[:-1] == [
+        f"assistant: retained {index}" for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+    ]
+    assert surface.widgets[-1].label == "assistant: surviving"

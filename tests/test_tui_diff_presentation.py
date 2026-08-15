@@ -6,13 +6,19 @@ from textual.content import Content
 
 from wisp.tui.diff_presentation import (
     DIFF_ADD_COUNT_STYLE,
+    DIFF_ADD_GUTTER_STYLE,
+    DIFF_ADD_SIGN_STYLE,
     DIFF_ADD_STYLE,
     DIFF_ADD_TOKEN_STYLE,
     DIFF_CONTEXT_STYLE,
     DIFF_DEL_COUNT_STYLE,
+    DIFF_DEL_GUTTER_STYLE,
+    DIFF_DEL_SIGN_STYLE,
     DIFF_DEL_STYLE,
     DIFF_DEL_TOKEN_STYLE,
     DIFF_EXPANDED_BYTES,
+    DIFF_GUTTER_STYLE,
+    DIFF_HUNK_STYLE,
     DIFF_META_STYLE,
     DiffOperation,
     DiffRow,
@@ -63,6 +69,39 @@ def test_header_counts_take_the_diff_hues_without_a_band() -> None:
     assert " on " not in DIFF_DEL_COUNT_STYLE
 
 
+def test_row_painter_separates_gutter_sign_hunk_and_source_roles() -> None:
+    addition = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.addition, "added", new_line=7)),
+        width=40,
+        show_line_numbers=True,
+    )
+    deletion = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.deletion, "removed", old_line=3)),
+        width=40,
+        show_line_numbers=True,
+    )
+    context = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.context, "kept", old_line=4, new_line=8)),
+        width=40,
+        show_line_numbers=True,
+    )
+    hunk = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.hunk, "@@ -3 +7 @@")),
+        width=40,
+        show_line_numbers=True,
+    )
+
+    assert DIFF_ADD_GUTTER_STYLE in _styles_at(addition, "7")
+    assert DIFF_ADD_SIGN_STYLE in _styles_at(addition, "+")
+    assert DIFF_ADD_STYLE in _styles_at(addition, "added")
+    assert DIFF_DEL_GUTTER_STYLE in _styles_at(deletion, "3")
+    assert DIFF_DEL_SIGN_STYLE in _styles_at(deletion, "-")
+    assert DIFF_DEL_STYLE in _styles_at(deletion, "removed")
+    assert DIFF_GUTTER_STYLE in _styles_at(context, "4")
+    assert DIFF_CONTEXT_STYLE in _styles_at(context, "kept")
+    assert DIFF_HUNK_STYLE in _styles_at(hunk, "@@")
+
+
 def test_structured_diff_colors_counts_independently() -> None:
     presentation = build_edit_diff_presentation(_edit("old\n", "new\n"))
 
@@ -102,7 +141,7 @@ def test_changed_rows_pad_to_full_width_so_the_tint_forms_a_band() -> None:
         assert len(content.plain) == 40 + 2
         assert content.plain.endswith(" ")
         # The trailing fill carries the row tint, not a bare unstyled gap.
-        assert style in _styles_at(content, content.plain[-1])
+        assert str(content.spans[-1].style) == style
 
 
 def test_changed_rows_are_not_padded_past_the_available_width() -> None:

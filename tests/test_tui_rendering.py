@@ -236,6 +236,9 @@ def test_history_entries_from_rpc_messages_pairs_tool_calls_and_results() -> Non
             truncated=True,
         ),
     )
+    assert isinstance(entries[0], HistoricalTranscriptMessage)
+    assert isinstance(entries[1], HistoricalTranscriptMessage)
+    assert (entries[0].entry_id, entries[1].entry_id) == ("user-1", "assistant-1")
     assert history_from_rpc_messages(tuple()) == ()
 
 
@@ -1196,14 +1199,20 @@ def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() ->
     assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
 
 
-@pytest.mark.parametrize("theme_name", ["wisp", "wisp-light"])
+@pytest.mark.parametrize("theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-light"])
 @pytest.mark.parametrize(
     ("foreground", "background"),
     [
         ("diff-add-fg", "diff-add-bg"),
         ("diff-add-fg", "diff-add-token-bg"),
+        ("diff-line-number-fg", "diff-add-gutter-bg"),
+        ("diff-add-sign-fg", "diff-add-gutter-bg"),
         ("diff-del-fg", "diff-del-bg"),
         ("diff-del-fg", "diff-del-token-bg"),
+        ("diff-line-number-fg", "diff-del-gutter-bg"),
+        ("diff-del-sign-fg", "diff-del-gutter-bg"),
+        ("diff-context-fg", "background"),
+        ("diff-hunk-fg", "background"),
     ],
 )
 def test_diff_theme_colors_clear_contrast_thresholds(

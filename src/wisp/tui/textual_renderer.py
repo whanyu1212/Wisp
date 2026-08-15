@@ -346,6 +346,12 @@ class TextualTuiRenderer:
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
     ) -> bool:
+        if self.app.consume_live_history_recovery() is not None:
+            if self._history.recover_evicted_entries(entries):
+                self.app.live_history_reloaded()
+                return True
+            self.app.live_history_recovery_deferred()
+            return False
         if self._history.replace_latest_entries(entries):
             self.app.live_history_reloaded()
             return True

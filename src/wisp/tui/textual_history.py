@@ -371,6 +371,45 @@ class TextualHistoryController:
             self._surface.finish_history_render()
         return True
 
+    def recover_evicted_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> bool:
+        """Insert the durable prefix missing from a bounded live transcript.
+
+        A tail reload replaces the retained window only while the reader follows
+        live output. When the reader has moved upward, doing that would yank the
+        viewport back to the tail. Instead retain just the durable entries that
+        precede the surviving live suffix and mount them before that suffix.
+        """
+
+        snapshot = self._latest_reload_live_entries
+        live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
+        self._latest_reload_live_entries = None
+        recovered = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
+        recovered = self._exclude_retained_overlap(recovered)
+        if not recovered:
+            return True
+        if len(recovered) > self._window.visible_append_capacity:
+            # Keep the reader's mounted slice stable. Entries appended beyond it
+            # would remain invisible while falsely completing recovery; returning
+            # to live output will instead perform the deferred latest-page reload.
+            return False
+        if (
+            self._window.is_at_oldest
+            and len(self._window.entries) + len(recovered) > self._window.retained_capacity
+        ):
+            # The reader is viewing the oldest retained entries. Appending a
+            # latest-page prefix here would evict that exact edge and replace the
+            # anchor under their viewport; defer tail reconciliation instead.
+            return False
+        self._surface.begin_history_prepend()
+        self._surface.begin_history_render()
+        try:
+            self._discard_entries(self._window.append(self._retain(recovered), follow_tail=False))
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+            self._surface.finish_history_prepend()
+        return True
+
     def capture_latest_reload_live_entries(self) -> None:
         """Capture live output at the point the durable latest-page request starts."""
 
@@ -435,6 +474,22 @@ class TextualHistoryController:
             end -= 1
             live_end -= 1
         return entries[:end]
+
+    def _exclude_retained_overlap(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+    ) -> tuple[HistoricalTranscriptEntry, ...]:
+        """Drop the recovered prefix already contiguous with retained history."""
+
+        retained = tuple(item.entry for item in self._window.entries)
+        for overlap in range(min(len(entries), len(retained)), 0, -1):
+            if all(
+                _history_entry_id(left) is not None
+                and _history_entry_id(left) == _history_entry_id(right)
+                for left, right in zip(retained[-overlap:], entries[:overlap], strict=True)
+            ):
+                return entries[overlap:]
+        return entries
 
     def _discard_entries(self, entries: Iterable[_RetainedHistoryEntry]) -> None:
         """Release pairing state that only referenced evicted history entries."""
@@ -730,6 +785,14 @@ class TextualHistoryController:
             ),
             entry.truncated,
         )
+
+
+def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
+    if isinstance(entry, HistoricalTranscriptMessage):
+        return entry.entry_id
+    if isinstance(entry, HistoricalSkillInvocation):
+        return entry.entry_id
+    return entry.card_id
 
 
 def _history_entry_matches_live(
