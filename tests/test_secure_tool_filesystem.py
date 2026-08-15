@@ -27,6 +27,10 @@ def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -
     return anyio.run(run)
 
 
+def mark_git_repository(root: Path) -> None:
+    (root / ".git").mkdir()
+
+
 def test_read_rejects_final_symlink_even_when_outside_access_is_allowed(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("secret\n", encoding="utf-8")
@@ -279,6 +283,7 @@ def test_recursive_tools_skip_directory_symlinks_even_when_opted_out(tmp_path: P
 
 
 def test_recursive_tools_honor_repository_ignore_files(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
     (tmp_path / ".ignore").write_text("ignored.txt\n", encoding="utf-8")
     (tmp_path / ".rgignore").write_text("rg-only.py\n", encoding="utf-8")
@@ -297,7 +302,24 @@ def test_recursive_tools_honor_repository_ignore_files(tmp_path: Path) -> None:
     assert find.data["files"] == ["visible.py"]
 
 
+def test_non_repository_search_ignores_only_tool_specific_ignore_files(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text("git-only.txt\n", encoding="utf-8")
+    (tmp_path / ".ignore").write_text("tool-only.txt\n", encoding="utf-8")
+    for name in ("git-only.txt", "tool-only.txt", "visible.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["git-only.txt:1:needle", "visible.txt:1:needle"]
+    assert find.data["files"] == ["git-only.txt", "visible.txt"]
+
+
 def test_subdirectory_search_inherits_ancestor_ignore_files(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("subdir/ignored.txt\n", encoding="utf-8")
     subdir = tmp_path / "subdir"
     subdir.mkdir()
@@ -330,6 +352,7 @@ def test_recursive_tools_honor_repository_local_excludes(tmp_path: Path) -> None
 def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
     tmp_path: Path,
 ) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("foo/**\n!foo/bar.txt\n", encoding="utf-8")
     foo = tmp_path / "foo"
     foo.mkdir()
@@ -345,6 +368,7 @@ def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
 
 
 def test_recursive_tools_do_not_reinclude_below_ignored_parent(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("foo/\n!foo/bar.txt\n", encoding="utf-8")
     foo = tmp_path / "foo"
     foo.mkdir()
@@ -381,6 +405,7 @@ def test_recursive_tools_search_unignored_common_directory_names(tmp_path: Path)
 def test_recursive_tools_preserve_ignore_source_precedence_across_levels(
     tmp_path: Path,
 ) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("higher/a.txt\n", encoding="utf-8")
     (tmp_path / ".rgignore").write_text("lower/a.txt\n", encoding="utf-8")
     lower = tmp_path / "lower"
@@ -401,6 +426,7 @@ def test_recursive_tools_preserve_ignore_source_precedence_across_levels(
 
 
 def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
     generated = tmp_path / "generated"
     generated.mkdir()
@@ -416,6 +442,19 @@ def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
 
     assert default.text == "No matches"
     assert explicit.data["matches"] == ["generated/result.txt:1:needle"]
+
+
+def test_grep_explicit_glob_supports_brace_alternatives(tmp_path: Path) -> None:
+    for name in ("app.js", "app.py", "app.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "glob": "*.{py,js}"},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["matches"] == ["app.js:1:needle", "app.py:1:needle"]
 
 
 def test_grep_explicit_glob_reincludes_hidden_files(tmp_path: Path) -> None:
@@ -439,6 +478,7 @@ def test_grep_explicit_glob_reincludes_hidden_files(tmp_path: Path) -> None:
 def test_grep_negated_glob_excludes_matches_without_overriding_ignores(
     tmp_path: Path,
 ) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
     (tmp_path / "excluded.txt").write_text("needle\n", encoding="utf-8")
     (tmp_path / "ignored.py").write_text("needle\n", encoding="utf-8")
@@ -456,6 +496,7 @@ def test_grep_negated_glob_excludes_matches_without_overriding_ignores(
 
 
 def test_recursive_tools_preserve_valid_non_utf8_ignore_rules(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_bytes(b"ignored.txt\n\xff\n")
     (tmp_path / "ignored.txt").write_text("needle\n", encoding="utf-8")
     (tmp_path / "visible.txt").write_text("needle\n", encoding="utf-8")
@@ -472,6 +513,7 @@ def test_recursive_tools_reject_oversized_ignore_file(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 32)
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("x" * 33, encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -496,6 +538,7 @@ def test_subdirectory_search_propagates_ancestor_ignore_file_limit(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 8)
+    mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("x" * 9, encoding="utf-8")
     (tmp_path / "nested").mkdir()
 
@@ -513,6 +556,7 @@ def test_path_fallback_propagates_nested_ignore_file_limit(
     monkeypatch.setattr(search_module, "_MAX_IGNORE_FILE_BYTES", 8)
     nested = tmp_path / "nested"
     nested.mkdir()
+    mark_git_repository(nested)
     (nested / ".gitignore").write_text("x" * 9, encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 

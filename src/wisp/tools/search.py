@@ -51,6 +51,8 @@ _IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
 _MAX_IGNORE_FILE_BYTES = 1_000_000
 _MAX_IGNORE_FILE_PATTERNS = 10_000
 _MAX_DIRECTORY_ENTRIES = 100_000
+_MAX_GIT_MARKER_BYTES = 4_096
+_MAX_GLOB_ALTERNATIVES = 256
 
 
 class _SearchInputLimitError(ToolError):
@@ -531,16 +533,18 @@ def _iter_files(
         return
     try:
         with open_directory(secure_path) as descriptor:
+            ancestor_specs, in_git_repository = _ancestor_ignore_specs(
+                secure_path.path,
+                context,
+                cancel_event=cancel_event,
+            )
             yield from _walk_directory(
                 descriptor,
                 secure_path.path,
                 context,
-                ignore_specs=_ancestor_ignore_specs(
-                    secure_path.path,
-                    context,
-                    cancel_event=cancel_event,
-                ),
+                ignore_specs=ancestor_specs,
                 ignore_override_glob=ignore_override_glob,
+                in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
             )
             return
@@ -566,34 +570,41 @@ def _ancestor_ignore_specs(
     context: ToolContext,
     *,
     cancel_event: Event | None = None,
-) -> tuple[_IgnoreSpec, ...]:
+) -> tuple[tuple[_IgnoreSpec, ...], bool]:
     cwd = context.cwd.resolve(strict=False)
     try:
         relative = path.relative_to(cwd)
     except ValueError:
-        return ()
+        return (), False
     specs: list[_IgnoreSpec] = []
+    in_git_repository = False
     current = cwd
     for part in relative.parts:
         if cancel_event is not None and cancel_event.is_set():
-            return tuple(specs)
+            return tuple(specs), in_git_repository
         selected = secure_tool_path(str(current), context)
         try:
             with open_directory(selected) as descriptor:
+                in_git_repository = in_git_repository or _is_git_repository_root(
+                    descriptor,
+                    current,
+                    context,
+                )
                 specs.extend(
                     _read_ignore_specs(
                         descriptor,
                         current,
                         context,
+                        include_gitignore=in_git_repository,
                         cancel_event=cancel_event,
                     )
                 )
         except _SearchInputLimitError:
             raise
         except ToolError:
-            return tuple(specs)
+            return tuple(specs), in_git_repository
         current /= part
-    return tuple(specs)
+    return tuple(specs), in_git_repository
 
 
 def _walk_directory(
@@ -603,14 +614,21 @@ def _walk_directory(
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
     ignore_override_glob: str | None,
+    in_git_repository: bool = False,
     cancel_event: Event | None = None,
 ) -> Iterable[Path]:
     if cancel_event is not None and cancel_event.is_set():
         return
+    in_git_repository = in_git_repository or _is_git_repository_root(
+        descriptor,
+        path,
+        context,
+    )
     ignore_specs += _read_ignore_specs(
         descriptor,
         path,
         context,
+        include_gitignore=in_git_repository,
         cancel_event=cancel_event,
     )
     try:
@@ -656,6 +674,7 @@ def _walk_directory(
                             context,
                             ignore_specs=ignore_specs,
                             ignore_override_glob=ignore_override_glob,
+                            in_git_repository=in_git_repository,
                             cancel_event=cancel_event,
                         )
                 except _SearchInputLimitError:
@@ -676,6 +695,7 @@ def _walk_directory(
                     context,
                     ignore_specs=ignore_specs,
                     ignore_override_glob=ignore_override_glob,
+                    in_git_repository=in_git_repository,
                     cancel_event=cancel_event,
                 )
             finally:
@@ -735,26 +755,74 @@ def _read_bounded_ignore_lines(descriptor: int, source: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _is_git_repository_root(
+    descriptor: int | Path,
+    directory: Path,
+    context: ToolContext,
+) -> bool:
+    """Detect a non-symlink Git directory or worktree marker."""
+
+    marker_fd: int | None = None
+    try:
+        if isinstance(descriptor, int):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            marker_fd = os.open(".git", flags, dir_fd=descriptor)
+            info = os.fstat(marker_fd)
+            if stat.S_ISDIR(info.st_mode):
+                return True
+            if not stat.S_ISREG(info.st_mode):
+                return False
+        else:
+            marker = secure_tool_path(str(directory / ".git"), context)
+            try:
+                with open_directory(marker):
+                    return True
+            except ToolError:
+                with open_file(marker) as opened:
+                    marker_fd = os.dup(opened)
+        with os.fdopen(marker_fd, "rb") as marker_file:
+            marker_fd = None
+            content = marker_file.read(_MAX_GIT_MARKER_BYTES + 1)
+        if len(content) > _MAX_GIT_MARKER_BYTES:
+            return False
+        first_line = content.splitlines()[0] if content else b""
+        return first_line.startswith(b"gitdir: ") and bool(
+            first_line.removeprefix(b"gitdir: ").strip()
+        )
+    except (FileNotFoundError, OSError, ToolError):
+        return False
+    finally:
+        if marker_fd is not None:
+            os.close(marker_fd)
+
+
 def _read_ignore_specs(
     descriptor: int | Path,
     directory: Path,
     context: ToolContext,
     *,
+    include_gitignore: bool,
     cancel_event: Event | None = None,
 ) -> tuple[_IgnoreSpec, ...]:
     if cancel_event is not None and cancel_event.is_set():
         return ()
     specs: list[_IgnoreSpec] = []
-    repository_exclude = _read_repository_exclude(
-        descriptor,
-        directory,
-        context,
-        cancel_event=cancel_event,
+    repository_exclude = (
+        _read_repository_exclude(
+            descriptor,
+            directory,
+            context,
+            cancel_event=cancel_event,
+        )
+        if include_gitignore
+        else None
     )
     if repository_exclude is not None:
         specs.append(repository_exclude)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     for priority, name in enumerate(_IGNORE_FILES, start=1):
+        if name == ".gitignore" and not include_gitignore:
+            continue
         if cancel_event is not None and cancel_event.is_set():
             return tuple(specs)
         try:
@@ -936,12 +1004,66 @@ def _is_exclusion_glob(pattern: str) -> bool:
     return pattern.startswith("!")
 
 
+def _expand_brace_alternatives(pattern: str) -> tuple[str, ...]:
+    expanded: list[str] = []
+
+    def expand(candidate: str) -> None:
+        escaped = False
+        opening: int | None = None
+        for index, character in enumerate(candidate):
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == "{":
+                opening = index
+                break
+        if opening is None:
+            expanded.append(candidate)
+            if len(expanded) > _MAX_GLOB_ALTERNATIVES:
+                raise ToolError(f"glob expands beyond {_MAX_GLOB_ALTERNATIVES} alternatives")
+            return
+
+        depth = 0
+        escaped = False
+        separators: list[int] = []
+        closing: int | None = None
+        for index in range(opening, len(candidate)):
+            character = candidate[index]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    closing = index
+                    break
+            elif character == "," and depth == 1:
+                separators.append(index)
+        if closing is None or not separators:
+            expanded.append(candidate)
+            return
+
+        prefix = candidate[:opening]
+        suffix = candidate[closing + 1 :]
+        boundaries = [opening, *separators, closing]
+        for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+            expand(prefix + candidate[start + 1 : end] + suffix)
+
+    expand(pattern)
+    return tuple(dict.fromkeys(expanded))
+
+
 def _matches_glob(path: Path, pattern: str, context: ToolContext) -> bool:
     exclusion = _is_exclusion_glob(pattern)
     effective_pattern = pattern[1:] if exclusion else pattern
     display_path = display_tool_path(path, context)
-    matched = fnmatch.fnmatch(path.name, effective_pattern) or fnmatch.fnmatch(
-        display_path, effective_pattern
+    matched = any(
+        fnmatch.fnmatch(path.name, alternative) or fnmatch.fnmatch(display_path, alternative)
+        for alternative in _expand_brace_alternatives(effective_pattern)
     )
     return not matched if exclusion else matched
 
