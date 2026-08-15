@@ -6,7 +6,6 @@ import codecs
 import fnmatch
 import heapq
 import os
-import re
 import stat
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
@@ -14,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
+import regex as bounded_regex
+from pathspec import GitIgnoreSpec
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
@@ -42,6 +43,8 @@ IGNORED_DIRS = {
 }
 RG_MATCH_SEPARATOR = "\x1f"
 RG_CONTEXT_SEPARATOR = "\x1e"
+_REGEX_TIMEOUT_SECONDS = 0.05
+_IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
 
 
 class GrepTool:
@@ -419,7 +422,12 @@ def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[P
     secure_path = _coerce_secure_path(path, context)
     try:
         with open_directory(secure_path) as descriptor:
-            yield from _walk_directory(descriptor, secure_path.path, context)
+            yield from _walk_directory(
+                descriptor,
+                secure_path.path,
+                context,
+                ignore_specs=(),
+            )
             return
     except ToolError as directory_error:
         try:
@@ -431,7 +439,20 @@ def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[P
             raise directory_error from None
 
 
-def _walk_directory(descriptor: int | Path, path: Path, context: ToolContext) -> Iterable[Path]:
+@dataclass(frozen=True, slots=True)
+class _IgnoreSpec:
+    base: Path
+    spec: GitIgnoreSpec
+
+
+def _walk_directory(
+    descriptor: int | Path,
+    path: Path,
+    context: ToolContext,
+    *,
+    ignore_specs: tuple[_IgnoreSpec, ...],
+) -> Iterable[Path]:
+    ignore_specs += _read_ignore_specs(descriptor, path, context)
     try:
         with os.scandir(descriptor) as entries:
             retained = sorted(entries, key=lambda entry: entry.name)
@@ -454,13 +475,22 @@ def _walk_directory(descriptor: int | Path, path: Path, context: ToolContext) ->
         if stat.S_ISLNK(info.st_mode):
             continue
         if stat.S_ISDIR(info.st_mode):
-            if name in IGNORED_DIRS or _is_hidden(name):
+            if (
+                name in IGNORED_DIRS
+                or _is_hidden(name)
+                or _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
+            ):
                 continue
             if isinstance(descriptor, Path):
                 child_path = secure_tool_path(str(candidate), context)
                 try:
                     with open_directory(child_path) as child:
-                        yield from _walk_directory(child, candidate, context)
+                        yield from _walk_directory(
+                            child,
+                            candidate,
+                            context,
+                            ignore_specs=ignore_specs,
+                        )
                 except ToolError:
                     continue
                 continue
@@ -471,16 +501,64 @@ def _walk_directory(descriptor: int | Path, path: Path, context: ToolContext) ->
                 # candidate; skip it rather than falling back to path traversal.
                 continue
             try:
-                yield from _walk_directory(child, candidate, context)
+                yield from _walk_directory(
+                    child,
+                    candidate,
+                    context,
+                    ignore_specs=ignore_specs,
+                )
             finally:
                 os.close(child)
             continue
         if (
             stat.S_ISREG(info.st_mode)
             and not _is_hidden(name)
+            and not _is_ignored(candidate, is_directory=False, ignore_specs=ignore_specs)
             and _is_path_within_tool_cwd(candidate, context)
         ):
             yield candidate
+
+
+def _read_ignore_specs(
+    descriptor: int | Path, directory: Path, context: ToolContext
+) -> tuple[_IgnoreSpec, ...]:
+    specs: list[_IgnoreSpec] = []
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    for name in _IGNORE_FILES:
+        try:
+            if isinstance(descriptor, int):
+                ignore_fd = os.open(name, flags, dir_fd=descriptor)
+                try:
+                    if not stat.S_ISREG(os.fstat(ignore_fd).st_mode):
+                        continue
+                    with os.fdopen(os.dup(ignore_fd), "r", encoding="utf-8") as file:
+                        lines = tuple(file)
+                finally:
+                    os.close(ignore_fd)
+            else:
+                ignore_path = secure_tool_path(str(directory / name), context)
+                with open_file(ignore_path) as ignore_fd:
+                    with os.fdopen(os.dup(ignore_fd), "r", encoding="utf-8") as file:
+                        lines = tuple(file)
+        except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
+            continue
+        specs.append(_IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines)))
+    return tuple(specs)
+
+
+def _is_ignored(path: Path, *, is_directory: bool, ignore_specs: tuple[_IgnoreSpec, ...]) -> bool:
+    ignored = False
+    for rules in ignore_specs:
+        try:
+            relative = path.relative_to(rules.base).as_posix()
+        except ValueError:
+            continue
+        if is_directory:
+            relative += "/"
+        match = rules.spec.check_file(relative).include
+        if match is not None:
+            ignored = match
+    return ignored
 
 
 def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
@@ -521,14 +599,17 @@ def _build_matcher(
 
         return literal_matcher
 
-    flags = re.IGNORECASE if ignore_case else 0
+    flags = bounded_regex.IGNORECASE if ignore_case else 0
     try:
-        expression = re.compile(pattern, flags=flags)
-    except re.error as exc:
+        expression = bounded_regex.compile(pattern, flags=flags)
+    except bounded_regex.error as exc:
         raise ToolError(f"Invalid grep pattern: {exc}") from exc
 
     def regex_matcher(line: str) -> bool:
-        return expression.search(line) is not None
+        try:
+            return expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS) is not None
+        except TimeoutError as exc:
+            raise ToolError("grep pattern exceeded the regex evaluation time limit") from exc
 
     return regex_matcher
 

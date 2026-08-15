@@ -13,7 +13,7 @@ from wisp.tools import secure_fs as secure_fs_module
 from wisp.tools.context import ToolContext
 from wisp.tools.file_ops import EditTool, ReadTool, WriteTool
 from wisp.tools.result import ToolError, ToolResult
-from wisp.tools.search import GrepTool, LsTool
+from wisp.tools.search import FindTool, GrepTool, LsTool
 
 
 def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -> ToolResult:
@@ -115,6 +115,21 @@ def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "original\n"
 
 
+def test_write_allows_missing_conflict_parent(tmp_path: Path) -> None:
+    context = ToolContext(
+        cwd=tmp_path,
+        conflicting_write_paths=(Path("nested/AGENTS.MD"),),
+    )
+
+    run_tool(
+        WriteTool(),
+        {"path": "nested/AGENTS.md", "content": "guidance\n", "overwrite": False},
+        context,
+    )
+
+    assert (tmp_path / "nested/AGENTS.md").read_text(encoding="utf-8") == "guidance\n"
+
+
 def test_edit_rejects_destination_replaced_before_publish(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -156,6 +171,36 @@ def test_recursive_tools_skip_directory_symlinks_even_when_opted_out(tmp_path: P
     result = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
 
     assert result.text == "No matches"
+
+
+def test_recursive_tools_honor_repository_ignore_files(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
+    (tmp_path / ".ignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / ".rgignore").write_text("rg-only.py\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "match.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "rg-only.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert grep.data["matches"] == ["visible.py:1:needle"]
+    assert find.data["files"] == ["visible.py"]
+
+
+def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
+    (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match="regex evaluation time limit"):
+        run_tool(
+            GrepTool(),
+            {"path": ".", "pattern": "(a+)+$"},
+            ToolContext(cwd=tmp_path),
+        )
 
 
 def test_ls_displays_but_does_not_follow_symlink(tmp_path: Path) -> None:

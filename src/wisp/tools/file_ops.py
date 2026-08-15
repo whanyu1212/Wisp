@@ -159,9 +159,14 @@ class _WriteOutcome:
 def _check_conflicting_paths(context: ToolContext) -> None:
     for conflict in context.conflicting_write_paths:
         candidate = secure_tool_path(str(conflict), context)
-        with open_parent(candidate) as parent:
-            if stat_leaf(parent) is not None:
-                raise ToolError(f"Conflicting write path already exists: {conflict}")
+        try:
+            with open_parent(candidate) as parent:
+                if stat_leaf(parent) is not None:
+                    raise ToolError(f"Conflicting write path already exists: {conflict}")
+        except ToolError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                continue
+            raise
 
 
 def _open_existing(parent: OpenParent, info: os.stat_result) -> int:
