@@ -267,6 +267,10 @@ def test_known_file_access_works_below_execute_only_parent(tmp_path: Path) -> No
 def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("original\n", encoding="utf-8")
+    attribute = "user.wisp-write-only"
+    has_xattrs = all(hasattr(os, name) for name in ("setxattr", "getxattr"))
+    if has_xattrs:
+        os.setxattr(target, attribute, b"retained")
     target.chmod(0o200)
 
     result = run_tool(
@@ -279,6 +283,8 @@ def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
     assert target.stat().st_mode & 0o777 == 0o200
     target.chmod(0o600)
     assert target.read_text(encoding="utf-8") == "replacement\n"
+    if has_xattrs:
+        assert os.getxattr(target, attribute) == b"retained"
 
 
 def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:

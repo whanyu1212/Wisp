@@ -445,6 +445,7 @@ def _atomic_write(
         initial_version: tuple[int, int, int, int, int] | None = None
         metadata: _ReplacementMetadata | None = None
         link_count = 0
+        requires_in_place = False
         if initial is not None:
             initial_version = file_version(initial)
             link_count = initial.st_nlink
@@ -459,13 +460,26 @@ def _atomic_write(
             except ToolError as exc:
                 if not isinstance(exc.__cause__, PermissionError):
                     raise
-                metadata_descriptor = _open_metadata_descriptor(parent, initial)
-                if metadata_descriptor is not None:
+                try:
+                    metadata_descriptor = _open_metadata_descriptor(parent, initial)
+                except ToolError as metadata_exc:
+                    if not isinstance(metadata_exc.__cause__, PermissionError):
+                        raise
+                    metadata_descriptor = None
+                    requires_in_place = True
+                if metadata_descriptor is None:
+                    requires_in_place = True
+                else:
                     try:
                         opened = os.fstat(metadata_descriptor)
                         initial_version = file_version(opened)
                         link_count = opened.st_nlink
-                        metadata = _snapshot_replacement_metadata(metadata_descriptor, opened)
+                        try:
+                            metadata = _snapshot_replacement_metadata(metadata_descriptor, opened)
+                        except ToolError as metadata_exc:
+                            if not isinstance(metadata_exc.__cause__, PermissionError):
+                                raise
+                            requires_in_place = True
                     finally:
                         os.close(metadata_descriptor)
             else:
@@ -478,7 +492,7 @@ def _atomic_write(
                 finally:
                     os.close(descriptor)
 
-        if overwrite and initial_version is not None and link_count > 1:
+        if overwrite and initial_version is not None and (link_count > 1 or requires_in_place):
             _write_existing_in_place(parent, content, expected=initial_version)
             return _WriteOutcome(False, before_text, None)
 
