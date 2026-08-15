@@ -24,6 +24,7 @@ from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderToolCallCompleted,
@@ -119,6 +120,25 @@ class CancellableProvider:
         content = f"done {prompt}"
         yield ProviderTextDelta(delta=content)
         yield ProviderResponseCompleted(content=content)
+
+
+class InBandFailingProvider:
+    name = "in-band-failing-test"
+    default_model: str | None = "in-band-failing-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del messages, tools, tool_results, previous_response_id, effort
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        yield ProviderResponseFailed(message="provider failed")
 
 
 class FailingProvider:
@@ -241,6 +261,17 @@ async def build_completion_only_runtime() -> WispRuntime:
     )
 
 
+async def build_in_band_failing_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(InBandFailingProvider())
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
+
+
 async def build_failing_runtime() -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
@@ -332,6 +363,7 @@ __all__ = [
     "build_cancellable_runtime",
     "build_completion_only_runtime",
     "build_failing_runtime",
+    "build_in_band_failing_runtime",
     "build_mixed_tool_runtime",
     "build_tool_runtime",
     "cli_module",

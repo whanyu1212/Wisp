@@ -12,6 +12,7 @@ from rich.console import Console
 
 from wisp.coding.costs import format_usage_cost
 from wisp.events import (
+    AgentCompleted,
     CompactionCompleted,
     CompactionStarted,
     ErrorEvent,
@@ -49,16 +50,21 @@ def _writes_json_events(mode: OutputMode) -> bool:
 
 async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
     rendered_error: str | None = None
+    terminal_failure: AgentCompleted | None = None
     try:
         async for event in events:
             _write_json_event(event)
             if isinstance(event, ErrorEvent):
                 rendered_error = event.message
+            elif isinstance(event, AgentCompleted) and event.outcome != "completed":
+                terminal_failure = event
     except Exception as exc:
         if rendered_error is None:
             rendered_error = str(exc)
             _write_json_event(ErrorEvent(message=rendered_error))
         raise _JsonOutputModeError(rendered_error) from exc
+    if terminal_failure is not None:
+        raise _JsonOutputModeError(rendered_error or f"Agent run {terminal_failure.outcome}")
 
 
 def _write_json_event(event: WispEvent) -> None:

@@ -125,6 +125,31 @@ def test_json_mode_invalid_auto_compaction_env_is_structured(tmp_path: Path) -> 
     assert "WISP_AUTO_COMPACTION must be one of" in records[0]["message"]
 
 
+def test_json_mode_returns_nonzero_for_in_band_provider_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_in_band_failing_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "fail", "--mode", "json", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "in-band-failing-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records[-5:]] == [
+        "message.completed",
+        "error",
+        "turn.completed",
+        "session.saved",
+        "agent.completed",
+    ]
+    assert records[-1]["outcome"] == "failed"
+
+
 def test_json_mode_emits_error_event_without_stderr_noise(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
