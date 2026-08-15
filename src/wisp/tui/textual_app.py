@@ -433,6 +433,9 @@ class TextualTui(App[None]):
 
     def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
         super().__init__()
+        # Textual's native wheel handler reads sensitivity from the app, not the
+        # scroll view. One row is the smallest stable terminal scroll increment.
+        self.scroll_sensitivity_y = 1.0
         # Register and select a Wisp theme before application CSS is parsed so
         # the transcript's custom muted variable is available on first mount.
         for theme in WISP_THEMES:
@@ -990,7 +993,7 @@ class TextualTui(App[None]):
         if jump is None or transcript is None or target not in {jump, jump.parent}:
             return
         transcript.scroll_to(
-            y=transcript.scroll_target_y + direction * transcript.scroll_sensitivity_y,
+            y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
             animate=False,
         )
         event.stop()
