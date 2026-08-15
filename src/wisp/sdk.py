@@ -85,20 +85,11 @@ class InProcessWisp(RpcController):
         """
 
         selected_options = options or InProcessOptions()
-        cwd = (
-            (selected_options.cwd or selected_options.project_context_root or Path.cwd())
-            .expanduser()
-            .resolve(strict=False)
+        cwd, project_root = await anyio.to_thread.run_sync(
+            _resolve_startup_paths,
+            selected_options,
+            abandon_on_cancel=True,
         )
-        project_root = selected_options.project_context_root
-        if project_root is None:
-            project_root = await anyio.to_thread.run_sync(
-                resolve_project_context_root,
-                cwd,
-                abandon_on_cancel=True,
-            )
-        else:
-            project_root = project_root.expanduser().resolve(strict=False)
         startup_trusted = await anyio.to_thread.run_sync(
             trusted_noninteractive,
             project_root,
@@ -157,6 +148,20 @@ class InProcessWisp(RpcController):
 
     async def __aexit__(self, *_args: object) -> None:
         await self.aclose()
+
+
+def _resolve_startup_paths(options: InProcessOptions) -> tuple[Path, Path]:
+    cwd = (
+        (options.cwd or options.project_context_root or Path.cwd())
+        .expanduser()
+        .resolve(strict=False)
+    )
+    project_root = options.project_context_root
+    if project_root is None:
+        project_root = resolve_project_context_root(cwd)
+    else:
+        project_root = project_root.expanduser().resolve(strict=False)
+    return cwd, project_root
 
 
 def _require_asyncio_backend() -> None:

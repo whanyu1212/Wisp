@@ -101,6 +101,12 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
     workspace = Path.home() / "workspace"
     workspace.mkdir()
 
+    original_resolve_startup_paths = sdk_module._resolve_startup_paths
+
+    def resolve_startup_paths(options: InProcessOptions) -> tuple[Path, Path]:
+        call_threads["paths"] = get_ident()
+        return original_resolve_startup_paths(options)
+
     def resolve_project_root(cwd: Path) -> Path:
         assert cwd == workspace
         call_threads["project_root"] = get_ident()
@@ -136,6 +142,7 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
         assert config_overrides is not None
         return expected_config
 
+    monkeypatch.setattr(sdk_module, "_resolve_startup_paths", resolve_startup_paths)
     monkeypatch.setattr(sdk_module, "resolve_project_context_root", resolve_project_root)
     monkeypatch.setattr(sdk_module, "trusted_noninteractive", check_trust)
     monkeypatch.setattr(sdk_module._ConfigOverrides, "build", build_config)
@@ -148,8 +155,58 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
         assert result is expected_config
 
     anyio.run(scenario)
-    assert set(call_threads) == {"project_root", "trust", "config"}
+    assert set(call_threads) == {"paths", "project_root", "trust", "config"}
     assert all(thread_id != main_thread for thread_id in call_threads.values())
+
+
+def test_in_process_sdk_offloads_explicit_workspace_path_normalization(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    call_thread: int | None = None
+    expected_config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    workspace = tmp_path / "workspace"
+
+    original_resolve_startup_paths = sdk_module._resolve_startup_paths
+
+    def resolve_startup_paths(options: InProcessOptions) -> tuple[Path, Path]:
+        nonlocal call_thread
+        call_thread = get_ident()
+        return original_resolve_startup_paths(options)
+
+    async def fake_start(
+        cls: type[InProcessWisp],
+        config: WispConfig,
+        *,
+        options: InProcessOptions,
+        config_overrides: object | None = None,
+    ) -> object:
+        assert cls is InProcessWisp
+        assert config == expected_config
+        assert options.project_context_root == workspace
+        assert options.cwd == workspace
+        assert config_overrides is not None
+        return expected_config
+
+    monkeypatch.setattr(sdk_module, "_resolve_startup_paths", resolve_startup_paths)
+    monkeypatch.setattr(sdk_module, "trusted_noninteractive", lambda _path: False)
+    monkeypatch.setattr(
+        sdk_module._ConfigOverrides,
+        "build",
+        lambda _overrides, **_kwargs: expected_config,
+    )
+    monkeypatch.setattr(InProcessWisp, "_start", classmethod(fake_start))
+
+    async def scenario() -> None:
+        result = await InProcessWisp.from_environment(
+            options=InProcessOptions(project_context_root=workspace)
+        )
+        assert result is expected_config
+
+    anyio.run(scenario)
+    assert call_thread is not None
+    assert call_thread != main_thread
 
 
 def test_in_process_sdk_offloads_resumed_session_startup(
