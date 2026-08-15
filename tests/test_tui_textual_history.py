@@ -623,3 +623,32 @@ def test_history_controller_recovers_evicted_prefix_while_reader_is_browsing() -
     ]
     assert surface.prepend_starts == surface.prepend_finishes == 1
     assert surface.follow_requests == 0
+
+
+def test_history_recovery_drops_prefix_already_retained_before_live_entries() -> None:
+    surface = _HistorySurface(following=False, at_top=True)
+    controller = TextualHistoryController(surface)
+    retained = HistoricalTranscriptMessage(role="assistant", content="retained")
+    controller.replace_entries((retained,), session_label="Windowed")
+    evicted = cast(Widget, surface._mount("assistant: evicted", before=None))
+    surviving = cast(Widget, surface._mount("assistant: surviving", before=None))
+    controller.record_live_message("assistant", "evicted", widget=evicted)
+    controller.record_live_message("assistant", "surviving", widget=surviving)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(evicted)
+    surface.widgets.remove(cast(_HistoryWidget, evicted))
+
+    controller.recover_evicted_entries(
+        (
+            retained,
+            HistoricalTranscriptMessage(role="assistant", content="evicted"),
+            HistoricalTranscriptMessage(role="assistant", content="surviving"),
+        )
+    )
+
+    assert [widget.label for widget in surface.widgets] == [
+        "resumed session: Windowed",
+        "assistant: retained",
+        "assistant: evicted",
+        "assistant: surviving",
+    ]

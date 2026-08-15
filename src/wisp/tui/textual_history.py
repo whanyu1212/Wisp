@@ -384,6 +384,7 @@ class TextualHistoryController:
         live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
         self._latest_reload_live_entries = None
         recovered = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
+        recovered = self._exclude_retained_overlap(recovered)
         if not recovered:
             return
         self._surface.begin_history_prepend()
@@ -459,6 +460,18 @@ class TextualHistoryController:
             end -= 1
             live_end -= 1
         return entries[:end]
+
+    def _exclude_retained_overlap(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+    ) -> tuple[HistoricalTranscriptEntry, ...]:
+        """Drop the recovered prefix already contiguous with retained history."""
+
+        retained = tuple(item.entry for item in self._window.entries)
+        for overlap in range(min(len(entries), len(retained)), 0, -1):
+            if retained[-overlap:] == entries[:overlap]:
+                return entries[overlap:]
+        return entries
 
     def _discard_entries(self, entries: Iterable[_RetainedHistoryEntry]) -> None:
         """Release pairing state that only referenced evicted history entries."""
