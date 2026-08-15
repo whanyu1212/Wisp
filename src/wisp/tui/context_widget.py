@@ -38,8 +38,17 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
 
     context = stats.context
     observed = context.observed_is_current and context.observed_tokens is not None
-    current_tokens = context.observed_tokens if observed else context.estimate.total_tokens
-    assert current_tokens is not None
+    fallback_tokens = (
+        context.observed_tokens
+        if observed and context.observed_tokens is not None
+        else context.estimate.total_tokens
+    )
+    current_tokens = (
+        context.effective_tokens
+        if context.accounting_method == "provider_observed_plus_estimate"
+        and context.effective_tokens is not None
+        else fallback_tokens
+    )
     window = context.context_window
     percentage = current_tokens / window * 100 if window is not None else None
     trigger_tokens = (
@@ -64,7 +73,13 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
         current_tokens=current_tokens,
         context_window=window,
         percentage=percentage,
-        source="provider observation" if observed else "deterministic estimate (approximate)",
+        source=(
+            "provider observation + trailing estimate"
+            if context.accounting_method == "provider_observed_plus_estimate"
+            else "provider observation"
+            if observed
+            else "deterministic estimate (approximate)"
+        ),
         reserve=_format_tokens(context.reserve_tokens),
         remaining=(_format_tokens(remaining_tokens) if remaining_tokens is not None else "unknown"),
         trigger=(

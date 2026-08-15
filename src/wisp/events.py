@@ -26,7 +26,7 @@ from wisp.skills.models import (
     SkillSource,
 )
 
-EVENT_SCHEMA_VERSION: Literal[31] = 31
+EVENT_SCHEMA_VERSION: Literal[32] = 32
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -49,6 +49,7 @@ SKILL_INVOCATION_SCHEMA_VERSION = 28
 SKILL_CATALOG_SCHEMA_VERSION = 29
 MCP_STATUS_SCHEMA_VERSION = 30
 PACKAGE_SKILLS_SCHEMA_VERSION = 31
+CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -73,6 +74,14 @@ _PROCESS_METADATA_FIELDS = frozenset(
         "stderr_dropped_bytes",
     }
 )
+
+
+def _strip_context_accounting_fields(value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    value.pop("trailing_estimated_tokens", None)
+    value.pop("effective_tokens", None)
+    value.pop("accounting_method", None)
 
 
 def utc_now() -> datetime:
@@ -113,6 +122,7 @@ class WispEvent(BaseModel):
         29,
         30,
         31,
+        32,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -263,6 +273,25 @@ class ContextEstimate(BaseModel):
     total_tokens: int = Field(ge=0)
 
 
+class ContextObservation(BaseModel):
+    """Provider-reported input usage for one exact request-context prefix."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str
+    model: str | None = None
+    input_tokens: int = Field(ge=0)
+    message_count: int = Field(ge=0)
+    context_fingerprint: str = Field(min_length=1)
+
+
+ContextAccountingMethod = Literal[
+    "fully_estimated",
+    "provider_observed",
+    "provider_observed_plus_estimate",
+]
+
+
 class ContextBudget(BaseModel):
     """Current estimate, latest observation, and model-window budget."""
 
@@ -271,11 +300,31 @@ class ContextBudget(BaseModel):
     estimate: ContextEstimate
     observed_tokens: int | None = Field(default=None, ge=0)
     observed_is_current: bool = False
+    trailing_estimated_tokens: int | None = Field(default=None, ge=0)
+    effective_tokens: int | None = Field(default=None, ge=0)
+    accounting_method: ContextAccountingMethod = "fully_estimated"
     context_window: int | None = Field(default=None, gt=0)
     reserve_tokens: int = Field(ge=0)
     remaining_tokens: int | None = None
     estimated_percent: float | None = Field(default=None, ge=0)
     over_budget: bool | None = None
+
+    @model_validator(mode="after")
+    def _default_effective_tokens(self) -> Self:
+        if self.effective_tokens is None:
+            tokens = (
+                self.observed_tokens
+                if self.observed_is_current and self.observed_tokens is not None
+                else self.estimate.total_tokens
+            )
+            object.__setattr__(self, "effective_tokens", tokens)
+        if (
+            self.accounting_method == "fully_estimated"
+            and self.observed_is_current
+            and self.observed_tokens is not None
+        ):
+            object.__setattr__(self, "accounting_method", "provider_observed")
+        return self
 
 
 class CompactionPolicyStatus(BaseModel):
@@ -562,6 +611,7 @@ class MessageCompleted(WispEvent):
     tool_calls: tuple[ToolCallSnapshot, ...] = ()
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+    context_observation: ContextObservation | None = None
 
     @model_validator(mode="after")
     def _validate_cost_schema(self) -> Self:
@@ -576,6 +626,8 @@ class MessageCompleted(WispEvent):
         data = cast(dict[str, object], handler(self))
         if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
             data.pop("cost", None)
+        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
+            data.pop("context_observation", None)
         return data
 
 
@@ -600,6 +652,13 @@ class ContextEstimated(WispEvent):
     provider: str
     model: str | None = None
     budget: ContextBudget
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
+            _strip_context_accounting_fields(data.get("budget"))
+        return data
 
 
 class ContextOverflow(WispEvent):
@@ -810,6 +869,8 @@ class CompactionStarted(WispEvent):
         data = cast(dict[str, object], handler(self))
         if self.schema_version in {8, 9}:
             data.pop("trigger_budget", None)
+        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
+            _strip_context_accounting_fields(data.get("trigger_budget"))
         return data
 
 
@@ -904,6 +965,9 @@ class SessionStatsReported(WispEvent):
         if self.schema_version < COMPACTION_POLICY_SCHEMA_VERSION:
             stats = cast(dict[str, object], data["stats"])
             stats.pop("compaction", None)
+        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
+            stats = cast(dict[str, object], data["stats"])
+            _strip_context_accounting_fields(stats.get("context"))
         return data
 
 

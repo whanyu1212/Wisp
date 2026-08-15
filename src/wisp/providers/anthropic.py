@@ -628,6 +628,7 @@ def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
         total_tokens=(
             input_tokens + output_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
         ),
+        context_input_tokens=input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0),
         cache_read_input_tokens=cache_read_tokens,
         cache_write_input_tokens=cache_write_tokens,
         reasoning_output_tokens=reasoning_tokens,
@@ -663,6 +664,7 @@ def _usage_from_anthropic_delta(
         total_tokens=(
             input_tokens + output_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
         ),
+        context_input_tokens=input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0),
         cache_read_input_tokens=cache_read_tokens,
         cache_write_input_tokens=cache_write_tokens,
         reasoning_output_tokens=reasoning_tokens,

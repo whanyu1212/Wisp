@@ -13,7 +13,11 @@ from wisp.agent.configuration import (
     validate_non_negative_integer,
     validate_optional_non_negative_integer,
 )
-from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
+from wisp.agent.context import (
+    build_context_budget,
+    estimate_context,
+    estimate_context_budget,
+)
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.agent.messages import (
     CompactionRecord,
@@ -48,6 +52,7 @@ from wisp.events import (
     CompactionStarted,
     ContextBudget,
     ContextEstimated,
+    ContextObservation,
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
@@ -179,11 +184,8 @@ def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
 
 @dataclass(frozen=True, slots=True)
 class _ContextObservation:
-    provider: str
-    model: str | None
-    tokens: int
+    observation: ContextObservation
     entry_id: str
-    context_fingerprint: str
 
 
 @dataclass(slots=True)
@@ -790,7 +792,6 @@ class CodingSession:
                 self._accepting_queued_messages = True
 
         turns = 0
-        had_tool_round = False
         tool_iterations = 0
         had_unsafe_tool_round = False
         overflow_recovery_attempted = False
@@ -822,7 +823,6 @@ class CodingSession:
                     elif isinstance(event, MessageCompleted) and (
                         event.tool_calls or event.finish_reason == "tool_calls"
                     ):
-                        had_tool_round = True
                         attempt_had_tool_round = True
                         tool_iterations += 1
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
@@ -867,21 +867,14 @@ class CodingSession:
                         isinstance(event, MessageCompleted)
                         and event.finish_reason not in {"error", "cancelled"}
                         and event.usage is not None
-                        and event.usage.total_tokens > 0
-                        and not event.tool_calls
-                        and not had_tool_round
+                        and event.usage.input_tokens > 0
                         and completion_entry_id is not None
                     ):
-                        current_messages = self._normalize_provider_messages(harness.messages)
-                        self._context_observations[session.session_id] = _ContextObservation(
-                            provider=self.provider.name,
-                            model=self.model or self.provider.default_model,
-                            tokens=event.usage.total_tokens,
-                            entry_id=completion_entry_id,
-                            context_fingerprint=context_fingerprint(
-                                current_messages, effective_tools
-                            ),
-                        )
+                        if event.context_observation is not None:
+                            self._context_observations[session.session_id] = _ContextObservation(
+                                observation=event.context_observation,
+                                entry_id=completion_entry_id,
+                            )
 
                     yield await emit(event)
             except ContextOverflowError as exc:
@@ -1151,11 +1144,7 @@ class CodingSession:
 
         if budget.context_window is None or budget.reserve_tokens >= budget.context_window:
             return None
-        tokens = (
-            budget.observed_tokens
-            if budget.observed_is_current and budget.observed_tokens is not None
-            else budget.estimate.total_tokens
-        )
+        tokens = budget.effective_tokens or 0
         excess = tokens - (budget.context_window - budget.reserve_tokens)
         return excess if excess > 0 else None
 
@@ -1207,24 +1196,15 @@ class CodingSession:
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
         tools = tuple(harness.config.tools)
-        estimate = estimate_context(provider_messages, tools)
         observation = self._context_observations.get(session.session_id)
-        current_fingerprint = context_fingerprint(provider_messages, tools)
-        observed_tokens = None
-        observed_is_current = False
-        if observation is not None:
-            observed_tokens = observation.tokens
-            observed_is_current = (
-                observation.provider == self.provider.name
-                and observation.model == (self.model or self.provider.default_model)
-                and observation.context_fingerprint == current_fingerprint
-            )
-        budget = build_context_budget(
-            estimate,
+        budget = estimate_context_budget(
+            provider_messages,
+            tools,
             context_window=self._context_window(),
             reserve_tokens=self._effective_context_reserve_tokens(),
-            observed_tokens=observed_tokens,
-            observed_is_current=observed_is_current,
+            observation=observation.observation if observation is not None else None,
+            provider=self.provider.name,
+            model=self.model or self.provider.default_model,
         )
         if not should_auto_compact(budget, enabled=self.auto_compaction_enabled):
             return
@@ -1562,12 +1542,12 @@ class CodingSession:
             observed_entry_id = None
             observed_context_fingerprint = None
             if observation is not None:
-                observed_tokens = observation.tokens
+                observed_tokens = observation.observation.input_tokens
                 observed_entry_id = observation.entry_id
-                observed_context_fingerprint = observation.context_fingerprint
+                observed_context_fingerprint = observation.observation.context_fingerprint
                 observed_is_current = (
-                    observation.provider == self.provider.name
-                    and observation.model == (self.model or self.provider.default_model)
+                    observation.observation.provider == self.provider.name
+                    and observation.observation.model == (self.model or self.provider.default_model)
                 )
             return build_session_stats(
                 session_id=session.session_id if session is not None else None,
@@ -1577,6 +1557,8 @@ class CodingSession:
                 tools=self._effective_tools(),
                 context_window=self._context_window(),
                 reserve_tokens=self._effective_context_reserve_tokens(),
+                provider=self.provider.name,
+                model=self.model or self.provider.default_model,
                 observed_tokens=observed_tokens,
                 observed_is_current=observed_is_current,
                 observed_entry_id=observed_entry_id,

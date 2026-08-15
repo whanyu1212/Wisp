@@ -2903,11 +2903,16 @@ def _textual_context_parts(snapshot: TuiViewSnapshot) -> tuple[str, str]:
         and context.observed_tokens is not None
         and context.context_window is not None
     )
+    effective_tokens = (
+        context.effective_tokens
+        if context.accounting_method == "provider_observed_plus_estimate"
+        and context.effective_tokens is not None
+        else context.observed_tokens
+    )
     percent = context.estimated_percent
-    if observed_is_current:
-        assert context.observed_tokens is not None
+    if observed_is_current and effective_tokens is not None:
         assert context.context_window is not None
-        percent = context.observed_tokens / context.context_window * 100
+        percent = effective_tokens / context.context_window * 100
     if percent is not None:
         marker = "" if observed_is_current else "~"
         compact = f"{marker}{percent:.0f}%"

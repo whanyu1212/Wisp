@@ -73,6 +73,7 @@ class ProviderUsage:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    context_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_write_input_tokens: int | None = None
     reasoning_output_tokens: int | None = None

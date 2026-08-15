@@ -52,7 +52,12 @@ from wisp.providers.events import (
 )
 from wisp.retry import RetryPolicy
 
-_EXPECTED_USAGE = ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+_EXPECTED_USAGE = ProviderUsage(
+    input_tokens=1,
+    output_tokens=1,
+    total_tokens=2,
+    context_input_tokens=1,
+)
 
 
 class StubAnthropicProvider(AnthropicProvider):

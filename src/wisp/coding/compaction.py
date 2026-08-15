@@ -77,11 +77,7 @@ def should_auto_compact(budget: ContextBudget, *, enabled: bool) -> bool:
         or budget.reserve_tokens >= budget.context_window
     ):
         return False
-    tokens = (
-        budget.observed_tokens
-        if budget.observed_is_current and budget.observed_tokens is not None
-        else budget.estimate.total_tokens
-    )
+    tokens = budget.effective_tokens or 0
     return tokens > budget.context_window - budget.reserve_tokens
 
 

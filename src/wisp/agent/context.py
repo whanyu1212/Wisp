@@ -8,7 +8,12 @@ from collections.abc import Sequence
 from hashlib import sha256
 
 from wisp.agent.messages import Message
-from wisp.events import ContextBudget, ContextEstimate
+from wisp.events import (
+    ContextAccountingMethod,
+    ContextBudget,
+    ContextEstimate,
+    ContextObservation,
+)
 from wisp.providers.base import ToolCallResult, ToolSpec
 
 
@@ -53,6 +58,70 @@ def estimate_context(
     )
 
 
+def observe_context(
+    messages: Sequence[Message],
+    tools: Sequence[ToolSpec] = (),
+    *,
+    provider: str,
+    model: str | None,
+    input_tokens: int,
+) -> ContextObservation:
+    """Capture provider-reported input usage for one exact request context."""
+
+    return ContextObservation(
+        provider=provider,
+        model=model,
+        input_tokens=input_tokens,
+        message_count=len(messages),
+        context_fingerprint=context_fingerprint(messages, tools),
+    )
+
+
+def trailing_context_estimate(
+    messages: Sequence[Message],
+    tools: Sequence[ToolSpec],
+    observation: ContextObservation,
+) -> ContextEstimate | None:
+    """Estimate context appended after a still-valid observed request prefix."""
+
+    if observation.message_count > len(messages):
+        return None
+    prefix = messages[: observation.message_count]
+    if context_fingerprint(prefix, tools) != observation.context_fingerprint:
+        return None
+    return estimate_context(messages[observation.message_count :])
+
+
+def estimate_context_budget(
+    messages: Sequence[Message],
+    tools: Sequence[ToolSpec] = (),
+    *,
+    context_window: int | None,
+    reserve_tokens: int,
+    observation: ContextObservation | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> ContextBudget:
+    """Build a budget, anchoring a valid prefix to provider-reported input usage."""
+
+    estimate = estimate_context(messages, tools)
+    trailing = (
+        trailing_context_estimate(messages, tools, observation)
+        if observation is not None
+        and observation.provider == provider
+        and observation.model == model
+        else None
+    )
+    return build_context_budget(
+        estimate,
+        context_window=context_window,
+        reserve_tokens=reserve_tokens,
+        observed_tokens=observation.input_tokens if observation is not None else None,
+        observed_is_current=trailing is not None,
+        trailing_estimated_tokens=trailing.total_tokens if trailing is not None else None,
+    )
+
+
 def build_context_budget(
     estimate: ContextEstimate,
     *,
@@ -60,27 +129,44 @@ def build_context_budget(
     reserve_tokens: int,
     observed_tokens: int | None = None,
     observed_is_current: bool = False,
+    trailing_estimated_tokens: int | None = None,
 ) -> ContextBudget:
     """Combine an estimate with optional model-window and provider observations."""
 
     if reserve_tokens < 0:
         raise ValueError("reserve_tokens must be non-negative")
+    if observed_is_current and observed_tokens is not None:
+        trailing_tokens = trailing_estimated_tokens or 0
+        effective_tokens = observed_tokens + trailing_tokens
+        accounting_method: ContextAccountingMethod = (
+            "provider_observed" if trailing_tokens == 0 else "provider_observed_plus_estimate"
+        )
+    else:
+        trailing_tokens = None
+        effective_tokens = estimate.total_tokens
+        accounting_method = "fully_estimated"
     if context_window is None:
         return ContextBudget(
             estimate=estimate,
             observed_tokens=observed_tokens,
             observed_is_current=observed_is_current,
+            trailing_estimated_tokens=trailing_tokens,
+            effective_tokens=effective_tokens,
+            accounting_method=accounting_method,
             reserve_tokens=reserve_tokens,
         )
-    remaining = context_window - reserve_tokens - estimate.total_tokens
+    remaining = context_window - reserve_tokens - effective_tokens
     return ContextBudget(
         estimate=estimate,
         observed_tokens=observed_tokens,
         observed_is_current=observed_is_current,
+        trailing_estimated_tokens=trailing_tokens,
+        effective_tokens=effective_tokens,
+        accounting_method=accounting_method,
         context_window=context_window,
         reserve_tokens=reserve_tokens,
         remaining_tokens=remaining,
-        estimated_percent=(estimate.total_tokens / context_window) * 100,
+        estimated_percent=(effective_tokens / context_window) * 100,
         over_budget=remaining <= 0,
     )
 
@@ -142,4 +228,11 @@ def _utf8_bytes(text: str) -> bytes:
     return text.encode("utf-8", errors="backslashreplace")
 
 
-__all__ = ["build_context_budget", "context_fingerprint", "estimate_context"]
+__all__ = [
+    "build_context_budget",
+    "context_fingerprint",
+    "estimate_context",
+    "estimate_context_budget",
+    "observe_context",
+    "trailing_context_estimate",
+]
