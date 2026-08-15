@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import anyio
@@ -3785,6 +3785,54 @@ def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
     assert "data.txt-1-before" in result.text
     assert "data.txt:2:match" in result.text
     assert "data.txt-3-after" in result.text
+
+
+def test_grep_tool_python_fallback_merges_overlapping_context_groups(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text(
+        "before\nmatch one\nmatch two\nafter\n",
+        encoding="utf-8",
+    )
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "context": 1, "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == (
+        "data.txt-1-before\ndata.txt:2:match one\ndata.txt:3:match two\ndata.txt-4-after"
+    )
+    assert result.data["count"] == 2
+
+
+def test_grep_tool_python_fallback_bounds_context_collection(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("match\n" * 100, encoding="utf-8")
+    collected_line_counts: list[int] = []
+    original = search_tools_module._result_from_grep_lines
+
+    def tracking_result(lines: Sequence[str], **kwargs: object) -> ToolResult:
+        collected_line_counts.append(len(lines))
+        return original(lines, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(search_tools_module, "_result_from_grep_lines", tracking_result)
+    context = ToolContext(cwd=tmp_path, max_output_lines=5)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "context": 100, "literal": True},
+        context,
+    )
+
+    assert collected_line_counts == [context.max_output_lines + 1]
+    assert result.truncated is True
 
 
 def test_grep_tool_python_fallback_preserves_whitespace_only_patterns(

@@ -9,7 +9,7 @@ import os
 import stat
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import anyio
@@ -190,66 +190,73 @@ def _python_grep(
     effective_context_lines = _bounded_rg_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
     output: list[str] = []
+    output_bytes = 0
     match_count = 0
     for file_path in _iter_files(secure_path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
-        file_output_start = len(output)
         file_match_start = match_count
         file_had_extra_match = False
+        file_buffer = _BoundedGrepFileOutput(
+            prior_lines=len(output),
+            prior_bytes=output_bytes,
+            prefix_separator=bool(output and effective_context_lines),
+            max_lines=context.max_output_lines,
+            max_bytes=context.max_output_bytes,
+        )
+
         try:
             preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
-            active_contexts: list[_StreamingMatchContext] = []
+            group_end = 0
+            last_emitted_line = 0
             candidate = secure_tool_path(str(file_path), context)
             with open_file(candidate) as descriptor:
                 lines = _iter_utf8_splitlines(descriptor)
                 for line_number, line in enumerate(lines, start=1):
-                    completed_contexts: list[_StreamingMatchContext] = []
-                    for active in active_contexts:
-                        if active.remaining_after > 0:
-                            active.lines.append(
-                                _format_grep_record(file_path, line_number, line, False, context)
-                            )
-                            active.remaining_after -= 1
-                        if active.remaining_after == 0:
-                            completed_contexts.append(active)
-                    for completed in completed_contexts:
-                        output.extend(completed.lines)
-                        active_contexts.remove(completed)
+                    if file_buffer.exhausted or file_had_extra_match:
+                        continue
 
-                    if not file_had_extra_match and matcher(line):
+                    is_match = matcher(line)
+                    if is_match:
                         if match_count >= max_results:
                             file_had_extra_match = True
                         else:
                             match_count += 1
-                            match_lines = [
-                                _format_grep_record(file_path, number, text, False, context)
-                                for number, text in preceding
-                            ]
-                            match_lines.append(
-                                _format_grep_record(file_path, line_number, line, True, context)
+                            if line_number > group_end:
+                                for number, text in preceding:
+                                    if number > last_emitted_line:
+                                        file_buffer.append(
+                                            _format_grep_record(
+                                                file_path, number, text, False, context
+                                            )
+                                        )
+                                        last_emitted_line = number
+                                        if file_buffer.exhausted:
+                                            break
+                            file_buffer.append(
+                                _format_grep_record(file_path, line_number, line, True, context),
+                                preserve_match=True,
                             )
-                            if effective_context_lines:
-                                active_contexts.append(
-                                    _StreamingMatchContext(
-                                        lines=match_lines,
-                                        remaining_after=effective_context_lines,
-                                    )
-                                )
-                            else:
-                                output.extend(match_lines)
+                            last_emitted_line = line_number
+                            group_end = max(group_end, line_number + effective_context_lines)
+                    elif line_number <= group_end:
+                        file_buffer.append(
+                            _format_grep_record(file_path, line_number, line, False, context)
+                        )
+                        last_emitted_line = line_number
                     preceding.append((line_number, line))
-            for active in active_contexts:
-                output.extend(active.lines)
         except UnicodeDecodeError:
-            del output[file_output_start:]
             match_count = file_match_start
             continue
 
-        if effective_context_lines and file_output_start and len(output) > file_output_start:
-            output.insert(file_output_start, "--")
+        if file_buffer.lines:
+            if effective_context_lines and output:
+                output.append("--")
+                output_bytes += 3  # "\n--"
+            output.extend(file_buffer.lines)
+            output_bytes += file_buffer.byte_count
 
-        if file_had_extra_match:
+        if file_had_extra_match or file_buffer.exhausted:
             return _result_from_grep_lines(
                 output,
                 max_results=max_results,
@@ -270,6 +277,37 @@ def _python_grep(
 _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
 _PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+@dataclass(slots=True)
+class _BoundedGrepFileOutput:
+    prior_lines: int
+    prior_bytes: int
+    prefix_separator: bool
+    max_lines: int
+    max_bytes: int
+    lines: list[str] = field(default_factory=list)
+    byte_count: int = 0
+    exhausted: bool = False
+
+    def append(self, record: str, *, preserve_match: bool = False) -> None:
+        """Retain bounded output, allowing one oversized matching-record lookahead."""
+
+        separator_lines = 1 if self.prefix_separator and not self.lines else 0
+        separator_bytes = 3 if separator_lines else 0  # "\n--"
+        record_bytes = len(record.encode("utf-8"))
+        newline_bytes = 1 if self.prior_lines or self.lines or separator_lines else 0
+        total_lines = self.prior_lines + separator_lines + len(self.lines) + 1
+        total_bytes = (
+            self.prior_bytes + separator_bytes + self.byte_count + record_bytes + newline_bytes
+        )
+        would_exceed = total_lines > self.max_lines or total_bytes > self.max_bytes
+        if would_exceed and not preserve_match:
+            self.exhausted = True
+            return
+        self.lines.append(record)
+        self.byte_count += record_bytes + newline_bytes
+        self.exhausted = would_exceed
 
 
 def _iter_utf8_splitlines(
@@ -329,12 +367,6 @@ def _yield_splitline_chunk(
     if start < len(text):
         line_parts.append(text[start:])
     return False
-
-
-@dataclass(slots=True)
-class _StreamingMatchContext:
-    lines: list[str]
-    remaining_after: int
 
 
 def _format_grep_record(
