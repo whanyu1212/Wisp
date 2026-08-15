@@ -335,6 +335,40 @@ def test_grep_explicit_glob_overrides_repository_ignore(tmp_path: Path) -> None:
     assert explicit.data["matches"] == ["generated/result.txt:1:needle"]
 
 
+def test_grep_explicit_glob_reincludes_hidden_files(tmp_path: Path) -> None:
+    hidden_directory = tmp_path / ".hidden"
+    hidden_directory.mkdir()
+    (hidden_directory / "result.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".hidden.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    default = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    explicit = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "glob": "*.txt"},
+        context,
+    )
+
+    assert default.text == "No matches"
+    assert explicit.data["matches"] == [
+        ".hidden/result.txt:1:needle",
+        ".hidden.txt:1:needle",
+    ]
+
+
+def test_recursive_tools_preserve_valid_non_utf8_ignore_rules(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_bytes(b"ignored.txt\n\xff\n")
+    (tmp_path / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["visible.txt:1:needle"]
+    assert find.data["files"] == ["visible.txt"]
+
+
 def test_recursive_tools_reject_oversized_ignore_file(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -426,6 +460,34 @@ def test_grep_rejects_unbounded_newline_free_file(tmp_path: Path) -> None:
             {"path": ".", "pattern": "needle", "literal": True},
             ToolContext(cwd=tmp_path),
         )
+
+
+def test_grep_stops_reading_after_output_is_truncated(tmp_path: Path) -> None:
+    (tmp_path / "data.txt").write_text(
+        "needle\n" + ("x" * 1_000_001),
+        encoding="utf-8",
+    )
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path, max_output_bytes=1),
+    )
+
+    assert result.truncated is True
+
+
+def test_grep_skips_binary_file_after_pending_match(tmp_path: Path) -> None:
+    (tmp_path / "binary.dat").write_bytes(b"needle\n" + (b"x" * 70_000) + b"\0")
+    (tmp_path / "text.txt").write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["matches"] == ["text.txt:1:needle"]
 
 
 def test_ls_displays_but_does_not_follow_symlink(tmp_path: Path) -> None:

@@ -5296,10 +5296,9 @@ def test_textual_home_loads_the_true_durable_session_start() -> None:
             await pilot.pause()
 
             app_instance.action_scroll_transcript_home()
-            for _ in range(60):
-                await pilot.pause()
-                if not pages and app_instance._oldest_navigation_generation is None:
-                    break
+            with anyio.fail_after(10):
+                while pages or app_instance._oldest_navigation_generation is not None:
+                    await pilot.pause()
 
             transcript = app_instance.query_one("#transcript", Transcript)
             return (

@@ -64,6 +64,10 @@ class _DirectoryEntryLimitError(_SearchInputLimitError):
     """Raised when one repository directory exceeds its traversal budget."""
 
 
+class _BinaryFileDetected(Exception):
+    """Stop grep and discard pending output when a streamed file contains NUL."""
+
+
 class GrepTool:
     """Search file contents."""
 
@@ -236,7 +240,7 @@ def _python_grep(
                 lines = _iter_utf8_splitlines(descriptor)
                 for line_number, line in enumerate(lines, start=1):
                     if file_buffer.exhausted or file_had_extra_match:
-                        continue
+                        break
 
                     is_match = matcher(line)
                     if is_match:
@@ -267,7 +271,9 @@ def _python_grep(
                         )
                         last_emitted_line = line_number
                     preceding.append((line_number, line))
-        except UnicodeDecodeError:
+                    if file_buffer.exhausted or file_had_extra_match:
+                        break
+        except (_BinaryFileDetected, UnicodeDecodeError):
             match_count = file_match_start
             continue
 
@@ -344,6 +350,8 @@ def _iter_utf8_splitlines(
     with file_source as file:
         while chunk := file.read(_PYTHON_GREP_CHUNK_BYTES):
             decoded = decoder.decode(chunk)
+            if "\0" in decoded:
+                raise _BinaryFileDetected
             if pending_cr:
                 yield "".join(line_parts)
                 line_parts.clear()
@@ -354,6 +362,8 @@ def _iter_utf8_splitlines(
             if sum(map(len, line_parts)) > max_line_chars:
                 raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
         decoded = decoder.decode(b"", final=True)
+    if "\0" in decoded:
+        raise _BinaryFileDetected
     if pending_cr:
         yield "".join(line_parts)
         line_parts.clear()
@@ -563,7 +573,7 @@ def _walk_directory(
         if stat.S_ISLNK(info.st_mode):
             continue
         if stat.S_ISDIR(info.st_mode):
-            if _is_hidden(name) or (
+            if (_is_hidden(name) and ignore_override_glob is None) or (
                 _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
                 and not _may_reinclude_descendant(candidate, ignore_specs)
                 and ignore_override_glob is None
@@ -604,9 +614,15 @@ def _walk_directory(
             continue
         if (
             stat.S_ISREG(info.st_mode)
-            and not _is_hidden(name)
             and (
-                not _is_ignored(candidate, is_directory=False, ignore_specs=ignore_specs)
+                (
+                    not _is_hidden(name)
+                    and not _is_ignored(
+                        candidate,
+                        is_directory=False,
+                        ignore_specs=ignore_specs,
+                    )
+                )
                 or (
                     ignore_override_glob is not None
                     and _matches_glob(candidate, ignore_override_glob, context)
@@ -637,7 +653,7 @@ def _read_bounded_ignore_lines(descriptor: int, source: str) -> tuple[str, ...]:
         content = file.read(_MAX_IGNORE_FILE_BYTES + 1)
     if len(content) > _MAX_IGNORE_FILE_BYTES:
         raise _IgnoreFileLimitError(f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_BYTES} bytes")
-    lines = content.decode("utf-8").splitlines(keepends=True)
+    lines = content.decode("utf-8", errors="surrogateescape").splitlines(keepends=True)
     if len(lines) > _MAX_IGNORE_FILE_PATTERNS:
         raise _IgnoreFileLimitError(
             f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_PATTERNS} patterns"
