@@ -433,6 +433,7 @@ async def _run_rpc_with_runtime(
             max_tool_iterations=max_tool_iterations,
             startup_trusted=startup_trusted,
             project_context_root=project_context_root,
+            cwd=Path.cwd(),
         ),
         write_event=_write_json_event,
         render_events=_render_json_events,

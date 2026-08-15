@@ -67,6 +67,11 @@ class InProcessOptions:
     Tools are not exposed by default.  ``all_tools`` or ``allowed_tools`` only
     control model visibility; mutating and command tools still require an
     approval response unless ``approve_unsafe_tools`` is explicitly selected.
+
+    ``cwd`` controls built-in tool path resolution and command execution.
+    ``project_context_root`` independently controls trust, project settings,
+    skills, and instruction discovery. When only a project root is supplied, it
+    also becomes the tool working directory.
     """
 
     all_tools: bool = False
@@ -78,6 +83,7 @@ class InProcessOptions:
     max_tool_iterations: int | None = None
     startup_trusted: bool = False
     project_context_root: Path | None = None
+    cwd: Path | None = None
 
     def __post_init__(self) -> None:
         if self.resume is not None and self.continue_latest:
@@ -398,19 +404,26 @@ class RpcHost:
 
         sessions = JsonlSessionStore(config.session_dir)
 
-        def load_startup_state() -> tuple[_RpcSessionState, Path]:
+        def load_startup_state() -> tuple[_RpcSessionState, Path, Path]:
             session = select_session(
                 sessions,
                 resume=options.resume,
                 continue_latest=options.continue_latest,
             )
             session_state = rpc_session_state(session)
-            project_context_root = options.project_context_root or resolve_project_context_root(
-                Path.cwd()
+            cwd = (
+                (options.cwd or options.project_context_root or Path.cwd())
+                .expanduser()
+                .resolve(strict=False)
             )
-            return session_state, project_context_root
+            project_context_root = (
+                (options.project_context_root or resolve_project_context_root(cwd))
+                .expanduser()
+                .resolve(strict=False)
+            )
+            return session_state, project_context_root, cwd
 
-        session_state, project_context_root = await anyio.to_thread.run_sync(
+        session_state, project_context_root, cwd = await anyio.to_thread.run_sync(
             load_startup_state,
             abandon_on_cancel=True,
         )
@@ -435,6 +448,7 @@ class RpcHost:
             providers=runtime.providers,
             models=runtime.models,
             trusted=options.startup_trusted,
+            cwd=cwd,
             skill_catalog=skill_catalog,
         )
         agent = CodingSession.from_configuration(

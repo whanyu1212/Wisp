@@ -15,6 +15,7 @@ from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tools.context import ToolContext
 
 
 async def _runtime_for(config: WispConfig) -> WispRuntime:
@@ -80,12 +81,15 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
     tmp_path: Path,
 ) -> None:
     config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
 
     async def scenario() -> None:
         runtime = await _runtime_for(config)
         agent = CodingSession(
             provider=runtime.providers.get("fake"),
             sessions=JsonlSessionStore(config.session_dir),
+            tool_context=ToolContext(cwd=workspace),
             trusted=False,
         )
 
@@ -107,6 +111,7 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
 
         assert event is None
         assert agent.trusted is True
+        assert agent.tool_context.cwd == workspace
 
     anyio.run(scenario)
 
@@ -241,6 +246,8 @@ def test_trusted_project_transition_applies_config_and_returns_event(tmp_path: P
         encoding="utf-8",
     )
     session_dir = tmp_path / "sessions"
+    workspace = project / "src"
+    workspace.mkdir()
     startup = WispConfig.from_env(
         provider="fake",
         session_dir=session_dir,
@@ -258,6 +265,7 @@ def test_trusted_project_transition_applies_config_and_returns_event(tmp_path: P
             provider=runtime.providers.get("fake"),
             sessions=JsonlSessionStore(session_dir),
             events=events,
+            tool_context=ToolContext(cwd=workspace),
         )
         transition = RpcProjectConfiguration(
             startup_config=startup,
@@ -276,6 +284,7 @@ def test_trusted_project_transition_applies_config_and_returns_event(tmp_path: P
         assert agent.model == "project-model"
         assert agent.trusted is True
         assert project_auth.resolve().as_posix() in agent.tool_context.protected_paths
+        assert agent.tool_context.cwd == workspace
         assert runtime.events is events
         assert runtime.tools is tools
         assert runtime.providers is providers

@@ -42,6 +42,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.tools.file_ops import ReadTool
 
 
 def test_in_process_sdk_start_cancel_abandons_startup_trust_lookup(
@@ -97,8 +98,17 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
     main_thread = get_ident()
     call_threads: dict[str, int] = {}
     expected_config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    workspace = Path.home() / "workspace"
+    workspace.mkdir()
 
-    def resolve_project_root(_cwd: Path) -> Path:
+    original_resolve_startup_paths = sdk_module._resolve_startup_paths
+
+    def resolve_startup_paths(options: InProcessOptions) -> tuple[Path, Path]:
+        call_threads["paths"] = get_ident()
+        return original_resolve_startup_paths(options)
+
+    def resolve_project_root(cwd: Path) -> Path:
+        assert cwd == workspace
         call_threads["project_root"] = get_ident()
         return tmp_path
 
@@ -128,21 +138,75 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
         assert cls is InProcessWisp
         assert config == expected_config
         assert options.project_context_root == tmp_path
+        assert options.cwd == workspace
         assert config_overrides is not None
         return expected_config
 
+    monkeypatch.setattr(sdk_module, "_resolve_startup_paths", resolve_startup_paths)
     monkeypatch.setattr(sdk_module, "resolve_project_context_root", resolve_project_root)
     monkeypatch.setattr(sdk_module, "trusted_noninteractive", check_trust)
     monkeypatch.setattr(sdk_module._ConfigOverrides, "build", build_config)
     monkeypatch.setattr(InProcessWisp, "_start", classmethod(fake_start))
 
     async def scenario() -> None:
-        result = await InProcessWisp.from_environment()
+        result = await InProcessWisp.from_environment(
+            options=InProcessOptions(cwd=Path("~/workspace"))
+        )
         assert result is expected_config
 
     anyio.run(scenario)
-    assert set(call_threads) == {"project_root", "trust", "config"}
+    assert set(call_threads) == {"paths", "project_root", "trust", "config"}
     assert all(thread_id != main_thread for thread_id in call_threads.values())
+
+
+def test_in_process_sdk_offloads_explicit_workspace_path_normalization(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    call_thread: int | None = None
+    expected_config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    workspace = tmp_path / "workspace"
+
+    original_resolve_startup_paths = sdk_module._resolve_startup_paths
+
+    def resolve_startup_paths(options: InProcessOptions) -> tuple[Path, Path]:
+        nonlocal call_thread
+        call_thread = get_ident()
+        return original_resolve_startup_paths(options)
+
+    async def fake_start(
+        cls: type[InProcessWisp],
+        config: WispConfig,
+        *,
+        options: InProcessOptions,
+        config_overrides: object | None = None,
+    ) -> object:
+        assert cls is InProcessWisp
+        assert config == expected_config
+        assert options.project_context_root == workspace
+        assert options.cwd == workspace
+        assert config_overrides is not None
+        return expected_config
+
+    monkeypatch.setattr(sdk_module, "_resolve_startup_paths", resolve_startup_paths)
+    monkeypatch.setattr(sdk_module, "trusted_noninteractive", lambda _path: False)
+    monkeypatch.setattr(
+        sdk_module._ConfigOverrides,
+        "build",
+        lambda _overrides, **_kwargs: expected_config,
+    )
+    monkeypatch.setattr(InProcessWisp, "_start", classmethod(fake_start))
+
+    async def scenario() -> None:
+        result = await InProcessWisp.from_environment(
+            options=InProcessOptions(project_context_root=workspace)
+        )
+        assert result is expected_config
+
+    anyio.run(scenario)
+    assert call_thread is not None
+    assert call_thread != main_thread
 
 
 def test_in_process_sdk_offloads_resumed_session_startup(
@@ -266,6 +330,57 @@ def test_in_process_options_allows_zero_tool_iterations() -> None:
     assert InProcessOptions(max_tool_iterations=0).max_tool_iterations == 0
     with pytest.raises(ValueError, match="non-negative"):
         InProcessOptions(max_tool_iterations=-1)
+
+
+def test_in_process_sdk_project_root_defaults_tool_cwd(tmp_path: Path) -> None:
+    project = tmp_path / "Wisp-344"
+    project.mkdir()
+    target = project / "notes.txt"
+    target.write_text("selected worktree\n", encoding="utf-8")
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path / "sessions"),
+            options=InProcessOptions(
+                allow_read_tools=True,
+                startup_trusted=True,
+                project_context_root=project,
+            ),
+        )
+        try:
+            context = controller._in_process_transport._host.agent.tool_context
+            result = await ReadTool().run({"path": str(target)}, context)
+
+            assert context.cwd == project.resolve(strict=False)
+            assert result.text == "selected worktree\n"
+        finally:
+            await controller.aclose()
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_explicit_cwd_preserves_project_subdirectory(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    working_directory = project / "src"
+    working_directory.mkdir(parents=True)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path / "sessions"),
+            options=InProcessOptions(
+                startup_trusted=True,
+                project_context_root=project,
+                cwd=working_directory,
+            ),
+        )
+        try:
+            host = controller._in_process_transport._host
+            assert host.agent.tool_context.cwd == working_directory.resolve(strict=False)
+            assert host.agent.project_context_root == project.resolve(strict=False)
+        finally:
+            await controller.aclose()
+
+    anyio.run(scenario)
 
 
 def test_rpc_trust_gate_offloads_store_io(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

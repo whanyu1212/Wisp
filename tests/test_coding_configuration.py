@@ -64,6 +64,23 @@ def test_resolver_validates_default_effort_but_preserves_explicit_override(tmp_p
     )
 
 
+def test_resolver_uses_explicit_tool_working_directory(tmp_path: Path) -> None:
+    providers = ProviderRegistry()
+    providers.register(FakeProvider())
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    configuration = resolve_coding_session_configuration(
+        WispConfig(provider="fake", session_dir=tmp_path / "sessions"),
+        providers=providers,
+        models=None,
+        trusted=True,
+        cwd=workspace,
+    )
+
+    assert configuration.tool_context.cwd == workspace
+
+
 def test_reconfigure_updates_dynamic_settings_and_preserves_live_resources(tmp_path: Path) -> None:
     initial_provider = FakeProvider()
     replacement_provider = _OpenAIProvider()
