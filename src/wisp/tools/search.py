@@ -213,10 +213,15 @@ def _python_grep(
     output: list[str] = []
     output_bytes = 0
     match_count = 0
+    ignore_override_glob = glob if glob is not None and not _is_exclusion_glob(glob) else None
     files = (
         _iter_files(secure_path, context)
-        if glob is None
-        else _iter_files(secure_path, context, ignore_override_glob=glob)
+        if ignore_override_glob is None
+        else _iter_files(
+            secure_path,
+            context,
+            ignore_override_glob=ignore_override_glob,
+        )
     )
     for file_path in files:
         if glob is not None and not _matches_glob(file_path, glob, context):
@@ -573,7 +578,7 @@ def _walk_directory(
         if stat.S_ISLNK(info.st_mode):
             continue
         if stat.S_ISDIR(info.st_mode):
-            if (_is_hidden(name) and ignore_override_glob is None) or (
+            if _is_hidden(name) or (
                 _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
                 and not _may_reinclude_descendant(candidate, ignore_specs)
                 and ignore_override_glob is None
@@ -825,9 +830,18 @@ def _is_hidden(name: str) -> bool:
     return name.startswith(".")
 
 
+def _is_exclusion_glob(pattern: str) -> bool:
+    return pattern.startswith("!")
+
+
 def _matches_glob(path: Path, pattern: str, context: ToolContext) -> bool:
+    exclusion = _is_exclusion_glob(pattern)
+    effective_pattern = pattern[1:] if exclusion else pattern
     display_path = display_tool_path(path, context)
-    return fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(display_path, pattern)
+    matched = fnmatch.fnmatch(path.name, effective_pattern) or fnmatch.fnmatch(
+        display_path, effective_pattern
+    )
+    return not matched if exclusion else matched
 
 
 def _build_matcher(

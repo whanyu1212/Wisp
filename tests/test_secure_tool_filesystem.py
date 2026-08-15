@@ -350,10 +350,26 @@ def test_grep_explicit_glob_reincludes_hidden_files(tmp_path: Path) -> None:
     )
 
     assert default.text == "No matches"
-    assert explicit.data["matches"] == [
-        ".hidden/result.txt:1:needle",
-        ".hidden.txt:1:needle",
-    ]
+    assert explicit.data["matches"] == [".hidden.txt:1:needle"]
+
+
+def test_grep_negated_glob_excludes_matches_without_overriding_ignores(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (tmp_path / "excluded.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "ignored.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".hidden.py").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "glob": "!*.txt"},
+        context,
+    )
+
+    assert result.data["matches"] == ["visible.py:1:needle"]
 
 
 def test_recursive_tools_preserve_valid_non_utf8_ignore_rules(tmp_path: Path) -> None:
