@@ -371,6 +371,30 @@ class TextualHistoryController:
             self._surface.finish_history_render()
         return True
 
+    def recover_evicted_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
+        """Insert the durable prefix missing from a bounded live transcript.
+
+        A tail reload replaces the retained window only while the reader follows
+        live output. When the reader has moved upward, doing that would yank the
+        viewport back to the tail. Instead retain just the durable entries that
+        precede the surviving live suffix and mount them before that suffix.
+        """
+
+        snapshot = self._latest_reload_live_entries
+        live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
+        self._latest_reload_live_entries = None
+        recovered = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
+        if not recovered:
+            return
+        self._surface.begin_history_prepend()
+        self._surface.begin_history_render()
+        try:
+            self._discard_entries(self._window.append(self._retain(recovered), follow_tail=False))
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+            self._surface.finish_history_prepend()
+
     def capture_latest_reload_live_entries(self) -> None:
         """Capture live output at the point the durable latest-page request starts."""
 

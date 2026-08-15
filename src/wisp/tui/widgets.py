@@ -77,18 +77,10 @@ from wisp.tui.decision_content import (
 )
 from wisp.tui.diff_presentation import (
     DIFF_ADD_COUNT_STYLE,
-    DIFF_ADD_STYLE,
-    DIFF_ADD_TOKEN_STYLE,
-    DIFF_CONTEXT_STYLE,
     DIFF_DEL_COUNT_STYLE,
-    DIFF_DEL_STYLE,
-    DIFF_DEL_TOKEN_STYLE,
-    DIFF_META_STYLE,
     DiffPresentation,
-    DiffRow,
-    DiffRowKind,
-    DiffVisibleRow,
 )
+from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.rendering import (
     TuiViewSnapshot,
@@ -388,244 +380,6 @@ def _render_diff_presentation(
             visible_row,
             width=inner_width,
             show_line_numbers=presentation.show_line_numbers,
-        )
-    return content
-
-
-def _render_diff_visible_row(
-    visible_row: DiffVisibleRow,
-    *,
-    width: int,
-    show_line_numbers: bool,
-) -> Content:
-    """Render one selected row, padding changed rows into a full-width band.
-
-    Context and metadata rows are never padded — a trailing fill on an untinted
-    row is invisible cells that only widen the transcript. A changed row, by
-    contrast, carries a background, so its fill is exactly what turns a ragged
-    coloured fragment into a band that ends at the card edge.
-    """
-
-    row = visible_row.row
-    if row.kind in {DiffRowKind.omission, DiffRowKind.hunk}:
-        return Content("  ") + Content.styled(
-            _truncate_to_cell_width(row.text, width),
-            DIFF_META_STYLE,
-        )
-
-    marker = {
-        DiffRowKind.context: " ",
-        DiffRowKind.addition: "+",
-        DiffRowKind.deletion: "-",
-    }[row.kind]
-    if show_line_numbers:
-        old_line = "" if row.old_line is None else str(row.old_line)
-        new_line = "" if row.new_line is None else str(row.new_line)
-        gutter = f"{old_line:>4} {new_line:>4} {marker} │ "
-    else:
-        gutter = f"{marker} │ "
-    source_width = max(1, width - cell_len(gutter))
-    source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
-    style = _diff_row_style(row)
-    content = Content.styled("  " + gutter, style) + _styled_diff_source(
-        source, emphasis_ranges, _diff_token_style(row), style
-    )
-    if row.kind in {DiffRowKind.addition, DiffRowKind.deletion}:
-        fill = source_width - cell_len(source)
-        if fill > 0:
-            content += Content.styled(" " * fill, style)
-    return content
-
-
-def _crop_diff_row_source(
-    row: DiffRow,
-    *,
-    width: int,
-) -> tuple[str, tuple[tuple[int, int], ...]]:
-    """Crop literal source before its known synthetic terminator annotation."""
-
-    note_length = min(max(0, row.terminator_note_length), len(row.text))
-    source_text = row.text[:-note_length] if note_length else row.text
-    note = row.text[-note_length:] if note_length else ""
-    # Favor review evidence over an annotation when the gutter leaves too few
-    # cells to show a useful changed token. At wider sizes, reserve the note's
-    # exact known width and append it after the independently cropped literal.
-    note_width = cell_len(note)
-    source_width = width - note_width
-    show_note = bool(note) and source_width >= 4
-    cropped, ranges = _crop_diff_source(
-        source_text,
-        row.emphasis_ranges,
-        width=source_width if show_note else width,
-        preserve_tail=row.kind in {DiffRowKind.addition, DiffRowKind.deletion},
-    )
-    if show_note:
-        return f"{cropped}{note}", ranges
-    if note:
-        # The annotation did not fit, so make the omitted metadata explicit
-        # without allowing it to displace the source evidence. On an exact-fit
-        # row, reserve the final cell for the marker rather than silently
-        # making a newline-only change look identical on both sides.
-        if cell_len(cropped) < width:
-            return f"{cropped}…", ranges
-        return f"{_take_cell_prefix(cropped, max(0, width - 1))}…", ranges
-    return cropped, ranges
-
-
-def _diff_row_style(row: DiffRow) -> str:
-    if row.kind is DiffRowKind.addition:
-        return DIFF_ADD_STYLE
-    if row.kind is DiffRowKind.deletion:
-        return DIFF_DEL_STYLE
-    if row.kind is DiffRowKind.context:
-        return DIFF_CONTEXT_STYLE
-    return DIFF_META_STYLE
-
-
-def _diff_token_style(row: DiffRow) -> str:
-    """The stronger tint for changed tokens inside an already-tinted row.
-
-    Only addition and deletion rows have a distinct token tint. Any other kind
-    falls back to its own row style, so emphasis on an unexpected row degrades
-    to no visible change rather than an unreadable inverted block.
-    """
-
-    if row.kind is DiffRowKind.addition:
-        return DIFF_ADD_TOKEN_STYLE
-    if row.kind is DiffRowKind.deletion:
-        return DIFF_DEL_TOKEN_STYLE
-    return _diff_row_style(row)
-
-
-def _crop_diff_source(
-    text: str,
-    ranges: tuple[tuple[int, int], ...],
-    *,
-    width: int,
-    preserve_tail: bool,
-) -> tuple[str, tuple[tuple[int, int], ...]]:
-    """Crop a source row while keeping its emphasized evidence in view.
-
-    A normal width clip starts at column zero, which can hide the only changed
-    token when it occurs near the end of a long line. When emphasis is present,
-    reserve visible cells around its complete span and remap ranges to the cropped
-    literal string. The outer gutter still identifies the row as an addition or
-    deletion, while ellipses explicitly signal omitted source context.
-    """
-
-    if cell_len(text) <= width:
-        return text, ranges
-    if width < 3:
-        # A terminal this narrow cannot accommodate both truncation markers and
-        # a changed character; preserve the row's fixed +/- gutter without
-        # overflowing it. Supported compact layouts have wider source columns.
-        return _truncate_to_cell_width(text, width), ()
-    normalized = tuple(
-        sorted(
-            (max(0, start), min(len(text), end))
-            for start, end in ranges
-            if end > start and start < len(text)
-        )
-    )
-    if not normalized:
-        # Unequal replacements intentionally skip intra-line matching. Their
-        # changed rows still need reviewable evidence on narrow terminals: use
-        # a literal suffix window rather than showing only a shared prefix.
-        if preserve_tail and width >= 2:
-            return f"…{_take_cell_suffix(text, width - 1)}", ()
-        return _truncate_to_cell_width(text, width), ()
-
-    focus_start = normalized[0][0]
-    focus_end = normalized[-1][1]
-    left_marker = "…" if focus_start else ""
-    right_marker = "…" if focus_end < len(text) else ""
-    focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
-    focus = text[focus_start:focus_end]
-    before = ""
-    after = ""
-    if cell_len(focus) > focus_width:
-        # Prefix-clipping the emphasis itself hides changed source. Reserve a
-        # trailing ellipsis even when the original span reached line end so the
-        # reader knows that horizontally changed evidence remains unavailable.
-        right_marker = "…"
-        focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
-        focus = _take_cell_prefix(focus, focus_width)
-        focus_end = focus_start + len(focus)
-    else:
-        context_width = focus_width - cell_len(focus)
-        before = _take_cell_suffix(text[:focus_start], context_width // 2)
-        after = _take_cell_prefix(text[focus_end:], context_width - cell_len(before))
-
-    source = f"{left_marker}{before}{focus}{after}{right_marker}"
-    offset = len(left_marker) + len(before)
-    remapped = tuple(
-        (offset + max(start, focus_start) - focus_start, offset + min(end, focus_end) - focus_start)
-        for start, end in normalized
-        if max(start, focus_start) < min(end, focus_end)
-    )
-    return source, remapped
-
-
-def _take_cell_prefix(text: str, width: int) -> str:
-    """Return the longest literal prefix that fits in ``width`` terminal cells."""
-
-    cells = 0
-    end = 0
-    for index, character in enumerate(text):
-        character_cells = cell_len(character)
-        if cells + character_cells > width:
-            break
-        cells += character_cells
-        end = index + 1
-    return text[:end]
-
-
-def _take_cell_suffix(text: str, width: int) -> str:
-    """Return the longest literal suffix that fits in ``width`` terminal cells."""
-
-    cells = 0
-    start = len(text)
-    for index in range(len(text) - 1, -1, -1):
-        character_cells = cell_len(text[index])
-        if cells + character_cells > width:
-            break
-        cells += character_cells
-        start = index
-    return text[start:]
-
-
-def _styled_diff_source(
-    source: str,
-    ranges: tuple[tuple[int, int], ...],
-    token_style: str,
-    base_style: str,
-) -> Content:
-    """Keep literal source styled while retaining bounded intra-line emphasis.
-
-    ``token_style`` is a complete style for the changed spans rather than a
-    modifier appended to ``base_style``, so emphasis is a deliberate second tint
-    layered on the row band instead of an inversion of it.
-    """
-
-    if not ranges:
-        return Content.styled(source, base_style) if base_style else Content(source)
-    content = Content("")
-    cursor = 0
-    for start, end in sorted(ranges):
-        start = min(max(cursor, start), len(source))
-        end = min(max(start, end), len(source))
-        if start > cursor:
-            content += (
-                Content.styled(source[cursor:start], base_style)
-                if base_style
-                else Content(source[cursor:start])
-            )
-        if end > start:
-            content += Content.styled(source[start:end], token_style)
-        cursor = end
-    if cursor < len(source):
-        content += (
-            Content.styled(source[cursor:], base_style) if base_style else Content(source[cursor:])
         )
     return content
 
@@ -2078,6 +1832,12 @@ class Transcript(VerticalScroll):
 
         return self._has_more_history
 
+    @property
+    def can_page_to_older_history(self) -> bool:
+        """Whether ordinary edge paging can reveal older transcript entries."""
+
+        return self._has_more_history or self._has_retained_history
+
     def request_history_at_top(
         self,
         navigation: HistoryNavigation | None = None,
@@ -2189,11 +1949,7 @@ class Transcript(VerticalScroll):
         self._stop_following()
         page_height = float(self.scrollable_content_region.height)
         navigation = None
-        if (
-            page_height > 0
-            and self.scroll_y <= page_height
-            and (self._has_more_history or self._has_retained_history)
-        ):
+        if page_height > 0 and self.scroll_y <= page_height:
             navigation = HistoryNavigation(
                 HistoryNavigationIntent.PAGE_UP,
                 remaining_rows=page_height - self.scroll_y,
@@ -2209,7 +1965,7 @@ class Transcript(VerticalScroll):
 
         self._stop_following()
         step = float(self.scroll_sensitivity_y)
-        if self.scroll_y <= step and (self._has_more_history or self._has_retained_history):
+        if self.scroll_y <= step:
             navigation = HistoryNavigation(
                 HistoryNavigationIntent.WHEEL_UP,
                 remaining_rows=max(0.0, step - self.scroll_y),
@@ -2475,8 +2231,9 @@ class ToolCard(Static):
     # Tool result
 
     Review one tool request and its bounded result. Enter or Space expands extra
-    output when available; expansion changes presentation only and never reruns the
-    tool. Escape returns focus to the prompt or active safety decision.
+    output when available; use v on an edit or write result to open its full retained
+    diff. Presentation changes never rerun the tool. Escape returns focus to the
+    prompt or active safety decision.
     """
 
     # Status drives the semantic CSS role while the visible action phrase carries
@@ -2498,6 +2255,7 @@ class ToolCard(Static):
     BINDINGS = [
         Binding("enter", "toggle_expand", "Expand/collapse", show=False),
         Binding("space", "toggle_expand", "Expand/collapse", show=False),
+        Binding("v", "view_diff", "View diff", show=False),
         Binding("escape", "leave", "Back to input", show=False),
     ]
 
@@ -2667,9 +2425,17 @@ class ToolCard(Static):
         # card's position (expanding a historical card must not yank the viewport).
         self.post_message(self.Toggled(self))
 
+    def action_view_diff(self) -> None:
+        """Open the retained structured diff in the dedicated reader surface."""
+
+        if isinstance(self._detail, DiffPresentation):
+            self.post_message(self.ViewDiffRequested(self, self._detail))
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_expand":
             return self._can_expand()
+        if action == "view_diff":
+            return isinstance(self._detail, DiffPresentation)
         return True
 
     def action_leave(self) -> None:
@@ -2691,6 +2457,14 @@ class ToolCard(Static):
     class LeaveRequested(Message):
         """A focused card asked to hand focus back to the prompt input."""
 
+    class ViewDiffRequested(Message):
+        """A focused diff card requested the dedicated reader surface."""
+
+        def __init__(self, card: ToolCard, presentation: DiffPresentation) -> None:
+            super().__init__()
+            self.card = card
+            self.presentation = presentation
+
     def _repaint(self, *, layout: bool = True) -> None:
         # Build the whole tree as Content, appending every untrusted value as literal
         # text. Trusted bullets and branches are also literal chrome; semantic state
@@ -2709,6 +2483,8 @@ class ToolCard(Static):
         if self._can_expand():
             label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
             action += Content.styled(label, "$text-muted")
+        if isinstance(self._detail, DiffPresentation):
+            action += Content.styled(" · v view diff", "$text-muted")
         content = _tree_line(
             action,
             width=width,

@@ -114,11 +114,17 @@ DIFF_ADD_STYLE = "$diff-add-fg on $diff-add-bg"
 DIFF_DEL_STYLE = "$diff-del-fg on $diff-del-bg"
 DIFF_ADD_TOKEN_STYLE = "$diff-add-fg on $diff-add-token-bg"
 DIFF_DEL_TOKEN_STYLE = "$diff-del-fg on $diff-del-token-bg"
+DIFF_ADD_GUTTER_STYLE = "$diff-line-number-fg on $diff-add-gutter-bg"
+DIFF_DEL_GUTTER_STYLE = "$diff-line-number-fg on $diff-del-gutter-bg"
+DIFF_ADD_SIGN_STYLE = "$diff-add-sign-fg on $diff-add-gutter-bg"
+DIFF_DEL_SIGN_STYLE = "$diff-del-sign-fg on $diff-del-gutter-bg"
+DIFF_GUTTER_STYLE = "$diff-line-number-fg"
 # The header's +N/-N counts are a summary, not a row: they take the same hues
 # without a band, so a tinted rectangle never appears outside the diff body.
 DIFF_ADD_COUNT_STYLE = "$diff-add-fg"
 DIFF_DEL_COUNT_STYLE = "$diff-del-fg"
-DIFF_CONTEXT_STYLE = "$text-muted"
+DIFF_CONTEXT_STYLE = "$diff-context-fg"
+DIFF_HUNK_STYLE = "$diff-hunk-fg"
 DIFF_META_STYLE = "$text-muted"
 
 DIFF_COLLAPSED_ROWS = 8
@@ -433,16 +439,22 @@ def _clip_to_bytes(text: str, max_bytes: int) -> str:
 
 __all__ = [
     "DIFF_ADD_COUNT_STYLE",
+    "DIFF_ADD_GUTTER_STYLE",
+    "DIFF_ADD_SIGN_STYLE",
     "DIFF_ADD_STYLE",
     "DIFF_ADD_TOKEN_STYLE",
     "DIFF_COLLAPSED_BYTES",
     "DIFF_COLLAPSED_ROWS",
     "DIFF_CONTEXT_STYLE",
+    "DIFF_DEL_GUTTER_STYLE",
+    "DIFF_DEL_SIGN_STYLE",
     "DIFF_DEL_COUNT_STYLE",
     "DIFF_DEL_STYLE",
     "DIFF_DEL_TOKEN_STYLE",
     "DIFF_EXPANDED_BYTES",
     "DIFF_EXPANDED_ROWS",
+    "DIFF_GUTTER_STYLE",
+    "DIFF_HUNK_STYLE",
     "DIFF_META_STYLE",
     "DiffOperation",
     "DiffPresentation",

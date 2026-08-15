@@ -3662,6 +3662,71 @@ def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() 
     assert resumed_requests == 1
 
 
+@pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
+def test_textual_backward_navigation_recovers_evicted_live_history(navigation: str) -> None:
+    async def scenario() -> tuple[int, list[str], float, bool]:
+        app_instance, renderer = create_textual_tui()
+        messages = tuple(
+            f"message {index}\nline {index}a\nline {index}b\nline {index}c" for index in range(3)
+        )
+        requests = 0
+
+        async def request_latest() -> None:
+            nonlocal requests
+            requests += 1
+            renderer.replace_latest_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=message)
+                    for message in messages
+                )
+            )
+            renderer.history_page_loaded(has_more=False)
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            widgets = []
+            for message in messages:
+                widget = app_instance.write_assistant(message)
+                assert widget is not None
+                renderer._history.record_live_message("assistant", message, widget=widget)
+                widgets.append(widget)
+            await pilot.pause()
+            transcript.stop_following()
+            transcript.scroll_home(animate=False)
+            app_instance.set_history_latest_request_hook(request_latest)
+            app_instance.remove_live_transcript_widget(widgets[0])
+            app_instance.live_transcript_widget_evicted(widgets[0])
+
+            if navigation == "page_up":
+                app_instance.action_scroll_transcript_page_up()
+            else:
+                await pilot._post_mouse_events(
+                    [events.MouseScrollUp],
+                    widget=transcript,
+                    times=1,
+                )
+            with anyio.fail_after(5):
+                while requests == 0:
+                    await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            return (
+                requests,
+                _transcript_texts(app_instance),
+                transcript.scroll_y,
+                transcript.is_following,
+            )
+
+    requests, texts, scroll_y, following = anyio.run(scenario)
+
+    assert requests == 1
+    assert [text.split("\n", 1)[0] for text in texts].count("message 0") == 1
+    assert any(text.startswith("message 1\n") for text in texts)
+    assert any(text.startswith("message 2\n") for text in texts)
+    assert scroll_y == 0
+    assert not following
+
+
 def test_textual_close_exits_when_stream_shutdown_fails(monkeypatch: MonkeyPatch) -> None:
     async def scenario() -> bool:
         app_instance = TextualTui()

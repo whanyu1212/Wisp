@@ -45,6 +45,7 @@ from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
 from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
+from wisp.tui.diff_viewer import DiffViewer
 from wisp.tui.file_index import FileIndexConfig, collect_paths
 from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.overlay import (
@@ -464,6 +465,7 @@ class TextualTui(App[None]):
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
         self._context_status: ContextStatusOverlay | None = None
+        self._diff_viewer: DiffViewer | None = None
         self._operation_indicator: OperationIndicator | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._help_viewport_state: TranscriptViewportState | None = None
@@ -489,6 +491,7 @@ class TextualTui(App[None]):
         self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
+        self._live_history_recovery_navigation: HistoryNavigation | None = None
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
@@ -534,6 +537,7 @@ class TextualTui(App[None]):
             # transcript/composer siblings when it becomes visible.
             yield OperationIndicator(id="operation-indicator")
             yield ContextStatusOverlay(id="context-status")
+            yield DiffViewer(id="diff-viewer")
             # Transcript takes all remaining height (1fr). ComposerPanel is explicitly
             # auto-height so the input and detached footer still hug the screen bottom.
             yield Transcript(
@@ -595,6 +599,7 @@ class TextualTui(App[None]):
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
         self._context_status = self.query_one("#context-status", ContextStatusOverlay)
+        self._diff_viewer = self.query_one("#diff-viewer", DiffViewer)
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
             composer=self._composer,
@@ -611,6 +616,7 @@ class TextualTui(App[None]):
                 OverlayKind.prompt_history: self._prompt_history_picker,
                 OverlayKind.theme_picker: self._theme_picker,
                 OverlayKind.context_status: self._context_status,
+                OverlayKind.diff_viewer: self._diff_viewer,
                 OverlayKind.operation_indicator: self._operation_indicator,
             },
             defer_after_refresh=self._defer_overlay_restore,
@@ -909,15 +915,27 @@ class TextualTui(App[None]):
         elif self._decision_panel is not None:
             self._decision_panel.focus_options()
 
+    def on_tool_card_view_diff_requested(self, event: ToolCard.ViewDiffRequested) -> None:
+        """Open a card's retained structured diff without disturbing scrollback."""
+
+        event.stop()
+        self.show_diff_viewer(event.presentation)
+
+    def on_diff_viewer_closed(self, event: DiffViewer.Closed) -> None:
+        event.stop()
+        self.hide_diff_viewer()
+
     def _cancel_card_expand_repin(self) -> None:
         # A user scroll after focusing a card is a deliberate move away from the tail.
         self._transcript_controller.user_scrolled()
 
-    def _begin_transcript_navigation(self) -> int:
-        """Invalidate stale viewport work and cancel any in-flight Home traversal."""
+    def _begin_transcript_navigation(self, *, preserve_live_history_recovery: bool = False) -> int:
+        """Invalidate stale viewport work and cancel incompatible reader actions."""
 
         self._transcript_navigation_generation += 1
         self._cancel_oldest_navigation()
+        if not preserve_live_history_recovery:
+            self._live_history_recovery_navigation = None
         return self._transcript_navigation_generation
 
     def _cancel_oldest_navigation(self) -> None:
@@ -927,11 +945,12 @@ class TextualTui(App[None]):
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self._wheel_event_targets_transcript(event):
             self._cancel_card_expand_repin()
-            self._begin_transcript_navigation()
+            self._begin_transcript_navigation(preserve_live_history_recovery=True)
             assert self._transcript is not None
             navigation = self._transcript.prepare_wheel_up()
             if navigation is not None:
                 self._pending_history_navigation = navigation
+                self._recover_evicted_history_for_backward_navigation(navigation)
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
@@ -1655,6 +1674,9 @@ class TextualTui(App[None]):
     # next Enter into an unintended approval. Delegate to the panel's own
     # OptionList navigation in that case instead.
     def action_scroll_transcript_page_up(self) -> None:
+        if self._diff_viewer is not None and self._diff_viewer.is_open:
+            self._diff_viewer.action_page_up()
+            return
         if help_keys := self._help_key_panel():
             help_keys.action_page_up()
             return
@@ -1669,12 +1691,16 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
-            self._begin_transcript_navigation()
+            self._begin_transcript_navigation(preserve_live_history_recovery=True)
             navigation = self._transcript.page_up()
             if navigation is not None:
                 self._pending_history_navigation = navigation
+                self._recover_evicted_history_for_backward_navigation(navigation)
 
     def action_scroll_transcript_page_down(self) -> None:
+        if self._diff_viewer is not None and self._diff_viewer.is_open:
+            self._diff_viewer.action_page_down()
+            return
         if help_keys := self._help_key_panel():
             help_keys.action_page_down()
             return
@@ -1693,6 +1719,9 @@ class TextualTui(App[None]):
             self._transcript.page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        if self._diff_viewer is not None and self._diff_viewer.is_open:
+            self._diff_viewer.action_home()
+            return
         if help_keys := self._help_key_panel():
             help_keys.action_scroll_home()
             return
@@ -1713,6 +1742,9 @@ class TextualTui(App[None]):
             self._continue_oldest_navigation(generation, self._transcript_epoch)
 
     def action_scroll_transcript_end(self) -> None:
+        if self._diff_viewer is not None and self._diff_viewer.is_open:
+            self._diff_viewer.action_end()
+            return
         if help_keys := self._help_key_panel():
             help_keys.action_scroll_end()
             return
@@ -1923,6 +1955,26 @@ class TextualTui(App[None]):
             return False
         return overlays.close(OverlayKind.context_status)
 
+    def show_diff_viewer(self, presentation: DiffPresentation) -> None:
+        """Show one tool-card diff with an independently scrollable full view."""
+
+        viewer = self._diff_viewer
+        overlays = self._overlay_controller
+        if viewer is None or overlays is None:
+            return
+        if overlays.active_overlay is not None or overlays.active_operation is not None:
+            return
+        overlays.open(OverlayKind.diff_viewer, preserve_viewport=True)
+        viewer.show_diff(presentation)
+
+    def hide_diff_viewer(self) -> bool:
+        """Dismiss the diff reader and restore transcript position and composer."""
+
+        overlays = self._overlay_controller
+        if overlays is None:
+            return False
+        return overlays.close(OverlayKind.diff_viewer)
+
     def session_catalog_started(self) -> None:
         self._start_session_operation(OverlayOperation.session_catalog)
 
@@ -1963,6 +2015,7 @@ class TextualTui(App[None]):
         self._prepending_history = False
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
+        self._live_history_recovery_navigation = None
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
         self._cancel_oldest_navigation()
@@ -2064,6 +2117,75 @@ class TextualTui(App[None]):
         self._live_history_reload_needed = True
         self._request_live_history_reload()
 
+    def _recover_evicted_history_for_backward_navigation(
+        self,
+        navigation: HistoryNavigation,
+    ) -> None:
+        """Load a durable prefix when PageUp or the wheel reaches live eviction.
+
+        Ordinary history paging owns retained and server-known older pages. This
+        path is only for a live transcript whose oldest mounted widgets were
+        evicted before the reader started browsing, leaving no page cursor for
+        the normal edge handler to follow.
+        """
+
+        transcript = self._transcript
+        request_latest = self._history_latest_request_hook
+        if (
+            not self._live_history_reload_needed
+            or request_latest is None
+            or transcript is None
+            or transcript.is_following
+            or transcript.scroll_y != 0
+            or transcript.can_page_to_older_history
+        ):
+            return
+        pending = self._live_history_recovery_navigation
+        if pending is not None:
+            # Wheel events can arrive while the RPC page is in flight. Retain the
+            # unconsumed distance so the restored viewport lands where the reader
+            # intended, rather than making them repeat the burst after every page.
+            self._live_history_recovery_navigation = HistoryNavigation(
+                navigation.intent,
+                pending.remaining_rows + navigation.remaining_rows,
+                transcript.follow_generation,
+            )
+            return
+        if self._live_history_reload_pending:
+            return
+        self._live_history_recovery_navigation = HistoryNavigation(
+            navigation.intent,
+            navigation.remaining_rows,
+            transcript.follow_generation,
+        )
+        self._live_history_reload_pending = True
+        self.run_worker(
+            request_latest(),
+            group="history-latest-reload",
+            exit_on_error=False,
+        )
+
+    def consume_live_history_recovery(self) -> HistoryNavigation | None:
+        """Return a still-valid backward recovery intent for the renderer."""
+
+        navigation = self._live_history_recovery_navigation
+        transcript = self._transcript
+        self._live_history_recovery_navigation = None
+        if (
+            navigation is None
+            or transcript is None
+            or transcript.is_following
+            or transcript.scroll_y != 0
+        ):
+            return None
+        navigation = HistoryNavigation(
+            navigation.intent,
+            navigation.remaining_rows,
+            transcript.follow_generation,
+        )
+        self._pending_history_navigation = navigation
+        return navigation
+
     def _request_live_history_reload(self) -> None:
         transcript = self._transcript
         request_latest = self._history_latest_request_hook
@@ -2087,11 +2209,13 @@ class TextualTui(App[None]):
 
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
+        self._live_history_recovery_navigation = None
 
     def live_history_reload_failed(self) -> None:
         """Release a failed request while retaining recovery work for a later retry."""
 
         self._live_history_reload_pending = False
+        self._live_history_recovery_navigation = None
 
     def set_live_widget_evicted_hook(self, hook: Callable[[Widget], None]) -> None:
         """Register the renderer-owned durable-history identity release hook."""
