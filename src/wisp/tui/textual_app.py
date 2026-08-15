@@ -786,6 +786,14 @@ class TextualTui(App[None]):
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
+            if self._oldest_navigation_generation is not None:
+                # Window reconciliation can briefly collapse max_scroll_y to zero,
+                # which looks like tail-following even though Home still owns the
+                # navigation. Preserve that explicit reader intent; End cancels the
+                # generation before it deliberately restores tail following.
+                if self._transcript is not None:
+                    self._transcript.stop_following()
+                return
             self._cancel_oldest_navigation()
             show_latest = self._history_window_latest_hook
             if show_latest is not None:
@@ -2482,8 +2490,7 @@ class TextualTui(App[None]):
             return
         transcript.history_page_loaded(has_more=has_more)
         self._history_layout_generation += 1
-        oldest_generation = self._oldest_navigation_generation
-        if not has_more and oldest_generation is None:
+        if not has_more and self._oldest_navigation_generation is None:
             return
         self.run_worker(
             self._settle_history_page_layout(
@@ -2491,7 +2498,6 @@ class TextualTui(App[None]):
                 self._last_history_render_mounts,
                 self._history_layout_generation,
                 self._transcript_epoch,
-                oldest_generation,
             ),
             group="history-page-layout",
             exit_on_error=False,
@@ -2503,7 +2509,6 @@ class TextualTui(App[None]):
         mounts: tuple[AwaitMount, ...],
         generation: int,
         epoch: int,
-        oldest_generation: int | None,
     ) -> None:
         for mounted in mounts:
             await mounted
@@ -2512,7 +2517,6 @@ class TextualTui(App[None]):
             transcript,
             generation,
             epoch,
-            oldest_generation,
         )
 
     def _settle_history_page_after_refresh(
@@ -2520,7 +2524,6 @@ class TextualTui(App[None]):
         transcript: Transcript,
         generation: int,
         epoch: int,
-        oldest_generation: int | None,
     ) -> None:
         if (
             generation != self._history_layout_generation
@@ -2528,14 +2531,19 @@ class TextualTui(App[None]):
             or transcript is not self._transcript
         ):
             return
-        transcript.history_page_layout_settled()
+        oldest_generation = self._oldest_navigation_generation
         if (
             oldest_generation is not None
-            and oldest_generation == self._oldest_navigation_generation
+            and oldest_generation == self._transcript_navigation_generation
         ):
+            transcript.history_page_layout_settled()
             self._continue_oldest_navigation(oldest_generation, epoch)
             return
+        # Pin the initial history batch before arming edge pagination. Under a
+        # delayed Textual layout, arming first can let a pending top-edge watcher
+        # request an unnecessary page before follow_tail() reaches the real end.
         transcript.follow_tail()
+        transcript.history_page_layout_settled()
         self.call_after_refresh(
             self._request_history_if_still_at_top,
             transcript,
@@ -2549,12 +2557,31 @@ class TextualTui(App[None]):
         generation: int,
         epoch: int,
     ) -> None:
-        if (
+        if not (
             generation == self._history_layout_generation
             and epoch == self._transcript_epoch
             and transcript is self._transcript
         ):
-            transcript.request_history_at_top()
+            return
+        viewport_height = transcript.scrollable_content_region.height
+        if viewport_height <= 0 or any(child.region.height <= 0 for child in transcript.children):
+            self.call_after_refresh(
+                self._request_history_if_still_at_top,
+                transcript,
+                generation,
+                epoch,
+            )
+            return
+        # A mounted widget occupies at least one row, so child count is a stable
+        # lower bound even while Textual is still updating virtual geometry.
+        # Never request another page merely because scroll_y has not caught up.
+        if (
+            len(transcript.children) > viewport_height
+            or transcript.virtual_size.height > viewport_height
+            or transcript.max_scroll_y > 0
+        ):
+            return
+        transcript.request_history_at_top()
 
     def _continue_oldest_navigation(self, generation: int, epoch: int) -> None:
         """Advance one retained or durable step toward the session beginning."""
