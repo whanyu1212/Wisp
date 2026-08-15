@@ -7432,19 +7432,80 @@ def test_textual_composer_compacts_metadata_and_caps_editor_responsively(
     compact: bool,
     max_height: int,
 ) -> None:
-    async def scenario() -> tuple[bool, bool, float]:
+    async def scenario() -> tuple[bool, bool, str, float]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=(80, height)) as pilot:
+            await pilot.pause()
+            app_instance.set_status(
+                TuiViewSnapshot(
+                    status="idle",
+                    input_hint="wisp> ",
+                    mode="plan",
+                    model="gpt-5.6-codex",
+                    provider="openai-codex",
+                )
+            )
+            composer = app_instance.query_one("#composer", ComposerPanel)
+            metadata = app_instance.query_one("#composer-meta", ComposerMeta)
+            editor = app_instance.query_one("#input", Input)
+            return (
+                composer.has_class("-compact"),
+                metadata.display,
+                metadata.render().plain,
+                editor.styles.max_height.value,
+            )
+
+    is_compact, metadata_visible, metadata_text, actual_max_height = anyio.run(scenario)
+    assert is_compact is compact
+    assert metadata_visible
+    assert metadata_text == ("Plan" if compact else "Plan · gpt-5.6-codex · openai-codex")
+    assert actual_max_height == max_height
+
+
+def test_textual_composer_recalculates_compact_layout_after_terminal_resize() -> None:
+    async def scenario() -> tuple[
+        tuple[bool, str, float], tuple[bool, str, float], tuple[bool, str, float]
+    ]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(80, 12)) as pilot:
+            app_instance.set_status(
+                TuiViewSnapshot(
+                    status="idle",
+                    input_hint="wisp> ",
+                    mode="plan",
+                    model="gpt-5.6-codex",
+                    provider="openai-codex",
+                )
+            )
             await pilot.pause()
             composer = app_instance.query_one("#composer", ComposerPanel)
             metadata = app_instance.query_one("#composer-meta", ComposerMeta)
             editor = app_instance.query_one("#input", Input)
-            return composer.has_class("-compact"), metadata.display, editor.styles.max_height.value
+            compact = (
+                composer.has_class("-compact"),
+                metadata.render().plain,
+                editor.styles.max_height.value,
+            )
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            expanded = (
+                composer.has_class("-compact"),
+                metadata.render().plain,
+                editor.styles.max_height.value,
+            )
+            await pilot.resize_terminal(80, 12)
+            await pilot.pause()
+            recompressed = (
+                composer.has_class("-compact"),
+                metadata.render().plain,
+                editor.styles.max_height.value,
+            )
+            return compact, expanded, recompressed
 
-    is_compact, metadata_visible, actual_max_height = anyio.run(scenario)
-    assert is_compact is compact
-    assert metadata_visible is not compact
-    assert actual_max_height == max_height
+    compact, expanded, recompressed = anyio.run(scenario)
+    assert compact == (True, "Plan", 6)
+    assert expanded == (False, "Plan · gpt-5.6-codex · openai-codex", 8)
+    assert recompressed == compact
 
 
 def test_textual_composer_metadata_drops_provider_before_model_under_width_pressure() -> None:

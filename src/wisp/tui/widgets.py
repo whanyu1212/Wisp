@@ -3044,6 +3044,7 @@ class ComposerMeta(Static):
     def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
         super().__init__(id=id, markup=False)
         self._snapshot = TuiViewSnapshot(status="idle", input_hint="wisp> ")
+        self._compact = False
 
     def on_mount(self) -> None:
         self._render_metadata()
@@ -3055,17 +3056,27 @@ class ComposerMeta(Static):
         self._snapshot = snapshot
         self._render_metadata()
 
+    def set_compact(self, compact: bool) -> None:
+        """Show only the behavior-changing mode when vertical space is scarce."""
+
+        if self._compact == compact:
+            return
+        self._compact = compact
+        self._render_metadata()
+
     def refresh_theme(self) -> None:
         """Re-resolve the mode accent after a live theme change."""
 
         self._render_metadata()
 
     def _render_metadata(self) -> None:
-        width = self.content_size.width
         mode, model, provider = _composer_metadata_fields(
             self._snapshot,
-            width=width if width > 0 else None,
+            width=(self.content_size.width or None),
         )
+        if self._compact:
+            model = ""
+            provider = ""
         rendered = Text()
         theme = self.app.current_theme
         for value, color in (
@@ -3102,16 +3113,22 @@ class ComposerPanel(Vertical):
         yield self._metadata
 
     def on_mount(self) -> None:
-        self._update_layout()
-
-    def on_resize(self, event: events.Resize) -> None:
-        self._update_layout()
+        self.refresh_layout()
 
     def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
         self._metadata.set_snapshot(snapshot)
 
     def refresh_theme(self) -> None:
         self._metadata.refresh_theme()
+
+    def refresh_layout(self, *, height: int | None = None) -> None:
+        """Recompute responsive content from the terminal height."""
+
+        selected_height = self.app.size.height if height is None else height
+        compact = selected_height < 16
+        self.set_class(compact, "-compact")
+        self._metadata.set_compact(compact)
+        self._input.styles.max_height = max(6, selected_height // 3)
 
     def hide(self) -> None:
         """Hide all focusable composer content while an overlay owns the input slot."""
@@ -3134,13 +3151,6 @@ class ComposerPanel(Vertical):
 
         if event.control is self:
             self.focus()
-
-    def _update_layout(self) -> None:
-        # At twelve rows the metadata would consume enough transcript height to
-        # alter PageUp semantics. Keep the writing surface and hide only identity
-        # chrome until the terminal has room for both.
-        self.set_class(self.app.size.height < 16, "-compact")
-        self._input.styles.max_height = max(6, self.app.size.height // 3)
 
 
 class StatusBar(Static):

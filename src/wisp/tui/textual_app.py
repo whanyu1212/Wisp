@@ -358,7 +358,11 @@ class TextualTui(App[None]):
     }
 
     #composer.-compact #composer-meta {
-        display: none;
+        margin-top: 0;
+    }
+
+    #composer.-compact {
+        padding-top: 0;
     }
 
     #status {
@@ -619,9 +623,11 @@ class TextualTui(App[None]):
             self.run_worker(self._run_and_exit(), exclusive=True)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Move contextual help below the conversation on narrow terminals."""
+        """Update responsive help and composer presentation after terminal resize."""
 
         self.screen.set_class(event.size.width < 80, "-compact-help")
+        if self._composer is not None:
+            self._composer.refresh_layout(height=event.size.height)
 
     def watch_theme(self, theme_name: str) -> None:
         # Theme variables recolor mounted CSS-owned content atomically. Widgets
