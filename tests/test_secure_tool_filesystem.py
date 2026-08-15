@@ -474,6 +474,83 @@ def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
     assert find.data["files"] == ["foo/bar.txt"]
 
 
+def test_recursive_tools_keep_ignored_intermediate_directories_pruned(
+    tmp_path: Path,
+) -> None:
+    mark_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "foo/**\n!foo/sub/x.txt\n",
+        encoding="utf-8",
+    )
+    nested = tmp_path / "foo" / "sub"
+    nested.mkdir(parents=True)
+    (nested / "x.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.text == "No matches"
+    assert find.text == "No files found"
+
+
+def test_recursive_tools_reinclude_variable_depth_ignore_root(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "**/foo/**\n!foo/keep.txt\n",
+        encoding="utf-8",
+    )
+    root_foo = tmp_path / "foo"
+    root_foo.mkdir()
+    (root_foo / "keep.txt").write_text("needle\n", encoding="utf-8")
+    nested_foo = tmp_path / "nested" / "foo"
+    nested_foo.mkdir(parents=True)
+    (nested_foo / "keep.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["foo/keep.txt:1:needle"]
+    assert find.data["files"] == ["foo/keep.txt"]
+
+
+def test_recursive_tools_reinclude_single_component_wildcard_root(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "*/**\n!*/keep.txt\n",
+        encoding="utf-8",
+    )
+    directory = tmp_path / "foo"
+    directory.mkdir()
+    (directory / "keep.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["foo/keep.txt:1:needle"]
+    assert find.data["files"] == ["foo/keep.txt"]
+
+
+def test_recursive_tools_reinclude_wildcard_directory_patterns(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "logs-*/**\n!logs-*/keep.txt\n",
+        encoding="utf-8",
+    )
+    logs = tmp_path / "logs-1"
+    logs.mkdir()
+    (logs / "keep.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["logs-1/keep.txt:1:needle"]
+    assert find.data["files"] == ["logs-1/keep.txt"]
+
+
 def test_recursive_tools_do_not_reinclude_below_ignored_parent(tmp_path: Path) -> None:
     mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("foo/\n!foo/bar.txt\n", encoding="utf-8")
@@ -564,6 +641,26 @@ def test_grep_explicit_glob_supports_brace_alternatives(tmp_path: Path) -> None:
     assert result.data["matches"] == ["app.js:1:needle", "app.py:1:needle"]
 
 
+def test_grep_path_glob_does_not_cross_component_boundaries(tmp_path: Path) -> None:
+    direct = tmp_path / "src" / "direct.py"
+    direct.parent.mkdir()
+    direct.write_text("needle\n", encoding="utf-8")
+    nested = tmp_path / "src" / "nested" / "deep.py"
+    nested.parent.mkdir()
+    nested.write_text("needle\n", encoding="utf-8")
+    misleading_directory = tmp_path / "src" / "package.py"
+    misleading_directory.mkdir()
+    (misleading_directory / "deep.txt").write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "glob": "src/*.py"},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["matches"] == ["src/direct.py:1:needle"]
+
+
 def test_grep_explicit_glob_reincludes_hidden_files(tmp_path: Path) -> None:
     hidden_directory = tmp_path / ".hidden"
     hidden_directory.mkdir()
@@ -588,6 +685,9 @@ def test_grep_negated_glob_excludes_matches_without_overriding_ignores(
     mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
     (tmp_path / "excluded.txt").write_text("needle\n", encoding="utf-8")
+    excluded_directory = tmp_path / "excluded-directory.txt"
+    excluded_directory.mkdir()
+    (excluded_directory / "deep.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "ignored.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "visible.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / ".hidden.py").write_text("needle\n", encoding="utf-8")

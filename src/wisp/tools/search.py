@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import codecs
-import fnmatch
 import heapq
 import os
 import stat
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from threading import Event
 
@@ -940,7 +940,12 @@ def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...])
         exclusion_allows_reinclude = False
         if ignored and match.index is not None:
             source = rules.spec.patterns[match.index].pattern
-            exclusion_allows_reinclude = isinstance(source, str) and source.rstrip().endswith("/**")
+            if isinstance(source, str) and source.rstrip().endswith("/**"):
+                ignored_root = source.rstrip().removesuffix("/**").removeprefix("/")
+                exclusion_allows_reinclude = _gitignore_glob_matches_exact(
+                    relative,
+                    f"/{ignored_root}/",
+                )
     if not ignored or not exclusion_allows_reinclude:
         return False
 
@@ -958,27 +963,13 @@ def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...])
             ):
                 continue
             negated = source[1:].removeprefix("/")
-            if "/" not in negated.rstrip("/"):
+            components = negated.split("/")
+            if len(components) == 1:
                 return True
-            literal_prefix_chars: list[str] = []
-            escaped = False
-            for character in negated:
-                if escaped:
-                    literal_prefix_chars.append(character)
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character in "*?[":
-                    break
-                else:
-                    literal_prefix_chars.append(character)
-            literal_prefix = "".join(literal_prefix_chars)
-            if not literal_prefix:
-                return True
-            if literal_prefix.startswith(relative_directory) or relative_directory.startswith(
-                literal_prefix.rstrip("/") + "/"
-            ):
-                return True
+            for end in range(1, len(components)):
+                directory_pattern = "/" + "/".join(components[:end]) + "/"
+                if _gitignore_glob_matches_exact(relative_directory, directory_pattern):
+                    return True
     return False
 
 
@@ -1057,12 +1048,41 @@ def _expand_brace_alternatives(pattern: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(expanded))
 
 
+@lru_cache(maxsize=512)
+def _compiled_gitignore_glob(pattern: str) -> GitIgnoreSpec:
+    return GitIgnoreSpec.from_lines((pattern,))
+
+
+def _gitignore_scope_glob_matches(path: str, pattern: str) -> bool:
+    return _compiled_gitignore_glob(pattern).check_file(path).include is True
+
+
+def _gitignore_file_glob_matches(path: str, pattern: str) -> bool:
+    for compiled_pattern in _compiled_gitignore_glob(pattern).patterns:
+        regex = compiled_pattern.regex
+        if regex is None:
+            continue
+        for match in regex.finditer(path):
+            if match.groupdict().get("ps_d") != "/":
+                return True
+    return False
+
+
+def _gitignore_glob_matches_exact(path: str, pattern: str) -> bool:
+    for compiled_pattern in _compiled_gitignore_glob(pattern).patterns:
+        regex = compiled_pattern.regex
+        if regex is not None and any(match.end() == len(path) for match in regex.finditer(path)):
+            return True
+    return False
+
+
 def _matches_glob(path: Path, pattern: str, context: ToolContext) -> bool:
     exclusion = _is_exclusion_glob(pattern)
     effective_pattern = pattern[1:] if exclusion else pattern
-    display_path = display_tool_path(path, context)
+    display_path = Path(display_tool_path(path, context)).as_posix()
+    matcher = _gitignore_scope_glob_matches if exclusion else _gitignore_file_glob_matches
     matched = any(
-        fnmatch.fnmatch(path.name, alternative) or fnmatch.fnmatch(display_path, alternative)
+        matcher(display_path, alternative)
         for alternative in _expand_brace_alternatives(effective_pattern)
     )
     return not matched if exclusion else matched
