@@ -10,6 +10,7 @@ from typing import cast
 import anyio
 import pytest
 
+import wisp.agent.loop as agent_loop_module
 from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError, ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
@@ -20,6 +21,7 @@ from wisp.events import (
     MessageCompleted,
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
     UsageCost,
@@ -798,6 +800,168 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert ended_round_tripped.process_id == "proc-1"
     assert ended_round_tripped.process_state == "completed"
     assert ended_round_tripped.stdout == "tool stdout\n"
+
+
+def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
+    ended = ToolExecutionEnded(
+        call_id="call-1",
+        name="bash",
+        output="Command exited with code 2: output",
+        is_error=True,
+        exit_code=2,
+        output_has_exit_status=True,
+        before_text="before\n",
+        created=True,
+        summary="summary",
+        truncated=True,
+        process_id="proc-1",
+        process_state="failed",
+        process_error="process failed",
+        stdout="stdout\n",
+        stderr="stderr\n",
+        stdout_truncated=True,
+        stderr_truncated=True,
+        stdout_dropped_bytes=11,
+        stderr_dropped_bytes=12,
+    )
+
+    result = ToolResultReady.from_execution_ended(ended)
+    expected_payload = {
+        "call_id": "call-1",
+        "name": "bash",
+        "output": "Command exited with code 2: output",
+        "is_error": True,
+        "exit_code": 2,
+        "output_has_exit_status": True,
+        "before_text": "before\n",
+        "created": True,
+        "summary": "summary",
+        "truncated": True,
+        "process_id": "proc-1",
+        "process_state": "failed",
+        "process_error": "process failed",
+        "stdout": "stdout\n",
+        "stderr": "stderr\n",
+        "stdout_truncated": True,
+        "stderr_truncated": True,
+        "stdout_dropped_bytes": 11,
+        "stderr_dropped_bytes": 12,
+    }
+
+    envelope_fields = {"type", "schema_version", "timestamp"}
+    assert ended.model_dump(exclude=envelope_fields) == expected_payload
+    assert result.model_dump(exclude=envelope_fields) == expected_payload
+    assert result.type == "tool.result"
+    assert result.timestamp >= ended.timestamp
+    assert wisp_event_from_json(ended.model_dump_json()) == ended
+    assert wisp_event_from_json(result.model_dump_json()) == result
+
+
+def test_completion_and_continuation_reuse_tool_call_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="bash",
+        arguments={"command": "pwd"},
+        parse_error="example parse error",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+    snapshot_constructions: list[tuple[str, str, dict[str, object], str | None]] = []
+    snapshot_type = ToolCallSnapshot
+
+    def capture_snapshot(
+        *, call_id: str, name: str, arguments: dict[str, object], parse_error: str | None
+    ) -> ToolCallSnapshot:
+        snapshot_constructions.append((call_id, name, arguments, parse_error))
+        return snapshot_type(
+            call_id=call_id,
+            name=name,
+            arguments=arguments,
+            parse_error=parse_error,
+        )
+
+    monkeypatch.setattr(agent_loop_module, "ToolCallSnapshot", capture_snapshot)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+                messages=(Message(role="user", content="run pwd"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completed.tool_calls == (
+        ToolCallSnapshot(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "pwd"},
+            parse_error="example parse error",
+        ),
+    )
+    assert snapshot_constructions == [("call-1", "bash", {"command": "pwd"}, "example parse error")]
+
+
+def test_execution_end_immediately_precedes_projected_tool_result() -> None:
+    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+                messages=(Message(role="user", content="run pwd"),),
+            )
+        ]
+
+    events = anyio.run(run)
+    ended_index = next(
+        index for index, event in enumerate(events) if isinstance(event, ToolExecutionEnded)
+    )
+    ended = events[ended_index]
+    result = events[ended_index + 1]
+
+    assert isinstance(ended, ToolExecutionEnded)
+    assert isinstance(result, ToolResultReady)
+    envelope_fields = {"type", "schema_version", "timestamp"}
+    assert result.model_dump(exclude=envelope_fields) == ended.model_dump(exclude=envelope_fields)
 
 
 def _run_bash_loop(

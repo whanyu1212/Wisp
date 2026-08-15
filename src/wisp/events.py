@@ -691,36 +691,29 @@ class ProjectConfigApplied(WispEvent):
         return data
 
 
-class ToolExecutionEnded(WispEvent):
-    type: Literal["tool.execution.ended"] = "tool.execution.ended"
+class _ToolResultEvent(WispEvent):
+    """Shared bounded result contract for distinct tool lifecycle events."""
+
     call_id: str
     name: str
     output: str
     is_error: bool
     # Process exit status for shell-like tools, promoted from ToolResult.data by
-    # the executor (which knows the tool and holds the structured result). None
-    # for tools without exit-code semantics and for error paths that produced no
-    # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
-    # rather than the whole data mapping.
+    # the executor. None for tools without exit-code semantics and error paths
+    # that produced no ToolResult. This stays a narrow JSON-safe scalar rather
+    # than exposing an extension-owned result mapping across the RPC boundary.
     exit_code: int | None = None
     # True only when output begins with Wisp's synthetic completion envelope.
     # Explicit provenance avoids parsing genuine legacy stdout that resembles it.
     output_has_exit_status: bool = False
-    # Pre-write file snapshot for the diff renderer, promoted from ToolResult.data
-    # for write-like tools only. None for every other tool and for error paths.
-    # See ToolResultReady.before_text for the wire/bounding rationale.
+    # A bounded pre-write snapshot for write-like tools. None for other tools,
+    # creates, and overwrites whose previous contents could not be represented.
     before_text: str | None = None
-    # Whether a write created a new file. Disambiguates before_text=None: a create
-    # renders as pure additions, an overwrite with no usable snapshot falls back to
-    # the summary. False for every non-write tool. See ToolResultReady.created.
+    # Distinguishes a new file from an overwrite with no usable snapshot.
     created: bool = False
-    # One-line success summary for read-type tools (read/grep/find/ls), built from
-    # the tool's structured data. None for tools without one. See
-    # ToolResultReady.summary.
+    # A bounded one-line summary for successful read-type tools.
     summary: str | None = None
-    # Whether the tool capped its own output (past its max_output bytes/lines). The
-    # dropped content never leaves the tool, so this bool is the only signal that an
-    # expanded card is still not the whole story. See ToolResultReady.truncated.
+    # Whether the tool itself capped output before constructing this event.
     truncated: bool = False
     # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
     # consumers. These are bounded scalars/chunks, not the raw result mapping.
@@ -734,6 +727,16 @@ class ToolExecutionEnded(WispEvent):
     stdout_dropped_bytes: int = Field(default=0, ge=0)
     stderr_dropped_bytes: int = Field(default=0, ge=0)
 
+    def _result_payload(self) -> JsonObject:
+        """Return only fields declared by the shared result contract."""
+
+        envelope_fields = WispEvent.model_fields
+        return {
+            name: getattr(self, name)
+            for name in _ToolResultEvent.model_fields
+            if name not in envelope_fields
+        }
+
     @model_serializer(mode="wrap")
     def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         data = cast(dict[str, object], handler(self))
@@ -742,75 +745,22 @@ class ToolExecutionEnded(WispEvent):
         return data
 
 
-class ToolResultReady(WispEvent):
+class ToolExecutionEnded(_ToolResultEvent):
+    """Durable boundary reached after one tool execution finishes."""
+
+    type: Literal["tool.execution.ended"] = "tool.execution.ended"
+
+
+class ToolResultReady(_ToolResultEvent):
+    """Presentation/provider projection of a completed tool execution."""
+
     type: Literal["tool.result"] = "tool.result"
-    call_id: str
-    name: str
-    output: str
-    is_error: bool
-    # The one structured fact tool-aware rendering needs today: a shell command's
-    # exit status. Deliberately a bounded, JSON-safe scalar rather than the raw
-    # ToolResult.data mapping — the renderer runs in the TUI process and only sees
-    # events *after* they cross the RPC wire (agent subprocess → JSON → client),
-    # so the signal must serialize; but shipping the whole mapping would re-emit
-    # unbounded tool data (e.g. an `ls` entry list) past ToolContext's bounds and
-    # risk non-JSON payloads. This field crosses the only serialized consumer of
-    # these events — the same-version RPC transport (sessions store Messages, not
-    # raw events) — so no schema bump is needed. Set only for tools with genuine
-    # exit-code semantics, so a card is never spuriously reddened.
-    exit_code: int | None = None
-    # True only for the new Wisp-owned Bash completion envelope. Persisted through
-    # session presentation metadata so legacy raw output is never parsed as one.
-    output_has_exit_status: bool = False
-    # The file's contents *before* a write overwrote them, so the renderer can show
-    # a before/after diff instead of the flat "Wrote N bytes" summary. Like
-    # exit_code, this is a bounded, JSON-safe scalar that must survive the RPC wire:
-    # the write tool captures the prior text before clobbering the file, caps it
-    # (dropping the snapshot entirely rather than shipping an unbounded or partial
-    # file), and the executor promotes it here for the write tool only. None means
-    # no snapshot — a newly created file, a binary/oversize/unreadable prior file,
-    # or any non-write tool. The renderer uses ``created`` to tell those apart.
-    before_text: str | None = None
-    # Whether a write created a new file (vs. overwrote one). With before_text=None
-    # this is the only thing separating a create — rendered as a pure-addition diff
-    # of the new content — from an overwrite whose prior text couldn't be captured,
-    # which must fall back to the plain summary rather than masquerade as a create.
-    # A bounded JSON-safe scalar like before_text; False for every non-write tool.
-    created: bool = False
-    # A concise one-line summary of a successful read-type tool (read/grep/find/ls),
-    # e.g. "read 42 lines from foo.py" or "grep: 3 matches", shown on the card in
-    # place of a raw output dump. Like the other promoted fields it is a bounded,
-    # JSON-safe scalar that must survive the RPC wire: the tool computes it from its
-    # own structured data (never by re-parsing output), the summary module bounds it
-    # at the source, and the executor promotes it only for tools that have one. None
-    # for diff/shell tools, unknown tools, and error paths.
-    summary: str | None = None
-    # Whether the tool capped its own output past its max_output bytes/lines. The
-    # ``output`` on this event is already the tool-bounded string, and the dropped
-    # content never crossed the wire — so even a fully expanded card can be missing
-    # more. This bool lets the expanded card say so honestly ("truncated at the
-    # tool's limit") instead of implying it shows everything. A bounded JSON-safe
-    # scalar like the others; False for tools that returned everything and for error
-    # paths that produced no ToolResult.
-    truncated: bool = False
-    # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
-    # consumers. These are bounded scalars/chunks, not the raw result mapping.
-    process_id: str | None = None
-    process_state: ManagedProcessState | None = None
-    process_error: str | None = None
-    stdout: str | None = None
-    stderr: str | None = None
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
-    stdout_dropped_bytes: int = Field(default=0, ge=0)
-    stderr_dropped_bytes: int = Field(default=0, ge=0)
 
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
-            _strip_process_metadata_fields(data)
-        return data
+    @classmethod
+    def from_execution_ended(cls, event: ToolExecutionEnded) -> Self:
+        """Project a terminal execution without duplicating its payload schema."""
+
+        return cls.model_validate(event._result_payload())
 
 
 class TurnCompleted(WispEvent):
