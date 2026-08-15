@@ -536,7 +536,10 @@ def _walk_directory(
             if (
                 name in IGNORED_DIRS
                 or _is_hidden(name)
-                or _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
+                or (
+                    _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
+                    and not _may_reinclude_descendant(candidate, ignore_specs)
+                )
             ):
                 continue
             if isinstance(descriptor, Path):
@@ -581,6 +584,9 @@ def _read_ignore_specs(
     descriptor: int | Path, directory: Path, context: ToolContext
 ) -> tuple[_IgnoreSpec, ...]:
     specs: list[_IgnoreSpec] = []
+    repository_exclude = _read_repository_exclude(descriptor, directory, context)
+    if repository_exclude is not None:
+        specs.append(repository_exclude)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     for name in _IGNORE_FILES:
         try:
@@ -604,6 +610,46 @@ def _read_ignore_specs(
     return tuple(specs)
 
 
+def _read_repository_exclude(
+    descriptor: int | Path, directory: Path, context: ToolContext
+) -> _IgnoreSpec | None:
+    """Securely load a repository-local ``.git/info/exclude`` file."""
+
+    try:
+        if isinstance(descriptor, int):
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            git_fd = os.open(".git", directory_flags, dir_fd=descriptor)
+            try:
+                info_fd = os.open("info", directory_flags, dir_fd=git_fd)
+                try:
+                    exclude_fd = os.open("exclude", file_flags, dir_fd=info_fd)
+                    try:
+                        if not stat.S_ISREG(os.fstat(exclude_fd).st_mode):
+                            return None
+                        with os.fdopen(os.dup(exclude_fd), "r", encoding="utf-8") as file:
+                            lines = tuple(file)
+                    finally:
+                        os.close(exclude_fd)
+                finally:
+                    os.close(info_fd)
+            finally:
+                os.close(git_fd)
+        else:
+            exclude_path = secure_tool_path(str(directory / ".git" / "info" / "exclude"), context)
+            with open_file(exclude_path) as exclude_fd:
+                with os.fdopen(os.dup(exclude_fd), "r", encoding="utf-8") as file:
+                    lines = tuple(file)
+    except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
+        return None
+    return _IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines))
+
+
 def _is_ignored(path: Path, *, is_directory: bool, ignore_specs: tuple[_IgnoreSpec, ...]) -> bool:
     ignored = False
     for rules in ignore_specs:
@@ -617,6 +663,47 @@ def _is_ignored(path: Path, *, is_directory: bool, ignore_specs: tuple[_IgnoreSp
         if match is not None:
             ignored = match
     return ignored
+
+
+def _may_reinclude_descendant(path: Path, ignore_specs: tuple[_IgnoreSpec, ...]) -> bool:
+    """Return whether a negated rule could make an entry below ``path`` visible."""
+
+    for rules in ignore_specs:
+        try:
+            relative_directory = path.relative_to(rules.base).as_posix().rstrip("/") + "/"
+        except ValueError:
+            continue
+        for pattern in rules.spec.patterns:
+            source = pattern.pattern
+            if (
+                pattern.include is not False
+                or not isinstance(source, str)
+                or not source.startswith("!")
+            ):
+                continue
+            negated = source[1:].removeprefix("/")
+            if "/" not in negated.rstrip("/"):
+                return True
+            literal_prefix_chars: list[str] = []
+            escaped = False
+            for character in negated:
+                if escaped:
+                    literal_prefix_chars.append(character)
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character in "*?[":
+                    break
+                else:
+                    literal_prefix_chars.append(character)
+            literal_prefix = "".join(literal_prefix_chars)
+            if not literal_prefix:
+                return True
+            if literal_prefix.startswith(relative_directory) or relative_directory.startswith(
+                literal_prefix.rstrip("/") + "/"
+            ):
+                return True
+    return False
 
 
 def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:

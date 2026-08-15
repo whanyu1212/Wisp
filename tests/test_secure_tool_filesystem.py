@@ -250,6 +250,38 @@ def test_subdirectory_search_inherits_ancestor_ignore_files(tmp_path: Path) -> N
     assert find.data["files"] == ["subdir/visible.txt"]
 
 
+def test_recursive_tools_honor_repository_local_excludes(tmp_path: Path) -> None:
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    (info / "exclude").write_text("local-only.txt\n", encoding="utf-8")
+    (tmp_path / "local-only.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["visible.txt:1:needle"]
+    assert find.data["files"] == ["visible.txt"]
+
+
+def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text("foo/**\n!foo/bar.txt\n", encoding="utf-8")
+    foo = tmp_path / "foo"
+    foo.mkdir()
+    (foo / "bar.txt").write_text("needle\n", encoding="utf-8")
+    (foo / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
+
+    assert grep.data["matches"] == ["foo/bar.txt:1:needle"]
+    assert find.data["files"] == ["foo/bar.txt"]
+
+
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
 
