@@ -1815,6 +1815,11 @@ class Transcript(VerticalScroll):
         """Arm edge paging after the completed page has reached stable geometry."""
 
         self._history_request_armed = self._has_more_history or self._has_retained_history
+        if (
+            self.scroll_y == 0
+            and self._history_navigation.intent is not HistoryNavigationIntent.PRESERVE
+        ):
+            self._request_more_history_if_needed()
 
     def history_window_available(self, *, has_older: bool) -> None:
         """Record whether the UI can shift to already retained history."""
@@ -1828,6 +1833,12 @@ class Transcript(VerticalScroll):
         """Whether a durable history page remains available."""
 
         return self._has_more_history
+
+    @property
+    def history_page_loading(self) -> bool:
+        """Whether older-history navigation is waiting for a page response."""
+
+        return self._history_loading
 
     @property
     def can_page_to_older_history(self) -> bool:
@@ -1957,7 +1968,11 @@ class Transcript(VerticalScroll):
         self.request_history_at_top()
         return navigation
 
-    def prepare_wheel_up(self) -> HistoryNavigation | None:
+    def prepare_wheel_up(
+        self,
+        *,
+        request_history: bool = True,
+    ) -> HistoryNavigation | None:
         """Arm the unconsumed wheel step before Textual processes the event."""
 
         self._stop_following()
@@ -1968,7 +1983,8 @@ class Transcript(VerticalScroll):
                 remaining_rows=max(0.0, step - self.scroll_y),
                 reader_generation=self._follow_generation,
             )
-            self.request_history_at_top(navigation)
+            if request_history:
+                self.request_history_at_top(navigation)
             return navigation
         return None
 

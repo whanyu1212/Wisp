@@ -3727,6 +3727,72 @@ def test_textual_backward_navigation_recovers_evicted_live_history(navigation: s
     assert not following
 
 
+def test_textual_wheel_burst_is_preserved_while_history_page_loads() -> None:
+    async def scenario() -> tuple[int, float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        request_started = anyio.Event()
+        release_request = anyio.Event()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+            request_started.set()
+            await release_request.wait()
+            renderer.prepend_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SHIFT)
+                )
+            )
+            renderer.history_page_loaded(has_more=False)
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(
+                        role="assistant",
+                        content=f"current {index}",
+                    )
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+                ),
+                session_label="Windowed session",
+            )
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.stop_following()
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=1,
+            )
+            with anyio.fail_after(5):
+                await request_started.wait()
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=2,
+            )
+            pending_rows = app_instance._pending_history_navigation.remaining_rows
+            release_request.set()
+            with anyio.fail_after(5):
+                while app_instance._history_prepend_anchor is not None or transcript.scroll_y == 0:
+                    await pilot.pause()
+            return requests, pending_rows, transcript.scroll_y, transcript.max_scroll_y
+
+    requests, pending_rows, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert requests == 1
+    assert pending_rows == 3.0
+    assert 0 < scroll_y < max_scroll_y
+
+
 def test_textual_close_exits_when_stream_shutdown_fails(monkeypatch: MonkeyPatch) -> None:
     async def scenario() -> bool:
         app_instance = TextualTui()

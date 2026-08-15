@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from textual import events, on, work
@@ -153,6 +154,32 @@ def _input_placeholder(hint: str) -> str:
     """
 
     return _INPUT_PLACEHOLDERS.get(hint, f"{_PROMPT_GLYPH} {hint}")
+
+
+@dataclass
+class _HistoryPrependAnchor:
+    transcript: Transcript
+    widget: Widget | None
+    scroll_y: float
+    widget_y: float
+    following: bool
+    epoch: int
+    navigation_generation: int
+    navigation: HistoryNavigation
+
+
+def _merge_history_navigation(
+    current: HistoryNavigation,
+    incoming: HistoryNavigation,
+) -> HistoryNavigation:
+    intent = (
+        incoming.intent if current.intent is HistoryNavigationIntent.PRESERVE else current.intent
+    )
+    return HistoryNavigation(
+        intent,
+        current.remaining_rows + incoming.remaining_rows,
+        incoming.reader_generation,
+    )
 
 
 class TextualTui(App[None]):
@@ -499,19 +526,7 @@ class TextualTui(App[None]):
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
-        self._history_prepend_anchor: (
-            tuple[
-                Transcript,
-                Widget | None,
-                float,
-                float,
-                bool,
-                int,
-                int,
-                HistoryNavigation,
-            ]
-            | None
-        ) = None
+        self._history_prepend_anchor: _HistoryPrependAnchor | None = None
         self._transcript_navigation_generation = 0
         self._pending_history_navigation = HistoryNavigation()
         self._oldest_navigation_generation: int | None = None
@@ -839,7 +854,7 @@ class TextualTui(App[None]):
             self._stream.resume_if_deferred()
             self._request_live_history_reload()
 
-    async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
+    def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
         event.stop()
         transcript = self._transcript
         if (
@@ -872,7 +887,11 @@ class TextualTui(App[None]):
             if event.navigation.intent is HistoryNavigationIntent.OLDEST:
                 self._oldest_navigation_generation = None
             return
-        await hook()
+        self.run_worker(
+            hook(),
+            group="history-page-request",
+            exit_on_error=False,
+        )
 
     def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
         event.stop()
@@ -950,11 +969,29 @@ class TextualTui(App[None]):
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self._wheel_event_targets_transcript(event):
             self._cancel_card_expand_repin()
-            self._begin_transcript_navigation(preserve_live_history_recovery=True)
             assert self._transcript is not None
-            navigation = self._transcript.prepare_wheel_up()
+            transcript = self._transcript
+            anchor = self._history_prepend_anchor
+            continuing_prepend = (
+                anchor is not None
+                and anchor.transcript is transcript
+                and anchor.navigation.intent is not HistoryNavigationIntent.OLDEST
+            )
+            continuing_load = transcript.history_page_loading
+            if not continuing_prepend and not continuing_load:
+                self._begin_transcript_navigation(preserve_live_history_recovery=True)
+            navigation = transcript.prepare_wheel_up(request_history=not continuing_prepend)
             if navigation is not None:
-                self._pending_history_navigation = navigation
+                if continuing_prepend:
+                    assert anchor is not None
+                    anchor.navigation = _merge_history_navigation(anchor.navigation, navigation)
+                elif continuing_load:
+                    self._pending_history_navigation = _merge_history_navigation(
+                        self._pending_history_navigation,
+                        navigation,
+                    )
+                else:
+                    self._pending_history_navigation = navigation
                 self._recover_evicted_history_for_backward_navigation(navigation)
         self._forward_jump_overlay_scroll(event, direction=-1)
 
@@ -2530,13 +2567,13 @@ class TextualTui(App[None]):
             return None
         anchor = self._history_prepend_anchor
         anchor_boundary = (
-            anchor[1]
+            anchor.widget
             if (
                 self._prepending_history
                 and anchor is not None
-                and anchor[0] is transcript
-                and anchor[1] is not None
-                and anchor[1].parent is transcript
+                and anchor.transcript is transcript
+                and anchor.widget is not None
+                and anchor.widget.parent is transcript
             )
             else None
         )
@@ -2845,15 +2882,15 @@ class TextualTui(App[None]):
         self._history_prepend_mounts.clear()
         navigation = self._pending_history_navigation
         self._pending_history_navigation = HistoryNavigation()
-        self._history_prepend_anchor = (
-            transcript,
-            first_history_entry,
-            transcript.scroll_y,
-            first_history_entry.region.y if first_history_entry is not None else 0.0,
-            transcript.is_following,
-            self._transcript_epoch,
-            self._transcript_navigation_generation,
-            navigation,
+        self._history_prepend_anchor = _HistoryPrependAnchor(
+            transcript=transcript,
+            widget=first_history_entry,
+            scroll_y=transcript.scroll_y,
+            widget_y=first_history_entry.region.y if first_history_entry is not None else 0.0,
+            following=transcript.is_following,
+            epoch=self._transcript_epoch,
+            navigation_generation=self._transcript_navigation_generation,
+            navigation=navigation,
         )
 
     def finish_history_prepend(self) -> None:
@@ -2862,7 +2899,6 @@ class TextualTui(App[None]):
         self._prepending_history = False
         anchor = self._history_prepend_anchor
         mounts = tuple(self._history_prepend_mounts)
-        self._history_prepend_anchor = None
         self._history_prepend_mounts.clear()
         if anchor is not None:
             self.run_worker(
@@ -2873,16 +2909,7 @@ class TextualTui(App[None]):
 
     async def _restore_prepend_viewport_after_mounts(
         self,
-        anchor: tuple[
-            Transcript,
-            Widget | None,
-            float,
-            float,
-            bool,
-            int,
-            int,
-            HistoryNavigation,
-        ],
+        anchor: _HistoryPrependAnchor,
         mounts: tuple[AwaitMount, ...],
     ) -> None:
         for mounted in mounts:
@@ -2891,41 +2918,25 @@ class TextualTui(App[None]):
 
     def _restore_prepend_viewport(
         self,
-        anchor: tuple[
-            Transcript,
-            Widget | None,
-            float,
-            float,
-            bool,
-            int,
-            int,
-            HistoryNavigation,
-        ],
+        anchor: _HistoryPrependAnchor,
     ) -> None:
-        (
-            transcript,
-            anchor_widget,
-            scroll_y,
-            anchor_y_before,
-            following,
-            epoch,
-            navigation_generation,
-            navigation,
-        ) = anchor
+        if self._history_prepend_anchor is anchor:
+            self._history_prepend_anchor = None
+        transcript = anchor.transcript
         if (
-            epoch != self._transcript_epoch
-            or navigation_generation != self._transcript_navigation_generation
+            anchor.epoch != self._transcript_epoch
+            or anchor.navigation_generation != self._transcript_navigation_generation
             or transcript is not self._transcript
-            or transcript.is_following != following
-            or (not following and transcript.scroll_y != scroll_y)
+            or transcript.is_following != anchor.following
+            or (not anchor.following and transcript.scroll_y != anchor.scroll_y)
         ):
             return
         transcript.restore_prepend_viewport(
-            scroll_y=scroll_y,
-            anchor=anchor_widget,
-            anchor_y_before=anchor_y_before,
-            following=following,
-            navigation=navigation,
+            scroll_y=anchor.scroll_y,
+            anchor=anchor.widget,
+            anchor_y_before=anchor.widget_y,
+            following=anchor.following,
+            navigation=anchor.navigation,
         )
 
     def append_stream(self, delta: str) -> None:
