@@ -7,7 +7,7 @@ import fnmatch
 import heapq
 import os
 import re
-import shutil
+import stat
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -18,11 +18,10 @@ import anyio
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import display_tool_path, is_protected_path, resolve_tool_path
-from wisp.tools.process import ProcessResult as ProcessResult
-from wisp.tools.process import _run_exec_limited_stdout
+from wisp.tools.paths import display_tool_path, is_protected_path
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
 from wisp.tools.truncation import truncate_text
 
 IGNORED_DIRS = {
@@ -50,7 +49,7 @@ class GrepTool:
 
     name = "grep"
     safety: ToolSafety = "read"
-    description = "Search text files with ripgrep when available, falling back to Python."
+    description = "Search UTF-8 text files without following symbolic links."
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -75,7 +74,7 @@ class GrepTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         pattern = _required_string(arguments, "pattern", allow_whitespace=True)
-        path = resolve_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context)
         glob = _optional_string(arguments, "glob")
         ignore_case = _optional_bool(arguments, "ignore_case", default=False)
         literal = _optional_bool(arguments, "literal", default=False)
@@ -85,21 +84,6 @@ class GrepTool:
             raise ToolError("grep.context must be greater than or equal to 0")
         if max_results is None or max_results < 1:
             raise ToolError("grep.max_results must be greater than or equal to 1")
-
-        rg_path = shutil.which("rg")
-        if rg_path is not None:
-            return await _run_rg_grep(
-                rg_path,
-                pattern=pattern,
-                path=path,
-                glob=glob,
-                ignore_case=ignore_case,
-                literal=literal,
-                context_lines=context_lines,
-                max_results=max_results,
-                context=context,
-                process_supervisor=self._process_supervisor,
-            )
 
         return await anyio.to_thread.run_sync(
             lambda: _python_grep(
@@ -121,7 +105,7 @@ class FindTool:
 
     name = "find"
     safety: ToolSafety = "read"
-    description = "Find files with ripgrep when available, falling back to Python walking."
+    description = "Find files by glob without following symbolic links."
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -140,22 +124,11 @@ class FindTool:
         await self._process_supervisor.aclose()
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = resolve_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context)
         pattern = _optional_string(arguments, "pattern") or "*"
         max_results = _optional_int(arguments, "max_results", default=100)
         if max_results is None or max_results < 1:
             raise ToolError("find.max_results must be greater than or equal to 1")
-
-        rg_path = shutil.which("rg")
-        if rg_path is not None:
-            return await _run_rg_find(
-                rg_path,
-                path=path,
-                pattern=pattern,
-                max_results=max_results,
-                context=context,
-                process_supervisor=self._process_supervisor,
-            )
 
         return await anyio.to_thread.run_sync(
             lambda: _python_find(
@@ -183,130 +156,12 @@ class LsTool:
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = resolve_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context)
         include_hidden = _optional_bool(arguments, "all", default=False)
         return await anyio.to_thread.run_sync(
             lambda: _python_ls(path=path, include_hidden=include_hidden, context=context),
             abandon_on_cancel=True,
         )
-
-
-async def _run_rg_grep(
-    rg_path: str,
-    *,
-    pattern: str,
-    path: Path,
-    glob: str | None,
-    ignore_case: bool,
-    literal: bool,
-    context_lines: int,
-    max_results: int,
-    context: ToolContext,
-    process_supervisor: ProcessSupervisor,
-) -> ToolResult:
-    effective_context_lines = _bounded_rg_context_lines(context_lines, context)
-    context_truncated = effective_context_lines < context_lines
-    command = [
-        rg_path,
-        *_rg_sandbox_args(context),
-        "--line-number",
-        "--no-heading",
-        "--color=never",
-        "--with-filename",
-        "--field-match-separator",
-        RG_MATCH_SEPARATOR,
-        "--field-context-separator",
-        RG_CONTEXT_SEPARATOR,
-        "--max-columns",
-        str(max(1, context.max_output_bytes)),
-    ]
-    if literal:
-        command.append("--fixed-strings")
-    if ignore_case:
-        command.append("--ignore-case")
-    if effective_context_lines:
-        command.extend(("--context", str(effective_context_lines)))
-    if glob:
-        command.extend(("--glob", glob))
-    command.extend(("--", pattern, _command_path(path, context)))
-
-    # Group-aware, stateful pre-buffer filter. rg emits records (match/context,
-    # each carrying the file path) fenced by bare "--" group separators when
-    # context > 0. We must drop protected records BEFORE buffering — rg can still
-    # emit them (a case-variant name its case-sensitive glob missed, or a caller
-    # glob that re-includes a secret) and buffering them would let a large protected
-    # match set exhaust the stdout buffer and kill rg before a later ordinary match
-    # is read. The "--" separators carry no path, so they must be suppressed by
-    # tracking whether the group they close actually kept anything; otherwise a run
-    # of all-protected groups floods the buffer with separators alone.
-    kept_since_separator = False
-
-    def _keep_line(line: str) -> bool:
-        nonlocal kept_since_separator
-        if line == "--":
-            # Emit a separator only after a group that kept content; drop it when the
-            # preceding group was entirely protected (or already separated).
-            emit = kept_since_separator
-            kept_since_separator = False
-            return emit
-        if _rg_grep_line_is_protected(line, context):
-            return False
-        kept_since_separator = True
-        return True
-
-    def _is_reportable_match(line: str) -> bool:
-        # Of the lines that survive _keep_line, count only match records so the
-        # reported count and truncation flag are accurate.
-        return _is_grep_match_line(line)
-
-    result = await _run_exec_limited_stdout(
-        command,
-        cwd=context.cwd,
-        process_supervisor=process_supervisor,
-        max_stdout_lines=max_results + 1,
-        stdout_line_filter=_keep_line,
-        stdout_count_filter=_is_reportable_match,
-        max_buffered_stdout_bytes=max(0, context.max_output_bytes),
-        max_buffered_stdout_lines=max(0, context.max_output_lines),
-        max_buffered_stderr_bytes=max(0, context.max_output_bytes),
-        max_buffered_stderr_lines=max(0, context.max_output_lines),
-    )
-    if result.exit_code == 1 and not result.stdout.strip():
-        return ToolResult(text="No matches", data={"count": 0, "matches": []})
-    if result.exit_code != 0 and not result.stdout_truncated:
-        raise ToolError(result.stderr.strip() or f"rg failed with exit code {result.exit_code}")
-
-    return _result_from_grep_lines(
-        _split_stdout_records(result.stdout),
-        max_results=max_results,
-        context=context,
-        force_truncated=result.stdout_truncated or context_truncated,
-        known_match_count=min(result.stdout_count, max_results),
-    )
-
-
-def _rg_sandbox_args(context: ToolContext) -> tuple[str, ...]:
-    base = ("--no-config", "--follow" if context.allow_outside_cwd else "--no-follow")
-    return base + _rg_protected_exclusions(context)
-
-
-def _rg_protected_exclusions(context: ToolContext) -> tuple[str, ...]:
-    """Emit ``--glob '!pattern'`` args so rg never reads protected secrets.
-
-    rg's ``--glob`` uses gitignore-style patterns; a leading ``!`` excludes.
-    Applying these at the rg level means a protected file's contents are never
-    streamed into our buffer, mirroring the Python walk's ``is_protected_path``
-    skip. Bare patterns are also emitted as ``**/pattern`` so they exclude at any
-    depth, matching :func:`is_protected_path` semantics.
-    """
-
-    args: list[str] = []
-    for pattern in context.protected_paths:
-        normalized = pattern.replace("\\", "/")
-        args.extend(("--glob", f"!{normalized}"))
-        if "/" not in normalized:
-            args.extend(("--glob", f"!**/{normalized}"))
-    return tuple(args)
 
 
 def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
@@ -315,69 +170,10 @@ def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext
     return min(requested_context_lines, max(0, (context.max_output_lines - 1) // 2))
 
 
-def _split_stdout_records(stdout: str) -> list[str]:
-    records = stdout.split("\n")
-    if records and records[-1] == "":
-        records.pop()
-    return records
-
-
-async def _run_rg_find(
-    rg_path: str,
-    *,
-    path: Path,
-    pattern: str,
-    max_results: int,
-    context: ToolContext,
-    process_supervisor: ProcessSupervisor,
-) -> ToolResult:
-    if path.is_file():
-        candidates = [path]
-    else:
-
-        def _reportable_file(line: str) -> bool:
-            # Filter protected paths at the subprocess boundary so they never
-            # consume a slot in the ``max_results + 1`` line budget — otherwise a
-            # run of protected files could exhaust the budget before any reportable
-            # file is seen, yielding a false "no matches".
-            candidate = _path_from_rg_line(line, context)
-            return _matches_glob(candidate, pattern, context) and not is_protected_path(
-                candidate, context
-            )
-
-        result = await _run_exec_limited_stdout(
-            [rg_path, *_rg_sandbox_args(context), "--files", "--", _command_path(path, context)],
-            cwd=context.cwd,
-            process_supervisor=process_supervisor,
-            max_stdout_lines=max_results + 1,
-            stdout_line_filter=_reportable_file,
-            max_buffered_stderr_bytes=max(0, context.max_output_bytes),
-            max_buffered_stderr_lines=max(0, context.max_output_lines),
-        )
-        if result.exit_code == 1 and not result.stdout.strip() and not result.stderr.strip():
-            candidates = []
-        elif result.exit_code != 0 and not result.stdout_truncated:
-            raise ToolError(
-                result.stderr.strip() or f"rg --files failed with exit code {result.exit_code}"
-            )
-        else:
-            candidates = [_path_from_rg_line(line, context) for line in result.stdout.splitlines()]
-
-    matches = [
-        display_tool_path(candidate, context)
-        for candidate in candidates
-        if _matches_glob(candidate, pattern, context) and not is_protected_path(candidate, context)
-    ]
-    matches.sort()
-    return _result_from_lines(
-        matches, max_results=max_results, context=context, count_label="files"
-    )
-
-
 def _python_grep(
     *,
     pattern: str,
-    path: Path,
+    path: Path | SecureToolPath,
     glob: str | None,
     ignore_case: bool,
     literal: bool,
@@ -385,15 +181,14 @@ def _python_grep(
     max_results: int,
     context: ToolContext,
 ) -> ToolResult:
-    if not path.exists():
-        raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
+    secure_path = _coerce_secure_path(path, context)
 
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     effective_context_lines = _bounded_rg_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
     output: list[str] = []
     match_count = 0
-    for file_path in _iter_files(path, context):
+    for file_path in _iter_files(secure_path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
         file_output_start = len(output)
@@ -402,51 +197,54 @@ def _python_grep(
         try:
             preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
             active_contexts: list[_StreamingMatchContext] = []
-            for line_number, line in enumerate(_iter_utf8_splitlines(file_path), start=1):
-                completed_contexts: list[_StreamingMatchContext] = []
-                for active in active_contexts:
-                    if active.remaining_after > 0:
-                        active.lines.append(
-                            _format_grep_record(file_path, line_number, line, False, context)
-                        )
-                        active.remaining_after -= 1
-                    if active.remaining_after == 0:
-                        completed_contexts.append(active)
-                for completed in completed_contexts:
-                    output.extend(completed.lines)
-                    active_contexts.remove(completed)
-
-                if not file_had_extra_match and matcher(line):
-                    if match_count >= max_results:
-                        # Keep consuming this file to validate its complete UTF-8
-                        # contents. A later decode error must discard all matches
-                        # from the file, matching the fallback's text-file policy.
-                        file_had_extra_match = True
-                    else:
-                        match_count += 1
-                        match_lines = [
-                            _format_grep_record(file_path, number, text, False, context)
-                            for number, text in preceding
-                        ]
-                        match_lines.append(
-                            _format_grep_record(file_path, line_number, line, True, context)
-                        )
-                        if effective_context_lines:
-                            active_contexts.append(
-                                _StreamingMatchContext(
-                                    lines=match_lines,
-                                    remaining_after=effective_context_lines,
-                                )
+            candidate = secure_tool_path(str(file_path), context)
+            with open_file(candidate) as descriptor:
+                lines = _iter_utf8_splitlines(descriptor)
+                for line_number, line in enumerate(lines, start=1):
+                    completed_contexts: list[_StreamingMatchContext] = []
+                    for active in active_contexts:
+                        if active.remaining_after > 0:
+                            active.lines.append(
+                                _format_grep_record(file_path, line_number, line, False, context)
                             )
+                            active.remaining_after -= 1
+                        if active.remaining_after == 0:
+                            completed_contexts.append(active)
+                    for completed in completed_contexts:
+                        output.extend(completed.lines)
+                        active_contexts.remove(completed)
+
+                    if not file_had_extra_match and matcher(line):
+                        if match_count >= max_results:
+                            file_had_extra_match = True
                         else:
-                            output.extend(match_lines)
-                preceding.append((line_number, line))
+                            match_count += 1
+                            match_lines = [
+                                _format_grep_record(file_path, number, text, False, context)
+                                for number, text in preceding
+                            ]
+                            match_lines.append(
+                                _format_grep_record(file_path, line_number, line, True, context)
+                            )
+                            if effective_context_lines:
+                                active_contexts.append(
+                                    _StreamingMatchContext(
+                                        lines=match_lines,
+                                        remaining_after=effective_context_lines,
+                                    )
+                                )
+                            else:
+                                output.extend(match_lines)
+                    preceding.append((line_number, line))
             for active in active_contexts:
                 output.extend(active.lines)
         except UnicodeDecodeError:
             del output[file_output_start:]
             match_count = file_match_start
             continue
+
+        if effective_context_lines and file_output_start and len(output) > file_output_start:
+            output.insert(file_output_start, "--")
 
         if file_had_extra_match:
             return _result_from_grep_lines(
@@ -470,13 +268,14 @@ _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
-def _iter_utf8_splitlines(path: Path) -> Iterator[str]:
+def _iter_utf8_splitlines(path: Path | int) -> Iterator[str]:
     """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
 
     decoder = codecs.getincrementaldecoder("utf-8")()
     line_parts: list[str] = []
     pending_cr = False
-    with path.open("rb") as file:
+    file_source = os.fdopen(os.dup(path), "rb") if isinstance(path, int) else path.open("rb")
+    with file_source as file:
         while chunk := file.read(_PYTHON_GREP_CHUNK_BYTES):
             decoded = decoder.decode(chunk)
             if pending_cr:
@@ -541,13 +340,12 @@ def _format_grep_record(
 
 def _python_find(
     *,
-    path: Path,
+    path: Path | SecureToolPath,
     pattern: str,
     max_results: int,
     context: ToolContext,
 ) -> ToolResult:
-    if not path.exists():
-        raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
+    secure_path = _coerce_secure_path(path, context)
 
     # Display paths resolve file symlinks, so a lexically late candidate may sort
     # before an earlier directory prefix. Scan the streamed candidates completely
@@ -557,7 +355,7 @@ def _python_find(
         max_results + 1,
         (
             display_tool_path(candidate, context)
-            for candidate in _iter_files(path, context)
+            for candidate in _iter_files(secure_path, context)
             if _matches_glob(candidate, pattern, context)
         ),
     )
@@ -566,31 +364,33 @@ def _python_find(
     )
 
 
-def _python_ls(*, path: Path, include_hidden: bool, context: ToolContext) -> ToolResult:
-    if not path.is_dir():
-        raise ToolError(f"Directory does not exist: {display_tool_path(path, context)}")
+def _python_ls(
+    *, path: Path | SecureToolPath, include_hidden: bool, context: ToolContext
+) -> ToolResult:
+    secure_path = _coerce_secure_path(path, context)
 
     entry_count = 0
 
-    def eligible_entries() -> Iterator[os.DirEntry[str]]:
+    def eligible_entries(descriptor: int | Path) -> Iterator[tuple[str, bool]]:
         nonlocal entry_count
-        with os.scandir(path) as entries:
+        with os.scandir(descriptor) as entries:
             for entry in entries:
                 if not include_hidden and entry.name.startswith("."):
                     continue
                 entry_count += 1
-                yield entry
+                yield entry.name, entry.is_dir(follow_symlinks=False)
 
     retained_limit = min(
         max(0, context.max_output_lines),
         max(0, context.max_output_bytes),
     )
-    retained = heapq.nsmallest(
-        retained_limit + 1,
-        eligible_entries(),
-        key=lambda entry: entry.name.lower(),
-    )
-    names = [f"{entry.name}/" if entry.is_dir() else entry.name for entry in retained]
+    with open_directory(secure_path) as descriptor:
+        retained = heapq.nsmallest(
+            retained_limit + 1,
+            eligible_entries(descriptor),
+            key=lambda entry: entry[0].lower(),
+        )
+    names = [f"{name}/" if is_directory else name for name, is_directory in retained]
     truncated = truncate_text(
         "\n".join(names),
         max_bytes=context.max_output_bytes,
@@ -599,7 +399,7 @@ def _python_ls(*, path: Path, include_hidden: bool, context: ToolContext) -> Too
     return ToolResult(
         text=truncated.text,
         data={
-            "path": display_tool_path(path, context),
+            "path": secure_path.display,
             "entries": names[:retained_limit],
             "entry_count": entry_count,
         },
@@ -607,22 +407,80 @@ def _python_ls(*, path: Path, include_hidden: bool, context: ToolContext) -> Too
     )
 
 
-def _iter_files(path: Path, context: ToolContext) -> Iterable[Path]:
-    if path.is_file():
-        if _is_path_within_tool_cwd(path, context):
-            yield path
-        return
-    if not path.is_dir():
-        return
+def _coerce_secure_path(path: Path | SecureToolPath, context: ToolContext) -> SecureToolPath:
+    if isinstance(path, SecureToolPath):
+        return path
+    return secure_tool_path(str(path), context)
 
-    for root, dir_names, file_names in os.walk(path):
-        dir_names[:] = sorted(
-            name for name in dir_names if name not in IGNORED_DIRS and not _is_hidden(name)
-        )
-        for file_name in sorted(name for name in file_names if not _is_hidden(name)):
-            candidate = Path(root) / file_name
-            if _is_path_within_tool_cwd(candidate, context):
-                yield candidate
+
+def _iter_files(path: Path | SecureToolPath, context: ToolContext) -> Iterable[Path]:
+    """Yield regular files through a descriptor-relative, non-following walk."""
+
+    secure_path = _coerce_secure_path(path, context)
+    try:
+        with open_directory(secure_path) as descriptor:
+            yield from _walk_directory(descriptor, secure_path.path, context)
+            return
+    except ToolError as directory_error:
+        try:
+            with open_file(secure_path):
+                if _is_path_within_tool_cwd(secure_path.path, context):
+                    yield secure_path.path
+                return
+        except ToolError:
+            raise directory_error from None
+
+
+def _walk_directory(descriptor: int | Path, path: Path, context: ToolContext) -> Iterable[Path]:
+    try:
+        with os.scandir(descriptor) as entries:
+            retained = sorted(entries, key=lambda entry: entry.name)
+    except OSError as exc:
+        raise ToolError(f"Could not list directory {path}: {exc}") from exc
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for entry in retained:
+        name = entry.name
+        candidate = path / name
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            if name in IGNORED_DIRS or _is_hidden(name):
+                continue
+            if isinstance(descriptor, Path):
+                child_path = secure_tool_path(str(candidate), context)
+                try:
+                    with open_directory(child_path) as child:
+                        yield from _walk_directory(child, candidate, context)
+                except ToolError:
+                    continue
+                continue
+            try:
+                child = os.open(name, directory_flags, dir_fd=descriptor)
+            except OSError:
+                # A rename, replacement, or newly introduced link invalidates this
+                # candidate; skip it rather than falling back to path traversal.
+                continue
+            try:
+                yield from _walk_directory(child, candidate, context)
+            finally:
+                os.close(child)
+            continue
+        if (
+            stat.S_ISREG(info.st_mode)
+            and not _is_hidden(name)
+            and _is_path_within_tool_cwd(candidate, context)
+        ):
+            yield candidate
 
 
 def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
@@ -676,10 +534,6 @@ def _build_matcher(
 
 
 type CallableMatcher = Callable[[str], bool]
-
-
-def _command_path(path: Path, context: ToolContext) -> str:
-    return display_tool_path(path, context)
 
 
 def _normalize_rg_line(line: str) -> str:
@@ -771,15 +625,6 @@ def _grep_record_path_exists(path_text: str, context: ToolContext) -> bool:
         return path.resolve(strict=False).is_file()
     except OSError:
         return False
-
-
-def _path_from_rg_line(line: str, context: ToolContext) -> Path:
-    path = Path(line.rstrip("\r\n"))
-    if not path.is_absolute():
-        path = context.cwd / path
-    if context.allow_outside_cwd:
-        return path
-    return path.resolve(strict=False)
 
 
 def _rg_grep_line_is_protected(line: str, context: ToolContext) -> bool:

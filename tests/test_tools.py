@@ -415,14 +415,14 @@ def test_write_tool_reports_temporary_cleanup_failure_after_publish(
     monkeypatch: MonkeyPatch,
 ) -> None:
     context = ToolContext(cwd=tmp_path)
-    real_unlink = Path.unlink
+    real_unlink = file_ops_module.os.unlink
 
-    def fail_temporary_unlink(path: Path, *args: object, **kwargs: object) -> None:
-        if path.name.startswith(".wisp-write-"):
+    def fail_temporary_unlink(path: str, *args: object, **kwargs: object) -> None:
+        if path.startswith(".wisp-write-"):
             raise PermissionError(errno.EACCES, "permission denied")
         real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail_temporary_unlink)
+    monkeypatch.setattr(file_ops_module.os, "unlink", fail_temporary_unlink)
 
     with pytest.raises(ToolError, match="temporary-link cleanup failed"):
         run_tool(
@@ -3357,6 +3357,7 @@ def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Pa
     assert result.text == "data.txt:1:match"
 
 
+@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
 def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -3447,7 +3448,8 @@ def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) ->
         context,
     )
 
-    assert result.text == "data.txt:1:[Omitted long matching line]"
+    assert result.text.startswith("data.txt:1:needle")
+    assert result.truncated is True
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
@@ -3547,6 +3549,7 @@ def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     assert "data.txt-3-after" in result.text
 
 
+@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
 def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -3640,7 +3643,7 @@ def test_grep_tool_ripgrep_ignores_config_that_follows_symlinks(
     assert result.data == {"count": 0, "matches": []}
 
 
-def test_grep_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+def test_grep_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
     if shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")
     workspace = tmp_path / "workspace"
@@ -3656,8 +3659,8 @@ def test_grep_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path
 
     result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
 
-    assert result.text == "link.txt:1:secret"
-    assert result.data["matches"] == ["link.txt:1:secret"]
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
 
 
 def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
@@ -3704,7 +3707,7 @@ def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
     assert result.data == {"count": 0, "files": []}
 
 
-def test_grep_tool_python_fallback_allows_symlinked_files_when_opted_out(
+def test_grep_tool_python_fallback_skips_symlinked_files_when_opted_out(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -3722,7 +3725,8 @@ def test_grep_tool_python_fallback_allows_symlinked_files_when_opted_out(
 
     result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
 
-    assert result.text == f"{link}:1:secret"
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
 
 
 def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
@@ -4050,7 +4054,7 @@ def test_find_tool_ripgrep_ignores_config_that_follows_symlinks(
     assert result.data == {"count": 0, "files": []}
 
 
-def test_find_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+def test_find_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
     if shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")
     workspace = tmp_path / "workspace"
@@ -4066,10 +4070,11 @@ def test_find_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
 
-    assert result.text == str(link)
-    assert result.data == {"count": 1, "files": [str(link)]}
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
 
 
+@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
 def test_find_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -4279,7 +4284,7 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
     assert result.data == {"count": 2, "files": ["a/first.py"]}
 
 
-def test_find_tool_python_fallback_orders_file_symlinks_by_display_path(
+def test_find_tool_python_fallback_skips_file_symlinks(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "")
@@ -4299,8 +4304,8 @@ def test_find_tool_python_fallback_orders_file_symlinks_by_display_path(
         ToolContext(cwd=tmp_path),
     )
 
-    assert result.text == "a.py\n[truncated]"
-    assert result.data == {"count": 2, "files": ["a.py"]}
+    assert result.text == "sub/b.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["sub/b.py"]}
 
 
 def test_find_tool_python_fallback_runs_off_event_loop(

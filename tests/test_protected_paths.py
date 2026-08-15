@@ -10,7 +10,6 @@ from pytest import MonkeyPatch
 
 from tests.test_tools import run_tool
 from wisp.settings import DEFAULT_PROTECTED_PATHS
-from wisp.tools import search as search_tools_module
 from wisp.tools.builtin import FindTool, GrepTool, ReadTool
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import is_protected_path, resolve_tool_path
@@ -100,14 +99,7 @@ def test_read_tool_allows_ordinary_file(tmp_path: Path) -> None:
     assert "print('hi')" in result.text
 
 
-@pytest.mark.parametrize("force_python", [False, True])
-def test_grep_skips_protected_files(
-    tmp_path: Path, monkeypatch: MonkeyPatch, force_python: bool
-) -> None:
-    # Cover both the rg-backed path and the pure-Python fallback: the secret must
-    # never appear in grep output regardless of which engine runs.
-    if force_python:
-        monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: None)
+def test_grep_skips_protected_files(tmp_path: Path) -> None:
 
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-needle\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("token = 'sk-needle'\n", encoding="utf-8")
@@ -119,12 +111,7 @@ def test_grep_skips_protected_files(
     assert "OPENAI_API_KEY" not in result.text
 
 
-@pytest.mark.parametrize("force_python", [False, True])
-def test_find_skips_protected_files(
-    tmp_path: Path, monkeypatch: MonkeyPatch, force_python: bool
-) -> None:
-    if force_python:
-        monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: None)
+def test_find_skips_protected_files(tmp_path: Path) -> None:
 
     (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     (tmp_path / "keep.env.py").write_text("ok\n", encoding="utf-8")
