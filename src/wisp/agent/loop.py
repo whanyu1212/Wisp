@@ -637,6 +637,12 @@ async def run_agent_loop(
                 )
                 for tool_call in tool_calls
             )
+            # Completion events cross a public yield boundary. Deep-copy the
+            # snapshots before yielding so consumer mutation cannot alter provider
+            # continuation state.
+            continuation_tool_calls = tuple(
+                snapshot.model_copy(deep=True) for snapshot in tool_call_snapshots
+            )
             yield MessageCompleted(
                 turn=turn,
                 content=completed_content,
@@ -653,7 +659,7 @@ async def run_agent_loop(
                 finish_reason=response.finish_reason,
                 usage=usage,
                 cost=cost,
-                tool_calls=tool_call_snapshots,
+                tool_calls=continuation_tool_calls,
             )
             state.record_response(completed, continuation_message)
             if usage is not None and config.context_window is not None:

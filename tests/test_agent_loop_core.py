@@ -28,7 +28,7 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
-from wisp.providers.base import ProviderError, ProviderProtocolError, ToolCallResult
+from wisp.providers.base import ProviderError, ProviderProtocolError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -857,13 +857,13 @@ def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
     assert wisp_event_from_json(result.model_dump_json()) == result
 
 
-def test_completion_and_continuation_reuse_tool_call_snapshots(
+def test_completion_and_continuation_snapshot_projection_is_single_and_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     call = ToolCall(
         call_id="call-1",
         name="bash",
-        arguments={"command": "pwd"},
+        arguments={"command": "pwd", "options": {"cwd": "before"}},
         parse_error="example parse error",
     )
     provider = ScriptedProvider(
@@ -883,43 +883,49 @@ def test_completion_and_continuation_reuse_tool_call_snapshots(
             ],
         ]
     )
-    snapshot_constructions: list[tuple[str, str, dict[str, object], str | None]] = []
-    snapshot_type = ToolCallSnapshot
 
-    def capture_snapshot(
-        *, call_id: str, name: str, arguments: dict[str, object], parse_error: str | None
-    ) -> ToolCallSnapshot:
-        snapshot_constructions.append((call_id, name, arguments, parse_error))
-        return snapshot_type(
-            call_id=call_id,
-            name=name,
-            arguments=arguments,
-            parse_error=parse_error,
-        )
+    estimated_messages: list[tuple[Message, ...]] = []
+    original_estimate_context = agent_loop_module.estimate_context
 
-    monkeypatch.setattr(agent_loop_module, "ToolCallSnapshot", capture_snapshot)
+    def capture_estimate(messages: tuple[Message, ...], tools: tuple[ToolSpec, ...]) -> object:
+        estimated_messages.append(messages)
+        return original_estimate_context(messages, tools)
+
+    monkeypatch.setattr(agent_loop_module, "estimate_context", capture_estimate)
 
     async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
-                messages=(Message(role="user", content="run pwd"),),
-            )
-        ]
+        events: list[object] = []
+        loop = run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+            messages=(Message(role="user", content="run pwd"),),
+        )
+        async for event in loop:
+            events.append(event)
+            if isinstance(event, MessageCompleted) and event.tool_calls:
+                event.tool_calls[0].arguments["command"] = "malicious"
+                options = cast(dict[str, object], event.tool_calls[0].arguments["options"])
+                options["cwd"] = "after"
+        return events
 
     events = anyio.run(run)
 
     completed = next(event for event in events if isinstance(event, MessageCompleted))
-    assert completed.tool_calls == (
+    expected_snapshot = ToolCallSnapshot(
+        call_id="call-1",
+        name="bash",
+        arguments={"command": "malicious", "options": {"cwd": "after"}},
+        parse_error="example parse error",
+    )
+    assert completed.tool_calls == (expected_snapshot,)
+    continuation = next(message for message in estimated_messages[1] if message.role == "assistant")
+    assert continuation.tool_calls == (
         ToolCallSnapshot(
             call_id="call-1",
             name="bash",
-            arguments={"command": "pwd"},
+            arguments={"command": "pwd", "options": {"cwd": "before"}},
             parse_error="example parse error",
         ),
     )
-    assert snapshot_constructions == [("call-1", "bash", {"command": "pwd"}, "example parse error")]
 
 
 def test_execution_end_immediately_precedes_projected_tool_result() -> None:
