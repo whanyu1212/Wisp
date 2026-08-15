@@ -20,6 +20,12 @@ class _Composer:
     display: bool = True
     focus_count: int = 0
 
+    def hide(self) -> None:
+        self.display = False
+
+    def show(self) -> None:
+        self.display = True
+
     def focus(self, scroll_visible: bool = True) -> object:
         self.focus_count += 1
         return self

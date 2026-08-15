@@ -74,6 +74,7 @@ from wisp.tui.theme_picker import ThemePicker
 from wisp.tui.theme_preference import ThemePreferenceState, load_theme_state, save_theme_state
 from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.widgets import (
+    ComposerPanel,
     DecisionPanel,
     HistoryNavigation,
     HistoryNavigationIntent,
@@ -256,7 +257,7 @@ class TextualTui(App[None]):
     .message--user {
         border-left: heavy $primary;
         background: $panel;
-        color: $primary;
+        color: $foreground;
         text-style: bold;
         padding-right: 1;
     }
@@ -328,29 +329,49 @@ class TextualTui(App[None]):
         outline-left: heavy $accent;
     }
 
-    /* The editor and footer remain separate widgets but share one flat surface.
-       Keeping the editor as the focus owner preserves overlay and cursor behavior. */
-    #input {
+    /* OpenCode-style composer: a filled writing surface with a single left rail,
+       then a detached status strip. The panel owns overlay visibility while the
+       editor remains the focus and cursor owner. */
+    #composer {
         height: auto;
-        max-height: 8;
-        border: none;
-        border-top: heavy $secondary;
+        border-left: heavy $accent;
         background: $surface;
-        padding: 0 2;
-        transition: border 200ms;
+        padding: 1 2 0 2;
     }
 
-    #input:focus {
-        border-top: heavy $accent;
-        background: $surface;
+    #input {
+        height: auto;
+        border: none;
+        background: transparent;
+        color: $foreground;
+        padding: 0;
+    }
+
+    #input .text-area--placeholder {
+        color: $foreground 60%;
+    }
+
+    #composer-meta {
+        height: 1;
+        margin-top: 1;
+        color: $foreground 60%;
+    }
+
+    #composer.-compact #composer-meta {
+        margin-top: 0;
+    }
+
+    #composer.-compact {
+        padding-top: 0;
     }
 
     #status {
         width: 1fr;
         height: 1;
+        border-left: heavy $accent;
         padding: 0 2;
-        color: $text-muted;
-        background: $surface;
+        color: $foreground 60%;
+        background: $background;
     }
 
     HelpPanel {
@@ -430,6 +451,7 @@ class TextualTui(App[None]):
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
+        self._composer: ComposerPanel | None = None
         self._transcript: Transcript | None = None
         self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
@@ -512,10 +534,8 @@ class TextualTui(App[None]):
             # transcript/composer siblings when it becomes visible.
             yield OperationIndicator(id="operation-indicator")
             yield ContextStatusOverlay(id="context-status")
-            # Transcript takes all remaining height (1fr). The input and compact
-            # footer hug the bottom, matching Pi's editor-above-footer visual shape.
-            # The input is yielded directly — a wrapping Container would default to
-            # height: 1fr and float the input into the middle of the screen.
+            # Transcript takes all remaining height (1fr). ComposerPanel is explicitly
+            # auto-height so the input and detached footer still hug the screen bottom.
             yield Transcript(
                 empty_wordmark=_WORDMARK,
                 empty_compact_wordmark=_WORDMARK_COMPACT,
@@ -539,7 +559,7 @@ class TextualTui(App[None]):
             yield ConnectPanel(id="connect-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
-            yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
+            yield ComposerPanel(placeholder=_input_placeholder("wisp> "), id="composer")
             # Textual uses a distinct one-row information hierarchy. The shared
             # Rich/prompt-toolkit renderers retain their existing two-line footer.
             yield StatusBar(id="status")
@@ -564,6 +584,7 @@ class TextualTui(App[None]):
         self._transcript = self.query_one("#transcript", Transcript)
         self._jump_to_latest = self.query_one("#jump-latest", JumpToLatest)
         self._status = self.query_one("#status", StatusBar)
+        self._composer = self.query_one("#composer", ComposerPanel)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._file_suggest = self.query_one("#file-suggest", FileSuggest)
@@ -576,7 +597,7 @@ class TextualTui(App[None]):
         self._context_status = self.query_one("#context-status", ContextStatusOverlay)
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
-            composer=self._input,
+            composer=self._composer,
             # Both composer-anchored menus, so an overlay opening tears down each
             # of them; the `@` picker would otherwise float over the overlay and
             # win the Escape/navigation keys that belong to the active workflow.
@@ -602,9 +623,11 @@ class TextualTui(App[None]):
             self.run_worker(self._run_and_exit(), exclusive=True)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Move contextual help below the conversation on narrow terminals."""
+        """Update responsive help and composer presentation after terminal resize."""
 
         self.screen.set_class(event.size.width < 80, "-compact-help")
+        if self._composer is not None:
+            self._composer.refresh_layout(height=event.size.height)
 
     def watch_theme(self, theme_name: str) -> None:
         # Theme variables recolor mounted CSS-owned content atomically. Widgets
@@ -612,6 +635,8 @@ class TextualTui(App[None]):
         if self.is_running:
             if self._status is not None:
                 self._status.refresh_theme()
+            if self._composer is not None:
+                self._composer.refresh_theme()
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/
@@ -1736,6 +1761,8 @@ class TextualTui(App[None]):
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         self._agent_mode = snapshot.mode
+        if self._composer is not None:
+            self._composer.set_snapshot(snapshot)
         if self._status is not None:
             self._status.set_snapshot(snapshot)
 
