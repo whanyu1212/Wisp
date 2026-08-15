@@ -1319,6 +1319,30 @@ def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_pa
     assert assistant_messages[0].finish_reason == "error"
 
 
+def test_coding_session_does_not_persist_empty_failed_completion(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderResponseFailed(message="upstream failed", response_id="response-1"),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completion.content == ""
+    assert completion.finish_reason == "error"
+    session_started = next(event for event in events if isinstance(event, AgentStarted))
+    replayed = JsonlSessionStore(tmp_path).load(session_started.session_id).read_context_messages()
+    assert [(message.role, message.content) for message in replayed] == [("user", "hello")]
+
+
 def test_coding_session_retries_uncertain_completion_write_without_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

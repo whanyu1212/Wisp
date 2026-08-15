@@ -22,6 +22,7 @@ from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
+    completion_event_has_history,
     message_from_completion_event,
     provider_history_message,
 )
@@ -858,7 +859,9 @@ class CodingSession:
                                     queue_kind=event.kind,
                                 )
                             )
-                    if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                    if isinstance(
+                        event, MessageCompleted | ToolExecutionEnded
+                    ) and completion_event_has_history(event):
                         tool_status = (
                             tool_presentation_statuses.pop(event.call_id, None)
                             if isinstance(event, ToolExecutionEnded)

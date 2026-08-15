@@ -23,6 +23,7 @@ from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderToolCallCompleted,
@@ -931,6 +932,28 @@ def test_harness_cancel_after_tool_execution_end_preserves_tool_output() -> None
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.tool_name == "lookup"
     assert tool_message.is_error is False
+
+
+def test_harness_does_not_retain_empty_failed_completion() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseFailed(message="provider failed"),
+            ]
+        ]
+    )
+    harness = _harness(provider)
+
+    async def run() -> list[object]:
+        return [event async for event in harness.prompt("initial")]
+
+    events = anyio.run(run)
+
+    assert any(event.type == "message.completed" and event.content == "" for event in events)
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial")
+    ]
 
 
 def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:

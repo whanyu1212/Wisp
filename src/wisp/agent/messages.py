@@ -134,6 +134,18 @@ class CompactionRecord(BaseModel):
         return data
 
 
+def completion_event_has_history(
+    event: MessageCompleted | ToolExecutionEnded,
+) -> bool:
+    """Return whether a completion carries portable provider history."""
+
+    return not (
+        isinstance(event, MessageCompleted)
+        and event.finish_reason in {"error", "cancelled"}
+        and not event.content
+    )
+
+
 def message_from_completion_event(
     event: MessageCompleted | ToolExecutionEnded,
 ) -> Message:
