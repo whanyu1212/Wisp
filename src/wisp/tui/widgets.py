@@ -1676,18 +1676,23 @@ class Transcript(VerticalScroll):
     taken as it grows reads "not at the bottom" and abandons following the very
     output it should track.
 
-    Instead the flag tracks whether the viewport is resting at the bottom, updated
-    only when the scroll position *settles* (``watch_scroll_y``):
+    Instead the flag tracks reader *intent*, updated only from a genuine reader-
+    or app-driven movement (``watch_scroll_y``, guarded — see below):
 
     - Rest at the bottom → ``True`` (keep following new output).
     - The user scrolls up and away → ``False`` (they're reading history; don't
       yank them back). Scrolling back to the bottom flips it ``True`` again.
 
-    Content growth alone never flips the flag: appends don't move ``scroll_y``,
-    and ``follow_tail()``'s programmatic scroll lands *at* the end, which
-    re-derives to ``True`` — self-consistent, so no guard is needed. After each
-    append the app calls ``follow_tail()``, which scrolls to the end iff the flag
-    is set.
+    ``scroll_y`` itself can also move with no reader input: mounting or removing
+    widgets changes ``max_scroll_y``, and Textual re-validates ``scroll_y``
+    against it (``_size_updated`` → ``_scroll_update``), which can *clamp* a
+    reader's parked position down — landing it exactly on the new
+    ``max_scroll_y`` and satisfying "at the bottom" by coincidence, not intent.
+    ``_size_updated`` marks that window as content-driven so ``watch_scroll_y``
+    never reads it as the reader returning to the tail. After each append the
+    app calls ``follow_tail()``, which scrolls to the end iff the flag is set —
+    that programmatic scroll is real movement and re-derives to ``True`` as
+    expected.
     """
 
     BINDING_GROUP_TITLE = "Conversation"
@@ -1726,6 +1731,7 @@ class Transcript(VerticalScroll):
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self._follow = True
         self._follow_generation = 0
+        self._content_driven_scroll_update = False
         self._empty_wordmark = empty_wordmark
         self._empty_compact_wordmark = empty_compact_wordmark
         self._empty_tagline = empty_tagline
@@ -1744,9 +1750,21 @@ class Transcript(VerticalScroll):
         container_size: Size,
         layout: bool = True,
     ) -> bool:
-        """Apply measured scroll geometry without requesting a second layout."""
+        """Apply measured scroll geometry without requesting a second layout.
 
-        return super()._size_updated(size, virtual_size, container_size, layout=False)
+        A virtual-size change (mount/remove) re-validates ``scroll_y`` against the
+        new ``max_scroll_y`` here, which can *move* ``scroll_y`` with no reader
+        input at all — e.g. clamping a reader's parked position down when the
+        mounted window shrinks. That lands ``watch_scroll_y`` a value change to
+        react to, so mark the call as content-driven for its duration: it must
+        never be read as the reader returning to the tail.
+        """
+
+        self._content_driven_scroll_update = True
+        try:
+            return super()._size_updated(size, virtual_size, container_size, layout=False)
+        finally:
+            self._content_driven_scroll_update = False
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
@@ -1783,21 +1801,27 @@ class Transcript(VerticalScroll):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         # Textual updates scroll_y as the position settles (including at the end
-        # of an animated user scroll). Re-derive follow intent from the resting
-        # position: at the bottom means "keep following", anywhere above means
-        # "the user is reading back, leave them there".
+        # of an animated user scroll) AND whenever a virtual-size change clamps a
+        # parked position against a new max_scroll_y (see _size_updated) — the
+        # latter carries no reader intent at all. Re-derive follow intent only
+        # from a real movement: landing at the bottom means "keep following",
+        # moving away means "the user is reading back, leave them there". A
+        # content-driven clamp must never flip the flag to True — that would
+        # mistake "the window shrank underneath a parked reader" for "the reader
+        # returned to the tail" (it can land exactly on the new max_scroll_y).
         previous = self._follow
         super().watch_scroll_y(old_value, new_value)
-        self._follow = self.is_vertical_scroll_end
-        if self._follow != previous:
-            if not self._follow:
-                self._follow_generation += 1
-                # A followed Markdown stream may have armed Textual's native
-                # compositor anchor. Reader navigation owns the viewport now,
-                # so disarm it in the same state transition instead of waiting
-                # for a later stream callback or final layout.
-                self.anchor(False)
-            self.post_message(self.FollowChanged(self._follow))
+        if not self._content_driven_scroll_update:
+            self._follow = self.is_vertical_scroll_end
+            if self._follow != previous:
+                if not self._follow:
+                    self._follow_generation += 1
+                    # A followed Markdown stream may have armed Textual's native
+                    # compositor anchor. Reader navigation owns the viewport now,
+                    # so disarm it in the same state transition instead of waiting
+                    # for a later stream callback or final layout.
+                    self.anchor(False)
+                self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
             self._history_navigation = HistoryNavigation()
@@ -1950,10 +1974,32 @@ class Transcript(VerticalScroll):
             )
         )
 
+    def _scroll_end_while_following(self) -> None:
+        """Jump to the tail, re-checking follow intent when this actually runs.
+
+        Both callers (``follow_tail()``, ``return_to_latest()``) use
+        ``scroll_end(animate=False)`` with its default ``immediate=False``:
+        Textual defers the real scroll via ``call_after_refresh`` so it can
+        read the post-layout ``max_scroll_y``. That deferred closure applies
+        unconditionally when it finally runs — it has no memory of the intent
+        that scheduled it. A reader who wheels away between the call and that
+        later refresh (new output arrives and schedules a follow while the
+        reader is still mid-read) would otherwise be silently carried back to
+        the tail regardless. Defer our own intent check the same one frame,
+        then apply immediately — Textual's own deferral is already spent by
+        the time ours fires, so ``max_scroll_y`` is equally settled.
+        """
+
+        def _apply_if_still_following() -> None:
+            if self._follow:
+                self.scroll_end(animate=False, immediate=True)
+
+        self.call_after_refresh(_apply_if_still_following)
+
     def follow_tail(self) -> None:
         """Scroll to the newest content iff the user hasn't scrolled away."""
         if self._follow:
-            self.scroll_end(animate=False)
+            self._scroll_end_while_following()
 
     def page_up(self) -> HistoryNavigation | None:
         """Move away from the tail before a page-up layout can re-pin it."""
@@ -2022,7 +2068,7 @@ class Transcript(VerticalScroll):
         was_following = self._follow
         self._follow_generation += 1
         self._follow = True
-        self.scroll_end(animate=False)
+        self._scroll_end_while_following()
         if not was_following:
             self.post_message(self.FollowChanged(True))
 

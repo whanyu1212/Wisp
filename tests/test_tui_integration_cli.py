@@ -4019,6 +4019,176 @@ def test_textual_wheel_rearms_history_without_scrolling_down_first() -> None:
     assert anyio.run(scenario) == 1
 
 
+def _forward_mouse_scroll_up(app_instance: TextualTui, transcript: Transcript) -> None:
+    """Forward a MouseScrollUp the way the real driver does, with no implicit pause.
+
+    ``pilot._post_mouse_events`` calls ``await self.pause()`` *before* posting its
+    event, which drains any already-queued ``call_after_refresh`` callbacks first
+    and hides exactly the ordering races these tests exist to catch. Forwarding
+    directly through the screen reproduces the real race: the event is queued
+    behind whatever ``InvokeLater`` callbacks are already pending.
+    """
+
+    region = transcript.region
+    click_x, click_y = region.offset + (2, 2)
+    event = events.MouseScrollUp(
+        widget=transcript,
+        x=click_x,
+        y=click_y,
+        delta_x=0,
+        delta_y=0,
+        screen_x=click_x,
+        screen_y=click_y,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+    )
+    app_instance.screen._forward_event(event)
+
+
+def test_textual_wheel_up_survives_a_pending_deferred_follow() -> None:
+    # Regression: Transcript.follow_tail() calls scroll_end(animate=False),
+    # whose default immediate=False defers the actual jump via
+    # call_after_refresh so it can read the post-layout max_scroll_y. That
+    # deferred closure applies unconditionally when it later runs — it has no
+    # memory of the follow check that scheduled it. If new output mounts (each
+    # mount scheduling its own deferred follow) and the reader wheels up before
+    # those deferred jumps fire, the queued jumps used to win and silently
+    # carry the reader back to the tail regardless of the wheel-up in between.
+    async def scenario() -> tuple[float, float]:
+        app_instance, _renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            for i in range(30):
+                app_instance.write_message(f"line {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+            assert transcript.is_following
+            assert transcript.scroll_y == transcript.max_scroll_y
+
+            # Each write schedules a deferred follow_tail() before the wheel
+            # event below is even posted.
+            app_instance.write_message("new A", role="user")
+            app_instance.write_message("new B", role="user")
+
+            before = transcript.scroll_y
+            _forward_mouse_scroll_up(app_instance, transcript)
+            await pilot.pause()
+            return before, transcript.scroll_y
+
+    before, after = anyio.run(scenario)
+    assert after < before
+
+
+def test_textual_scrolled_reader_survives_history_window_shrink() -> None:
+    # Regression: a reader parked above the tail must not be snapped back to
+    # the bottom when the mounted history window shrinks underneath them (e.g.
+    # retained-history reconciliation evicting older widgets). Textual clamps
+    # scroll_y down against the new, smaller max_scroll_y — a real scroll_y
+    # change that must not be misread as the reader returning to the tail.
+    async def scenario() -> tuple[bool, float, float]:
+        app_instance, _renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            for i in range(30):
+                app_instance.write_message(f"line {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript.stop_following()
+            transcript.scroll_to(y=transcript.max_scroll_y / 2, animate=False)
+            await pilot.pause()
+            assert not transcript.is_following
+            parked_y = transcript.scroll_y
+
+            # Shrink the mounted window below the reader's current position.
+            for widget in list(transcript.children)[10:]:
+                widget.remove()
+            await pilot.pause()
+            still_not_following = not transcript.is_following
+
+            # Regrow the window (more output/history arrives) and let it settle.
+            for i in range(15):
+                app_instance.write_message(f"regrow {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+            return still_not_following, parked_y, transcript.scroll_y
+
+    stayed_put, parked_y, final_y = anyio.run(scenario)
+    assert stayed_put
+    assert final_y < parked_y + 5  # reader was not carried to the tail
+
+
+def test_textual_top_of_history_survives_window_shrink_and_regrowth() -> None:
+    # Regression: scrolling all the way up must not snap back to the bottom —
+    # not even when the mounted window collapses and later regrows while the
+    # reader sits near the top. Parked one row below the very top (rather than
+    # exactly at scroll_y == 0): Textual's scroll_y is a reactive that only
+    # notifies watchers on an actual value change, and clamping 0 against a
+    # collapsed max_scroll_y of 0 is a no-op that would never exercise the
+    # clamp this test targets.
+    async def scenario() -> tuple[float, float]:
+        app_instance, _renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            for i in range(30):
+                app_instance.write_message(f"line {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript.stop_following()
+            transcript.scroll_to(y=1, animate=False)
+            await pilot.pause()
+            assert not transcript.is_following
+            parked_y = transcript.scroll_y
+            assert parked_y > 0
+
+            for widget in list(transcript.children)[3:]:
+                widget.remove()
+            await pilot.pause()
+
+            for i in range(20):
+                app_instance.write_message(f"regrow {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+            return parked_y, transcript.scroll_y
+
+    parked_y, final_y = anyio.run(scenario)
+    assert final_y < parked_y + 5  # reader was not carried to the tail
+
+
+def test_textual_home_still_holds_top_through_window_shrink_and_regrowth() -> None:
+    # Same guarantee as the wheel/PageUp case above, reached via Home — keeps
+    # the Home path covered by behavior now that the app no longer special-
+    # cases it in on_transcript_follow_changed.
+    async def scenario() -> float:
+        app_instance, _renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            for i in range(30):
+                app_instance.write_message(f"line {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+
+            app_instance.action_scroll_transcript_home()
+            await pilot.pause()
+            assert transcript.scroll_y == 0
+            assert not transcript.is_following
+
+            for widget in list(transcript.children)[5:]:
+                widget.remove()
+            await pilot.pause()
+
+            for i in range(20):
+                app_instance.write_message(f"regrow {i}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y
+
+    assert anyio.run(scenario) == 0
+
+
 def test_textual_close_exits_when_stream_shutdown_fails(monkeypatch: MonkeyPatch) -> None:
     async def scenario() -> bool:
         app_instance = TextualTui()
