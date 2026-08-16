@@ -4411,7 +4411,7 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
         ("wisp", "#dfe6ec", "#4aa3c7"),
         ("wisp-orchid", "#e8e5ef", "#9b8af2"),
         ("wisp-ember", "#eee7e2", "#d59a62"),
-        ("wisp-storm", "#c0caf5", "#7aa2f7"),
+        ("wisp-storm", "#c0caf5", "#8db0ff"),
         ("wisp-light", "#12171c", "#277795"),
     ],
 )

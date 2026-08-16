@@ -115,7 +115,10 @@ WISP_THEME_EMBER = Theme(
 
 WISP_THEME_STORM = Theme(
     name="wisp-storm",
-    primary="#7aa2f7",
+    # Tokyo Night's normal-intensity blue (#7aa2f7) clears 4.5:1 against the
+    # background but only 4.28:1 against $panel (e.g. JumpToLatest's badge
+    # text), so this uses the scheme's own bright-blue variant instead.
+    primary="#8db0ff",
     secondary="#bb9af7",
     accent="#7dcfff",
     warning="#e0af68",
