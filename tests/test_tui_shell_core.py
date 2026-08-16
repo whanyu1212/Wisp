@@ -344,9 +344,10 @@ def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
 
         assert shell.current_mode == "plan"
         assert shell.view.mode == "plan"
-        # Regression: a mode switch can't move the context window or cost, so
-        # it must not trigger a redundant session-stats round trip.
-        assert controller.session_stats_requests == []
+        # A mode switch changes the estimate CodingSession.get_session_stats()
+        # returns (plan mode adds a system prompt and restricts tools to
+        # read-only), so it must still trigger a session-stats refresh.
+        assert controller.session_stats_requests == ["session-stats-1"]
 
         await shell._handle_input_line(_InputLine("/build", _InputMode.idle))
         assert controller.agent_modes == ["plan", "build"]
