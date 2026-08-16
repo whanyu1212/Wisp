@@ -357,6 +357,84 @@ def test_request_boundary_hook_can_stop_after_tool_round() -> None:
     assert hook.snapshots[0].had_tool_calls is True
 
 
+def test_request_boundary_snapshot_mutation_does_not_leak_to_next_boundary() -> None:
+    """A snapshot mutation at one boundary must not appear in a later one.
+
+    If `continuation_messages` were shared (not deep-copied) with
+    `state.continuation_messages`, mutating a snapshot's tool-call arguments
+    at the first boundary would corrupt the loop's own history, and that
+    corruption would still be visible in a *second* boundary's snapshot
+    later in the same run.
+    """
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(
+                        call_id="call-1", name="noop", arguments={"path": "original"}
+                    )
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(
+                        ToolCall(call_id="call-1", name="noop", arguments={"path": "original"}),
+                    ),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("no more tools"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+
+    class MutateThenRecordHook:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.second_boundary_arguments: dict[str, object] | None = None
+
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            self.calls += 1
+            tool_call_message = next(
+                (message for message in snapshot.continuation_messages if message.tool_calls),
+                None,
+            )
+            if self.calls == 1:
+                assert tool_call_message is not None
+                tool_call_message.tool_calls[0].arguments["path"] = "corrupted-by-hook"
+                return RequestBoundaryDecision(stop=False)
+            self.second_boundary_arguments = (
+                dict(tool_call_message.tool_calls[0].arguments)
+                if tool_call_message is not None
+                else None
+            )
+            return RequestBoundaryDecision(stop=True)
+
+    hook = MutateThenRecordHook()
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    anyio.run(run)
+
+    assert hook.calls == 2
+    assert hook.second_boundary_arguments == {"path": "original"}
+
+
 def test_request_boundary_hook_stop_wins_over_unused_message_edits() -> None:
     """`stop=True` is honored even when combined with `messages`/`extra_messages`.
 

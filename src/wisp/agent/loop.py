@@ -225,7 +225,15 @@ async def _at_request_boundary(
         turn=state.turn,
         tool_iterations=state.tool_iterations,
         had_tool_calls=had_tool_calls,
-        continuation_messages=tuple(state.continuation_messages),
+        # `Message`/`ToolCallSnapshot` are frozen, but a `ToolCallSnapshot`'s
+        # `arguments` is a plain mutable dict -- deep-copy so a hook mutating
+        # what it was told is a read-only snapshot cannot corrupt the loop's
+        # live `state.continuation_messages`. Mirrors the same deep-copy
+        # already done before tool-call snapshots cross the MessageCompleted
+        # event boundary above.
+        continuation_messages=tuple(
+            message.model_copy(deep=True) for message in state.continuation_messages
+        ),
     )
     decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
         snapshot=snapshot
