@@ -255,6 +255,72 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert provider.calls[0].messages == messages
 
 
+class RaisingCancellationToken:
+    """Cancellation token whose is_cancelled() raises instead of returning a bool."""
+
+    def is_cancelled(self) -> bool:
+        raise RuntimeError("boom")
+
+
+def test_pure_loop_does_not_mask_cancellation_token_errors() -> None:
+    """A cancellation-token failure before the first turn must not raise UnboundLocalError.
+
+    Regression test for #359: `turn` was previously only bound inside the loop body
+    after the first cancellation check, so an exception raised by that very check
+    (before `turn = state.begin_turn()` executed) hit `if turn > 0:` in the outer
+    `except` and raised UnboundLocalError, masking the original failure.
+    """
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="boom"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=ScriptedProvider([]),
+                    tool_executor=NeverToolExecutor(),
+                    cancellation_token=RaisingCancellationToken(),
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == ["error"]
+
+
+def test_pure_loop_does_not_complete_unstarted_turn_with_nonzero_offset() -> None:
+    """A nonzero turn_offset must not make an unstarted turn look completed.
+
+    Regression test for a follow-up to #359: using `turn > 0` to decide whether to
+    emit a failure `TurnCompleted` is wrong once `turn` is pre-seeded to
+    `config.turn_offset` before the loop starts. With a nonzero offset and a
+    cancellation-token failure on the very first check, no `TurnStarted` is ever
+    emitted for this invocation, so no matching `TurnCompleted` must be emitted
+    either -- only the explicit `turn_started` flag can tell the two cases apart.
+    """
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="boom"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=ScriptedProvider([]),
+                    tool_executor=NeverToolExecutor(),
+                    cancellation_token=RaisingCancellationToken(),
+                    turn_offset=5,
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == ["error"]
+
+
 @pytest.mark.parametrize(
     ("started_id", "terminal_id", "tool_call_id"),
     [

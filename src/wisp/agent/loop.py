@@ -512,13 +512,24 @@ async def run_agent_loop(
         turn=config.turn_offset,
         tool_iterations=config.tool_iteration_offset,
     )
+    # Bind `turn`/`turn_started` before the loop so the outer `except` below
+    # can always reference them, even if an exception (e.g. a raising
+    # CancellationToken) fires before the first `state.begin_turn()` call.
+    # `turn_started` -- rather than `turn > 0` -- distinguishes "no turn
+    # started this invocation" from "a real turn is in flight", since a
+    # nonzero `turn_offset` would otherwise make `turn > 0` true even when
+    # this call never emitted a matching `TurnStarted`.
+    turn = config.turn_offset
+    turn_started = False
 
     try:
         while True:
+            turn_started = False
             if _is_cancelled(config):
                 yield ErrorEvent(message="Agent run cancelled")
                 break
             turn = state.begin_turn()
+            turn_started = True
             yield TurnStarted(turn=turn)
             if _is_cancelled(config):
                 for event in _cancelled_turn_events(turn):
@@ -857,7 +868,7 @@ async def run_agent_loop(
                     raise overflow_error from exc
                 raise
         yield ErrorEvent(message=str(exc))
-        if turn > 0:
+        if turn_started:
             yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
         if overflow_error is not None and overflow_error is not exc:
             raise overflow_error from exc
