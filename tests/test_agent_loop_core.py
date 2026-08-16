@@ -354,10 +354,25 @@ def test_request_boundary_hook_fires_after_tool_round_and_can_inject_messages() 
     assert [event.type for event in events].count("turn.completed") == 2
     assert len(provider.calls) == 2
     assert hook.snapshots[0].had_tool_calls is True
-    # The injected message must reach the second provider request's continuation
-    # history (appended after the tool result, before the next sample).
-    second_request_messages = provider.calls[1].messages
-    assert second_request_messages[-1] is injected
+    # OpenAI's Responses API reads *either* tool_results *or* messages, never
+    # both, whenever tool_results is non-empty -- so injecting content after a
+    # tool round only reaches every provider if the continuation chain resets
+    # (previous_response_id/tool_results cleared) and the full accumulated
+    # history, including this round's tool call/result, is replayed via
+    # messages instead. Regression for #363 review: an earlier version folded
+    # extra_messages into `messages` while still sending the stale
+    # tool_results/previous_response_id pair, which OpenAI's provider would
+    # have silently ignored.
+    second_call = provider.calls[1]
+    assert second_call.tool_results == ()
+    assert second_call.previous_response_id is None
+    assert [(m.role, m.content) for m in second_call.messages] == [
+        ("user", "hi"),
+        ("assistant", ""),
+        ("tool", "tool output"),
+        ("user", "steered"),
+    ]
+    assert second_call.messages[-1] is injected
 
 
 def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None:
@@ -385,6 +400,66 @@ def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None
     assert [event.type for event in events].count("turn.started") == 2
     assert len(provider.calls) == 2
     assert hook.snapshots[0].had_tool_calls is False
+    # Regression for #363 review: the first turn's own completed answer must
+    # be visible to the follow-up request -- every provider ignores
+    # previous_response_id whenever tool_results is empty (true here), so
+    # `messages` alone must already carry it.
+    second_call = provider.calls[1]
+    assert second_call.tool_results == ()
+    assert [(m.role, m.content) for m in second_call.messages] == [
+        ("user", "hi"),
+        ("assistant", "first"),
+    ]
+
+
+def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
+    """A tool round's results must not leak into a later, unrelated request."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("no more tools"),
+            _completed_stream("final"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+    hook = RecordingRequestBoundaryHook(
+        [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=False)]
+    )
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    anyio.run(run)
+
+    assert len(provider.calls) == 3
+    # Call 1 legitimately carries call-1's result. Call 2 (after the clean
+    # turn that consumed it) must not still be sending it.
+    assert provider.calls[1].tool_results == (
+        ToolCallResult(call_id="call-1", output="tool output", is_error=False),
+    )
+    assert provider.calls[2].tool_results == ()
 
 
 def test_request_boundary_hook_can_replace_base_messages() -> None:
@@ -412,6 +487,10 @@ def test_request_boundary_hook_can_replace_base_messages() -> None:
 
     assert provider.calls[0].messages == messages
     assert provider.calls[1].messages == replacement
+    # A full replacement discards accumulated continuation state entirely --
+    # the point of compaction is that the old history stops being resent.
+    assert provider.calls[1].tool_results == ()
+    assert provider.calls[1].previous_response_id is None
 
 
 class RaisingCancellationToken:

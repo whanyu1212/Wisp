@@ -155,14 +155,39 @@ async def _at_request_boundary(
     run; a completed tool round always continued into the next provider
     sample.
 
-    `extra_messages` are folded into the returned base `messages` (not
-    `state.continuation_messages`) because the next provider request is built
-    from `messages` directly -- the loop reconstructs continuation from
-    `tool_results`/`previous_response_id`, not from a flattened message list.
+    Every provider treats `messages` as the original, never-mutated turn-1
+    history and only ever *appends* new content on top of it via
+    `tool_results` + `previous_response_id` -- none of them can be told to
+    splice caller-supplied content into an active continuation chain. So:
+
+    - After a turn with no tool calls, every provider already ignores
+      `previous_response_id` whenever `tool_results` is empty (which it
+      always is here), so `messages` alone must already be complete: the
+      just-completed turn's own answer, sitting only in
+      `state.continuation_messages`, is folded in unconditionally so a
+      continuation actually follows up on what it claims to follow up on.
+    - After a tool round, `tool_results` is non-empty, and at least one
+      provider (OpenAI) reads *only* `tool_results` in that case, ignoring
+      `messages` entirely. A hook that wants the next request to see new
+      content there has no choice but to reset the continuation chain: fold
+      the accumulated `continuation_messages` (the tool call/result pairs a
+      resumed provider would otherwise only know via `previous_response_id`)
+      into `messages` and clear both, so the request is rebuilt as a fresh,
+      self-contained turn 1 that every provider reads the same way.
     """
 
+    def _reset_continuation_onto(base: Sequence[Message]) -> Sequence[Message]:
+        """Discard provider-native continuation, replaying `base` as the new turn 1."""
+
+        state.continuation_messages.clear()
+        state.reset_continuation()
+        return base
+
     if config.request_boundary_hook is None:
+        if not had_tool_calls:
+            messages = _reset_continuation_onto((*messages, *state.continuation_messages))
         return messages, stop_by_default
+
     snapshot = RequestBoundarySnapshot(
         turn=state.turn,
         tool_iterations=state.tool_iterations,
@@ -173,7 +198,16 @@ async def _at_request_boundary(
         snapshot=snapshot
     )
     if decision.messages is not None:
-        messages = decision.messages
+        # A full replacement (e.g. post-compaction) discards everything
+        # accumulated so far in favor of the hook's own base.
+        messages = _reset_continuation_onto(decision.messages)
+    elif not had_tool_calls or decision.extra_messages:
+        # Either the just-completed turn's own answer must become visible
+        # (no tool calls), or new content is being injected onto a tool-round
+        # continuation that at least one provider can't otherwise see it on.
+        # Either way, fold everything accumulated so far forward instead of
+        # losing it.
+        messages = _reset_continuation_onto((*messages, *state.continuation_messages))
     if decision.extra_messages:
         messages = (*messages, *decision.extra_messages)
     return messages, decision.stop
@@ -416,6 +450,23 @@ class _AgentLoopState:
 
     def complete_tool_round(self, results: Sequence[ToolCallResult]) -> None:
         self.pending_tool_results = tuple(results)
+
+    def reset_continuation(self) -> None:
+        """Discard provider-native continuation state for the next request.
+
+        Every provider's `previous_response_id`-anchored continuation only
+        ever appends new content on top of what it already remembers (server-
+        side for OpenAI, in a client-tracked replay tail for Anthropic/Google)
+        -- none of them can be told to splice in caller-supplied history
+        mid-chain. A boundary decision that replaces or injects messages must
+        therefore force the next request back to a fresh, self-contained
+        "turn 1": clear both `previous_response_id` and any pending tool
+        results so the next request is built from `messages` alone, which
+        every provider honors unconditionally.
+        """
+
+        self.previous_response_id = None
+        self.pending_tool_results = ()
 
 
 async def _provider_events(

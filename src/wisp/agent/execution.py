@@ -58,10 +58,22 @@ class RequestBoundaryDecision:
     """What the loop should do before its next provider sample, if anything.
 
     `messages`, when not `None`, replaces the loop's base message history
-    (e.g. after compaction). `extra_messages` are appended after the base/
+    (e.g. after compaction) -- everything accumulated so far is discarded in
+    favor of this new base. `extra_messages` are appended after the base/
     replacement history and before the next provider request (e.g. steering
-    or follow-up injection). `stop`, when `True`, ends the run at this
-    boundary through the loop's normal clean-completion path.
+    or follow-up injection) -- everything accumulated so far is kept.
+    `stop`, when `True`, ends the run at this boundary through the loop's
+    normal clean-completion path.
+
+    A non-empty `messages` or `extra_messages` always resets the provider's
+    native continuation state (`previous_response_id`, pending tool results)
+    for the next request: every provider only ever appends new content on
+    top of what it already remembers, so there is no cross-provider-safe way
+    to splice caller-supplied content into an active continuation chain --
+    the next request is rebuilt as a fresh, self-contained turn instead. A
+    hook that wants a plain, unmodified continuation should return an empty
+    decision (`RequestBoundaryDecision()`) rather than repeat what the loop
+    already has.
     """
 
     messages: Sequence[Message] | None = None
