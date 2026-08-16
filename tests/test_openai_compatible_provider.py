@@ -14,7 +14,12 @@ from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.events import ToolCallSnapshot
 from wisp.providers.auth import StoredProviderAuthResolver
-from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ProviderProtocolError,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
@@ -116,6 +121,25 @@ def _collect(provider: OpenAICompatibleProvider, **kwargs: object) -> list[objec
         ]
 
     return anyio.run(run)
+
+
+def test_rejects_missing_continuation_state() -> None:
+    provider, completions = _provider([])
+
+    async def run() -> None:
+        stream = provider.stream(
+            [Message(role="user", content="hi")],
+            previous_response_id="missing-response",
+            extra_messages=[Message(role="user", content="steered")],
+        )
+        await anext(stream)
+
+    with pytest.raises(
+        ProviderProtocolError,
+        match="openai-compatible continuation state is unavailable for missing-response",
+    ):
+        anyio.run(run)
+    assert completions.calls == []
 
 
 def test_streams_text_and_usage_and_closes_stream() -> None:
@@ -258,6 +282,45 @@ def test_replays_assistant_tool_calls_and_tool_results_on_follow_up() -> None:
             ],
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+    ]
+
+
+def test_replays_clean_response_before_appended_user_message() -> None:
+    provider, completions = _provider(
+        [
+            [_chunk(content="first", finish_reason="stop", response_id="first")],
+            [_chunk(content="second", finish_reason="stop", response_id="second")],
+        ]
+    )
+
+    first = _collect(provider)
+    terminal = first[-1]
+    assert isinstance(terminal, ProviderResponseCompleted)
+    second = _collect(
+        provider,
+        previous_response_id=terminal.response_id,
+        extra_messages=(Message(role="user", content="steered"),),
+    )
+
+    assert isinstance(second[-1], ProviderResponseCompleted)
+    assert completions.calls[1]["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "first"},
+        {"role": "user", "content": "steered"},
+    ]
+
+
+def test_fresh_context_appends_extra_messages() -> None:
+    provider, completions = _provider([[_chunk(content="done", finish_reason="stop")]])
+
+    _collect(
+        provider,
+        extra_messages=(Message(role="user", content="steered"),),
+    )
+
+    assert completions.calls[0]["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": "steered"},
     ]
 
 

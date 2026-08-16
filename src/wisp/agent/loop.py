@@ -51,9 +51,12 @@ from wisp.events import (
 )
 from wisp.providers.base import (
     ContextOverflowError,
+    ContinuationMessageProvider,
+    PromptCacheContinuationMessageProvider,
     PromptCacheKeyProvider,
     Provider,
     ProviderProtocolError,
+    StructuredToolReplacementProvider,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
@@ -139,14 +142,44 @@ def _is_cancelled(config: AgentLoopConfig) -> bool:
 
 
 def _is_tool_shaped(message: Message) -> bool:
-    """A message whose structure a provider's plain-message converter cannot preserve.
-
-    OpenAI/Anthropic/Google all ignore `Message.tool_calls` and flatten a
-    `role="tool"` message to ordinary text/user content when building a
-    request from `messages` directly -- see `_at_request_boundary`.
-    """
+    """Return whether a row belongs to a structured assistant/tool exchange."""
 
     return bool(message.tool_calls) or message.role == "tool"
+
+
+def _has_valid_replacement_tool_order(messages: Sequence[Message]) -> bool:
+    """Require each native tool result in a fresh replacement to be paired.
+
+    A replacement may retain the active exchange that compaction cannot
+    safely summarize. It must still be self-contained: accepting an orphaned
+    tool row would make adapter-specific error handling decide whether raw
+    tool output is trusted context.
+    """
+
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == "tool":
+            return False
+        if message.role != "assistant" or not message.tool_calls:
+            index += 1
+            continue
+
+        expected_names = {tool_call.call_id: tool_call.name for tool_call in message.tool_calls}
+        if len(expected_names) != len(message.tool_calls):
+            return False
+        index += 1
+        while expected_names:
+            if index >= len(messages):
+                return False
+            tool_result = messages[index]
+            if tool_result.role != "tool" or tool_result.tool_call_id is None:
+                return False
+            expected_name = expected_names.pop(tool_result.tool_call_id, None)
+            if expected_name is None or tool_result.tool_name != expected_name:
+                return False
+            index += 1
+    return True
 
 
 def _fold_clean_continuation(
@@ -163,7 +196,7 @@ def _fold_clean_continuation(
 
     folded = (*messages, *state.continuation_messages)
     state.continuation_messages.clear()
-    state.reset_continuation()
+    state.clear_native_continuation()
     return folded
 
 
@@ -175,68 +208,21 @@ async def _at_request_boundary(
     had_tool_calls: bool,
     stop_by_default: bool,
 ) -> tuple[Sequence[Message], bool]:
-    """Apply the configured `RequestBoundaryHook`'s decision, if any.
+    """Apply a typed transition between a completed turn and the next request.
 
-    Returns the (possibly replaced/extended) base message history and whether
-    the loop should stop at this boundary. A `None` hook is a no-op: the loop
-    keeps its current messages and does whatever it would have done at this
-    boundary before hooks existed (`stop_by_default`), matching pre-hook
-    behavior exactly -- a completed turn with no tool calls always ended the
-    run; a completed tool round always continued into the next provider
-    sample.
-
-    The tool-round boundary itself (`had_tool_calls=True`) is unaffected by
-    any of this: `state.pending_tool_results` is this round's own results,
-    non-empty, and every provider's existing `tool_results`-gated replay load
-    already carries prior tool history forward correctly there -- exactly as
-    it did before this hook existed. Continuing with an empty decision at
-    that boundary is always safe.
-
-    A *no-tool-calls* boundary is different. A plain continuation there --
-    no hook, or a hook that returns an empty decision -- is only supported
-    while this run has had no tool round yet: with no tool round behind it,
-    every provider natively continues from `state.previous_response_id`
-    (clearing `state.pending_tool_results`, below, is enough to stop
-    resending an earlier round's already-consumed results). But once a tool
-    round *has* happened earlier in the run, there is no provider-native way
-    to continue past a no-tool-calls boundary at all, not even a plain
-    "no-op" continuation: the `previous_response_id`-anchored replay tail
-    that would carry the tool exchange forward is loaded only when
-    `tool_results` is non-empty (confirmed for `_create_stream` in
-    anthropic.py/google.py/openai_compatible.py), and this boundary always
-    sends an empty `tool_results` -- so the next request would silently
-    sample from only the original base `messages`, missing the tool round
-    and the turn that followed it entirely. Rebuilding from `messages`
-    instead is equally unsafe: none of the providers preserve
-    `Message.tool_calls`/a `role="tool"` message's structure when replayed
-    through their plain-message converter (confirmed for
-    `_messages_to_response_input`/`_messages_to_anthropic`/
-    `_messages_to_google`), so folding `state.continuation_messages` in
-    would flatten a tool round's assistant/tool rows into a blank assistant
-    turn and an ordinary user message containing raw tool output. So once a
-    no-tool-calls boundary has tool history behind it, a hook may only
-    `stop`; every other decision is rejected.
-
-    Independent of any of that: a hook's own `messages`/`extra_messages`
-    must never themselves contain a tool-shaped message (an assistant
-    message with `tool_calls`, or a `role="tool"` result) even at a
-    boundary with no loop-generated tool history at all -- the same
-    plain-message-converter flattening applies regardless of where the
-    tool-shaped content came from.
+    A replacement starts a fresh provider request and atomically discards all
+    old loop continuation state. User ``extra_messages`` instead append once
+    to a capable provider's active continuation. When a clean response has no
+    usable cursor, the loop can safely fold its portable text history into a
+    fresh request; it never flattens structured tool history to do so.
     """
 
     has_tool_history = had_tool_calls or any(
         _is_tool_shaped(message) for message in state.continuation_messages
     )
-    blocked = not had_tool_calls and has_tool_history
-    if not had_tool_calls:
-        state.consume_pending_tool_results()
+    supports_continuation_messages = _provider_supports_continuation_messages(config.provider)
 
     if config.request_boundary_hook is None:
-        if blocked:
-            return messages, True
-        if not had_tool_calls:
-            messages = _fold_clean_continuation(state, messages)
         return messages, stop_by_default
 
     snapshot = RequestBoundarySnapshot(
@@ -244,11 +230,7 @@ async def _at_request_boundary(
         tool_iterations=state.tool_iterations,
         had_tool_calls=had_tool_calls,
         # `Message`/`ToolCallSnapshot` are frozen, but a `ToolCallSnapshot`'s
-        # `arguments` is a plain mutable dict -- deep-copy so a hook mutating
-        # what it was told is a read-only snapshot cannot corrupt the loop's
-        # live `state.continuation_messages`. Mirrors the same deep-copy
-        # already done before tool-call snapshots cross the MessageCompleted
-        # event boundary above.
+        # arguments contain a mutable dict. Do not expose the loop's live state.
         continuation_messages=tuple(
             message.model_copy(deep=True) for message in state.continuation_messages
         ),
@@ -256,42 +238,85 @@ async def _at_request_boundary(
     decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
         snapshot=snapshot
     )
+    # No provider request follows a stop, so its unused content must not make
+    # a completed turn fail or mutate its logical continuation.
     if decision.stop:
         return messages, True
-    if blocked:
+
+    extra_messages = tuple(decision.extra_messages)
+    if any(message.role != "user" or _is_tool_shaped(message) for message in extra_messages):
         raise RequestBoundaryUnsupportedError(
-            "RequestBoundaryHook cannot continue past a no-tool-calls boundary "
-            "once this run has had a tool round -- no provider-native mechanism "
-            "carries the tool round forward without either resending stale "
-            "tool_results or replaying continuation_messages through a "
-            "plain-message converter that would corrupt the structured tool "
-            "history. A hook may only return stop=True at this boundary."
+            "RequestBoundaryDecision.extra_messages must contain only plain user messages"
         )
-    if had_tool_calls and (decision.messages is not None or decision.extra_messages):
-        raise RequestBoundaryUnsupportedError(
-            "RequestBoundaryDecision.messages/extra_messages are not supported "
-            "immediately after a tool round -- rebuilding that continuation "
-            "would flatten structured tool calls/results into plain text for "
-            "at least one provider. A hook may only return stop=True/False at "
-            "this boundary."
-        )
-    if any(_is_tool_shaped(message) for message in (decision.messages or ())) or any(
-        _is_tool_shaped(message) for message in decision.extra_messages
-    ):
-        raise RequestBoundaryUnsupportedError(
-            "RequestBoundaryDecision.messages/extra_messages must not contain "
-            "tool-shaped messages (an assistant message with tool_calls, or a "
-            'role="tool" message) -- every provider\'s plain-message converter '
-            "flattens them to ordinary text instead of the structured pairs a "
-            "provider expects, corrupting history rather than continuing it."
-        )
-    if not had_tool_calls:
-        messages = _fold_clean_continuation(state, messages)
+
     if decision.messages is not None:
-        messages = decision.messages
-    if decision.extra_messages:
-        messages = (*messages, *decision.extra_messages)
-    return messages, decision.stop
+        if not _has_valid_replacement_tool_order(decision.messages):
+            raise RequestBoundaryUnsupportedError(
+                "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
+            )
+        if any(_is_tool_shaped(message) for message in decision.messages) and not (
+            _provider_supports_structured_tool_replacement(config.provider, effort=config.effort)
+        ):
+            raise RequestBoundaryUnsupportedError(
+                "The provider cannot fresh-replay a structured tool exchange for this effort"
+            )
+        # A replacement is caller-owned, self-contained context. It may retain
+        # the active structured tool pair; each adapter is responsible for
+        # encoding that fresh context natively. Extras become part of the fresh
+        # base, so this transition never depends on an optional capability.
+        state.replace_context()
+        return (*decision.messages, *extra_messages), False
+
+    if not had_tool_calls:
+        # The preceding provider request already consumed these outputs. Clear
+        # them only when another request will actually be made.
+        state.consume_pending_tool_results()
+
+    if extra_messages:
+        if supports_continuation_messages and state.previous_response_id is not None:
+            state.queue_extra_messages(extra_messages)
+            return messages, False
+        if has_tool_history:
+            raise RequestBoundaryUnsupportedError(
+                "Cannot append messages without a usable provider continuation after a tool round"
+            )
+        # A cursor-less clean response has portable assistant text only. Fold
+        # that history and make this a fresh request rather than inventing a
+        # provider response ID.
+        return (*_fold_clean_continuation(state, messages), *extra_messages), False
+
+    # The current tool results themselves make the immediate post-tool
+    # request a valid continuation for every legacy adapter. A cursor becomes
+    # necessary only after a later clean response has consumed those results.
+    if had_tool_calls:
+        return messages, False
+    if supports_continuation_messages and state.previous_response_id is not None:
+        return messages, False
+    if has_tool_history:
+        raise RequestBoundaryUnsupportedError(
+            "Cannot continue after a tool round without a usable provider continuation"
+        )
+    return _fold_clean_continuation(state, messages), False
+
+
+def _provider_supports_continuation_messages(provider: Provider) -> bool:
+    return getattr(provider, "supports_continuation_messages", False) is True
+
+
+def _provider_supports_prompt_cache_key(provider: Provider) -> bool:
+    return getattr(provider, "supports_prompt_cache_key", False) is True
+
+
+def _provider_supports_structured_tool_replacement(
+    provider: Provider, *, effort: str | None
+) -> bool:
+    """Negotiate an optional guard for opaque provider-native replay state."""
+
+    capability = getattr(provider, "supports_structured_tool_replacement", None)
+    if not callable(capability):
+        return True
+    replacement_provider = cast(StructuredToolReplacementProvider, provider)
+    return replacement_provider.supports_structured_tool_replacement(effort=effort)
 
 
 def _provider_stream(
@@ -299,15 +324,61 @@ def _provider_stream(
     *,
     messages: Sequence[Message],
     tool_results: Sequence[ToolCallResult],
+    extra_messages: Sequence[Message],
     previous_response_id: str | None,
 ) -> AsyncIterator[provider_events.ProviderEvent]:
     """Call one provider without imposing optional keywords on legacy adapters."""
 
     provider = config.provider
-    if (
-        config.prompt_cache_key is not None
-        and getattr(provider, "supports_prompt_cache_key", False) is True
-    ):
+    supports_continuation_messages = _provider_supports_continuation_messages(provider)
+    supports_prompt_cache_key = _provider_supports_prompt_cache_key(provider)
+    use_prompt_cache_key = config.prompt_cache_key is not None and supports_prompt_cache_key
+
+    if extra_messages and supports_continuation_messages and use_prompt_cache_key:
+        combined_provider = cast(PromptCacheContinuationMessageProvider, provider)
+        if config.effort is not None:
+            return combined_provider.stream(
+                messages,
+                model=config.model,
+                tools=config.tools,
+                tool_results=tool_results,
+                extra_messages=extra_messages,
+                previous_response_id=previous_response_id,
+                effort=config.effort,
+                prompt_cache_key=config.prompt_cache_key,
+            )
+        return combined_provider.stream(
+            messages,
+            model=config.model,
+            tools=config.tools,
+            tool_results=tool_results,
+            extra_messages=extra_messages,
+            previous_response_id=previous_response_id,
+            prompt_cache_key=config.prompt_cache_key,
+        )
+
+    if extra_messages and supports_continuation_messages:
+        continuation_provider = cast(ContinuationMessageProvider, provider)
+        if config.effort is not None:
+            return continuation_provider.stream(
+                messages,
+                model=config.model,
+                tools=config.tools,
+                tool_results=tool_results,
+                extra_messages=extra_messages,
+                previous_response_id=previous_response_id,
+                effort=config.effort,
+            )
+        return continuation_provider.stream(
+            messages,
+            model=config.model,
+            tools=config.tools,
+            tool_results=tool_results,
+            extra_messages=extra_messages,
+            previous_response_id=previous_response_id,
+        )
+
+    if use_prompt_cache_key:
         cache_provider = cast(PromptCacheKeyProvider, provider)
         if config.effort is not None:
             return cache_provider.stream(
@@ -327,6 +398,7 @@ def _provider_stream(
             previous_response_id=previous_response_id,
             prompt_cache_key=config.prompt_cache_key,
         )
+
     if config.effort is not None:
         return provider.stream(
             messages,
@@ -513,6 +585,7 @@ class _AgentLoopState:
     turn: int
     tool_iterations: int
     pending_tool_results: tuple[ToolCallResult, ...] = ()
+    pending_extra_messages: tuple[Message, ...] = ()
     previous_response_id: str | None = None
     continuation_messages: list[Message] = field(default_factory=list)
 
@@ -521,7 +594,13 @@ class _AgentLoopState:
         return self.turn
 
     def record_response(self, completed: _CompletedProviderResponse, message: Message) -> None:
-        self.previous_response_id = completed.response_id
+        # Public response IDs remain upstream-observed values. Stateless
+        # adapters may safely retain their existing local replay key when a
+        # later clean response has no new upstream ID, so do not erase a
+        # usable cursor in that case.
+        if completed.response_id is not None:
+            self.previous_response_id = completed.response_id
+        self.pending_extra_messages = ()
         self.continuation_messages.append(message)
 
     def begin_tool_round(self, maximum: int | None) -> None:
@@ -545,22 +624,25 @@ class _AgentLoopState:
 
         self.pending_tool_results = ()
 
-    def reset_continuation(self) -> None:
-        """Discard provider-native continuation state for the next request.
+    def queue_extra_messages(self, messages: Sequence[Message]) -> None:
+        """Queue user messages for exactly the next continued request."""
 
-        Every provider's `previous_response_id`-anchored continuation only
-        ever appends new content on top of what it already remembers (server-
-        side for OpenAI, in a client-tracked replay tail for Anthropic/Google)
-        -- none of them can be told to splice in caller-supplied history
-        mid-chain. A boundary decision that replaces or injects messages must
-        therefore force the next request back to a fresh, self-contained
-        "turn 1": clear both `previous_response_id` and any pending tool
-        results so the next request is built from `messages` alone, which
-        every provider honors unconditionally.
-        """
+        queued = tuple(messages)
+        self.continuation_messages.extend(queued)
+        self.pending_extra_messages = queued
+
+    def clear_native_continuation(self) -> None:
+        """Discard the provider cursor and data not yet consumed by a request."""
 
         self.previous_response_id = None
         self.pending_tool_results = ()
+        self.pending_extra_messages = ()
+
+    def replace_context(self) -> None:
+        """Atomically discard all state made obsolete by a base replacement."""
+
+        self.clear_native_continuation()
+        self.continuation_messages.clear()
 
 
 async def _provider_events(
@@ -771,6 +853,7 @@ async def run_agent_loop(
                     config,
                     messages=messages,
                     tool_results=state.pending_tool_results,
+                    extra_messages=state.pending_extra_messages,
                     previous_response_id=state.previous_response_id,
                 )
             except Exception as exc:
@@ -908,6 +991,7 @@ async def run_agent_loop(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=dict(tool_call.arguments),
+                    provider_call_id=tool_call.provider_call_id,
                     parse_error=tool_call.parse_error,
                 )
                 for tool_call in tool_calls

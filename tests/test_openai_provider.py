@@ -30,6 +30,7 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.events import ToolCallSnapshot
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -634,6 +635,7 @@ def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
             model="gpt-test",
             tools=[tool],
             tool_results=[tool_result],
+            extra_messages=[Message(role="user", content="steered")],
             previous_response_id="response-id",
         )
         assert [event async for event in stream] == []
@@ -648,7 +650,8 @@ def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
                     "type": "function_call_output",
                     "call_id": "call-id",
                     "output": "found it",
-                }
+                },
+                {"role": "user", "content": "steered"},
             ],
             "stream": True,
             "tools": [
@@ -662,6 +665,43 @@ def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
             ],
             "previous_response_id": "response-id",
         }
+    ]
+
+
+def test_openai_provider_serializes_active_tool_exchange_in_fresh_context() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+    messages = [
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(messages, model="gpt-test")  # noqa: SLF001
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls[0]["input"] == [
+        {"role": "user", "content": "search"},
+        {"role": "assistant", "content": "checking"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"query":"wisp"}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "found it"},
     ]
 
 
@@ -910,6 +950,33 @@ def test_openai_provider_normalizes_post_start_sdk_failure() -> None:
         message="OpenAI stream error: Connection error.",
         partial_content="partial",
     )
+
+
+def test_openai_provider_rejects_idless_server_side_continuation() -> None:
+    """An old Responses cursor cannot stand in for the current response ID."""
+
+    response_without_id = _response(response_id="response-id").model_copy(update={"id": None})
+    completion_without_id = cast(
+        ResponseCompletedEvent,
+        _completed_event().model_copy(update={"response": response_without_id}),
+    )
+    provider = StubOpenAIProvider([completion_without_id])
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hello")],
+                previous_response_id="previous-response",
+            )
+        ]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseFailed(
+            message="OpenAI continuation response did not include a response id"
+        ),
+    ]
 
 
 def test_openai_provider_retries_request_opening_failure_before_start() -> None:

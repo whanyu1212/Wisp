@@ -14,9 +14,11 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message as WispMessage
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.events import ToolCallSnapshot
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
+    ProviderProtocolError,
     ToolCall,
     ToolCallResult,
     ToolSpec,
@@ -785,6 +787,136 @@ def test_google_provider_stream_forwards_effort_to_create_stream() -> None:
     assert provider.seen_effort == "HIGH"
 
 
+def test_google_provider_rejects_structured_tool_replacement() -> None:
+    provider = GoogleProvider(api_key="test-key")
+
+    assert not provider.supports_structured_tool_replacement(effort=None)
+    assert not provider.supports_structured_tool_replacement(effort="HIGH")
+
+
+def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> None:
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [
+        WispMessage(role="user", content="search"),
+        WispMessage(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(
+                    call_id="call-1",
+                    name="lookup",
+                    arguments={"query": "wisp"},
+                    provider_call_id="call-1",
+                ),
+            ),
+        ),
+        WispMessage(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            messages,
+            model="gemini-test",
+            extra_messages=[WispMessage(role="user", content="steered")],
+        )
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    contents = stub_models.calls[0]["contents"]
+    assert contents[0] == genai_types.Content(role="user", parts=[genai_types.Part(text="search")])
+    assert contents[1].role == "model"
+    assert contents[1].parts[0].text == "checking"
+    assert contents[1].parts[1].function_call == genai_types.FunctionCall(
+        id="call-1", name="lookup", args={"query": "wisp"}
+    )
+    assert contents[2].parts[0].function_response == genai_types.FunctionResponse(
+        id="call-1", name="lookup", response={"output": "found it"}
+    )
+    assert contents[3] == genai_types.Content(role="user", parts=[genai_types.Part(text="steered")])
+
+
+def test_google_provider_omits_synthetic_ids_in_fresh_tool_exchange() -> None:
+    """Fresh replacement context must not invent Gemini function-call IDs."""
+
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [
+        WispMessage(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCallSnapshot(call_id="call-lookup-0", name="lookup", arguments={}),),
+        ),
+        WispMessage(
+            role="tool",
+            content="found it",
+            tool_call_id="call-lookup-0",
+            tool_name="lookup",
+        ),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(messages, model="gemini-test")  # noqa: SLF001
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    model_call = stub_models.calls[0]["contents"][0].parts[0].function_call
+    tool_result = stub_models.calls[0]["contents"][1].parts[0].function_response
+    assert model_call is not None
+    assert model_call.id is None
+    assert tool_result is not None
+    assert tool_result.id is None
+    assert tool_result.name == "lookup"
+
+
+def test_google_provider_replays_clean_response_before_appended_user_message() -> None:
+    stub_models = StubModels(
+        responses=[
+            [
+                _text_chunk(
+                    "first",
+                    response_id="response-id",
+                    finish_reason=genai_types.FinishReason.STOP,
+                )
+            ],
+            [],
+        ]
+    )
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        first_events = [event async for event in provider.stream(messages, model="gemini-test")]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        async for _event in provider.stream(
+            messages,
+            model="gemini-test",
+            previous_response_id=completed.response_id,
+            extra_messages=[WispMessage(role="user", content="steered")],
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert stub_models.calls[1]["contents"] == [
+        genai_types.Content(role="user", parts=[genai_types.Part(text="hello")]),
+        genai_types.Content(role="model", parts=[genai_types.Part(text="first")]),
+        genai_types.Content(role="user", parts=[genai_types.Part(text="steered")]),
+    ]
+
+
 def test_google_provider_replays_model_turn_before_tool_results() -> None:
     # Regression test: Gemini requires the model-role turn that produced a
     # tool call (including its thought_signature parts) to be resent ahead
@@ -891,6 +1023,30 @@ def test_google_provider_omits_function_response_id_when_gemini_never_issued_one
     function_response_part = replay_contents[2].parts[0]
     assert function_response_part.function_response.id is None
     assert function_response_part.function_response.name == "lookup"
+
+
+def test_google_provider_rejects_missing_continuation_state() -> None:
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+
+    async def run() -> None:
+        stream = provider.stream(
+            [WispMessage(role="user", content="hello")],
+            model="gemini-test",
+            previous_response_id="missing-response",
+            extra_messages=[WispMessage(role="user", content="steered")],
+        )
+        await anext(stream)
+
+    with pytest.raises(
+        ProviderProtocolError,
+        match="Google continuation state is unavailable for missing-response",
+    ):
+        anyio.run(run)
+    assert stub_models.calls == []
 
 
 def test_google_provider_tool_results_without_a_replay_omit_the_model_turn() -> None:

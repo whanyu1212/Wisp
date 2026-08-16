@@ -18,14 +18,11 @@ class ToolExecutionProtocolError(RuntimeError):
 
 
 class RequestBoundaryUnsupportedError(RuntimeError):
-    """Raised when a `RequestBoundaryHook` returns a decision the loop cannot apply.
+    """Raised when a boundary decision has no safe provider representation.
 
-    Currently: `messages`/`extra_messages` immediately after a tool round;
-    any decision other than `stop=True` (including a plain, unmodified
-    continuation) at a later no-tool-calls boundary once the run has had a
-    tool round earlier; or `messages`/`extra_messages` containing a
-    tool-shaped message (an assistant message with `tool_calls`, or a
-    `role="tool"` message) at any boundary. See `RequestBoundaryDecision`.
+    This is used when native structured tool history needs a continuation
+    cursor that is unavailable, or when appended content is not a plain user
+    message. A complete `messages` replacement remains a fresh request.
     """
 
 
@@ -69,48 +66,23 @@ class RequestBoundarySnapshot:
 class RequestBoundaryDecision:
     """What the loop should do before its next provider sample, if anything.
 
-    `messages`, when not `None`, replaces the loop's base message history
-    (e.g. after compaction) -- everything accumulated so far is discarded in
-    favor of this new base. `extra_messages` are appended after the base/
-    replacement history and before the next provider request (e.g. steering
-    or follow-up injection) -- everything accumulated so far is kept.
-    `stop`, when `True`, ends the run at this boundary through the loop's
-    normal clean-completion path.
+    `messages`, when not `None`, is a complete replacement context (for
+    example, after compaction). The loop discards every prior logical and
+    provider-native continuation value, then sends this replacement as a
+    fresh request. It may retain a valid active assistant tool call and its
+    matching tool result; provider adapters serialize such fresh context in
+    their native wire format.
 
-    A non-empty `messages`/`extra_messages` resets the provider's native
-    continuation state (`previous_response_id`, pending tool results) for the
-    next request: every provider only ever appends new content on top of
-    what it already remembers, so there is no cross-provider-safe way to
-    splice caller-supplied content into an active continuation chain -- the
-    next request is rebuilt as a fresh, self-contained turn instead. A hook
-    that wants a plain, unmodified continuation should return an empty
-    decision (`RequestBoundaryDecision()`) rather than repeat what the loop
-    already has.
+    `extra_messages` are one or more plain user messages for steering or a
+    follow-up. With an active continuation-capable provider, they are sent
+    once after current tool results without resetting that continuation. If a
+    replacement is also supplied, they are appended to its fresh base
+    instead. A cursor-less clean response may be folded into fresh portable
+    history; a cursor-less structured tool history is rejected rather than
+    flattened.
 
-    `messages`/`extra_messages` are only supported while this run has never
-    had a tool round. Immediately after one, rebuilding the continuation
-    would mean replaying accumulated assistant tool-call/tool-result
-    messages through each provider's plain-message converter, which
-    flattens them to ordinary text instead of the structured pairs a
-    provider expects -- corrupting history rather than fixing it. At a
-    *later* no-tool-calls boundary that followed a tool round earlier in the
-    run, not even a plain, unmodified continuation (an empty decision) is
-    possible: the provider-native replay that would carry the tool round
-    forward is only loaded when this boundary's `tool_results` is non-empty,
-    which it never is here, so continuing at all -- injected content or
-    not -- would silently drop the tool round from what the provider sees.
-    `run_agent_loop` raises `RequestBoundaryUnsupportedError` for any
-    decision other than `stop=True` once a no-tool-calls boundary has tool
-    history behind it, and for `messages`/`extra_messages` immediately after
-    a tool round; `stop` is always honored regardless of what else a
-    decision carries.
-
-    Independent of any of that, `messages`/`extra_messages` must never
-    themselves contain a tool-shaped message (an assistant message with
-    `tool_calls`, or a `role="tool"` message) at *any* boundary, even one
-    with no loop-generated tool history at all -- the same plain-message-
-    converter flattening applies regardless of where the tool-shaped
-    content came from.
+    `stop=True` ends the run cleanly and takes precedence over unused
+    `messages` or `extra_messages`.
     """
 
     messages: Sequence[Message] | None = None

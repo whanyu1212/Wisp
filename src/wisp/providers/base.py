@@ -125,3 +125,65 @@ class PromptCacheKeyProvider(Protocol):
     ) -> AsyncIterator[ProviderEvent]:
         """Yield one response lifecycle with an optional stable cache-routing key."""
         ...
+
+
+class ContinuationMessageProvider(Protocol):
+    """Opt-in capability to append user messages to an active continuation.
+
+    The loop supplies ``extra_messages`` only when it is non-empty and this
+    capability is declared. Implementations append those messages after the
+    request's current tool results, preserve provider-native replay, and can
+    continue clean responses when their cursor remains usable.
+    """
+
+    supports_continuation_messages: Literal[True]
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        """Yield one response lifecycle with new user messages appended once."""
+        ...
+
+
+class StructuredToolReplacementProvider(Protocol):
+    """Optional capability to fresh-replay a structured tool exchange.
+
+    Providers that retain opaque protocol blocks beside tool calls may reject
+    replacements for configurations where those blocks cannot be reconstructed
+    from ``Message`` snapshots. The loop treats providers without this
+    capability as preserving its existing replacement behavior.
+    """
+
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        """Return whether the current provider configuration can replay the exchange."""
+        ...
+
+
+class PromptCacheContinuationMessageProvider(Protocol):
+    """Combined optional capability for adapters supporting both features."""
+
+    supports_prompt_cache_key: Literal[True]
+    supports_continuation_messages: Literal[True]
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        """Yield one response lifecycle with both optional features applied."""
+        ...

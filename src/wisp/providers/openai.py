@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
-from json import JSONDecodeError, loads
+from json import JSONDecodeError, dumps, loads
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import anyio
@@ -27,7 +27,7 @@ from openai.types.responses import (
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
 )
-from openai.types.responses.response_input_param import ResponseInputParam
+from openai.types.responses.response_input_param import ResponseInputItemParam, ResponseInputParam
 
 from wisp.agent.messages import Message, Role
 from wisp.providers.auth import ProviderAuthResolver
@@ -65,6 +65,7 @@ class OpenAIProvider:
 
     name = "openai"
     supports_prompt_cache_key: Literal[True] = True
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -90,6 +91,7 @@ class OpenAIProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
@@ -105,7 +107,29 @@ class OpenAIProvider:
         stream: AsyncIterator[ResponseStreamEvent] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                if prompt_cache_key is not None:
+                if extra_messages:
+                    if prompt_cache_key is not None:
+                        stream = await self._create_stream(
+                            messages,
+                            model=selected_model,
+                            tools=tools,
+                            tool_results=tool_results,
+                            extra_messages=extra_messages,
+                            previous_response_id=previous_response_id,
+                            effort=effort,
+                            prompt_cache_key=prompt_cache_key,
+                        )
+                    else:
+                        stream = await self._create_stream(
+                            messages,
+                            model=selected_model,
+                            tools=tools,
+                            tool_results=tool_results,
+                            extra_messages=extra_messages,
+                            previous_response_id=previous_response_id,
+                            effort=effort,
+                        )
+                elif prompt_cache_key is not None:
                     stream = await self._create_stream(
                         messages,
                         model=selected_model,
@@ -153,7 +177,10 @@ class OpenAIProvider:
                 await anyio.sleep(delay)
         if stream is None:
             raise AssertionError("OpenAI retry loop completed without a stream or error")
-        response_id: str | None = previous_response_id
+        # A completion ID identifies this upstream response only. Do not
+        # expose the prior continuation cursor when an unusual stream omits a
+        # current response ID.
+        response_id: str | None = None
         pending_tool_calls: dict[str, ResponseFunctionToolCall] = {}
         completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
@@ -254,6 +281,16 @@ class OpenAIProvider:
         if failure is not None:
             yield failure
             return
+        if previous_response_id is not None and response_id is None:
+            # Unlike the stateless adapters, the Responses API keeps this
+            # chain server-side. Reusing an old cursor would omit the clean
+            # response that just completed, so fail rather than corrupt a
+            # later continuation.
+            yield ProviderResponseFailed(
+                message="OpenAI continuation response did not include a response id",
+                partial_content="".join(chunks),
+            )
+            return
 
         for content_index, tool_call in enumerate(tool_calls):
             yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
@@ -273,6 +310,7 @@ class OpenAIProvider:
         model: str,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
@@ -284,13 +322,19 @@ class OpenAIProvider:
             model=model,
             prompt_cache_key=prompt_cache_key,
         )
+        # The Responses API retains the prior chain server-side. A fresh
+        # request receives the complete supplied base; a continued request
+        # receives only this round's tool outputs and appended user messages.
         response_input = (
-            _tool_results_to_response_input(tool_results)
-            if tool_results
-            else _messages_to_response_input(
-                messages,
+            _messages_to_response_input(
+                (*messages, *extra_messages),
                 explicit_prompt_cache=explicit_prompt_cache,
             )
+            if previous_response_id is None
+            else [
+                *_tool_results_to_response_input(tool_results),
+                *_messages_to_response_input(extra_messages),
+            ]
         )
 
         # Built as a single kwargs dict rather than a create() call per
@@ -413,6 +457,34 @@ def _messages_to_response_input(
     response_input: ResponseInputParam = []
     boundary_written = False
     for message in messages:
+        if message.role == "tool" and message.tool_call_id:
+            response_input.append(
+                cast(
+                    ResponseInputItemParam,
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.tool_call_id,
+                        "output": message.content,
+                    },
+                )
+            )
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            if message.content:
+                response_input.append({"role": "assistant", "content": message.content})
+            for tool_call in message.tool_calls:
+                response_input.append(
+                    cast(
+                        ResponseInputItemParam,
+                        {
+                            "type": "function_call",
+                            "call_id": tool_call.call_id,
+                            "name": tool_call.name,
+                            "arguments": dumps(dict(tool_call.arguments), separators=(",", ":")),
+                        },
+                    )
+                )
+            continue
         if explicit_prompt_cache and message.prompt_cache_boundary and not boundary_written:
             message_param = cast(
                 EasyInputMessageParam,

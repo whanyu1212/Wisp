@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from json import dumps
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 import httpx
@@ -19,6 +19,7 @@ from wisp.agent.messages import Message
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
@@ -79,6 +80,7 @@ class GoogleProvider:
     """Provider backed by Google's Gemini Generative Language API."""
 
     name = "google"
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -107,6 +109,18 @@ class GoogleProvider:
         # and evicted alongside it.
         self._call_info: OrderedDict[str, _CallInfo] = OrderedDict()
 
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        """Reject fresh tool replay because Gemini thought signatures are opaque.
+
+        Gemini 3 requires a function call's thought signature to accompany its
+        matching result. ``Message`` snapshots intentionally retain portable
+        text and calls, not the provider-native ``Part`` payload, so they
+        cannot safely rebuild an active tool exchange as fresh context.
+        """
+
+        del effort
+        return False
+
     async def stream(
         self,
         messages: Sequence[Message],
@@ -114,18 +128,20 @@ class GoogleProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Gemini response lifecycle.
 
         Gemini's API is stateless, so a follow-up call carrying
-        ``tool_results`` must resend every prior round's model-turn (the
-        turn that produced the tool call) and its functionResponse
-        immediately before the newest ones. ``AgentHarness``'s ``messages``
-        never grows across tool rounds, so this provider reconstructs the
-        accumulated tail from its own replay state keyed by
-        ``previous_response_id``.
+        ``previous_response_id`` must resend every prior round's
+        model-turn (the turn that produced the tool call) and its
+        functionResponse immediately before the newest ones, plus any
+        ``tool_results``/``extra_messages`` this call adds.
+        ``AgentHarness``'s ``messages`` never grows across turns, so this
+        provider reconstructs the accumulated tail from its own replay
+        state keyed by ``previous_response_id``.
 
         ``effort`` maps to ``ThinkingConfig.thinking_level`` (Gemini's
         ``"MINIMAL"``/``"LOW"``/``"MEDIUM"``/``"HIGH"`` tiers where the
@@ -136,14 +152,25 @@ class GoogleProvider:
         stream: AsyncIterator[genai_types.GenerateContentResponse] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                stream = await self._create_stream(
-                    messages,
-                    model=selected_model,
-                    tools=tools,
-                    tool_results=tool_results,
-                    previous_response_id=previous_response_id,
-                    effort=effort,
-                )
+                if extra_messages:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        extra_messages=extra_messages,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
+                else:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
                 break
             except (genai_errors.APIError, httpx.TimeoutException, httpx.ConnectError) as exc:
                 decision = _google_retry_decision(exc)
@@ -261,33 +288,35 @@ class GoogleProvider:
                 tool_call_provider_ids.append(part.function_call.id)
                 yield ProviderToolCallCompleted(tool_call=tool_call, content_index=index)
 
-        if tool_calls:
-            if response_id is None:
-                failure = ProviderResponseFailed(
-                    message="Google tool-call response did not include a response id",
-                    partial_content="".join(chunks),
-                    response_id=None,
-                )
-                self._replays.discard(previous_response_id)
-                yield failure
-                return
-            previous_tail = self._get_replay(previous_response_id)
-            new_turn = genai_types.Content(role="model", parts=parts)
-            replay_tail = (
-                *previous_tail,
-                *((self._tool_results_to_content(tool_results),) if tool_results else ()),
-                new_turn,
+        if tool_calls and response_id is None:
+            failure = ProviderResponseFailed(
+                message="Google tool-call response did not include a response id",
+                partial_content="".join(chunks),
+                response_id=None,
             )
-            if previous_response_id is not None and previous_response_id != response_id:
+            self._replays.discard(previous_response_id)
+            yield failure
+            return
+        # Retain successful clean turns as well as tool rounds. If Gemini did
+        # not issue a new ID for an existing local replay, update that replay
+        # under its current key without changing the public response ID.
+        continuation_id = response_id or previous_response_id
+        if continuation_id is not None:
+            previous = self._require_replay(previous_response_id)
+            replay_tail = (
+                *previous,
+                *((self._tool_results_to_content(tool_results),) if tool_results else ()),
+                *_messages_to_google(extra_messages),
+                genai_types.Content(role="model", parts=parts),
+            )
+            if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
-            self._replays.remember(response_id, replay_tail)
-            for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
-                self._remember_call_info(
-                    tool_call.call_id,
-                    _CallInfo(name=tool_call.name, provider_id=_normalize_optional(provider_id)),
-                )
-        elif previous_response_id is not None:
-            self._replays.consume(previous_response_id)
+            self._replays.remember(continuation_id, replay_tail)
+        for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
+            self._remember_call_info(
+                tool_call.call_id,
+                _CallInfo(name=tool_call.name, provider_id=_normalize_optional(provider_id)),
+            )
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -304,15 +333,18 @@ class GoogleProvider:
         model: str,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         client = await self._client_or_create()
-        system_instruction = _system_from_messages(messages)
         contents = _messages_to_google(messages)
+        if previous_response_id is not None:
+            contents.extend(self._require_replay(previous_response_id))
         if tool_results:
-            contents.extend(self._get_replay(previous_response_id))
             contents.append(self._tool_results_to_content(tool_results))
+        contents.extend(_messages_to_google(extra_messages))
+        system_instruction = _system_from_messages(messages)
 
         # thinking_level only -- Gemini 2.5 models need thinking_budget (a
         # numeric token count) instead. This provider does not translate
@@ -375,13 +407,23 @@ class GoogleProvider:
         self._client_api_key = api_key
         return self._client
 
-    def _get_replay(self, previous_response_id: str | None) -> tuple[genai_types.Content, ...]:
+    def _require_replay(self, previous_response_id: str | None) -> tuple[genai_types.Content, ...]:
         if previous_response_id is None:
             return ()
         # A peek, not a pop: _create_stream can be re-invoked by the retry loop
         # in `stream()` before a response ever completes, so the replay must
         # survive a failed attempt to be available to the next one.
-        return self._replays.get(previous_response_id) or ()
+        continuation = self._replays.get(previous_response_id)
+        if continuation is None:
+            # Silently returning an empty continuation here would resend
+            # only the original base `messages`, dropping every tool call/
+            # result and injected message since -- fail loudly instead,
+            # matching OpenAICodexProvider's existing _get_continuation
+            # contract.
+            raise ProviderProtocolError(
+                f"Google continuation state is unavailable for {previous_response_id}"
+            )
+        return continuation
 
     def _remember_call_info(self, call_id: str, info: _CallInfo) -> None:
         self._call_info.pop(call_id, None)
@@ -445,6 +487,7 @@ def _tool_call_from_google(
         arguments=cast(JsonObject, arguments),
         raw_arguments=dumps(arguments),
         response_id=response_id,
+        provider_call_id=_normalize_optional(function_call.id),
     )
 
 
@@ -454,9 +497,51 @@ def _system_from_messages(messages: Sequence[Message]) -> str | None:
 
 
 def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content]:
+    """Encode fresh base context without flattening an active tool exchange."""
+
     contents: list[genai_types.Content] = []
+    # `ToolCallSnapshot.call_id` is Wisp's stable execution key. Gemini can
+    # omit the wire function-call ID, in which case that key is synthetic and
+    # must not be replayed as a Gemini-issued ID. Track the separate wire ID
+    # from each preceding assistant tool call for its matching result.
+    provider_call_ids: dict[str, str | None] = {}
     for message in messages:
         if message.role == "system":
+            continue
+        if message.role == "tool" and message.tool_call_id:
+            contents.append(
+                genai_types.Content(
+                    role="user",
+                    parts=[
+                        genai_types.Part(
+                            function_response=genai_types.FunctionResponse(
+                                id=provider_call_ids.get(message.tool_call_id),
+                                name=message.tool_name or message.tool_call_id,
+                                response={
+                                    "error" if message.is_error else "output": message.content
+                                },
+                            )
+                        )
+                    ],
+                )
+            )
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            parts: list[genai_types.Part] = []
+            if message.content:
+                parts.append(genai_types.Part(text=message.content))
+            for tool_call in message.tool_calls:
+                provider_call_ids[tool_call.call_id] = tool_call.provider_call_id
+                parts.append(
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(
+                            id=tool_call.provider_call_id,
+                            name=tool_call.name,
+                            args=dict(tool_call.arguments),
+                        )
+                    )
+                )
+            contents.append(genai_types.Content(role="model", parts=parts))
             continue
         role = "model" if message.role == "assistant" else "user"
         contents.append(

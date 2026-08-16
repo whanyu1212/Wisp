@@ -32,10 +32,12 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message as WispMessage
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.events import ToolCallSnapshot
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
+    ProviderProtocolError,
     ToolCall,
     ToolCallResult,
     ToolSpec,
@@ -58,6 +60,13 @@ _EXPECTED_USAGE = ProviderUsage(
     total_tokens=2,
     context_input_tokens=1,
 )
+
+
+def test_anthropic_provider_allows_structured_replacement_without_adaptive_thinking() -> None:
+    provider = AnthropicProvider(api_key="test-key")
+
+    assert provider.supports_structured_tool_replacement(effort=None)
+    assert not provider.supports_structured_tool_replacement(effort="high")
 
 
 class StubAnthropicProvider(AnthropicProvider):
@@ -885,6 +894,102 @@ def test_anthropic_provider_replays_tool_use_turn_before_tool_results() -> None:
     ]
 
 
+def test_anthropic_provider_serializes_active_tool_exchange_in_fresh_context() -> None:
+    messages_resource = StubMessagesResource(responses=[[]])
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [
+        WispMessage(role="user", content="search"),
+        WispMessage(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        WispMessage(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            messages,
+            model="claude-test",
+            extra_messages=[WispMessage(role="user", content="steered")],
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert messages_resource.calls[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "search"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "checking"},
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "lookup",
+                    "input": {"query": "wisp"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "found it",
+                    "is_error": False,
+                }
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "steered"}]},
+    ]
+
+
+def test_anthropic_provider_replays_clean_response_before_appended_user_message() -> None:
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                _message_start("response-id"),
+                _text_block_start(index=0),
+                _text_delta("first", index=0),
+                _message_delta("end_turn"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        first_events = [event async for event in provider.stream(messages, model="claude-test")]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        async for _event in provider.stream(
+            messages,
+            model="claude-test",
+            previous_response_id=completed.response_id,
+            extra_messages=[WispMessage(role="user", content="steered")],
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert messages_resource.calls[1]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "first"}]},
+        {"role": "user", "content": [{"type": "text", "text": "steered"}]},
+    ]
+
+
 def test_anthropic_provider_replay_includes_text_alongside_tool_use() -> None:
     messages_resource = StubMessagesResource(
         responses=[
@@ -1089,12 +1194,9 @@ def test_anthropic_provider_accumulates_replay_across_multiple_tool_rounds() -> 
     ]
 
 
-def test_anthropic_provider_tool_results_without_a_replay_omit_the_assistant_turn() -> None:
-    # No prior tool-use turn was ever streamed for this previous_response_id
-    # (e.g. it predates this provider instance, or belonged to a different
-    # provider) -- fall through gracefully rather than raising or fabricating
-    # a turn, matching the "advisory, never blocking" spirit of the rest of
-    # the registry-adjacent code in this codebase.
+def test_anthropic_provider_rejects_tool_results_without_replay() -> None:
+    """Never send an orphaned tool result when its structured turn is unavailable."""
+
     messages_resource = StubMessagesResource(responses=[[]])
     provider = AnthropicProvider(
         api_key="test-key",
@@ -1110,22 +1212,12 @@ def test_anthropic_provider_tool_results_without_a_replay_omit_the_assistant_tur
         ):
             pass
 
-    anyio.run(run)
-
-    assert messages_resource.calls[0]["messages"] == [
-        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call-id",
-                    "content": "ok",
-                    "is_error": False,
-                }
-            ],
-        },
-    ]
+    with pytest.raises(
+        ProviderProtocolError,
+        match="Anthropic continuation state is unavailable for unknown-response-id",
+    ):
+        anyio.run(run)
+    assert messages_resource.calls == []
 
 
 def test_anthropic_provider_reports_context_window_exceeded_as_failure() -> None:

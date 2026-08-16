@@ -238,6 +238,28 @@ def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
     assert "prompt_cache_key" not in provider.seen_body
 
 
+def test_openai_codex_provider_appends_user_messages_in_fresh_request(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [_completed_event("response-id")],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+
+    async def run() -> None:
+        async for _event in provider.stream(
+            [Message(role="user", content="hi")],
+            extra_messages=[Message(role="user", content="steered")],
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": "steered"},
+    ]
+
+
 def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
@@ -289,6 +311,7 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
                 [Message(role="user", content="hi")],
                 tools=[tool],
                 tool_results=[result],
+                extra_messages=[Message(role="user", content="steered")],
                 previous_response_id="response-id",
             )
         ] == [
@@ -312,6 +335,7 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
             "arguments": '{"query":"wisp"}',
         },
         {"type": "function_call_output", "call_id": "call-id", "output": "found"},
+        {"role": "user", "content": "steered"},
     ]
     assert "previous_response_id" not in provider.seen_body
     assert provider.seen_body["tools"] == [

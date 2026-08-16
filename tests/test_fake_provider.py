@@ -31,6 +31,7 @@ def test_scripted_provider_replays_events_and_records_request() -> None:
         )
     ]
     tool_results = [ToolCallResult(call_id="call-1", output="result")]
+    extra_messages = [Message(role="user", content="steered")]
 
     async def consume() -> list[object]:
         return [
@@ -40,6 +41,7 @@ def test_scripted_provider_replays_events_and_records_request() -> None:
                 model="model-1",
                 tools=tools,
                 tool_results=tool_results,
+                extra_messages=extra_messages,
                 previous_response_id="response-1",
             )
         ]
@@ -54,6 +56,7 @@ def test_scripted_provider_replays_events_and_records_request() -> None:
             tools=tuple(tools),
             tool_results=tuple(tool_results),
             previous_response_id="response-1",
+            extra_messages=tuple(extra_messages),
         )
     ]
     with pytest.raises(FrozenInstanceError):

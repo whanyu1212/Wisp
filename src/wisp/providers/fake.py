@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import anyio
 
@@ -27,6 +28,7 @@ class ProviderRequest:
     tools: tuple[ToolSpec, ...]
     tool_results: tuple[ToolCallResult, ...]
     previous_response_id: str | None
+    extra_messages: tuple[Message, ...] = ()
     effort: str | None = None
     prompt_cache_key: str | None = None
 
@@ -61,6 +63,7 @@ class ScriptedProvider:
     """Provider that replays predefined event streams and records each request."""
 
     name = "scripted"
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -79,6 +82,7 @@ class ScriptedProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
@@ -90,6 +94,7 @@ class ScriptedProvider:
                 tools=tuple(tools),
                 tool_results=tuple(tool_results),
                 previous_response_id=previous_response_id,
+                extra_messages=tuple(extra_messages),
                 effort=effort,
                 prompt_cache_key=prompt_cache_key,
             )
