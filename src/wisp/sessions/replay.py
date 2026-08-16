@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wisp.agent.messages import Message
-from wisp.agent.transcript import _MissingToolResult, _order_tool_result_items
+from wisp.agent.transcript import MissingToolResult, order_tool_result_items
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -313,8 +313,8 @@ def _ordered_context_rows(
 ) -> tuple[SessionContextRow, ...]:
     return tuple(
         item
-        for item in _order_tool_result_items(rows, message_of=lambda row: row.message)
-        if not isinstance(item, _MissingToolResult)
+        for item in order_tool_result_items(rows, message_of=lambda row: row.message)
+        if not isinstance(item, MissingToolResult)
     )
 
 
