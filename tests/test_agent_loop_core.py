@@ -2788,6 +2788,66 @@ def test_request_boundary_context_rebase_keeps_live_native_continuation() -> Non
     assert len(executor.calls) == 1
 
 
+def test_clean_boundary_rebase_drops_consumed_tool_results() -> None:
+    """A clean response must not resend the prior round's tool results."""
+
+    tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="tool-response"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    response_id="tool-response",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("clean", response_id="clean-response"),
+            _completed_stream("followed up", response_id="follow-up-response"),
+        ]
+    )
+
+    class CleanRebaseHook:
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            if snapshot.turn == 1:
+                return RequestBoundaryDecision()
+            if snapshot.turn == 2:
+                return RequestBoundaryDecision(
+                    context_rebase=RequestContextRebase(
+                        base_messages=(Message(role="user", content="compacted summary"),),
+                        expected_continuation_messages=snapshot.continuation_messages,
+                    ),
+                    extra_messages=(Message(role="user", content="follow up"),),
+                )
+            return RequestBoundaryDecision(stop=True)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=RecordingToolExecutor(),
+                    request_boundary_hook=CleanRebaseHook(),
+                ),
+                messages=(Message(role="user", content="inspect"),),
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.calls[1].tool_results == (
+        ToolCallResult(call_id="call-1", output="tool output"),
+    )
+    assert provider.calls[2].previous_response_id == "clean-response"
+    assert provider.calls[2].tool_results == ()
+    assert [message.content for message in provider.calls[2].extra_messages] == ["follow up"]
+
+
 def test_request_boundary_context_rebase_rejects_stale_continuation() -> None:
     """A stale compaction plan must not mutate the loop's continuation state."""
 

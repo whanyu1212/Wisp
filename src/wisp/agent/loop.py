@@ -287,7 +287,11 @@ def _apply_request_boundary_decision(
             )
         replacement = _validate_replacement_messages(config, rebase.base_messages)
         # Do not call `replace_context`: rebase deliberately keeps the live
-        # provider cursor, opaque replay tail, and pending tool results.
+        # provider cursor and opaque replay tail. Tool results remain pending
+        # only at the immediate post-tool boundary; a clean response has
+        # already consumed them.
+        if not had_tool_calls:
+            state.consume_pending_tool_results()
         if extra_messages:
             state.queue_extra_messages(extra_messages)
         return replacement, False
