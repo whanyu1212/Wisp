@@ -1241,6 +1241,8 @@ def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() ->
         ("diff-del-sign-fg", "diff-del-gutter-bg"),
         ("diff-context-fg", "background"),
         ("diff-hunk-fg", "background"),
+        ("diff-add-count-fg", "panel"),
+        ("diff-del-count-fg", "panel"),
     ],
 )
 def test_diff_theme_colors_clear_contrast_thresholds(

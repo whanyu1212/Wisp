@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from enum import StrEnum
+from enum import Enum, StrEnum
 
 
 class DiffOperation(StrEnum):
@@ -19,6 +19,14 @@ class DiffOperation(StrEnum):
 
     create = "create"
     modify = "modify"
+
+
+class DiffLayout(Enum):
+    """A requested or effective TUI diff arrangement."""
+
+    auto = "auto"
+    unified = "unified"
+    split = "split"
 
 
 class DiffRowKind(StrEnum):
@@ -48,6 +56,10 @@ class DiffRow:
     # tighter later cap can avoid double-counting that pending omission.
     hidden_rows: int = 0
     hidden_bytes: int = 0
+    # True only when retained deletion/addition sides of one replacement were
+    # separated by this synthetic omission. Split planning may cross that
+    # boundary; an omission hiding context remains a real semantic separator.
+    bridges_replacement: bool = False
 
     @property
     def is_source(self) -> bool:
@@ -69,7 +81,13 @@ class DiffVisibleRow:
     hidden_bytes: int = 0
 
     @classmethod
-    def omission(cls, hidden_rows: int, hidden_bytes: int) -> DiffVisibleRow:
+    def omission(
+        cls,
+        hidden_rows: int,
+        hidden_bytes: int,
+        *,
+        bridges_replacement: bool = False,
+    ) -> DiffVisibleRow:
         """Describe omitted source evidence without pretending it was displayed."""
 
         parts: list[str] = []
@@ -84,6 +102,7 @@ class DiffVisibleRow:
                 f"… {', '.join(parts) or 'content hidden'}",
                 hidden_rows=hidden_rows,
                 hidden_bytes=hidden_bytes,
+                bridges_replacement=bridges_replacement,
             ),
             hidden_rows=hidden_rows,
             hidden_bytes=hidden_bytes,
@@ -119,10 +138,11 @@ DIFF_DEL_GUTTER_STYLE = "$diff-line-number-fg on $diff-del-gutter-bg"
 DIFF_ADD_SIGN_STYLE = "$diff-add-sign-fg on $diff-add-gutter-bg"
 DIFF_DEL_SIGN_STYLE = "$diff-del-sign-fg on $diff-del-gutter-bg"
 DIFF_GUTTER_STYLE = "$diff-line-number-fg"
-# The header's +N/-N counts are a summary, not a row: they take the same hues
-# without a band, so a tinted rectangle never appears outside the diff body.
-DIFF_ADD_COUNT_STYLE = "$diff-add-fg"
-DIFF_DEL_COUNT_STYLE = "$diff-del-fg"
+# The header's +N/-N counts are a summary, not a row: they use related
+# contrast-safe hues without a band, so a tinted rectangle never appears
+# outside the diff body.
+DIFF_ADD_COUNT_STYLE = "$diff-add-count-fg"
+DIFF_DEL_COUNT_STYLE = "$diff-del-count-fg"
 DIFF_CONTEXT_STYLE = "$diff-context-fg"
 DIFF_HUNK_STYLE = "$diff-hunk-fg"
 DIFF_META_STYLE = "$text-muted"
@@ -131,6 +151,11 @@ DIFF_COLLAPSED_ROWS = 8
 DIFF_COLLAPSED_BYTES = 2_000
 DIFF_EXPANDED_ROWS = 400
 DIFF_EXPANDED_BYTES = 64_000
+# Split view is deliberately conservative. A pane is useful only when this many
+# source cells remain after its line-number/sign gutter; otherwise two cropped
+# slivers are less readable than one unified row.
+DIFF_SPLIT_MIN_SOURCE_WIDTH = 24
+DIFF_SPLIT_DIVIDER_WIDTH = 3
 
 
 @dataclass(frozen=True)
@@ -156,6 +181,20 @@ class DiffPresentation:
 
         return self.path or "(unnamed file)"
 
+    @property
+    def line_number_width(self) -> int:
+        """Cells needed for a stable old/new line-number column."""
+
+        if not self.show_line_numbers:
+            return 0
+        numbers = (
+            number
+            for row in self.rows
+            for number in (row.old_line, row.new_line)
+            if number is not None
+        )
+        return max(4, max((len(str(number)) for number in numbers), default=0))
+
     def visible_rows(self, *, expanded: bool) -> tuple[DiffVisibleRow, ...]:
         """Select a deterministic bounded preview for the requested card state."""
 
@@ -170,6 +209,114 @@ class DiffPresentation:
         """Whether expanded mode reveals diff evidence beyond the preview."""
 
         return self.visible_rows(expanded=False) != self.visible_rows(expanded=True)
+
+
+@dataclass(frozen=True)
+class DiffSplitRow:
+    """One planned side-by-side row, or metadata spanning both panes."""
+
+    left: DiffVisibleRow | None = None
+    right: DiffVisibleRow | None = None
+    metadata: DiffVisibleRow | None = None
+
+
+def split_pane_gutter_width(*, show_line_numbers: bool, line_number_width: int = 4) -> int:
+    """Return the cells reserved by one split pane's semantic gutter."""
+
+    return max(1, line_number_width) + 5 if show_line_numbers else 4
+
+
+def minimum_split_width(*, show_line_numbers: bool, line_number_width: int = 4) -> int:
+    """Return the narrowest width with two genuinely readable source panes."""
+
+    pane_width = (
+        split_pane_gutter_width(
+            show_line_numbers=show_line_numbers,
+            line_number_width=line_number_width,
+        )
+        + DIFF_SPLIT_MIN_SOURCE_WIDTH
+    )
+    return pane_width * 2 + DIFF_SPLIT_DIVIDER_WIDTH
+
+
+def resolve_diff_layout(
+    requested: DiffLayout,
+    presentation: DiffPresentation,
+    *,
+    width: int,
+) -> DiffLayout:
+    """Resolve auto/split safely for the current terminal width and operation."""
+
+    if requested is DiffLayout.unified:
+        return DiffLayout.unified
+    if requested is DiffLayout.auto and presentation.operation is DiffOperation.create:
+        return DiffLayout.unified
+    if width < minimum_split_width(
+        show_line_numbers=presentation.show_line_numbers,
+        line_number_width=presentation.line_number_width,
+    ):
+        return DiffLayout.unified
+    return DiffLayout.split
+
+
+def plan_split_diff_rows(rows: Iterable[DiffVisibleRow]) -> tuple[DiffSplitRow, ...]:
+    """Plan literal unified rows into conservative side-by-side alignment.
+
+    Context is repeated on both sides. Only an immediately adjacent deletion and
+    addition run is treated as a replacement and paired in source order. Any
+    excess or standalone change gets a blank opposite pane, while hunk and
+    omission metadata spans the complete layout.
+    """
+
+    ordered = tuple(rows)
+    planned: list[DiffSplitRow] = []
+    index = 0
+    while index < len(ordered):
+        visible = ordered[index]
+        kind = visible.row.kind
+        if kind in {DiffRowKind.hunk, DiffRowKind.omission}:
+            planned.append(DiffSplitRow(metadata=visible))
+            index += 1
+            continue
+        if kind is DiffRowKind.context:
+            planned.append(DiffSplitRow(left=visible, right=visible))
+            index += 1
+            continue
+        if kind is DiffRowKind.addition:
+            planned.append(DiffSplitRow(right=visible))
+            index += 1
+            continue
+
+        deletions: list[DiffVisibleRow] = []
+        while index < len(ordered) and ordered[index].row.kind is DiffRowKind.deletion:
+            deletions.append(ordered[index])
+            index += 1
+        # The retention layer may insert honest omission metadata between the
+        # retained deletion and addition sides of one replacement. It is not a
+        # semantic change-group boundary, so keep looking through it for the
+        # adjacent additions and render the metadata after the paired evidence.
+        interstitial_metadata: list[DiffVisibleRow] = []
+        while (
+            index < len(ordered)
+            and ordered[index].row.kind is DiffRowKind.omission
+            and ordered[index].row.bridges_replacement
+        ):
+            interstitial_metadata.append(ordered[index])
+            index += 1
+        additions: list[DiffVisibleRow] = []
+        while index < len(ordered) and ordered[index].row.kind is DiffRowKind.addition:
+            additions.append(ordered[index])
+            index += 1
+        row_count = max(len(deletions), len(additions))
+        for pair_index in range(row_count):
+            planned.append(
+                DiffSplitRow(
+                    left=deletions[pair_index] if pair_index < len(deletions) else None,
+                    right=additions[pair_index] if pair_index < len(additions) else None,
+                )
+            )
+        planned.extend(DiffSplitRow(metadata=row) for row in interstitial_metadata)
+    return tuple(planned)
 
 
 def select_diff_rows(
@@ -311,18 +458,40 @@ def _with_omission_rows(
     visible: list[DiffVisibleRow] = []
     hidden_rows = 0
     hidden_bytes = 0
+    hidden_kinds: set[DiffRowKind] = set()
     pending_partial_bytes = 0
 
-    def flush_hidden() -> None:
+    def flush_hidden(next_row: DiffRow | None = None) -> None:
         nonlocal hidden_rows, hidden_bytes
         if hidden_rows:
-            visible.append(DiffVisibleRow.omission(hidden_rows, hidden_bytes))
+            previous_source = next(
+                (item.row for item in reversed(visible) if item.row.is_source),
+                None,
+            )
+            next_continues_replacement = next_row is not None and (
+                next_row.kind is DiffRowKind.addition
+                or (next_row.kind is DiffRowKind.omission and next_row.bridges_replacement)
+            )
+            bridges_replacement = (
+                previous_source is not None
+                and previous_source.kind is DiffRowKind.deletion
+                and next_continues_replacement
+                and hidden_kinds <= {DiffRowKind.deletion, DiffRowKind.addition}
+            )
+            visible.append(
+                DiffVisibleRow.omission(
+                    hidden_rows,
+                    hidden_bytes,
+                    bridges_replacement=bridges_replacement,
+                )
+            )
         hidden_rows = 0
         hidden_bytes = 0
+        hidden_kinds.clear()
 
     for index, row in enumerate(rows):
         if index in included:
-            flush_hidden()
+            flush_hidden(row)
             if row.kind is DiffRowKind.omission and pending_partial_bytes:
                 # A prior expanded byte cap already counted the pending partial
                 # source row in this omission. Its retained prefix becomes
@@ -332,6 +501,7 @@ def _with_omission_rows(
                     DiffVisibleRow.omission(
                         row.hidden_rows,
                         row.hidden_bytes + pending_partial_bytes,
+                        bridges_replacement=row.bridges_replacement,
                     )
                 )
                 pending_partial_bytes = 0
@@ -356,6 +526,7 @@ def _with_omission_rows(
             else:
                 hidden_rows += 1
                 hidden_bytes += len(row.text.encode("utf-8"))
+                hidden_kinds.add(row.kind)
     flush_hidden()
     if pending_partial_bytes:
         visible.append(DiffVisibleRow.omission(0, pending_partial_bytes))
@@ -456,10 +627,18 @@ __all__ = [
     "DIFF_GUTTER_STYLE",
     "DIFF_HUNK_STYLE",
     "DIFF_META_STYLE",
+    "DIFF_SPLIT_DIVIDER_WIDTH",
+    "DIFF_SPLIT_MIN_SOURCE_WIDTH",
+    "DiffLayout",
     "DiffOperation",
     "DiffPresentation",
     "DiffRow",
     "DiffRowKind",
+    "DiffSplitRow",
     "DiffVisibleRow",
+    "minimum_split_width",
+    "plan_split_diff_rows",
+    "resolve_diff_layout",
     "select_diff_rows",
+    "split_pane_gutter_width",
 ]

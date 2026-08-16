@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.cells import cell_len
 from textual.content import Content
 
 from wisp.tui.diff_presentation import (
@@ -20,12 +21,19 @@ from wisp.tui.diff_presentation import (
     DIFF_GUTTER_STYLE,
     DIFF_HUNK_STYLE,
     DIFF_META_STYLE,
+    DiffLayout,
     DiffOperation,
+    DiffPresentation,
     DiffRow,
     DiffRowKind,
     DiffVisibleRow,
+    minimum_split_width,
+    plan_split_diff_rows,
+    resolve_diff_layout,
     select_diff_rows,
 )
+from wisp.tui.diff_rendering import render_diff_split_row
+from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
 from wisp.tui.tool_output import build_edit_diff_presentation, build_write_diff_presentation
 from wisp.tui.widgets import _render_diff_presentation, _render_diff_visible_row
 
@@ -37,6 +45,15 @@ def _edit(old: str, new: str) -> dict[str, object]:
 def _styles_at(content: Content, needle: str) -> set[str]:
     start = content.plain.index(needle)
     return {str(span.style) for span in content.spans if span.start <= start < span.end}
+
+
+def test_pi_diff_hues_back_theme_reactive_semantic_roles() -> None:
+    assert WISP_THEME_DARK.variables["diff-add-fg"] == "#b5bd68"
+    assert WISP_THEME_DARK.variables["diff-del-fg"] == "#cc6666"
+    # The light green takes a minimal darker tonal adjustment to meet AA;
+    # Pi's light red can remain exact.
+    assert WISP_THEME_LIGHT.variables["diff-add-fg"] == "#4d754d"
+    assert WISP_THEME_LIGHT.variables["diff-del-fg"] == "#aa5555"
 
 
 def test_changed_row_styles_carry_a_row_tint_and_a_stronger_token_tint() -> None:
@@ -317,6 +334,194 @@ def test_byte_clipping_counts_preselected_omissions_in_its_final_marker() -> Non
     assert omission.row.kind is DiffRowKind.omission
     assert omission.hidden_rows == 40
     assert omission.hidden_bytes == total_bytes - displayed_source_bytes
+
+
+def test_split_planner_pairs_only_adjacent_replacements_and_keeps_unmatched_rows_blank() -> None:
+    rows = tuple(
+        DiffVisibleRow(row)
+        for row in (
+            DiffRow(DiffRowKind.hunk, "@@ -1,4 +1,4 @@"),
+            DiffRow(DiffRowKind.context, "keep", old_line=1, new_line=1),
+            DiffRow(DiffRowKind.deletion, "old one", old_line=2),
+            DiffRow(DiffRowKind.deletion, "old two", old_line=3),
+            DiffRow(DiffRowKind.addition, "new one", new_line=2),
+            DiffRow(DiffRowKind.context, "middle", old_line=4, new_line=3),
+            DiffRow(DiffRowKind.addition, "standalone", new_line=4),
+            DiffRow(DiffRowKind.omission, "… 2 lines hidden"),
+        )
+    )
+
+    planned = plan_split_diff_rows(rows)
+
+    assert planned[0].metadata is rows[0]
+    assert planned[1].left is rows[1] and planned[1].right is rows[1]
+    assert planned[2].left is rows[2] and planned[2].right is rows[4]
+    assert planned[3].left is rows[3] and planned[3].right is None
+    assert planned[4].left is rows[5] and planned[4].right is rows[5]
+    assert planned[5].left is None and planned[5].right is rows[6]
+    assert planned[6].metadata is rows[7]
+
+
+def test_split_planner_pairs_retained_replacement_sides_across_omission_metadata() -> None:
+    rows = (
+        *(DiffRow(DiffRowKind.deletion, f"old {index}") for index in range(3)),
+        *(DiffRow(DiffRowKind.addition, f"new {index}") for index in range(3)),
+    )
+    retained = select_diff_rows(rows, max_rows=4, max_bytes=1_000)
+    omissions = [row for row in retained if row.row.kind is DiffRowKind.omission]
+
+    assert [row.row.bridges_replacement for row in omissions] == [True, False]
+
+    planned = plan_split_diff_rows(retained)
+
+    assert planned[0].left is retained[0] and planned[0].right is retained[3]
+    assert planned[1].left is retained[1] and planned[1].right is retained[4]
+    assert planned[2].metadata is retained[2]
+    assert planned[3].metadata is retained[5]
+
+
+def test_nested_selection_preserves_replacement_omission_provenance() -> None:
+    rows = (
+        *(DiffRow(DiffRowKind.deletion, f"old {index}") for index in range(3)),
+        *(DiffRow(DiffRowKind.addition, f"new {index}") for index in range(3)),
+    )
+    retained = select_diff_rows(rows, max_rows=4, max_bytes=1_000)
+    nested = select_diff_rows(
+        tuple(visible_row.row for visible_row in retained),
+        max_rows=2,
+        max_bytes=1_000,
+    )
+    nested_source = [row for row in nested if row.row.is_source]
+    planned = plan_split_diff_rows(nested)
+    paired = next(row for row in planned if row.left is not None and row.right is not None)
+
+    assert [row.row.kind for row in nested_source] == [
+        DiffRowKind.deletion,
+        DiffRowKind.addition,
+    ]
+    assert paired.left is nested_source[0]
+    assert paired.right is nested_source[1]
+    nested_omissions = [
+        row.row.bridges_replacement for row in nested if row.row.kind is DiffRowKind.omission
+    ]
+    assert nested_omissions == [True, True, False, False]
+
+
+def test_split_planner_does_not_pair_across_omitted_context() -> None:
+    deletion = DiffVisibleRow(DiffRow(DiffRowKind.deletion, "old", old_line=10))
+    hidden_context = DiffVisibleRow.omission(2, 20)
+    addition = DiffVisibleRow(DiffRow(DiffRowKind.addition, "new", new_line=20))
+
+    planned = plan_split_diff_rows((deletion, hidden_context, addition))
+
+    assert planned[0].left is deletion and planned[0].right is None
+    assert planned[1].metadata is hidden_context
+    assert planned[2].left is None and planned[2].right is addition
+
+
+def test_auto_and_explicit_split_share_conservative_width_fallback() -> None:
+    presentation = DiffPresentation(
+        path="example.py",
+        operation=DiffOperation.modify,
+        additions=1,
+        deletions=1,
+        rows=(),
+        show_line_numbers=True,
+    )
+    breakpoint = minimum_split_width(show_line_numbers=True)
+
+    assert presentation.line_number_width == 4
+    assert breakpoint == 69
+    assert minimum_split_width(show_line_numbers=False) == 59
+    assert (
+        resolve_diff_layout(DiffLayout.auto, presentation, width=breakpoint - 1)
+        is DiffLayout.unified
+    )
+    assert (
+        resolve_diff_layout(DiffLayout.split, presentation, width=breakpoint - 1)
+        is DiffLayout.unified
+    )
+    assert resolve_diff_layout(DiffLayout.auto, presentation, width=breakpoint) is DiffLayout.split
+    assert resolve_diff_layout(DiffLayout.split, presentation, width=breakpoint) is DiffLayout.split
+
+    wide_number_presentation = DiffPresentation(
+        path="large.py",
+        operation=DiffOperation.modify,
+        additions=1,
+        deletions=1,
+        rows=(
+            DiffRow(DiffRowKind.deletion, "old", old_line=10_000),
+            DiffRow(DiffRowKind.addition, "new", new_line=10_000),
+        ),
+        show_line_numbers=True,
+    )
+    wide_number_breakpoint = minimum_split_width(
+        show_line_numbers=True,
+        line_number_width=wide_number_presentation.line_number_width,
+    )
+
+    assert wide_number_presentation.line_number_width == 5
+    assert wide_number_breakpoint == 71
+    assert (
+        resolve_diff_layout(
+            DiffLayout.auto,
+            wide_number_presentation,
+            width=wide_number_breakpoint - 1,
+        )
+        is DiffLayout.unified
+    )
+    assert (
+        resolve_diff_layout(
+            DiffLayout.auto,
+            wide_number_presentation,
+            width=wide_number_breakpoint,
+        )
+        is DiffLayout.split
+    )
+
+
+def test_create_diff_stays_unified_in_auto_but_can_be_explicitly_split() -> None:
+    presentation = DiffPresentation(
+        path="new.py",
+        operation=DiffOperation.create,
+        additions=1,
+        deletions=0,
+        rows=(DiffRow(DiffRowKind.addition, "new", new_line=1),),
+        show_line_numbers=True,
+    )
+
+    assert resolve_diff_layout(DiffLayout.auto, presentation, width=200) is DiffLayout.unified
+    assert resolve_diff_layout(DiffLayout.split, presentation, width=200) is DiffLayout.split
+
+
+def test_split_renderer_crops_unicode_by_cells_and_keeps_content_literal() -> None:
+    old = DiffVisibleRow(
+        DiffRow(
+            DiffRowKind.deletion,
+            "界" * 40 + " [bold]literal[/bold]",
+            old_line=12,
+            emphasis_ranges=((40, 46),),
+        )
+    )
+    new = DiffVisibleRow(
+        DiffRow(
+            DiffRowKind.addition,
+            "界" * 40 + " <tag>",
+            new_line=12,
+            emphasis_ranges=((40, 45),),
+        )
+    )
+    planned = plan_split_diff_rows((old, new))
+
+    content = render_diff_split_row(planned[0], width=79, show_line_numbers=True)
+
+    assert cell_len(content.plain) == 79
+    assert "…" in content.plain
+    assert "[bold]" in content.plain
+    assert "<tag>" in content.plain
+    styles = {str(span.style) for span in content.spans}
+    assert DIFF_DEL_STYLE in styles and DIFF_DEL_TOKEN_STYLE in styles
+    assert DIFF_ADD_STYLE in styles and DIFF_ADD_TOKEN_STYLE in styles
 
 
 def test_selection_clips_utf8_on_a_character_boundary_and_reports_the_remainder() -> None:

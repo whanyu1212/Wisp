@@ -10,31 +10,41 @@ from textual.theme import Theme
 # foreground must clear WCAG AA against both surfaces; the token band is the
 # tighter pairing and therefore governs these hand-tuned values.
 _DARK_DIFF_VARIABLES = {
-    "diff-add-fg": "#8fbfa8",
+    # Pi's diff hues are retained exactly; supporting bands stay dark enough
+    # that source, token, sign, and gutter roles all clear WCAG AA.
+    "diff-add-fg": "#b5bd68",
+    "diff-add-count-fg": "#b5bd68",
     "diff-add-bg": "#16241e",
     "diff-add-token-bg": "#22432f",
     "diff-add-gutter-bg": "#102018",
-    "diff-add-sign-fg": "#b4d8c3",
-    "diff-del-fg": "#cf95a1",
+    "diff-add-sign-fg": "#b5bd68",
+    "diff-del-fg": "#cc6666",
+    # Header counts sit on theme panels, including Storm's blue panel; this
+    # Pi-red tonal step is light enough to remain readable on every dark panel.
+    "diff-del-count-fg": "#e89595",
     "diff-del-bg": "#241a1d",
-    "diff-del-token-bg": "#4a2630",
-    "diff-del-gutter-bg": "#30181d",
-    "diff-del-sign-fg": "#e3adb8",
+    "diff-del-token-bg": "#2b181e",
+    "diff-del-gutter-bg": "#25151a",
+    "diff-del-sign-fg": "#cc6666",
     "diff-line-number-fg": "#a1a9b0",
     "diff-context-fg": "#b2b9c0",
     "diff-hunk-fg": "#9dc3d3",
 }
 _LIGHT_DIFF_VARIABLES = {
-    "diff-add-fg": "#265c48",
-    "diff-add-bg": "#eaf5ee",
-    "diff-add-token-bg": "#c3e4d0",
-    "diff-add-gutter-bg": "#d7ecdf",
-    "diff-add-sign-fg": "#1d6149",
-    "diff-del-fg": "#8a3548",
-    "diff-del-bg": "#fbecef",
-    "diff-del-token-bg": "#f4ccd4",
-    "diff-del-gutter-bg": "#f5dce2",
-    "diff-del-sign-fg": "#842f43",
+    # Pi green needs a minimal darker tonal step on light surfaces to meet 4.5:1.
+    # Pi red already clears the target and remains exact.
+    "diff-add-fg": "#4d754d",
+    "diff-add-count-fg": "#4d754d",
+    "diff-add-bg": "#f5faf5",
+    "diff-add-token-bg": "#e5f0e5",
+    "diff-add-gutter-bg": "#edf5ed",
+    "diff-add-sign-fg": "#4d754d",
+    "diff-del-fg": "#aa5555",
+    "diff-del-count-fg": "#aa5555",
+    "diff-del-bg": "#fff8f8",
+    "diff-del-token-bg": "#fff0f0",
+    "diff-del-gutter-bg": "#fff4f4",
+    "diff-del-sign-fg": "#aa5555",
     "diff-line-number-fg": "#4e5a63",
     "diff-context-fg": "#45515a",
     "diff-hunk-fg": "#315e73",
