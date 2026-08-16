@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from json import JSONDecodeError, loads
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 from anthropic import (
@@ -36,6 +36,7 @@ from wisp.agent.messages import Message
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
@@ -95,19 +96,9 @@ _STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
 # must never be silently reported as a clean completion.
 _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 
-# Anthropic's Messages API is stateless and requires each assistant tool_use
-# turn to immediately precede its matching tool_result -- but AgentHarness's
-# provider-neutral loop assumes a Responses-API-style backend (like OpenAI's)
-# that remembers everything server-side via previous_response_id, so on every
-# tool round it only ever passes that round's *new* tool_results, on top of
-# the *original*, never-mutated `messages`. A multi-round tool conversation
-# (call 1 -> result 1 -> call 2 -> result 2 -> ...) therefore needs the full
-# accumulated replay tail resent every time, not just the latest round --
-# Wisp bridges this the same way OpenAICodexProvider bridges its own
-# non-conversational backend: cache the whole accumulated tail keyed by
-# response_id, and grow it by one (assistant tool_use, user tool_result) pair
-# per round. The shared continuation store bounds pending state so a long
-# session cannot grow memory without limit.
+# Anthropic's Messages API is stateless. The adapter keeps the exact native
+# replay tail keyed by the provider cursor so it can append each request's new
+# tool results or user steering without flattening structured tool history.
 
 
 @dataclass
@@ -139,6 +130,7 @@ class AnthropicProvider:
     """Provider backed by Anthropic's Messages API."""
 
     name = "anthropic"
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -165,16 +157,18 @@ class AnthropicProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Anthropic response lifecycle.
 
         Anthropic's Messages API is stateless, so a follow-up call carrying
-        ``tool_results`` must resend every prior round's assistant tool_use
-        turn and tool_result immediately before the newest ones.
-        ``AgentHarness``'s ``messages`` never grows across tool rounds (it
-        assumes a Responses-API-style backend that remembers everything
+        ``previous_response_id`` must resend every prior round's assistant
+        tool_use turn and tool_result immediately before the newest ones,
+        plus any ``tool_results``/``extra_messages`` this call adds.
+        ``AgentHarness``'s ``messages`` never grows across turns (it assumes
+        a Responses-API-style backend that remembers everything
         server-side), so this provider reconstructs the accumulated tail
         from its own replay state keyed by ``previous_response_id``.
 
@@ -193,14 +187,25 @@ class AnthropicProvider:
         stream: AsyncIterator[RawMessageStreamEvent] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                stream = await self._create_stream(
-                    messages,
-                    model=selected_model,
-                    tools=tools,
-                    tool_results=tool_results,
-                    previous_response_id=previous_response_id,
-                    effort=effort,
-                )
+                if extra_messages:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        extra_messages=extra_messages,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
+                else:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
                 break
             except AnthropicError as exc:
                 decision = _anthropic_retry_decision(exc)
@@ -351,34 +356,31 @@ class AnthropicProvider:
                     tool_call=tool_call, content_index=len(tool_calls) - 1
                 )
 
-        if tool_calls:
-            if response_id is None:
-                failure = ProviderResponseFailed(
-                    message="Anthropic tool-call response did not include a message id",
-                    partial_content="".join(chunks),
-                    response_id=None,
-                )
-                self._replays.discard(previous_response_id)
-                yield failure
-                return
-            # The accumulated tail carried into *this* call (everything up to
-            # and including the tool_use turn this round is answering) plus
-            # this round's own tool_result message plus the new tool_use turn
-            # this response just produced -- the full state the *next* round
-            # needs to resend, since Anthropic never remembers any of it
-            # server-side.
-            previous_tail = self._get_replay(previous_response_id)
-            new_turn = _replay_message_from_stream(content_blocks)
-            replay_tail = (
-                *previous_tail,
-                *((_tool_results_to_message(tool_results),) if tool_results else ()),
-                new_turn,
+        if tool_calls and response_id is None:
+            failure = ProviderResponseFailed(
+                message="Anthropic tool-call response did not include a message id",
+                partial_content="".join(chunks),
+                response_id=None,
             )
-            if previous_response_id is not None and previous_response_id != response_id:
+            self._replays.discard(previous_response_id)
+            yield failure
+            return
+        # Save every successful turn: a later follow-up may arrive after a
+        # clean response, not only after tool use. A missing clean response ID
+        # does not change the public completion; an already-active local replay
+        # safely advances under its existing key.
+        continuation_id = response_id or previous_response_id
+        if continuation_id is not None:
+            previous = self._require_replay(previous_response_id)
+            replay_tail = (
+                *previous,
+                *((_tool_results_to_message(tool_results),) if tool_results else ()),
+                *_messages_to_anthropic(extra_messages),
+                _replay_message_from_stream(content_blocks),
+            )
+            if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
-            self._replays.remember(response_id, replay_tail)
-        elif previous_response_id is not None:
-            self._replays.consume(previous_response_id)
+            self._replays.remember(continuation_id, replay_tail)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -395,15 +397,18 @@ class AnthropicProvider:
         model: str,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         client = await self._client_or_create()
-        system = _system_from_messages(messages)
         anthropic_messages = _messages_to_anthropic(messages)
+        if previous_response_id is not None:
+            anthropic_messages.extend(self._require_replay(previous_response_id))
         if tool_results:
-            anthropic_messages.extend(self._get_replay(previous_response_id))
             anthropic_messages.append(_tool_results_to_message(tool_results))
+        anthropic_messages.extend(_messages_to_anthropic(extra_messages))
+        system = _system_from_messages(messages)
         anthropic_tools = _tool_specs_to_anthropic_tools(tools)
 
         # Built as a single kwargs dict rather than a create() call per
@@ -461,13 +466,25 @@ class AnthropicProvider:
         self._client_api_key = api_key
         return self._client
 
-    def _get_replay(self, previous_response_id: str | None) -> tuple[MessageParam, ...]:
+    def _require_replay(self, previous_response_id: str | None) -> tuple[MessageParam, ...]:
         if previous_response_id is None:
             return ()
         # A peek, not a pop: _create_stream can be re-invoked by the retry loop
         # in `stream()` before a response ever completes, so the replay must
         # survive a failed attempt to be available to the next one.
-        return self._replays.get(previous_response_id) or ()
+        continuation = self._replays.get(previous_response_id)
+        if continuation is None:
+            # Silently returning an empty continuation here would resend
+            # only the original base `messages`, dropping every tool call/
+            # result and injected message since -- exactly the corruption
+            # this whole continuation mechanism exists to prevent. A missing
+            # entry (evicted, or a caller passing a stale/foreign id) must
+            # fail loudly instead, matching OpenAICodexProvider's existing
+            # _get_continuation contract.
+            raise ProviderProtocolError(
+                f"Anthropic continuation state is unavailable for {previous_response_id}"
+            )
+        return continuation
 
 
 _ReplayBlockParam = (
@@ -576,9 +593,39 @@ def _system_from_messages(messages: Sequence[Message]) -> str | None:
 
 
 def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
+    """Encode fresh base context without flattening an active tool exchange."""
+
     anthropic_messages: list[MessageParam] = []
     for message in messages:
         if message.role == "system":
+            continue
+        if message.role == "tool" and message.tool_call_id:
+            anthropic_messages.append(
+                _tool_results_to_message(
+                    (
+                        ToolCallResult(
+                            call_id=message.tool_call_id,
+                            output=message.content,
+                            is_error=message.is_error is True,
+                        ),
+                    )
+                )
+            )
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            blocks: list[_ReplayBlockParam] = []
+            if message.content:
+                blocks.append({"type": "text", "text": message.content})
+            blocks.extend(
+                {
+                    "type": "tool_use",
+                    "id": tool_call.call_id,
+                    "name": tool_call.name,
+                    "input": dict(tool_call.arguments),
+                }
+                for tool_call in message.tool_calls
+            )
+            anthropic_messages.append(cast(MessageParam, {"role": "assistant", "content": blocks}))
             continue
         role = "user" if message.role == "tool" else message.role
         content: TextBlockParam = {"type": "text", "text": message.content}

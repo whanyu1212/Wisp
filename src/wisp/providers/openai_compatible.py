@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from json import JSONDecodeError, dumps, loads
-from typing import Protocol, cast, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 import anyio
@@ -29,6 +29,7 @@ from wisp.openai_compatible import (
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
@@ -74,6 +75,7 @@ class OpenAICompatibleProvider:
     """Provider for OpenAI-compatible streaming Chat Completions endpoints."""
 
     name = OPENAI_COMPATIBLE_PROVIDER_NAME
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -108,6 +110,7 @@ class OpenAICompatibleProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
@@ -120,14 +123,25 @@ class OpenAICompatibleProvider:
         native_stream: AsyncIterator[ChatCompletionChunk] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                native_stream = await self._create_stream(
-                    messages,
-                    model=selected_model,
-                    tools=tools,
-                    tool_results=tool_results,
-                    previous_response_id=previous_response_id,
-                    effort=effort,
-                )
+                if extra_messages:
+                    native_stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        extra_messages=extra_messages,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
+                else:
+                    native_stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
                 break
             except OpenAIError as exc:
                 decision = _retry_decision(exc)
@@ -247,21 +261,34 @@ class OpenAICompatibleProvider:
                     content_index=len(tool_calls) - 1,
                 )
 
-        if tool_calls:
-            continuation_id = response_id or f"chatcmpl_wisp_{uuid4().hex}"
-            previous = self._get_continuation(previous_response_id)
-            assistant = _assistant_tool_message("".join(chunks), tool_calls)
+        # Chat Completions does not guarantee a response ID. Preserve its
+        # established synthetic cursor only for a tool-call turn; otherwise an
+        # active local replay can advance under its existing key without
+        # exposing a locally invented clean response ID.
+        continuation_id = response_id or (
+            f"chatcmpl_wisp_{uuid4().hex}" if tool_calls else previous_response_id
+        )
+        if continuation_id is not None:
+            previous = self._require_continuation(previous_response_id)
+            assistant: ChatPayload = (
+                _assistant_tool_message("".join(chunks), tool_calls)
+                if tool_calls
+                else {"role": "assistant", "content": "".join(chunks) or None}
+            )
             replay = (
                 *previous,
                 *(_tool_results_to_messages(tool_results) if tool_results else ()),
+                *_messages_to_chat(extra_messages),
                 assistant,
             )
             if previous_response_id != continuation_id:
                 self._continuations.consume(previous_response_id)
             self._continuations.remember(continuation_id, replay)
+        if tool_calls:
+            # Preserve the adapter's established synthetic tool-call cursor:
+            # Chat Completions can omit an ID even though the next request must
+            # answer this tool exchange. Clean responses never receive one.
             response_id = continuation_id
-        else:
-            self._continuations.consume(previous_response_id)
 
         normalized_reason: ProviderFinishReason = cast(
             ProviderFinishReason, "tool_calls" if tool_calls else finish_reason
@@ -281,14 +308,17 @@ class OpenAICompatibleProvider:
         model: str,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         client = await self._client_or_create()
         chat_messages = _messages_to_chat(messages)
+        if previous_response_id is not None:
+            chat_messages.extend(self._require_continuation(previous_response_id))
         if tool_results:
-            chat_messages.extend(self._get_continuation(previous_response_id))
             chat_messages.extend(_tool_results_to_messages(tool_results))
+        chat_messages.extend(_messages_to_chat(extra_messages))
         kwargs: dict[str, object] = {
             "model": model,
             "messages": chat_messages,
@@ -347,8 +377,19 @@ class OpenAICompatibleProvider:
         self._client_api_key = None
         await client.close()
 
-    def _get_continuation(self, response_id: str | None) -> tuple[ChatPayload, ...]:
-        return self._continuations.get(response_id) or ()
+    def _require_continuation(self, response_id: str | None) -> tuple[ChatPayload, ...]:
+        if response_id is None:
+            return ()
+        continuation = self._continuations.get(response_id)
+        if continuation is None:
+            # Silently returning () here would resend only the original
+            # base `messages`, dropping every tool call/result and injected
+            # message since -- fail loudly instead, matching
+            # OpenAICodexProvider's existing _get_continuation contract.
+            raise ProviderProtocolError(
+                f"{self.name} continuation state is unavailable for {response_id}"
+            )
+        return continuation
 
 
 def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:

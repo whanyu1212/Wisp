@@ -64,6 +64,7 @@ class OpenAICodexProvider:
 
     name = "openai-codex"
     supports_prompt_cache_key: Literal[True] = True
+    supports_continuation_messages: Literal[True] = True
 
     def __init__(
         self,
@@ -90,6 +91,7 @@ class OpenAICodexProvider:
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
+        extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
@@ -112,10 +114,10 @@ class OpenAICodexProvider:
             )
         account_id = auth.account_id or account_id_from_access_token(auth.token)
         headers = _codex_headers(token=auth.token, account_id=account_id)
-        continuation_items = self._get_continuation(previous_response_id)
         continuation_input = (
-            *continuation_items,
+            *self._get_continuation(previous_response_id),
             *_tool_results_to_codex_input(tool_results),
+            *_messages_to_codex_input(extra_messages),
         )
         body = _codex_request_body(
             messages,
@@ -125,7 +127,7 @@ class OpenAICodexProvider:
             effort=effort,
             prompt_cache_key=prompt_cache_key,
         )
-        response_id: str | None = previous_response_id
+        response_id: str | None = None
         pending_tool_calls: dict[str, dict[str, object]] = {}
         completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
@@ -231,21 +233,21 @@ class OpenAICodexProvider:
                             failure = ProviderResponseFailed(
                                 message=_codex_error_message(event),
                                 partial_content="".join(chunks),
-                                response_id=response_id,
+                                response_id=response_id or previous_response_id,
                             )
                             break
                         elif event_type == "response.failed":
                             failure = ProviderResponseFailed(
                                 message=_codex_failed_message(event),
                                 partial_content="".join(chunks),
-                                response_id=response_id,
+                                response_id=response_id or previous_response_id,
                             )
                             break
                         elif event_type == "response.incomplete":
                             failure = ProviderResponseFailed(
                                 message=_codex_incomplete_message(event),
                                 partial_content="".join(chunks),
-                                response_id=response_id,
+                                response_id=response_id or previous_response_id,
                             )
                             break
             except (ProviderError, httpx.HTTPError) as exc:
@@ -253,7 +255,7 @@ class OpenAICodexProvider:
                     failure = failure or ProviderResponseFailed(
                         message=str(exc),
                         partial_content="".join(chunks),
-                        response_id=response_id,
+                        response_id=response_id or previous_response_id,
                     )
                     break
                 decision = _codex_retry_decision(exc)
@@ -288,7 +290,7 @@ class OpenAICodexProvider:
             failure = ProviderResponseFailed(
                 message="OpenAI Codex stream ended before response.completed was received",
                 partial_content="".join(chunks),
-                response_id=response_id,
+                response_id=response_id or previous_response_id,
             )
 
         if failure is not None:
@@ -296,20 +298,20 @@ class OpenAICodexProvider:
             yield failure
             return
 
-        if tool_calls:
-            if response_id is None:
-                raise ProviderProtocolError(
-                    "OpenAI Codex tool response did not include a response id"
-                )
+        if tool_calls and response_id is None:
+            raise ProviderProtocolError("OpenAI Codex tool response did not include a response id")
+        # Codex uses a local store for store:false continuations. Preserve
+        # the upstream response ID in public events; if a clean continuation
+        # omits a new ID, advance the existing local replay key instead.
+        continuation_id = response_id or previous_response_id
+        if continuation_id is not None:
             replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
-            if previous_response_id is not None and previous_response_id != response_id:
+            if previous_response_id is not None and previous_response_id != continuation_id:
                 self._continuations.consume(previous_response_id)
             self._continuations.remember(
-                response_id,
+                continuation_id,
                 (*continuation_input, *replay_items),
             )
-        elif previous_response_id is not None:
-            self._continuations.consume(previous_response_id)
 
         for content_index, tool_call in enumerate(tool_calls):
             yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
