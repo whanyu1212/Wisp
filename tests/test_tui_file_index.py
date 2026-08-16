@@ -7,8 +7,18 @@ from pathlib import Path
 import pytest
 
 from wisp.tools.context import ToolContext
-from wisp.tui.file_index import FileIndexConfig, collect_paths, filter_paths, score_path
-from wisp.tui.textual_app import _file_index_context
+from wisp.tui.file_index import (
+    FileIndexConfig,
+    FileIndexRequest,
+    ProjectDirectory,
+    ProjectFile,
+    collect_paths,
+    collect_project_snapshot,
+    filter_paths,
+    format_file_reference,
+    score_path,
+)
+from wisp.tui.textual_app import _build_file_index_snapshot, _file_index_context
 
 pytestmark = pytest.mark.tui
 
@@ -27,17 +37,21 @@ def _write(root: Path, relative: str, content: str = "x") -> Path:
 # --- collection ------------------------------------------------------------
 
 
-def test_collects_nested_files_and_marks_directories(tmp_path: Path) -> None:
+def test_collects_typed_hierarchy_and_projects_legacy_paths(tmp_path: Path) -> None:
     _write(tmp_path, "src/wisp/app.py")
     _write(tmp_path, "README.md")
 
-    paths = collect_paths(_config(tmp_path))
+    snapshot = collect_project_snapshot(_config(tmp_path))
 
-    assert "README.md" in paths
-    assert "src/wisp/app.py" in paths
-    # Directories are suffixed so the picker needn't re-stat to tell them apart.
-    assert "src/" in paths
-    assert "src/wisp/" in paths
+    assert ProjectFile("README.md") in snapshot.entries
+    assert ProjectDirectory("src") in snapshot.entries
+    assert ProjectDirectory("src/wisp") in snapshot.entries
+    assert ProjectFile("src/wisp/app.py") in snapshot.entries
+    assert snapshot.children_of() == ("README.md", "src")
+    assert snapshot.children_of("src/") == ("src/wisp",)
+    assert snapshot.children_of("src/wisp") == ("src/wisp/app.py",)
+    assert snapshot.paths == collect_paths(_config(tmp_path))
+    assert "src/" in snapshot.paths
 
 
 def test_prunes_ignored_directories(tmp_path: Path) -> None:
@@ -71,34 +85,72 @@ def test_excludes_protected_paths(tmp_path: Path) -> None:
     assert ".env.example" in paths
 
 
-def test_respects_entry_cap(tmp_path: Path) -> None:
+def test_respects_entry_cap_and_reports_truncation(tmp_path: Path) -> None:
     for index in range(50):
         _write(tmp_path, f"file_{index:03d}.txt")
 
-    paths = collect_paths(_config(tmp_path, max_entries=10))
+    snapshot = collect_project_snapshot(_config(tmp_path, max_entries=10))
 
-    assert len(paths) == 10
+    assert len(snapshot.entries) == 10
+    assert snapshot.truncation.entry_limit_reached is True
+    assert snapshot.truncated is True
 
 
-def test_respects_depth_cap(tmp_path: Path) -> None:
+def test_respects_depth_cap_and_reports_truncation(tmp_path: Path) -> None:
     _write(tmp_path, "a/b/c/d/deep.txt")
 
-    paths = collect_paths(_config(tmp_path, max_depth=2))
+    snapshot = collect_project_snapshot(_config(tmp_path, max_depth=2))
 
-    assert not any(path.startswith("a/b/c") for path in paths)
-    assert "a/" in paths
+    assert not any(path.startswith("a/b/c") for path in snapshot.paths)
+    assert "a/" in snapshot.paths
+    assert snapshot.truncation.depth_limit_reached is True
 
 
-def test_symlinked_directory_is_listed_but_not_followed(tmp_path: Path) -> None:
-    """A symlink to an ancestor would loop forever if descended into."""
+def test_queued_directory_replaced_by_symlink_cannot_disclose_outside_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queued = tmp_path / "queued"
+    _write(queued, "inside.txt")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    _write(outside, "outside-secret-name.txt")
+    original = tmp_path / "queued-original"
+    real_scandir = __import__("os").scandir
+    replaced = False
 
-    _write(tmp_path, "real/file.txt")
-    (tmp_path / "loop").symlink_to(tmp_path, target_is_directory=True)
+    def racing_scandir(path: object):  # type: ignore[no-untyped-def]
+        nonlocal replaced
+        if Path(path) == queued and not replaced:
+            queued.rename(original)
+            queued.symlink_to(outside, target_is_directory=True)
+            replaced = True
+        return real_scandir(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("wisp.tui.file_index.os.scandir", racing_scandir)
+    try:
+        snapshot = collect_project_snapshot(_config(tmp_path))
+    finally:
+        if queued.is_symlink():
+            queued.unlink()
+        if original.exists():
+            original.rename(queued)
+
+    assert replaced is True
+    assert "outside-secret-name.txt" not in snapshot.paths
+    assert "queued/outside-secret-name.txt" not in snapshot.paths
+
+
+def test_omits_file_directory_and_dangling_symlinks(tmp_path: Path) -> None:
+    """No symlink type is mentionable, and directory links are never followed."""
+
+    target = _write(tmp_path, "real/file.txt")
+    (tmp_path / "file-link").symlink_to(target)
+    (tmp_path / "dir-link").symlink_to(tmp_path / "real", target_is_directory=True)
+    (tmp_path / "dangling-link").symlink_to(tmp_path / "missing")
 
     paths = collect_paths(_config(tmp_path))
 
     assert "real/file.txt" in paths
-    assert not any(path.startswith("loop/") for path in paths)
+    assert not any("link" in path for path in paths)
 
 
 def test_missing_root_returns_empty(tmp_path: Path) -> None:
@@ -225,6 +277,38 @@ def test_context_falls_back_to_secure_defaults(tmp_path: Path, monkeypatch) -> N
     context = _file_index_context(tmp_path)
 
     assert ".env" in context.protected_paths
+
+
+def test_worker_snapshot_build_fails_closed_when_root_canonicalization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = FileIndexRequest(generation=1, cwd="/unresolvable/project")
+
+    def fail_resolve(*_args: object, **_kwargs: object) -> Path:
+        raise OSError("canonicalization failed")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    assert _build_file_index_snapshot(request) is None
+
+
+# --- formatting ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("src/app.py", "@src/app.py"),
+        ("my notes.md", '@"my notes.md"'),
+        ('say "hi".txt', '@"say \\"hi\\".txt"'),
+        ("back\\slash.txt", '@"back\\\\slash.txt"'),
+        ("control\x00name", '@"control\\u0000name"'),
+        ("资料/说明.md", "@资料/说明.md"),
+        ("资料/项目 说明.md", '@"资料/项目 说明.md"'),
+    ],
+)
+def test_formats_file_reference_with_json_quoting(path: str, expected: str) -> None:
+    assert format_file_reference(path) == expected
 
 
 # --- matching --------------------------------------------------------------

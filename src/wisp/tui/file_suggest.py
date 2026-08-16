@@ -24,7 +24,7 @@ from textual.content import Content, Span
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
-from wisp.tui.file_index import ScoredPath, filter_paths
+from wisp.tui.file_index import ProjectSnapshot, ScoredPath, filter_paths
 from wisp.tui.rendering import _truncate_to_cell_width
 
 
@@ -69,18 +69,25 @@ class FileSuggest(OptionList):
 
     def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
         super().__init__(id=id)
-        self._paths: tuple[str, ...] = ()
+        self._snapshot: ProjectSnapshot | None = None
         self._visible: tuple[ScoredPath, ...] = ()
         self._max_width = self._MAX_WIDTH_CEILING
 
-    def set_paths(self, paths: tuple[str, ...]) -> None:
-        """Install the candidate corpus (collected off-thread by the app)."""
+    def set_snapshot(self, snapshot: ProjectSnapshot | None) -> None:
+        """Atomically install or invalidate the immutable project snapshot."""
 
-        self._paths = paths
+        self._snapshot = snapshot
+        if snapshot is None or not snapshot.entries:
+            self.hide()
+            self.clear_options()
+
+    @property
+    def snapshot(self) -> ProjectSnapshot | None:
+        return self._snapshot
 
     @property
     def has_paths(self) -> bool:
-        return bool(self._paths)
+        return self._snapshot is not None and bool(self._snapshot.entries)
 
     def on_resize(self, event: events.Resize) -> None:
         # Same on_resize-driven pattern as SlashSuggest and StatusBar.
@@ -135,11 +142,12 @@ class FileSuggest(OptionList):
         """
 
         query = self.query_from_value(value, cursor)
-        if query is None or not self._paths:
+        snapshot = self._snapshot
+        if query is None or snapshot is None or not snapshot.entries:
             self.hide()
             return 0
 
-        matches = filter_paths(self._paths, query)
+        matches = filter_paths(snapshot.paths, query)
         self._visible = matches
         self.clear_options()
         if not matches:

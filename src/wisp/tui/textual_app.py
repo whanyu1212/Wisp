@@ -47,7 +47,13 @@ from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.diff_viewer import DiffViewer
-from wisp.tui.file_index import FileIndexConfig, collect_paths
+from wisp.tui.file_index import (
+    FileIndexConfig,
+    FileIndexRequest,
+    ProjectSnapshot,
+    collect_project_snapshot,
+    format_file_reference,
+)
 from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.overlay import (
     OverlayKind,
@@ -479,6 +485,10 @@ class TextualTui(App[None]):
         # applied mid-session. Held apart from the snapshot above so `None` keeps
         # meaning "nothing supplied"; see `set_picker_auth_path`.
         self._adopted_auth_paths: tuple[str, ...] = ()
+        self._file_index_generation = 0
+        self._file_index_cwd: str | None = None
+        self._file_index_request: FileIndexRequest | None = None
+        self._file_mention_active = False
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -744,13 +754,19 @@ class TextualTui(App[None]):
                 self.refresh_bindings()
             return
         if slash_matches:
+            self._file_mention_active = False
             self._file_suggest.hide()
             if menu_was_open != self._suggestion_menu_is_open():
                 self.refresh_bindings()
             return
-        self._file_suggest.show_for(
-            event.text_area.text, self._file_offset_of_cursor(event.text_area)
-        )
+        cursor = self._file_offset_of_cursor(event.text_area)
+        mention_active = FileSuggest.query_from_value(event.text_area.text, cursor) is not None
+        if mention_active and not self._file_mention_active:
+            # A mention session gets exactly one refresh. Reopening on the same root
+            # can continue displaying the immutable old snapshot while this runs.
+            self._refresh_file_suggestions()
+        self._file_mention_active = mention_active
+        self._file_suggest.show_for(event.text_area.text, cursor)
         if menu_was_open != self._suggestion_menu_is_open():
             self.refresh_bindings()
 
@@ -783,47 +799,106 @@ class TextualTui(App[None]):
         what the picker is willing to offer.
         """
 
-        pattern = auth_path.expanduser().resolve(strict=False).as_posix()
+        # Capture the caller's raw immutable input only. Canonicalization belongs to
+        # the index worker because even ``resolve(strict=False)`` may perform I/O or
+        # fail. Invalidate first so no old credential name remains activatable.
+        pattern = str(auth_path)
         if pattern not in self._adopted_auth_paths:
+            self._invalidate_file_snapshot()
             self._adopted_auth_paths = (*self._adopted_auth_paths, pattern)
 
-    def load_file_suggestions(self, cwd: str) -> None:
-        """Collect the `@`-picker corpus for `cwd`, off the event loop.
+    def _invalidate_file_snapshot(self) -> None:
+        """Synchronously hide indexed data and reject every older completion."""
 
-        Walking a real project costs hundreds of milliseconds of `os.scandir`, which
-        would visibly freeze every keystroke and animation if run inline. The walk is
-        syscall-bound, so a thread gives genuine concurrency here.
-        """
+        self._file_index_generation += 1
+        self._file_index_request = None
+        if self._file_suggest is not None:
+            self._file_suggest.set_snapshot(None)
+
+    def load_file_suggestions(self, cwd: str) -> FileIndexRequest | None:
+        """Capture and start one immutable off-thread snapshot request for ``cwd``."""
 
         picker = self._file_suggest
         if picker is None:
-            return
-        self._collect_file_suggestions(cwd, picker)
+            return None
+        raw_cwd = str(cwd)
+        if self._file_index_cwd is not None and raw_cwd != self._file_index_cwd:
+            # Compare only raw request identity here. A transition must hide the old
+            # corpus before the worker performs any fallible canonicalization.
+            self._invalidate_file_snapshot()
+        self._file_index_cwd = raw_cwd
+        return self._begin_file_index_request(
+            cwd=raw_cwd,
+            protected_paths=self._protected_paths,
+            adopted_auth_paths=self._adopted_auth_paths,
+            picker=picker,
+        )
+
+    def _refresh_file_suggestions(self) -> FileIndexRequest | None:
+        """Refresh the active root once at the start of an ``@`` mention session."""
+
+        picker = self._file_suggest
+        request = self._file_index_request
+        if picker is None or request is None:
+            return None
+        return self._begin_file_index_request(
+            cwd=request.cwd,
+            protected_paths=request.protected_paths,
+            adopted_auth_paths=request.adopted_auth_paths,
+            picker=picker,
+            max_entries=request.max_entries,
+            max_depth=request.max_depth,
+        )
+
+    def _begin_file_index_request(
+        self,
+        *,
+        cwd: str,
+        protected_paths: tuple[str, ...] | None,
+        adopted_auth_paths: tuple[str, ...],
+        picker: FileSuggest,
+        max_entries: int = 10_000,
+        max_depth: int = 12,
+    ) -> FileIndexRequest:
+        self._file_index_generation += 1
+        request = FileIndexRequest(
+            generation=self._file_index_generation,
+            cwd=cwd,
+            protected_paths=protected_paths,
+            adopted_auth_paths=adopted_auth_paths,
+            max_entries=max_entries,
+            max_depth=max_depth,
+        )
+        self._file_index_request = request
+        self._start_file_index_request(request, picker)
+        return request
+
+    def _start_file_index_request(self, request: FileIndexRequest, picker: FileSuggest) -> None:
+        """Narrow injectable seam between UI lifecycle and the Textual worker."""
+
+        self._collect_file_suggestions(request, picker)
 
     @work(thread=True, exclusive=True, group="file-suggest")
-    def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
-        root = Path(cwd)
-        context = _file_index_context(root, self._protected_paths, self._adopted_auth_paths)
-        paths = collect_paths(FileIndexConfig(root=root, context=context))
-        # Hop back to the event loop: widget state must not be mutated from a worker.
-        self.call_from_thread(self._install_file_suggestions, picker, paths)
+    def _collect_file_suggestions(self, request: FileIndexRequest, picker: FileSuggest) -> None:
+        snapshot = _build_file_index_snapshot(request)
+        # Exactly one event-loop hop installs the complete immutable snapshot.
+        self.call_from_thread(self._install_file_suggestions, request, picker, snapshot)
 
-    def _install_file_suggestions(self, picker: FileSuggest, paths: tuple[str, ...]) -> None:
-        """Install the corpus and re-evaluate any mention the user already typed.
+    def _install_file_suggestions(
+        self,
+        request: FileIndexRequest,
+        picker: FileSuggest,
+        snapshot: ProjectSnapshot | None,
+    ) -> None:
+        """Install only the newest request and re-evaluate a currently typed mention."""
 
-        The walk takes hundreds of milliseconds, so the user can easily type `@query`
-        before it lands. `show_for` hid the menu at the time because the corpus was
-        empty, and `set_paths` alone would not re-read the editor — the menu would
-        stay hidden until the next keystroke. Re-running the trigger scan here makes
-        simply waiting for indexing sufficient.
-
-        The scan is a no-op unless the caret is currently inside a mention, so this
-        never opens the menu on its own.
-        """
-
-        picker.set_paths(paths)
+        if request != self._file_index_request or request.generation != self._file_index_generation:
+            return
+        if picker is not self._file_suggest:
+            return
+        picker.set_snapshot(snapshot)
         editor = self._input
-        if editor is None or not paths:
+        if editor is None or snapshot is None or not snapshot.entries:
             return
         # An overlay or pending operation has already torn the composer down. The
         # worker is a background arrival, not user intent, so it must never revive
@@ -1410,12 +1485,10 @@ class TextualTui(App[None]):
         if query is None:
             return False
 
-        # The mention spans from its `@` through the fragment typed so far. A path
-        # containing a space would break the single-token grammar the trigger
-        # relies on, so quote it — mirroring how Toad emits `@"my file.py"`.
+        # The mention spans from its `@` through the fragment typed so far. The
+        # pure formatter applies standard JSON escaping whenever quoting is needed.
         start = cursor - len(query) - 1
-        rendered = f'@"{path}"' if " " in path else f"@{path}"
-        replacement = f"{rendered} "
+        replacement = f"{format_file_reference(path)} "
         editor.value = f"{value[:start]}{replacement}{value[cursor:]}"
         editor.cursor_position = start + len(replacement)
         picker.hide()
@@ -3046,6 +3119,32 @@ def _transcript_child_layout_pending(child: Widget) -> bool:
     if child.region.height > 0:
         return False
     return not isinstance(child, StreamMessage) or not child.has_measured_empty_render
+
+
+def _build_file_index_snapshot(request: FileIndexRequest) -> ProjectSnapshot | None:
+    """Resolve raw request inputs and collect a snapshot on the worker thread.
+
+    Canonicalization failures fail closed: the event-loop installer replaces any
+    surviving projection with ``None`` rather than exposing a stale corpus.
+    """
+
+    try:
+        root = Path(request.cwd).expanduser().resolve(strict=False)
+        adopted_auth_paths = tuple(
+            Path(path).expanduser().resolve(strict=False).as_posix()
+            for path in request.adopted_auth_paths
+        )
+        context = _file_index_context(root, request.protected_paths, adopted_auth_paths)
+        return collect_project_snapshot(
+            FileIndexConfig(
+                root=root,
+                context=context,
+                max_entries=request.max_entries,
+                max_depth=request.max_depth,
+            )
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _file_index_context(
