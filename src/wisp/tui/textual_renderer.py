@@ -549,9 +549,9 @@ class TextualTuiRenderer:
             if self._progress_active:
                 self.app.show_working_indicator()
             overflow_retry_failed = event.reason == "overflow" and not event.will_retry
-            if (event.outcome == "failed" and event.reason in {"manual", "overflow"}) or (
-                event.outcome == "completed" and overflow_retry_failed
-            ):
+            if (
+                event.outcome == "failed" and event.reason in {"manual", "overflow", "threshold"}
+            ) or (event.outcome == "completed" and overflow_retry_failed):
                 if event.reason == "overflow":
                     self._overflow_recovery_failed = True
                 self.app.write_error(_compaction_completed_text(event))

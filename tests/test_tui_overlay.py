@@ -220,3 +220,61 @@ def test_prompt_history_interrupt_closes_overlay_and_restores_viewport() -> None
     assert not harness.history.is_open
     assert harness.composer.display is True
     assert len(harness.deferred) == 1
+
+
+def test_deferred_restore_applies_when_nothing_else_transitions_first() -> None:
+    # Baseline for the regression below: with no intervening transition, the
+    # deferred restore queued by close() must still apply when it finally runs.
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.open(OverlayKind.prompt_history, preserve_viewport=True)
+    harness.history.open = True
+    controller.close(OverlayKind.prompt_history)
+
+    assert len(harness.deferred) == 1
+    harness.deferred[0]()
+    assert harness.transcript.restored == [harness.transcript.state]
+
+
+def test_deferred_restore_is_dropped_by_a_later_overlay_transition() -> None:
+    # Regression: a restore queued by close() must not apply once a later
+    # open()/start_operation() has begun a new transition. Without the
+    # generation guard, the stale closure would silently overwrite whatever
+    # scroll state the second overlay's own lifecycle has since established —
+    # the same "deferred async work forgets the state that scheduled it" bug
+    # class already fixed in Transcript's follow-intent tracking.
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.open(OverlayKind.prompt_history, preserve_viewport=True)
+    harness.history.open = True
+    controller.close(OverlayKind.prompt_history)
+    assert len(harness.deferred) == 1
+    pending_restore = harness.deferred[0]
+
+    # A second, unrelated overlay opens before the first restore's deferred
+    # callback has run — e.g. an approval prompt arriving right after the
+    # reader dismissed the prompt-history picker.
+    controller.open(OverlayKind.decision)
+
+    pending_restore()
+    assert harness.transcript.restored == []
+
+
+def test_deferred_restore_is_dropped_by_a_later_operation() -> None:
+    # Same guarantee, but the intervening transition is a non-visual operation
+    # (e.g. a session switch) rather than another overlay.
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.open(OverlayKind.prompt_history, preserve_viewport=True)
+    harness.history.open = True
+    controller.close(OverlayKind.prompt_history)
+    assert len(harness.deferred) == 1
+    pending_restore = harness.deferred[0]
+
+    controller.start_operation(OverlayOperation.session_switch)
+
+    pending_restore()
+    assert harness.transcript.restored == []

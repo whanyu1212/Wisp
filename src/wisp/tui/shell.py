@@ -1660,6 +1660,19 @@ class TuiShell:
             self.state.rendered_tokens = False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event
+            if self.state.cancel_requested:
+                # A cancel for this command was already sent before the agent
+                # reached its approval checkpoint. The event still arrives over
+                # the RPC transport, but reopening a prompt for a turn the user
+                # is actively aborting would contradict their cancel and could
+                # mislead them into thinking it didn't register. Deny quietly —
+                # the eventual RpcCommandFinished(cancelled) unwinds the rest.
+                return await self._answer_pending_approval(
+                    "",
+                    approved=False,
+                    reason="Denied from TUI: cancelling",
+                    exit_after_denial=False,
+                )
             self.state.status = TuiStatus.waiting_for_approval
             self._sync_view()
             self.renderer.approval_request(event)
@@ -1964,9 +1977,20 @@ class TuiShell:
                 self.renderer.notice(
                     "Plan mode enabled." if pending.mode == "plan" else "Build mode enabled."
                 )
-            self.view.context = None
+            if (
+                pending.provider is not None
+                or pending.model is not None
+                or pending.mode is not None
+            ):
+                # A provider/model change can move the context window or
+                # pricing; a mode switch changes the estimate too (plan mode
+                # adds PLAN_MODE_SYSTEM_PROMPT and restricts _effective_tools()
+                # to read-only, both of which CodingSession.get_session_stats()
+                # folds into its estimate). Effort and auto-compaction toggles
+                # affect neither, so those alone still skip the round trip.
+                self.view.context = None
+                await self._request_session_stats()
             self._sync_view()
-            await self._request_session_stats()
             return
         message = event.error or "configure failed"
         if pending.provider is not None:

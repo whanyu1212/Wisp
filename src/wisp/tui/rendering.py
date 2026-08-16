@@ -424,6 +424,13 @@ class LineTuiRenderer:
                 event.outcome != "completed" or not event.will_retry
             ):
                 self.console.print(f"[red]{_markup_escape(text)}[/red]")
+            elif event.outcome == "failed":
+                # Catches "manual" (the default reason) and any future reason
+                # not already special-cased above. Without this, a failed
+                # manual /compact rendered as plain unstyled text -- less
+                # visually distinct than a routine successful compaction,
+                # which gets Rich's automatic number-highlighting.
+                self.console.print(f"[red]{_markup_escape(text)}[/red]")
             else:
                 self.console.print(text, markup=False)
         elif isinstance(event, MessageCompleted) and event.content:
@@ -709,9 +716,16 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def token_delta(self, delta: str) -> None:
-        previous_lines = len(self._rendered_transcript_lines())
+        # Only the streaming entry can have grown here -- the rest of
+        # state.transcript is untouched by a token append. Re-wrapping just
+        # that one entry, before and after, keeps this O(len(streaming_text))
+        # instead of O(len(transcript) + len(streaming_text)) per token; the
+        # naive `len(self._rendered_transcript_lines())` before/after used to
+        # re-wrap the entire prior transcript from scratch on every token.
+        previous_lines = self._rendered_streaming_entry_line_count()
         self.state.streaming_text += delta
-        self._preserve_scroll_after_line_count_change(previous_lines)
+        appended_lines = self._rendered_streaming_entry_line_count() - previous_lines
+        self._preserve_scroll_after_appended_lines(appended_lines)
         # The layout foundation still uses line-oriented input and a plain
         # console renderer. Redrawing the full layout for every token would
         # append repeated frames when clear_screen is disabled, so coalesce
@@ -1039,6 +1053,19 @@ class FullscreenTuiRenderer:
         start = max(0, end - visible_count)
         return entries[start:end]
 
+    def _rendered_streaming_entry_line_count(self) -> int:
+        """Rendered line count of the in-progress streaming entry alone.
+
+        Used by token_delta() to measure how many lines one delta added
+        without re-wrapping the rest of the transcript, which is unaffected
+        by a token append.
+        """
+
+        if not self.state.streaming_text:
+            return 0
+        entry = TuiTranscriptEntry("assistant", self.state.streaming_text, "green")
+        return len(self._rendered_entry_lines(entry))
+
     def _rendered_transcript_lines(self) -> list[_RenderedTranscriptLine]:
         lines: list[_RenderedTranscriptLine] = []
         for entry in self._transcript_entries():
@@ -1080,11 +1107,6 @@ class FullscreenTuiRenderer:
 
     def _max_transcript_scroll_offset(self) -> int:
         return max(0, len(self._rendered_transcript_lines()) - self._transcript_view_entries())
-
-    def _preserve_scroll_after_line_count_change(self, previous_lines: int) -> None:
-        self._preserve_scroll_after_appended_lines(
-            len(self._rendered_transcript_lines()) - previous_lines
-        )
 
     def _preserve_scroll_after_appended_lines(self, appended_lines: int) -> None:
         if self.state.transcript_scroll_offset > 0:

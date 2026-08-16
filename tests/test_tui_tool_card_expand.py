@@ -192,6 +192,17 @@ def test_no_truncation_marker_when_tool_returned_everything() -> None:
     assert "truncated at the tool's limit" not in _rendered(card)  # expanded
 
 
+def test_tool_card_disables_markup_parsing_like_every_other_content_static() -> None:
+    # Defense-in-depth: every other content-bearing Static in widgets.py that
+    # renders untrusted tool/model text passes markup=False. _repaint() always
+    # wraps its content through Content(...) (never .from_markup), so this is
+    # currently inert -- but it must stay false so a future call site that
+    # updates the widget with a raw str directly can't reopen markup
+    # injection the way the rest of the module is guarded against.
+    card = ToolCard("read", {"path": "foo.py"})
+    assert card._render_markup is False
+
+
 def test_expanded_output_stays_literal_no_markup_injection() -> None:
     # Full output containing color-span markup must render literally when expanded,
     # never parsed — the same out-of-band styling guarantee as the collapsed views.

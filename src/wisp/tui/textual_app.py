@@ -2108,16 +2108,23 @@ class TextualTui(App[None]):
         self._connect_oauth_hook = hook
 
     def request_latest_history(self) -> bool:
-        """Schedule a durable latest-page reload requested by history retention."""
+        """Schedule a durable latest-page reload requested by history retention.
+
+        Routes through ``_start_live_history_reload`` (an ungated primitive —
+        it does not itself check ``_live_history_reload_needed``) rather than
+        launching the worker directly, so ``_live_history_reload_pending`` is
+        recorded here the same as it is for the other caller
+        (``_request_live_history_reload``). Without that, a caller could
+        follow this call with its own ``_request_live_history_reload()`` in
+        the same tick and find ``_live_history_reload_pending`` still
+        ``False``, dispatching a second, redundant ``history-latest-reload``
+        worker for the same reload.
+        """
 
         hook = self._history_latest_request_hook
         if hook is None:
             return False
-        self.run_worker(
-            hook(),
-            group="history-latest-reload",
-            exit_on_error=False,
-        )
+        self._start_live_history_reload(hook)
         return True
 
     def history_is_at_top(self) -> bool:

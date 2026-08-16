@@ -880,3 +880,39 @@ def test_tui_shell_eof_waits_for_compaction_and_drops_follow_ups() -> None:
         assert controller.shutdown_count == 1
 
     anyio.run(run)
+
+
+def test_tui_shell_denies_approval_that_arrives_after_cancel_without_reopening_prompt() -> None:
+    # Regression: the agent can decide to call an approval-requiring tool and
+    # only then reach the checkpoint where cancellation actually takes effect.
+    # If the reader's cancel is sent first, ToolApprovalRequested for that same
+    # in-flight command can still arrive afterward. It must be auto-denied
+    # quietly -- reopening the prompt would contradict a cancel the reader
+    # already sent and could mislead them into thinking it didn't register.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+
+        should_exit = await shell._cancel_current("cancelling")
+        assert should_exit is False
+        assert controller.cancelled == ["prompt-1"]
+
+        should_exit = await shell._handle_rpc_event(
+            ToolApprovalRequested(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            )
+        )
+
+        assert should_exit is False
+        assert shell.state.pending_approval is None
+        assert shell.state.status is not TuiStatus.waiting_for_approval
+        assert controller.approvals == [("call-1", False, "Denied from TUI: cancelling")]
+        assert "approval required" not in output.getvalue()
+
+    anyio.run(run)

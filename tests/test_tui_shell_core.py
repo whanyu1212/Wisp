@@ -344,6 +344,10 @@ def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
 
         assert shell.current_mode == "plan"
         assert shell.view.mode == "plan"
+        # A mode switch changes the estimate CodingSession.get_session_stats()
+        # returns (plan mode adds a system prompt and restricts tools to
+        # read-only), so it must still trigger a session-stats refresh.
+        assert controller.session_stats_requests == ["session-stats-1"]
 
         await shell._handle_input_line(_InputLine("/build", _InputMode.idle))
         assert controller.agent_modes == ["plan", "build"]
@@ -602,7 +606,9 @@ def test_tui_context_toggle_uses_typed_configure_and_rejects_busy_commands() -> 
             RpcCommandFinished(command_id="configure-1", command_type="configure", ok=True)
         )
         assert "Automatic compaction disabled." in renderer.notices
-        assert controller.session_stats_requests == ["session-stats-1"]
+        # Regression: an auto-compaction toggle can't move the context window
+        # or cost, so it must not trigger a redundant session-stats round trip.
+        assert controller.session_stats_requests == []
 
         shell.state.current_command_id = "prompt-1"
         shell.state.current_command_type = "prompt"

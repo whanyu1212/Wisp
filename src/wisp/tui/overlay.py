@@ -113,6 +113,10 @@ class TextualOverlayController:
         self._stale_event_barrier = 0.0
         self._viewport_owner: OverlayKind | None = None
         self._viewport_state: TranscriptViewportState | None = None
+        # Bumped on every transition that could race a still-pending deferred
+        # restore (see _restore_viewport_for). The deferred closure captures its
+        # generation and no-ops if a later transition has since moved on.
+        self._viewport_generation = 0
 
     @property
     def active_overlay(self) -> OverlayKind | None:
@@ -209,6 +213,11 @@ class TextualOverlayController:
         self._stale_event_barrier = self._clock()
         for suggestion in self._suggestions:
             suggestion.hide()
+        # Invalidate any deferred viewport restore still queued from a prior
+        # close() (see _restore_viewport_for): once a new transition begins,
+        # that snapshot no longer describes the surface the reader is looking
+        # at, so it must not be allowed to apply when it finally fires.
+        self._viewport_generation += 1
 
     def _hide_all_overlays(self) -> None:
         for surface in self._overlays.values():
@@ -230,7 +239,17 @@ class TextualOverlayController:
             return
         state = self._viewport_state
         self._clear_viewport_state()
-        self._defer_after_refresh(lambda: self._transcript.restore_viewport_state(state))
+        generation = self._viewport_generation
+        self._defer_after_refresh(lambda: self._apply_deferred_restore(generation, state))
+
+    def _apply_deferred_restore(self, generation: int, state: TranscriptViewportState) -> None:
+        # A later open()/start_operation() has since begun a new transition —
+        # this snapshot describes a surface the reader has already left.
+        # Applying it now would silently overwrite whatever scroll state that
+        # later transition (or the reader) has since established.
+        if generation != self._viewport_generation:
+            return
+        self._transcript.restore_viewport_state(state)
 
     def _clear_viewport_state(self) -> None:
         self._viewport_owner = None

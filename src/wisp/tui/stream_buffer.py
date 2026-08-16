@@ -382,6 +382,27 @@ class MarkdownStreamController:
     def _anchor_stream_tail(self, turn: _StreamTurn, transcript: Transcript) -> None:
         """Pin one followed stream inside the compositor pass that grows it."""
 
+        if (
+            self._anchored_turn is turn
+            and self._anchored_transcript is transcript
+            and transcript.is_anchored
+        ):
+            # Already anchored to this turn from an earlier drain of the same
+            # paced stream -- re-arming would re-run Textual's anchor(True),
+            # which stops any in-flight scroll animation and re-derives
+            # scroll_target_y, on every one of the ~4-15 drains/sec a single
+            # streaming turn produces. The compositor's own anchored-arrange
+            # pass is what actually keeps the view pinned as content grows.
+            #
+            # transcript.is_anchored must be checked too, not just our own
+            # bookkeeping: something outside this controller (e.g. card-focus
+            # handling in textual_app.py) can call transcript.anchor(False)
+            # directly, disarming the transcript without going through
+            # _release_stream_anchor. Our _anchored_turn/_anchored_transcript
+            # would still (correctly) name this turn as the one we intend to
+            # keep following, but the transcript's live anchor is off, so it
+            # must be re-armed on the next drain rather than skipped.
+            return
         transcript.anchor()
         self._anchored_turn = turn
         self._anchored_transcript = transcript
