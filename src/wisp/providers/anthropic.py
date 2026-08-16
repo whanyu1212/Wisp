@@ -150,6 +150,17 @@ class AnthropicProvider:
         self._retry_policy = retry_policy or RetryPolicy()
         self._replays = ContinuationStore[tuple[MessageParam, ...]]()
 
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        """Reject fresh tool replay while adaptive thinking is enabled.
+
+        Anthropic requires signed thinking blocks to be preserved byte-for-byte
+        beside their tool uses. ``Message`` snapshots intentionally retain only
+        portable text and tool data, so a replacement cannot safely rebuild a
+        tool exchange when ``effort`` enabled adaptive thinking.
+        """
+
+        return effort is None
+
     async def stream(
         self,
         messages: Sequence[Message],

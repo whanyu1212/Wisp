@@ -475,6 +475,7 @@ def _tool_call_from_google(
         arguments=cast(JsonObject, arguments),
         raw_arguments=dumps(arguments),
         response_id=response_id,
+        provider_call_id=_normalize_optional(function_call.id),
     )
 
 
@@ -487,6 +488,11 @@ def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content
     """Encode fresh base context without flattening an active tool exchange."""
 
     contents: list[genai_types.Content] = []
+    # `ToolCallSnapshot.call_id` is Wisp's stable execution key. Gemini can
+    # omit the wire function-call ID, in which case that key is synthetic and
+    # must not be replayed as a Gemini-issued ID. Track the separate wire ID
+    # from each preceding assistant tool call for its matching result.
+    provider_call_ids: dict[str, str | None] = {}
     for message in messages:
         if message.role == "system":
             continue
@@ -497,7 +503,7 @@ def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content
                     parts=[
                         genai_types.Part(
                             function_response=genai_types.FunctionResponse(
-                                id=message.tool_call_id,
+                                id=provider_call_ids.get(message.tool_call_id),
                                 name=message.tool_name or message.tool_call_id,
                                 response={
                                     "error" if message.is_error else "output": message.content
@@ -512,16 +518,17 @@ def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content
             parts: list[genai_types.Part] = []
             if message.content:
                 parts.append(genai_types.Part(text=message.content))
-            parts.extend(
-                genai_types.Part(
-                    function_call=genai_types.FunctionCall(
-                        id=tool_call.call_id,
-                        name=tool_call.name,
-                        args=dict(tool_call.arguments),
+            for tool_call in message.tool_calls:
+                provider_call_ids[tool_call.call_id] = tool_call.provider_call_id
+                parts.append(
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(
+                            id=tool_call.provider_call_id,
+                            name=tool_call.name,
+                            args=dict(tool_call.arguments),
+                        )
                     )
                 )
-                for tool_call in message.tool_calls
-            )
             contents.append(genai_types.Content(role="model", parts=parts))
             continue
         role = "model" if message.role == "assistant" else "user"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 JsonObject = Mapping[str, object]
@@ -21,6 +21,10 @@ class ToolCall:
     arguments: JsonObject
     raw_arguments: str = ""
     response_id: str | None = None
+    # Some providers assign a local fallback so Wisp can correlate execution
+    # results even when their wire protocol omitted a function-call ID. Keep
+    # the original provider-issued ID separately for faithful fresh replay.
+    provider_call_id: str | None = field(default=None, compare=False)
     parse_error: str | None = None
 
 

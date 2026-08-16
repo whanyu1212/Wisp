@@ -70,6 +70,13 @@ class CacheAwareScriptedProvider(ScriptedProvider):
     supports_prompt_cache_key = True
 
 
+class OpaqueReplayScriptedProvider(ScriptedProvider):
+    """Scripted provider that cannot fresh-replay opaque tool-turn state."""
+
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        return effort is None
+
+
 class RecordingToolExecutor:
     def __init__(self) -> None:
         self.calls: list[ToolCall] = []
@@ -698,6 +705,49 @@ def test_request_boundary_hook_rejects_interleaved_or_mismatched_tool_replacemen
             pass
 
     with pytest.raises(RequestBoundaryUnsupportedError, match="unpaired structured tool exchange"):
+        anyio.run(run)
+    assert len(provider.calls) == 1
+
+
+def test_request_boundary_hook_rejects_opaque_structured_tool_replacement() -> None:
+    """Providers may guard configurations with unrepresentable native blocks."""
+
+    provider = OpaqueReplayScriptedProvider([_completed_stream("first")])
+    hook = RecordingRequestBoundaryHook(
+        [
+            RequestBoundaryDecision(
+                messages=(
+                    Message(
+                        role="assistant",
+                        content="",
+                        tool_calls=(
+                            ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
+                        ),
+                    ),
+                    Message(
+                        role="tool",
+                        content="tool output",
+                        tool_call_id="call-1",
+                        tool_name="lookup",
+                    ),
+                )
+            )
+        ]
+    )
+
+    async def run() -> None:
+        async for _event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                request_boundary_hook=hook,
+                effort="high",
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            pass
+
+    with pytest.raises(RequestBoundaryUnsupportedError, match="cannot fresh-replay"):
         anyio.run(run)
     assert len(provider.calls) == 1
 

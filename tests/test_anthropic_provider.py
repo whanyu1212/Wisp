@@ -62,6 +62,13 @@ _EXPECTED_USAGE = ProviderUsage(
 )
 
 
+def test_anthropic_provider_allows_structured_replacement_without_adaptive_thinking() -> None:
+    provider = AnthropicProvider(api_key="test-key")
+
+    assert provider.supports_structured_tool_replacement(effort=None)
+    assert not provider.supports_structured_tool_replacement(effort="high")
+
+
 class StubAnthropicProvider(AnthropicProvider):
     def __init__(self, events: Sequence[RawMessageStreamEvent]) -> None:
         super().__init__(api_key="test-key", default_model="default-test-model")

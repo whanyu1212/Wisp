@@ -147,6 +147,9 @@ class ToolCallSnapshot(BaseModel):
     call_id: str
     name: str
     arguments: JsonObject
+    # Runtime-only provider metadata used to reconstruct a fresh active tool
+    # exchange. It is intentionally absent from persisted/public events.
+    provider_call_id: str | None = Field(default=None, exclude=True, repr=False)
     parse_error: str | None = None
 
 

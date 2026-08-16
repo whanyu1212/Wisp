@@ -56,6 +56,7 @@ from wisp.providers.base import (
     PromptCacheKeyProvider,
     Provider,
     ProviderProtocolError,
+    StructuredToolReplacementProvider,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
@@ -253,6 +254,12 @@ async def _at_request_boundary(
             raise RequestBoundaryUnsupportedError(
                 "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
             )
+        if any(_is_tool_shaped(message) for message in decision.messages) and not (
+            _provider_supports_structured_tool_replacement(config.provider, effort=config.effort)
+        ):
+            raise RequestBoundaryUnsupportedError(
+                "The provider cannot fresh-replay a structured tool exchange for this effort"
+            )
         # A replacement is caller-owned, self-contained context. It may retain
         # the active structured tool pair; each adapter is responsible for
         # encoding that fresh context natively. Extras become part of the fresh
@@ -298,6 +305,18 @@ def _provider_supports_continuation_messages(provider: Provider) -> bool:
 
 def _provider_supports_prompt_cache_key(provider: Provider) -> bool:
     return getattr(provider, "supports_prompt_cache_key", False) is True
+
+
+def _provider_supports_structured_tool_replacement(
+    provider: Provider, *, effort: str | None
+) -> bool:
+    """Negotiate an optional guard for opaque provider-native replay state."""
+
+    capability = getattr(provider, "supports_structured_tool_replacement", None)
+    if not callable(capability):
+        return True
+    replacement_provider = cast(StructuredToolReplacementProvider, provider)
+    return replacement_provider.supports_structured_tool_replacement(effort=effort)
 
 
 def _provider_stream(
@@ -972,6 +991,7 @@ async def run_agent_loop(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=dict(tool_call.arguments),
+                    provider_call_id=tool_call.provider_call_id,
                     parse_error=tool_call.parse_error,
                 )
                 for tool_call in tool_calls

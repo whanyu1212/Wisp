@@ -799,7 +799,12 @@ def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> N
             role="assistant",
             content="checking",
             tool_calls=(
-                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+                ToolCallSnapshot(
+                    call_id="call-1",
+                    name="lookup",
+                    arguments={"query": "wisp"},
+                    provider_call_id="call-1",
+                ),
             ),
         ),
         WispMessage(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
@@ -826,6 +831,43 @@ def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> N
         id="call-1", name="lookup", response={"output": "found it"}
     )
     assert contents[3] == genai_types.Content(role="user", parts=[genai_types.Part(text="steered")])
+
+
+def test_google_provider_omits_synthetic_ids_in_fresh_tool_exchange() -> None:
+    """Fresh replacement context must not invent Gemini function-call IDs."""
+
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [
+        WispMessage(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCallSnapshot(call_id="call-lookup-0", name="lookup", arguments={}),),
+        ),
+        WispMessage(
+            role="tool",
+            content="found it",
+            tool_call_id="call-lookup-0",
+            tool_name="lookup",
+        ),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(messages, model="gemini-test")  # noqa: SLF001
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    model_call = stub_models.calls[0]["contents"][0].parts[0].function_call
+    tool_result = stub_models.calls[0]["contents"][1].parts[0].function_response
+    assert model_call is not None
+    assert model_call.id is None
+    assert tool_result is not None
+    assert tool_result.id is None
+    assert tool_result.name == "lookup"
 
 
 def test_google_provider_replays_clean_response_before_appended_user_message() -> None:
