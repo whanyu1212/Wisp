@@ -654,17 +654,25 @@ and source layout before creating project-specific guidance. It only works in bu
 normal project-trust and write-approval flow, and refuses to replace an existing `AGENTS.md` or
 `AGENTS.MD`. The final write is create-only, so a file that appears during inspection is preserved.
 
-Type `/` to filter commands inline. Type `@` to reference a project file — an inline picker filters
-as you type, matching loosely so `@tuiapp` finds `src/wisp/tui/textual_app.py`. Only the path is
-inserted; Wisp does not inline file contents, and the listing honors the same `protected_paths`
-policy, so secrets are never offered.
+Type `/` to filter commands inline. Type `@` to reference a project file. The picker starts in
+fuzzy mode and matches loosely, so `@tuiapp` finds `src/wisp/tui/textual_app.py`; press `Tab` to
+switch to a project tree without changing the draft or query, and press `Tab` again to return.
+`Up`/`Down` move the selection. In tree mode, `Left`/`Right` collapse or expand a directory, while
+`Enter` (or a click) expands/collapses directories and inserts files. Fuzzy mode retains directory
+insertion for compatibility. `Escape` dismisses the picker without changing the draft. Only the path is
+inserted; Wisp does not inline file contents, and the shared snapshot honors the same
+`protected_paths` policy, so secrets are never offered. A visible limit cue means the indexed
+snapshot omitted paths rather than proving a directory is empty.
 
 ### Keybindings
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit |
+| `Enter` | Submit, or activate the selected slash/file-picker item |
 | `Shift+Enter` / `Ctrl+J` | Insert newline (`Ctrl+J` in the live fullscreen renderer) |
+| `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
+| `Up` / `Down` | Move through an active suggestion menu |
+| `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
 | `Ctrl+G` | Toggle contextual help for the focused Textual surface |

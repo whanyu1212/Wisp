@@ -47,7 +47,13 @@ from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.diff_viewer import DiffViewer
-from wisp.tui.file_index import FileIndexConfig, collect_paths
+from wisp.tui.file_index import (
+    FileIndexConfig,
+    FileIndexRequest,
+    ProjectSnapshot,
+    collect_project_snapshot,
+    format_file_reference,
+)
 from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.overlay import (
     OverlayKind,
@@ -443,7 +449,9 @@ class TextualTui(App[None]):
         ),
         Binding("up", "menu_move(-1)", "Previous suggestion", priority=True, show=False),
         Binding("down", "menu_move(1)", "Next suggestion", priority=True, show=False),
-        Binding("tab", "menu_complete", "Complete suggestion", priority=True, show=False),
+        Binding("left", "file_tree_move(False)", "Collapse directory", priority=True, show=False),
+        Binding("right", "file_tree_move(True)", "Expand directory", priority=True, show=False),
+        Binding("tab", "menu_complete", "Complete / switch picker", priority=True, show=False),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+t", "toggle_theme", "Light/dark", priority=True, show=False),
@@ -479,6 +487,9 @@ class TextualTui(App[None]):
         # applied mid-session. Held apart from the snapshot above so `None` keeps
         # meaning "nothing supplied"; see `set_picker_auth_path`.
         self._adopted_auth_paths: tuple[str, ...] = ()
+        self._file_index_generation = 0
+        self._file_index_cwd: str | None = None
+        self._file_index_request: FileIndexRequest | None = None
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -692,11 +703,10 @@ class TextualTui(App[None]):
         typed name before Enter dispatches them.
         """
 
-        # An open file menu claims Enter first: the user is picking a path, not
-        # submitting the prompt. Completion leaves the line intact for further
-        # typing, so this always swallows the keypress.
-        if self._file_suggest is not None and self._file_suggest.is_open:
-            if self._complete_path_from_menu():
+        # An active file picker claims Enter first: files are inserted and tree
+        # directories expand/collapse without submitting the prompt.
+        if self._file_suggest is not None and self._file_suggest.is_active:
+            if self._activate_file_picker():
                 return True
 
         suggest = self._suggest
@@ -744,15 +754,38 @@ class TextualTui(App[None]):
                 self.refresh_bindings()
             return
         if slash_matches:
-            self._file_suggest.hide()
+            self._file_suggest.end_mention()
             if menu_was_open != self._suggestion_menu_is_open():
                 self.refresh_bindings()
             return
-        self._file_suggest.show_for(
-            event.text_area.text, self._file_offset_of_cursor(event.text_area)
-        )
+        self._sync_file_suggest(event.text_area)
         if menu_was_open != self._suggestion_menu_is_open():
             self.refresh_bindings()
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        """Keep a cursor-relative mention synchronized on caret-only movement."""
+
+        if event.text_area is not self._input or self._file_suggest is None:
+            return
+        menu_was_open = self._suggestion_menu_is_open()
+        if self._suggest is not None and self._suggest.is_open:
+            self._file_suggest.end_mention()
+        else:
+            self._sync_file_suggest(event.text_area)
+        if menu_was_open != self._suggestion_menu_is_open():
+            self.refresh_bindings()
+
+    def _sync_file_suggest(self, editor: TextArea) -> None:
+        picker = self._file_suggest
+        if picker is None:
+            return
+        cursor = self._file_offset_of_cursor(editor)
+        mention_was_active = picker.mention_active
+        picker.show_for(editor.text, cursor)
+        if picker.mention_active and not mention_was_active:
+            # A mention session gets exactly one refresh. Reopening on the same root
+            # can continue displaying the immutable old snapshot while this runs.
+            self._refresh_file_suggestions()
 
     @staticmethod
     def _file_offset_of_cursor(editor: TextArea) -> int:
@@ -783,47 +816,106 @@ class TextualTui(App[None]):
         what the picker is willing to offer.
         """
 
-        pattern = auth_path.expanduser().resolve(strict=False).as_posix()
+        # Capture the caller's raw immutable input only. Canonicalization belongs to
+        # the index worker because even ``resolve(strict=False)`` may perform I/O or
+        # fail. Invalidate first so no old credential name remains activatable.
+        pattern = str(auth_path)
         if pattern not in self._adopted_auth_paths:
+            self._invalidate_file_snapshot()
             self._adopted_auth_paths = (*self._adopted_auth_paths, pattern)
 
-    def load_file_suggestions(self, cwd: str) -> None:
-        """Collect the `@`-picker corpus for `cwd`, off the event loop.
+    def _invalidate_file_snapshot(self) -> None:
+        """Synchronously hide indexed data and reject every older completion."""
 
-        Walking a real project costs hundreds of milliseconds of `os.scandir`, which
-        would visibly freeze every keystroke and animation if run inline. The walk is
-        syscall-bound, so a thread gives genuine concurrency here.
-        """
+        self._file_index_generation += 1
+        self._file_index_request = None
+        if self._file_suggest is not None:
+            self._file_suggest.set_snapshot(None)
+
+    def load_file_suggestions(self, cwd: str) -> FileIndexRequest | None:
+        """Capture and start one immutable off-thread snapshot request for ``cwd``."""
 
         picker = self._file_suggest
         if picker is None:
-            return
-        self._collect_file_suggestions(cwd, picker)
+            return None
+        raw_cwd = str(cwd)
+        if self._file_index_cwd is not None and raw_cwd != self._file_index_cwd:
+            # Compare only raw request identity here. A transition must hide the old
+            # corpus before the worker performs any fallible canonicalization.
+            self._invalidate_file_snapshot()
+        self._file_index_cwd = raw_cwd
+        return self._begin_file_index_request(
+            cwd=raw_cwd,
+            protected_paths=self._protected_paths,
+            adopted_auth_paths=self._adopted_auth_paths,
+            picker=picker,
+        )
+
+    def _refresh_file_suggestions(self) -> FileIndexRequest | None:
+        """Refresh the active root once at the start of an ``@`` mention session."""
+
+        picker = self._file_suggest
+        request = self._file_index_request
+        if picker is None or request is None:
+            return None
+        return self._begin_file_index_request(
+            cwd=request.cwd,
+            protected_paths=request.protected_paths,
+            adopted_auth_paths=request.adopted_auth_paths,
+            picker=picker,
+            max_entries=request.max_entries,
+            max_depth=request.max_depth,
+        )
+
+    def _begin_file_index_request(
+        self,
+        *,
+        cwd: str,
+        protected_paths: tuple[str, ...] | None,
+        adopted_auth_paths: tuple[str, ...],
+        picker: FileSuggest,
+        max_entries: int = 10_000,
+        max_depth: int = 12,
+    ) -> FileIndexRequest:
+        self._file_index_generation += 1
+        request = FileIndexRequest(
+            generation=self._file_index_generation,
+            cwd=cwd,
+            protected_paths=protected_paths,
+            adopted_auth_paths=adopted_auth_paths,
+            max_entries=max_entries,
+            max_depth=max_depth,
+        )
+        self._file_index_request = request
+        self._start_file_index_request(request, picker)
+        return request
+
+    def _start_file_index_request(self, request: FileIndexRequest, picker: FileSuggest) -> None:
+        """Narrow injectable seam between UI lifecycle and the Textual worker."""
+
+        self._collect_file_suggestions(request, picker)
 
     @work(thread=True, exclusive=True, group="file-suggest")
-    def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
-        root = Path(cwd)
-        context = _file_index_context(root, self._protected_paths, self._adopted_auth_paths)
-        paths = collect_paths(FileIndexConfig(root=root, context=context))
-        # Hop back to the event loop: widget state must not be mutated from a worker.
-        self.call_from_thread(self._install_file_suggestions, picker, paths)
+    def _collect_file_suggestions(self, request: FileIndexRequest, picker: FileSuggest) -> None:
+        snapshot = _build_file_index_snapshot(request)
+        # Exactly one event-loop hop installs the complete immutable snapshot.
+        self.call_from_thread(self._install_file_suggestions, request, picker, snapshot)
 
-    def _install_file_suggestions(self, picker: FileSuggest, paths: tuple[str, ...]) -> None:
-        """Install the corpus and re-evaluate any mention the user already typed.
+    def _install_file_suggestions(
+        self,
+        request: FileIndexRequest,
+        picker: FileSuggest,
+        snapshot: ProjectSnapshot | None,
+    ) -> None:
+        """Install only the newest request and re-evaluate a currently typed mention."""
 
-        The walk takes hundreds of milliseconds, so the user can easily type `@query`
-        before it lands. `show_for` hid the menu at the time because the corpus was
-        empty, and `set_paths` alone would not re-read the editor — the menu would
-        stay hidden until the next keystroke. Re-running the trigger scan here makes
-        simply waiting for indexing sufficient.
-
-        The scan is a no-op unless the caret is currently inside a mention, so this
-        never opens the menu on its own.
-        """
-
-        picker.set_paths(paths)
+        if request != self._file_index_request or request.generation != self._file_index_generation:
+            return
+        if picker is not self._file_suggest:
+            return
+        picker.set_snapshot(snapshot)
         editor = self._input
-        if editor is None or not paths:
+        if editor is None or snapshot is None or not snapshot.entries:
             return
         # An overlay or pending operation has already torn the composer down. The
         # worker is a background arrival, not user intent, so it must never revive
@@ -1294,77 +1386,51 @@ class TextualTui(App[None]):
             return
         await super().on_event(event)
 
-    async def on_key(self, event: events.Key) -> None:
-        # Menu-scoped keys, handled only while a menu is open so normal input (Tab
-        # focus, Escape, arrows in the editor) is untouched otherwise. Enter is
-        # intentionally NOT intercepted — on_input_submitted runs the line, and
-        # _accept_menu_highlight_on_enter decides whether a menu claims it first.
-        file_suggest = self._file_suggest
-        if file_suggest is not None and file_suggest.is_open:
-            if event.key in {"down", "up", "tab", "escape"}:
-                if event.key == "down":
-                    file_suggest.action_cursor_down()
-                elif event.key == "up":
-                    file_suggest.action_cursor_up()
-                elif event.key == "tab":
-                    self._complete_path_from_menu()
-                else:
-                    # Dismiss but keep whatever the user typed.
-                    file_suggest.hide()
-                    self.refresh_bindings()
-                event.prevent_default()
-                event.stop()
-            return
-
-        suggest = self._suggest
-        if suggest is None or not suggest.is_open:
-            return
-        if event.key == "down":
-            suggest.action_cursor_down()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "up":
-            suggest.action_cursor_up()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "tab":
-            self._complete_from_menu()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "escape":
-            # Dismiss but keep whatever the user typed.
-            suggest.hide()
-            self.refresh_bindings()
-            event.prevent_default()
-            event.stop()
-
     def _suggestion_menu_is_open(self) -> bool:
         return bool(
             (self._file_suggest is not None and self._file_suggest.is_open)
             or (self._suggest is not None and self._suggest.is_open)
         )
 
+    def _file_picker_is_active(self) -> bool:
+        return self._file_suggest is not None and self._file_suggest.is_active
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"menu_move", "menu_complete"}:
-            return self._suggestion_menu_is_open()
+            return self._file_picker_is_active() or bool(
+                self._suggest is not None and self._suggest.is_open
+            )
+        if action == "file_tree_move":
+            return bool(
+                self._file_suggest is not None
+                and self._file_suggest.is_active
+                and self._file_suggest.is_tree_mode
+            )
         return super().check_action(action, parameters)
 
     def action_menu_move(self, direction: int) -> None:
-        menu = (
-            self._file_suggest
-            if self._file_suggest is not None and self._file_suggest.is_open
-            else self._suggest
-        )
-        if menu is None or not menu.is_open:
+        picker = self._file_suggest
+        if picker is not None and picker.is_active:
+            picker.move_selection(direction)
+            return
+        suggest = self._suggest
+        if suggest is None or not suggest.is_open:
             return
         if direction < 0:
-            menu.action_cursor_up()
+            suggest.action_cursor_up()
         else:
-            menu.action_cursor_down()
+            suggest.action_cursor_down()
+
+    def action_file_tree_move(self, expand: bool) -> None:
+        picker = self._file_suggest
+        if picker is not None:
+            picker.move_tree_horizontal(expand=expand)
 
     def action_menu_complete(self) -> None:
-        if self._file_suggest is not None and self._file_suggest.is_open:
-            self._complete_path_from_menu()
+        picker = self._file_suggest
+        if picker is not None and picker.is_active:
+            # Tab changes project-file presentation; Enter performs activation.
+            picker.toggle_mode()
         else:
             self._complete_from_menu()
         self.refresh_bindings()
@@ -1384,41 +1450,43 @@ class TextualTui(App[None]):
         suggest.hide()
         self.refresh_bindings()
 
-    def _complete_path_from_menu(self) -> bool:
-        """Replace the in-progress `@query` with the highlighted path.
+    def on_file_suggest_activation_requested(self, event: FileSuggest.ActivationRequested) -> None:
+        """Route mouse rows through the same activation seam as Enter."""
 
-        Unlike `_complete_from_menu`, this must NOT use `prefill_command` — that
-        replaces the whole buffer, which is right for a slash command that owns the
-        line but would destroy the surrounding prose of a mid-prompt mention. Only
-        the `@…` span itself is spliced, and the caret lands after the inserted
-        path so typing continues naturally.
+        self._activate_file_picker(event.path)
 
-        Returns whether a completion was applied.
-        """
+    def _activate_file_picker(self, requested_path: str | None = None) -> bool:
+        """Activate a picker row and splice an insertable path into the draft."""
 
         picker = self._file_suggest
         editor = self._input
-        if picker is None or editor is None or not picker.is_open:
+        if picker is None or editor is None:
             return False
-        path = picker.highlighted_path()
-        if path is None:
-            return False
-
         value = editor.text
         cursor = self._file_offset_of_cursor(editor)
         query = picker.query_from_value(value, cursor)
-        if query is None:
+        if query is None or query != picker.current_query or not picker.is_active:
+            # A caret move can race a keyboard/mouse activation message. Reconcile
+            # from the authoritative editor first and perform no picker side effect.
+            picker.show_for(value, cursor)
+            self.refresh_bindings()
             return False
 
-        # The mention spans from its `@` through the fragment typed so far. A path
-        # containing a space would break the single-token grammar the trigger
-        # relies on, so quote it — mirroring how Toad emits `@"my file.py"`.
+        activation = picker.activate(requested_path)
+        if not activation.handled:
+            return False
+        path = activation.insertion_path
+        if path is None:
+            # Tree directories only expand/collapse and still consume Enter/click.
+            return True
+
+        # Keyboard and mouse both use this pure formatter and this one splice.
         start = cursor - len(query) - 1
-        rendered = f'@"{path}"' if " " in path else f"@{path}"
-        replacement = f"{rendered} "
+        replacement = f"{format_file_reference(path)} "
         editor.value = f"{value[:start]}{replacement}{value[cursor:]}"
         editor.cursor_position = start + len(replacement)
-        picker.hide()
+        picker.end_mention()
+        editor.focus()
         self.refresh_bindings()
         return True
 
@@ -1602,8 +1670,8 @@ class TextualTui(App[None]):
         """Dismiss the nearest UI layer, then fall back to shell cancellation."""
 
         file_suggest = self._file_suggest
-        if file_suggest is not None and file_suggest.is_open:
-            file_suggest.hide()
+        if file_suggest is not None and file_suggest.is_active:
+            file_suggest.dismiss()
             self.refresh_bindings()
             return
         suggest = self._suggest
@@ -3046,6 +3114,32 @@ def _transcript_child_layout_pending(child: Widget) -> bool:
     if child.region.height > 0:
         return False
     return not isinstance(child, StreamMessage) or not child.has_measured_empty_render
+
+
+def _build_file_index_snapshot(request: FileIndexRequest) -> ProjectSnapshot | None:
+    """Resolve raw request inputs and collect a snapshot on the worker thread.
+
+    Canonicalization failures fail closed: the event-loop installer replaces any
+    surviving projection with ``None`` rather than exposing a stale corpus.
+    """
+
+    try:
+        root = Path(request.cwd).expanduser().resolve(strict=False)
+        adopted_auth_paths = tuple(
+            Path(path).expanduser().resolve(strict=False).as_posix()
+            for path in request.adopted_auth_paths
+        )
+        context = _file_index_context(root, request.protected_paths, adopted_auth_paths)
+        return collect_project_snapshot(
+            FileIndexConfig(
+                root=root,
+                context=context,
+                max_entries=request.max_entries,
+                max_depth=request.max_depth,
+            )
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _file_index_context(
