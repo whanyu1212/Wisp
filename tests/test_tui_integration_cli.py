@@ -3767,6 +3767,50 @@ def test_textual_latest_history_reload_does_not_repeat_without_new_eviction() ->
     assert not reload_needed
 
 
+def test_textual_deferred_history_reload_covers_evictions_before_request_start() -> None:
+    async def scenario() -> tuple[int, int | None, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        reload_scheduled = anyio.Event()
+        start_request = anyio.Event()
+        reload_finished = anyio.Event()
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count
+            reload_scheduled.set()
+            await start_request.wait()
+            request_count += 1
+            renderer.capture_latest_history_reload()
+            renderer.replace_latest_history_entries(())
+            reload_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+            app_instance.live_transcript_widget_evicted(Widget())
+            with anyio.fail_after(5):
+                await reload_scheduled.wait()
+
+            app_instance.live_transcript_widget_evicted(Widget())
+            generation_before_request = app_instance._live_history_reload_generation
+            start_request.set()
+            with anyio.fail_after(5):
+                await reload_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                generation_before_request,
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, generation_before_request, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 1
+    assert generation_before_request is None
+    assert not reload_pending
+    assert not reload_needed
+
+
 @pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
 def test_textual_backward_navigation_recovers_evicted_live_history(navigation: str) -> None:
     async def scenario() -> tuple[int, list[str], float, bool]:

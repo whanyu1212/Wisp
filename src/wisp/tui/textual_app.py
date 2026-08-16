@@ -2244,15 +2244,20 @@ class TextualTui(App[None]):
         self._start_live_history_reload(request_latest)
 
     def _start_live_history_reload(self, request_latest: Callable[[], Awaitable[None]]) -> None:
-        """Start one serialized reload and remember which evictions it can cover."""
+        """Start one serialized reload."""
 
         self._live_history_reload_pending = True
-        self._live_history_reload_generation = self._live_history_eviction_generation
         self.run_worker(
             request_latest(),
             group="history-latest-reload",
             exit_on_error=False,
         )
+
+    def capture_live_history_reload(self) -> None:
+        """Record the evictions covered when the durable request actually starts."""
+
+        if self._live_history_reload_pending:
+            self._live_history_reload_generation = self._live_history_eviction_generation
 
     def live_history_reloaded(self) -> None:
         """Finish one reload and repeat it if newer output was evicted in flight."""
