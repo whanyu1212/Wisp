@@ -3811,6 +3811,55 @@ def test_textual_deferred_history_reload_covers_evictions_before_request_start()
     assert not reload_needed
 
 
+def test_textual_user_requested_latest_reload_repeats_after_overlapping_eviction() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        first_request_started = anyio.Event()
+        release_first_response = anyio.Event()
+        second_request_finished = anyio.Event()
+        request_in_flight = False
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count, request_in_flight
+            if request_in_flight:
+                return
+            request_in_flight = True
+            request_count += 1
+            request_number = request_count
+            renderer.capture_latest_history_reload()
+            if request_number == 1:
+                first_request_started.set()
+                await release_first_response.wait()
+            request_in_flight = False
+            renderer.replace_latest_history_entries(())
+            if request_number == 2:
+                second_request_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+            assert app_instance.request_latest_history()
+            with anyio.fail_after(5):
+                await first_request_started.wait()
+
+            app_instance.live_transcript_widget_evicted(Widget())
+            release_first_response.set()
+            with anyio.fail_after(5):
+                await second_request_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 2
+    assert not reload_pending
+    assert not reload_needed
+
+
 @pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
 def test_textual_backward_navigation_recovers_evicted_live_history(navigation: str) -> None:
     async def scenario() -> tuple[int, list[str], float, bool]:
