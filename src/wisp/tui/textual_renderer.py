@@ -365,6 +365,7 @@ class TextualTuiRenderer:
         self.app.live_history_reload_failed()
 
     def capture_latest_history_reload(self) -> None:
+        self.app.capture_live_history_reload()
         self._history.capture_latest_reload_live_entries()
 
     def queued_prompts_cleared(self) -> None:

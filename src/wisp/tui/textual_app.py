@@ -521,6 +521,8 @@ class TextualTui(App[None]):
         self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
+        self._live_history_eviction_generation = 0
+        self._live_history_reload_generation: int | None = None
         self._live_history_recovery_navigation: HistoryNavigation | None = None
         self._live_history_recovery_blocked = False
         self._history_marker: Widget | None = None
@@ -2057,6 +2059,8 @@ class TextualTui(App[None]):
         self._prepending_history = False
         self._live_history_reload_pending = False
         self._live_history_reload_needed = False
+        self._live_history_eviction_generation = 0
+        self._live_history_reload_generation = None
         self._live_history_recovery_navigation = None
         self._live_history_recovery_blocked = False
         self._history_prepend_mounts.clear()
@@ -2157,6 +2161,7 @@ class TextualTui(App[None]):
         hook = self._live_widget_evicted_hook
         if hook is not None:
             hook(widget)
+        self._live_history_eviction_generation += 1
         self._live_history_reload_needed = True
         self._request_live_history_reload()
 
@@ -2202,12 +2207,7 @@ class TextualTui(App[None]):
             navigation.remaining_rows,
             transcript.follow_generation,
         )
-        self._live_history_reload_pending = True
-        self.run_worker(
-            request_latest(),
-            group="history-latest-reload",
-            exit_on_error=False,
-        )
+        self._start_live_history_reload(request_latest)
 
     def consume_live_history_recovery(self) -> HistoryNavigation | None:
         """Return a still-valid backward recovery intent for the renderer."""
@@ -2241,6 +2241,11 @@ class TextualTui(App[None]):
             or not transcript.is_following
         ):
             return
+        self._start_live_history_reload(request_latest)
+
+    def _start_live_history_reload(self, request_latest: Callable[[], Awaitable[None]]) -> None:
+        """Start one serialized reload."""
+
         self._live_history_reload_pending = True
         self.run_worker(
             request_latest(),
@@ -2248,18 +2253,30 @@ class TextualTui(App[None]):
             exit_on_error=False,
         )
 
-    def live_history_reloaded(self) -> None:
-        """Allow another durable refresh after the current live-eviction reload settles."""
+    def capture_live_history_reload(self) -> None:
+        """Record the evictions covered when the durable request actually starts."""
 
+        self._live_history_reload_generation = self._live_history_eviction_generation
+
+    def live_history_reloaded(self) -> None:
+        """Finish one reload and repeat it if newer output was evicted in flight."""
+
+        covered_generation = self._live_history_reload_generation
         self._live_history_reload_pending = False
-        self._live_history_reload_needed = False
+        self._live_history_reload_generation = None
+        self._live_history_reload_needed = (
+            covered_generation is not None
+            and covered_generation != self._live_history_eviction_generation
+        )
         self._live_history_recovery_navigation = None
         self._live_history_recovery_blocked = False
+        self._request_live_history_reload()
 
     def live_history_recovery_deferred(self) -> None:
         """Release an unsafe oldest-window recovery without losing tail reload work."""
 
         self._live_history_reload_pending = False
+        self._live_history_reload_generation = None
         self._live_history_recovery_navigation = None
         self._live_history_recovery_blocked = True
 
@@ -2267,6 +2284,7 @@ class TextualTui(App[None]):
         """Release a failed request while retaining recovery work for a later retry."""
 
         self._live_history_reload_pending = False
+        self._live_history_reload_generation = None
         self._live_history_recovery_navigation = None
 
     def set_live_widget_evicted_hook(self, hook: Callable[[Widget], None]) -> None:
@@ -2769,7 +2787,9 @@ class TextualTui(App[None]):
         ):
             return
         viewport_height = transcript.scrollable_content_region.height
-        if viewport_height <= 0 or any(child.region.height <= 0 for child in transcript.children):
+        if viewport_height <= 0 or any(
+            _transcript_child_layout_pending(child) for child in transcript.children
+        ):
             self.call_after_refresh(
                 self._request_history_if_still_at_top,
                 transcript,
@@ -2777,8 +2797,9 @@ class TextualTui(App[None]):
                 epoch,
             )
             return
-        # A mounted widget occupies at least one row, so child count is a stable
-        # lower bound even while Textual is still updating virtual geometry.
+        # Child count remains a conservative lower bound while Textual updates
+        # virtual geometry. A measured-empty Markdown child still contributes to
+        # that bound even though it occupies no visible rows.
         # Never request another page merely because scroll_y has not caught up.
         if (
             len(transcript.children) > viewport_height
@@ -3012,6 +3033,14 @@ def _historical_message_needs_markdown(message: str) -> bool:
         return True
     first, separator, _rest = message.lstrip().partition(" ")
     return bool(separator and first.rstrip(".)").isdigit())
+
+
+def _transcript_child_layout_pending(child: Widget) -> bool:
+    """Return whether a zero-height transcript child has not completed measurement."""
+
+    if child.region.height > 0:
+        return False
+    return not isinstance(child, StreamMessage) or not child.has_measured_empty_render
 
 
 def _file_index_context(

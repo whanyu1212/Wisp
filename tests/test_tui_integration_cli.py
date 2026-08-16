@@ -49,6 +49,7 @@ from wisp.tui.textual_app import (
     _EMPTY_TRANSCRIPT_TAGLINE,
     TextualTui,
     TextualTuiRenderer,
+    _transcript_child_layout_pending,
     create_textual_tui,
 )
 from wisp.tui.transcript_window import (
@@ -3662,6 +3663,204 @@ def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() 
     assert resumed_requests == 1
 
 
+def test_textual_output_survives_eviction_during_latest_history_reload() -> None:
+    async def scenario() -> tuple[int, list[str], bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        first_request_started = anyio.Event()
+        release_first_response = anyio.Event()
+        second_request_finished = anyio.Event()
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count
+            request_count += 1
+            request_number = request_count
+            renderer.capture_latest_history_reload()
+            if request_number == 1:
+                first_request_started.set()
+                await release_first_response.wait()
+                entries = range(1, 76)
+            else:
+                entries = range(76, 151)
+            renderer.replace_latest_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(
+                        role="assistant",
+                        content=f"message {index}",
+                    )
+                    for index in entries
+                )
+            )
+            if request_number == 2:
+                second_request_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+
+            # Production retention limits trigger a latest-page reload here.
+            for index in range(1, 76):
+                message = f"message {index}"
+                widget = app_instance.write_assistant(message)
+                assert widget is not None
+                renderer._history.record_live_message("assistant", message, widget=widget)
+                app_instance.settle_stream_widget(widget)
+
+            with anyio.fail_after(5):
+                await first_request_started.wait()
+
+            # These messages are newer than the in-flight durable snapshot. The
+            # first ones are evicted before that stale snapshot is reconciled.
+            for index in range(76, 151):
+                message = f"message {index}"
+                widget = app_instance.write_assistant(message)
+                assert widget is not None
+                renderer._history.record_live_message("assistant", message, widget=widget)
+                app_instance.settle_stream_widget(widget)
+
+            release_first_response.set()
+            with anyio.fail_after(5):
+                await second_request_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                _transcript_texts(app_instance),
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, texts, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 2
+    assert all(texts.count(f"message {index}") == 1 for index in range(76, 151))
+    assert not reload_pending
+    assert not reload_needed
+
+
+def test_textual_latest_history_reload_does_not_repeat_without_new_eviction() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        reload_finished = anyio.Event()
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count
+            request_count += 1
+            renderer.capture_latest_history_reload()
+            renderer.replace_latest_history_entries(())
+            reload_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+            app_instance.live_transcript_widget_evicted(Widget())
+            with anyio.fail_after(5):
+                await reload_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 1
+    assert not reload_pending
+    assert not reload_needed
+
+
+def test_textual_deferred_history_reload_covers_evictions_before_request_start() -> None:
+    async def scenario() -> tuple[int, int | None, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        reload_scheduled = anyio.Event()
+        start_request = anyio.Event()
+        reload_finished = anyio.Event()
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count
+            reload_scheduled.set()
+            await start_request.wait()
+            request_count += 1
+            renderer.capture_latest_history_reload()
+            renderer.replace_latest_history_entries(())
+            reload_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+            app_instance.live_transcript_widget_evicted(Widget())
+            with anyio.fail_after(5):
+                await reload_scheduled.wait()
+
+            app_instance.live_transcript_widget_evicted(Widget())
+            generation_before_request = app_instance._live_history_reload_generation
+            start_request.set()
+            with anyio.fail_after(5):
+                await reload_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                generation_before_request,
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, generation_before_request, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 1
+    assert generation_before_request is None
+    assert not reload_pending
+    assert not reload_needed
+
+
+def test_textual_user_requested_latest_reload_repeats_after_overlapping_eviction() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        first_request_started = anyio.Event()
+        release_first_response = anyio.Event()
+        second_request_finished = anyio.Event()
+        request_in_flight = False
+        request_count = 0
+
+        async def request_latest() -> None:
+            nonlocal request_count, request_in_flight
+            if request_in_flight:
+                return
+            request_in_flight = True
+            request_count += 1
+            request_number = request_count
+            renderer.capture_latest_history_reload()
+            if request_number == 1:
+                first_request_started.set()
+                await release_first_response.wait()
+            request_in_flight = False
+            renderer.replace_latest_history_entries(())
+            if request_number == 2:
+                second_request_finished.set()
+
+        async with app_instance.run_test() as pilot:
+            app_instance.set_history_latest_request_hook(request_latest)
+            assert app_instance.request_latest_history()
+            with anyio.fail_after(5):
+                await first_request_started.wait()
+
+            app_instance.live_transcript_widget_evicted(Widget())
+            release_first_response.set()
+            with anyio.fail_after(5):
+                await second_request_finished.wait()
+            await pilot.pause()
+            return (
+                request_count,
+                app_instance._live_history_reload_pending,
+                app_instance._live_history_reload_needed,
+            )
+
+    request_count, reload_pending, reload_needed = anyio.run(scenario)
+
+    assert request_count == 2
+    assert not reload_pending
+    assert not reload_needed
+
+
 @pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
 def test_textual_backward_navigation_recovers_evicted_live_history(navigation: str) -> None:
     async def scenario() -> tuple[int, list[str], float, bool]:
@@ -5224,6 +5423,47 @@ def test_textual_transcript_loads_history_when_the_initial_page_fits() -> None:
             return requests
 
     assert anyio.run(scenario) == 1
+
+
+def test_textual_resumed_history_accepts_a_zero_height_message_as_settled() -> None:
+    async def scenario() -> tuple[int, tuple[tuple[bool, bool, bool], ...]]:
+        app_instance, renderer = create_textual_tui()
+        request_started = anyio.Event()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+            request_started.set()
+
+        async with app_instance.run_test(size=(80, 24)):
+            renderer.replace_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="\n"),),
+                session_label="Restored session",
+            )
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            with anyio.fail_after(5):
+                await request_started.wait()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return requests, tuple(
+                (
+                    isinstance(child, StreamMessage),
+                    isinstance(child, StreamMessage) and child.has_measured_empty_render,
+                    _transcript_child_layout_pending(child),
+                )
+                for child in transcript.children
+                if child.region.height == 0
+            )
+
+    pending_markdown = StreamMessage("nonempty")
+    assert pending_markdown.region.height == 0
+    assert _transcript_child_layout_pending(pending_markdown)
+
+    requests, zero_height_children = anyio.run(scenario)
+
+    assert requests == 1
+    assert zero_height_children == ((True, True, False),)
 
 
 def test_textual_transcript_waits_for_layout_before_requesting_history() -> None:
