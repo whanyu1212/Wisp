@@ -71,8 +71,9 @@ class StubGoogleProvider(GoogleProvider):
 
 
 class FailingGoogleProvider(GoogleProvider):
-    def __init__(self) -> None:
+    def __init__(self, message: str = "boom") -> None:
         super().__init__(api_key="test-key", default_model="default-test-model")
+        self.message = message
 
     async def _create_stream(
         self,
@@ -86,7 +87,7 @@ class FailingGoogleProvider(GoogleProvider):
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         async def stream() -> AsyncIterator[genai_types.GenerateContentResponse]:
             yield _text_chunk("partial")
-            raise httpx.ConnectError("boom")
+            raise httpx.ConnectError(self.message)
 
         return stream()
 
@@ -391,6 +392,25 @@ def test_google_provider_emits_failed_terminal_on_stream_error() -> None:
     assert isinstance(events[2], ProviderResponseFailed)
     assert events[2].partial_content == "partial"
     assert provider._replays.get("previous-response") is None  # noqa: SLF001
+
+
+def test_google_provider_preserves_replay_after_context_overflow() -> None:
+    provider = FailingGoogleProvider("maximum context length exceeded")
+    provider._replays.remember("previous-response", ())  # noqa: SLF001
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")],
+                previous_response_id="previous-response",
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert isinstance(events[-1], ProviderResponseFailed)
+    assert provider._replays.get("previous-response") == ()  # noqa: SLF001
 
 
 def test_google_provider_emits_failed_terminal_when_stream_ends_without_finish_reason() -> None:

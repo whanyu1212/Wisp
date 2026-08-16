@@ -6,7 +6,7 @@ from typing import cast
 
 import anyio
 import pytest
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, OpenAIError
 from openai.types.chat import ChatCompletionChunk
 from pytest import MonkeyPatch
 
@@ -31,7 +31,7 @@ from wisp.providers.openai_compatible import OpenAICompatibleProvider
 
 
 class _StubStream:
-    def __init__(self, chunks: Sequence[ChatCompletionChunk]) -> None:
+    def __init__(self, chunks: Sequence[ChatCompletionChunk | Exception]) -> None:
         self._chunks = iter(chunks)
         self.closed = False
 
@@ -40,16 +40,19 @@ class _StubStream:
 
     async def __anext__(self) -> ChatCompletionChunk:
         try:
-            return next(self._chunks)
+            item = next(self._chunks)
         except StopIteration:
             raise StopAsyncIteration from None
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     async def close(self) -> None:
         self.closed = True
 
 
 class _StubCompletions:
-    def __init__(self, responses: Sequence[Sequence[ChatCompletionChunk]]) -> None:
+    def __init__(self, responses: Sequence[Sequence[ChatCompletionChunk | Exception]]) -> None:
         self._responses = iter(responses)
         self.calls: list[dict[str, object]] = []
         self.streams: list[_StubStream] = []
@@ -100,7 +103,7 @@ def _chunk(
 
 
 def _provider(
-    responses: Sequence[Sequence[ChatCompletionChunk]],
+    responses: Sequence[Sequence[ChatCompletionChunk | Exception]],
 ) -> tuple[OpenAICompatibleProvider, _StubCompletions]:
     completions = _StubCompletions(responses)
     client = cast(AsyncOpenAI, _StubClient(completions))
@@ -177,6 +180,16 @@ def test_streams_text_and_usage_and_closes_stream() -> None:
     assert completed.usage.cache_read_input_tokens == 1
     assert completed.usage.reasoning_output_tokens == 1
     assert completions.streams[0].closed is True
+
+
+def test_preserves_continuation_after_context_overflow() -> None:
+    provider, _ = _provider([[OpenAIError("maximum context length exceeded")]])
+    provider._continuations.remember("previous-response", ())  # noqa: SLF001
+
+    events = _collect(provider, previous_response_id="previous-response")
+
+    assert isinstance(events[-1], ProviderResponseFailed)
+    assert provider._continuations.get("previous-response") is not None  # noqa: SLF001
 
 
 def test_serializes_tools_effort_and_fragmented_parallel_tool_calls() -> None:

@@ -1020,6 +1020,16 @@ async def run_agent_loop(
                     raise
 
             if request_overflow_error is not None:
+                # A provider may open a public response lifecycle and then
+                # raise instead of yielding a typed terminal failure. Close
+                # that lifecycle before recovery starts another turn.
+                if lifecycle.started:
+                    yield MessageCompleted(
+                        turn=turn,
+                        content="".join(lifecycle.text),
+                        finish_reason="error",
+                        response_id=lifecycle.started_response_id,
+                    )
                 # Preserve the historical raised-overflow path for callers
                 # without an explicit same-loop recovery hook. The outer
                 # handler owns its public terminal events and re-raises.

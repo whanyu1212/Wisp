@@ -30,6 +30,7 @@ from wisp.events import (
     ContextEstimated,
     ContextOverflow,
     MessageCompleted,
+    MessageStarted,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallSnapshot,
@@ -40,7 +41,12 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
-from wisp.providers.base import ProviderProtocolError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ContextOverflowError,
+    ProviderProtocolError,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -2815,6 +2821,82 @@ def test_request_boundary_context_rebase_rejects_stale_continuation() -> None:
 
     anyio.run(run)
     assert len(provider.calls) == 1
+
+
+def test_raised_context_overflow_closes_started_message_before_retry() -> None:
+    """A raised overflow must settle the public response before a retry turn."""
+
+    class StartedOverflowProvider:
+        name = "started-overflow"
+        default_model = "test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+            effort: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del messages, model, tools, tool_results, previous_response_id, effort
+            self.calls += 1
+            yield ProviderResponseStarted(
+                model="test",
+                response_id="failed-response" if self.calls == 1 else "recovered-response",
+            )
+            if self.calls == 1:
+                raise ContextOverflowError("maximum context length exceeded")
+            yield ProviderResponseCompleted(
+                content="recovered",
+                response_id="recovered-response",
+            )
+
+    class RecoverOverflow:
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> RequestBoundaryDecision:
+            del snapshot
+            return RequestBoundaryDecision(
+                messages=(Message(role="user", content="compacted summary"),)
+            )
+
+    provider = StartedOverflowProvider()
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    context_overflow_hook=RecoverOverflow(),
+                ),
+                messages=(Message(role="user", content="long prompt"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    lifecycle_events = [
+        event for event in events if isinstance(event, MessageStarted | MessageCompleted)
+    ]
+    assert [type(event) for event in lifecycle_events] == [
+        MessageStarted,
+        MessageCompleted,
+        MessageStarted,
+        MessageCompleted,
+    ]
+    failed_completion = lifecycle_events[1]
+    assert isinstance(failed_completion, MessageCompleted)
+    assert failed_completion.finish_reason == "error"
+    assert failed_completion.response_id == "failed-response"
+    assert [event.turn for event in events if isinstance(event, TurnCompleted)] == [1, 2]
+    assert provider.calls == 2
 
 
 def test_context_overflow_hook_retries_in_the_same_loop() -> None:
