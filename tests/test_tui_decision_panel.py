@@ -7,6 +7,7 @@ from unittest import mock
 
 import anyio
 import pytest
+from rich.cells import cell_len
 from textual import events
 from textual.app import App
 from textual.widgets import OptionList, Static
@@ -17,9 +18,12 @@ from wisp.tui.decision_content import (
     _approval_content,
     _bounded_decision_preview,
     _bounded_tool_session_option_name,
+    _decision_notice,
+    _DecisionRole,
     _trust_content,
 )
 from wisp.tui.textual_app import create_textual_tui
+from wisp.tui.theme import WISP_THEMES
 from wisp.tui.widgets import (
     DecisionPanel,
 )
@@ -64,13 +68,13 @@ def test_bounded_tool_session_option_name_truncates_long_names() -> None:
     assert truncated[:-1] == long_name[:29]
 
 
-def test_bounded_tool_session_option_name_collapses_embedded_newlines() -> None:
-    # A character-count cap alone doesn't stop an embedded newline from still
-    # splitting the option onto a second rendered line — collapse first.
+def test_bounded_tool_session_option_name_collapses_controls_and_bounds_display_cells() -> None:
     assert _bounded_tool_session_option_name("bash\ntool") == "bash tool"
     assert _bounded_tool_session_option_name("a\r\nb\rc\nd") == "a b c d"
+    assert _bounded_tool_session_option_name("bash\ttool") == "bash tool"
     assert "\n" not in _bounded_tool_session_option_name("x\n" * 30)
     assert "\r" not in _bounded_tool_session_option_name("x\r" * 30)
+    assert cell_len(_bounded_tool_session_option_name("界" * 30)) <= 30
 
 
 def test_bash_approval_content_summarizes_command_context() -> None:
@@ -84,7 +88,7 @@ def test_bash_approval_content_summarizes_command_context() -> None:
     )
 
     assert content.title == "Run command?"
-    assert content.meta == "bash - command execution\ncwd: /work/project"
+    assert content.meta == "! COMMAND EXECUTION · bash\ncwd: /work/project"
     assert content.detail == "$ uv run pytest\n  echo done\ntimeout: 30s"
 
 
@@ -148,11 +152,11 @@ def test_write_and_edit_approval_content_are_bounded_and_structured() -> None:
     )
 
     assert write.title == "Write file?"
-    assert write.meta == "notes.txt\nfile mutation - cwd: /work/project"
+    assert write.meta == "△ MODIFIES FILES · notes.txt\ncwd: /work/project"
     assert write.detail.startswith("content: 6 lines, 11 bytes\na\nb")
     assert write.detail.endswith("... preview truncated")
     assert edit.title == "Edit file?"
-    assert edit.meta == "app.py\nfile mutation - cwd: /work/project"
+    assert edit.meta == "△ MODIFIES FILES · app.py\ncwd: /work/project"
     assert "replacements: 3" in edit.detail
     assert "- old one\n+ new one" in edit.detail
     assert "- old two" in edit.detail
@@ -171,14 +175,87 @@ def test_custom_approval_content_uses_sorted_json_instead_of_repr() -> None:
     assert "{'a': True}" not in content.detail
 
 
+@pytest.mark.parametrize(
+    ("safety", "role", "category"),
+    [
+        ("read", _DecisionRole.READ, "○ READ-ONLY ACCESS"),
+        ("mutating", _DecisionRole.MUTATING, "△ MUTATING OPERATION"),
+        ("command", _DecisionRole.COMMAND, "! COMMAND EXECUTION"),
+    ],
+)
+def test_custom_approval_content_uses_authoritative_safety_category(
+    safety: Literal["read", "mutating", "command"],
+    role: _DecisionRole,
+    category: str,
+) -> None:
+    content = _approval_content(
+        _approval("extension-tool", {"target": "opaque"}, safety=safety),
+        cwd="/work/project",
+    )
+
+    assert content.role is role
+    assert content.meta == f"{category} · extension-tool\ncwd: /work/project"
+    if safety == "mutating":
+        assert "MODIFIES FILES" not in content.meta
+
+
+def test_known_tool_name_does_not_override_authoritative_safety_category() -> None:
+    content = _approval_content(
+        _approval(
+            "write",
+            {"path": "notes.txt", "content": "hello"},
+            safety="read",
+        ),
+        cwd="/work/project",
+    )
+
+    assert content.role is _DecisionRole.READ
+    assert content.meta == "○ READ-ONLY ACCESS · notes.txt\ncwd: /work/project"
+    assert "MODIFIES FILES" not in content.meta
+
+
+def test_custom_approval_detail_is_bounded_and_keeps_markup_literal() -> None:
+    content = _approval_content(
+        _approval(
+            "extension-tool",
+            {"payload": "[bold red]literal[/bold red]" + ("x" * 500)},
+        ),
+        cwd="/work/project",
+    )
+
+    assert "[bold red]literal[/bold red]" in content.detail
+    assert content.detail.endswith("... preview truncated")
+    assert len(content.detail) < 350
+
+
+def test_complete_decision_notice_bounds_untrusted_names_paths_and_cwd() -> None:
+    content = _approval_content(
+        _approval(
+            "[red]" + ("界" * 300) + "[/red]",
+            {"payload": "x" * 1000},
+        ),
+        cwd="/" + ("very-long/" * 100),
+    )
+    notice = _decision_notice(content)
+
+    assert cell_len(content.title) <= 96
+    assert all(cell_len(line) <= 160 for line in content.meta.splitlines())
+    assert len(notice) <= 680
+    assert notice.endswith("... preview truncated")
+    assert "界" * 100 not in notice
+
+
 def test_trust_content_explains_scope_without_implying_persistence() -> None:
     content = _trust_content(
         TrustRequested(request_id="trust-1", project_path=Path("/work/project"))
     )
 
     assert content.title == "Trust this project?"
-    assert content.meta == "/work/project"
-    assert content.detail == ("Trusting allows project-local settings and instructions to load.")
+    assert content.meta == "◆ PROJECT TRUST · /work/project"
+    assert content.detail == (
+        "Trusting loads project-controlled settings, instructions, and skills. "
+        "It does not bypass tool approvals."
+    )
 
 
 def test_approval_panel_defaults_to_approve_once_and_preserves_composer_draft() -> None:
@@ -299,7 +376,109 @@ def test_approval_panel_matches_main_background_and_has_border() -> None:
 
     background, app_background, border = anyio.run(scenario)
     assert background == app_background
-    assert all(edge[0] == "round" for edge in border)
+    assert all(edge[0] == "heavy" for edge in border)
+
+
+@pytest.mark.parametrize("theme", [theme.name for theme in WISP_THEMES])
+def test_decision_panel_roles_use_theme_semantic_styles(theme: str) -> None:
+    async def scenario() -> list[tuple[set[str], str, str, str]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.theme = theme
+            await pilot.pause()
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            title = app.query_one("#decision-title", Static)
+            role_classes = {
+                "decision--read",
+                "decision--mutating",
+                "decision--command",
+                "decision--trust",
+                "decision--fallback",
+            }
+            states: list[tuple[set[str], str, str, str]] = []
+
+            for event in (
+                _approval("inspect", {"path": "README.md"}, safety="read"),
+                _approval("write", {"path": "notes.txt", "content": "hello"}),
+                _approval("bash", {"command": "echo hi"}, safety="command"),
+            ):
+                renderer.approval_request(event)
+                await pilot.pause()
+                states.append(
+                    (
+                        {name for name in role_classes if panel.has_class(name)},
+                        panel.styles.border_top[0],
+                        panel.styles.border_top[1].hex.lower(),
+                        title.styles.color.hex.lower(),
+                    )
+                )
+
+            renderer.trust_request(
+                TrustRequested(request_id="trust-1", project_path=Path("/work/project"))
+            )
+            await pilot.pause()
+            states.append(
+                (
+                    {name for name in role_classes if panel.has_class(name)},
+                    panel.styles.border_top[0],
+                    panel.styles.border_top[1].hex.lower(),
+                    title.styles.color.hex.lower(),
+                )
+            )
+            return states
+
+    states = anyio.run(scenario)
+    assert [(classes, border_kind) for classes, border_kind, _, _ in states] == [
+        ({"decision--read"}, "round"),
+        ({"decision--mutating"}, "round"),
+        ({"decision--command"}, "heavy"),
+        ({"decision--trust"}, "double"),
+    ]
+    assert all(border_color == title_color for _, _, border_color, title_color in states)
+    assert len({border_color for _, _, border_color, _ in states}) == 4
+
+
+def test_decision_panel_no_color_keeps_category_symbols_and_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    async def scenario() -> tuple[bool, list[str]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(72, 20)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            rendered: list[str] = []
+            for event in (
+                _approval("inspect", {"path": "README.md"}, safety="read"),
+                _approval("write", {"path": "notes.txt", "content": "hello"}),
+                _approval("bash", {"command": "echo hi"}, safety="command"),
+            ):
+                renderer.approval_request(event)
+                await pilot.pause()
+                rendered.append(_static_plain(app.query_one("#decision-meta", Static)))
+
+            renderer.trust_request(
+                TrustRequested(request_id="trust-1", project_path=Path("/work/project"))
+            )
+            await pilot.pause()
+            rendered.append(_static_plain(app.query_one("#decision-meta", Static)))
+            return app.no_color, rendered
+
+    no_color, rendered = anyio.run(scenario)
+    assert no_color is True
+    assert rendered == [
+        "○ READ-ONLY ACCESS · inspect\ncwd: /work/project",
+        "△ MODIFIES FILES · notes.txt\ncwd: /work/project",
+        "! COMMAND EXECUTION · bash\ncwd: /work/project",
+        "◆ PROJECT TRUST · /work/project",
+    ]
 
 
 @pytest.mark.parametrize(("key", "expected"), [("4", "n"), ("escape", "n")])
@@ -680,7 +859,7 @@ def test_decision_panel_leaves_transcript_edge_margin(size: tuple[int, int]) -> 
     assert panel_right < transcript_right
 
 
-@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+@pytest.mark.parametrize("theme", [theme.name for theme in WISP_THEMES])
 def test_decision_panel_fits_above_footer_in_narrow_terminal(theme: str) -> None:
     async def scenario() -> tuple[int, int, int, int]:
         app, renderer = create_textual_tui()
@@ -755,7 +934,8 @@ def test_decision_panel_shows_every_option_with_a_full_detail_preview() -> None:
     assert panel_max_scroll_y == 0
 
 
-def test_approval_panel_options_stay_unwrapped_with_long_tool_name() -> None:
+@pytest.mark.parametrize("tool_name", ["a" * 71, "界" * 40, ("wide\tname") * 10])
+def test_approval_panel_options_stay_unwrapped_with_long_tool_name(tool_name: str) -> None:
     # A long tool name in the "Allow <name> for this session" option can wrap
     # the fixed-height #decision-options viewport, scrolling "4 Deny" out of
     # view with nothing to auto-scroll it back (the default highlight is no
@@ -774,7 +954,7 @@ def test_approval_panel_options_stay_unwrapped_with_long_tool_name() -> None:
                     cwd="/work/project",
                 )
             )
-            renderer.approval_request(_approval("a" * 71, {}, safety="command"))
+            renderer.approval_request(_approval(tool_name, {}, safety="command"))
             await pilot.pause()
             options = app.query_one("#decision-options", OptionList)
             return options.virtual_size.height, options.size.height

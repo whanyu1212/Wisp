@@ -12,12 +12,18 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
+
+from rich.cells import cell_len
 
 from wisp.events import ToolApprovalRequested, TrustRequested
-from wisp.tui.rendering import _format_cwd_for_footer
 
 _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
+_DECISION_NOTICE_LINES = 9
+_DECISION_NOTICE_CHARS = 640
+_DECISION_TITLE_CELLS = 96
+_DECISION_META_LINE_CELLS = 160
 _BASH_OPERATION_TITLES = {
     "run": "Run command?",
     "start": "Start command?",
@@ -26,11 +32,66 @@ _BASH_OPERATION_TITLES = {
 }
 
 
+class _DecisionRole(StrEnum):
+    READ = "read"
+    MUTATING = "mutating"
+    COMMAND = "command"
+    TRUST = "trust"
+    FALLBACK = "fallback"
+
+
+@dataclass(frozen=True)
+class _DecisionTreatment:
+    role: _DecisionRole
+    symbol: str
+    label: str
+    console_style: str
+
+
+_READ_TREATMENT = _DecisionTreatment(
+    role=_DecisionRole.READ,
+    symbol="○",
+    label="READ-ONLY ACCESS",
+    console_style="cyan",
+)
+_MUTATING_TREATMENT = _DecisionTreatment(
+    role=_DecisionRole.MUTATING,
+    symbol="△",
+    label="MUTATING OPERATION",
+    console_style="yellow",
+)
+_COMMAND_TREATMENT = _DecisionTreatment(
+    role=_DecisionRole.COMMAND,
+    symbol="!",
+    label="COMMAND EXECUTION",
+    console_style="bold red",
+)
+_TRUST_TREATMENT = _DecisionTreatment(
+    role=_DecisionRole.TRUST,
+    symbol="◆",
+    label="PROJECT TRUST",
+    console_style="magenta",
+)
+_FALLBACK_TREATMENT = _DecisionTreatment(
+    role=_DecisionRole.FALLBACK,
+    symbol="?",
+    label="TOOL APPROVAL",
+    console_style="yellow",
+)
+_SAFETY_TREATMENTS = {
+    "read": _READ_TREATMENT,
+    "mutating": _MUTATING_TREATMENT,
+    "command": _COMMAND_TREATMENT,
+}
+
+
 @dataclass(frozen=True)
 class _DecisionContent:
+    role: _DecisionRole
     title: str
     meta: str
     detail: str
+    console_style: str
 
 
 def _bounded_decision_preview(
@@ -75,48 +136,82 @@ def _bounded_decision_preview(
 
 # The DecisionPanel's #decision-options viewport is a fixed 4 lines (one per
 # option) with no auto-scroll to the highlighted option once the default
-# highlight is no longer the last one. An unbounded tool name in the "Allow
-# <name> for this session" option can wrap to a second line, pushing "4 Deny"
-# out of the visible viewport with nothing to scroll it back into view. This
-# cap keeps the option unwrapped at the project's supported narrow-terminal
-# floor (72 columns, see test_decision_panel_fits_above_footer_in_narrow_
-# terminal), including the panel's restrained 90% width. It is a character
-# count, not a terminal-column/display-width measurement, so it does not
-# guarantee no wrap at every possible width (very narrow terminals, or names
-# with wide/multi-column characters, can still wrap); logical option selection
-# is unaffected either way (Textual indexes by option, not rendered line).
-_TOOL_SESSION_OPTION_NAME_CHARS = 30
+# highlight is no longer the last one. A long tool name in the "Allow <name>
+# for this session" option can wrap to a second line, pushing "4 Deny" out of
+# the visible viewport with nothing to scroll it back into view. Bound display
+# cells, not code points, so wide Unicode extension names stay within the same
+# narrow-terminal budget as plain ASCII names.
+_TOOL_SESSION_OPTION_NAME_CELLS = 30
+
+
+def _bounded_single_line(value: str, *, max_cells: int) -> str:
+    """Collapse controls and truncate untrusted text to a terminal-cell budget."""
+
+    normalized = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    candidate = normalized[:max_cells]
+    truncated = len(normalized) > len(candidate) or cell_len(candidate) > max_cells
+    if not truncated:
+        return candidate
+
+    ellipsis = "…"
+    content_cells = max(0, max_cells - cell_len(ellipsis))
+    while candidate and cell_len(candidate) > content_cells:
+        candidate = candidate[:-1]
+    return f"{candidate}{ellipsis}"
 
 
 def _bounded_tool_session_option_name(name: str) -> str:
-    """Truncate a tool name for the "Allow <name> for this session" option label.
+    """Truncate a tool name for the fixed-height tool-session option."""
 
-    Keeps the option to a single line so it can't wrap and push later options
-    (notably "Deny") out of the fixed-height option-list viewport. In-repo tool
-    names are short plain-ASCII literals, but a name could in principle come
-    from an MCP/custom tool: collapse embedded newlines first, since a
-    character-count cap alone doesn't stop an embedded "\n" from still
-    splitting the option onto a second rendered line.
-    """
-
-    name = name.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    if len(name) <= _TOOL_SESSION_OPTION_NAME_CHARS:
-        return name
-    return f"{name[: _TOOL_SESSION_OPTION_NAME_CHARS - 1]}…"
+    return _bounded_single_line(name, max_cells=_TOOL_SESSION_OPTION_NAME_CELLS)
 
 
-def _safety_label(safety: str) -> str:
-    return {
-        "read": "read-only access",
-        "mutating": "file mutation",
-        "command": "command execution",
-    }.get(safety, safety)
+def _treatment_for_safety(safety: str) -> _DecisionTreatment:
+    """Map authoritative event metadata to presentation without policy inference."""
+
+    return _SAFETY_TREATMENTS.get(safety, _FALLBACK_TREATMENT)
 
 
-def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionContent:
+def _decision_meta(
+    treatment: _DecisionTreatment,
+    *,
+    subject: str,
+    cwd: str | None,
+    label: str | None = None,
+) -> str:
+    category = label or treatment.label
+    first_line = f"{treatment.symbol} {category}"
+    if subject:
+        first_line = f"{first_line} · {subject}"
+    first_line = _bounded_single_line(first_line, max_cells=_DECISION_META_LINE_CELLS)
+    if cwd:
+        cwd_line = _bounded_single_line(f"cwd: {cwd}", max_cells=_DECISION_META_LINE_CELLS)
+        return f"{first_line}\n{cwd_line}"
+    return first_line
+
+
+def _decision_notice(content: _DecisionContent) -> str:
+    """Return one bounded, literal notice shared by non-Textual renderers."""
+
+    lines: list[str] = []
+    for part in (content.meta, content.title, content.detail):
+        if part:
+            lines.extend(part.splitlines())
+    return _bounded_decision_preview(
+        lines,
+        max_lines=_DECISION_NOTICE_LINES,
+        max_chars=_DECISION_NOTICE_CHARS,
+    )
+
+
+def _approval_content(
+    event: ToolApprovalRequested,
+    *,
+    cwd: str | None = None,
+) -> _DecisionContent:
     arguments = event.arguments
-    cwd_text = _format_cwd_for_footer(cwd)
-    safety = _safety_label(event.safety)
+    treatment = _treatment_for_safety(event.safety)
+    tool_name = _bounded_single_line(event.name, max_cells=_DECISION_TITLE_CELLS)
 
     if event.name == "bash":
         operation_value = arguments.get("operation")
@@ -148,9 +243,11 @@ def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionCon
                 if yield_seconds is not None:
                     lines.append(f"yield_seconds: {yield_seconds}s")
         return _DecisionContent(
+            role=treatment.role,
             title=title,
-            meta=f"bash - {safety}\ncwd: {cwd_text}",
+            meta=_decision_meta(treatment, subject="bash", cwd=cwd),
             detail=_bounded_decision_preview(lines),
+            console_style=treatment.console_style,
         )
 
     if event.name == "write":
@@ -162,10 +259,18 @@ def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionCon
         byte_count = len(content_text.encode("utf-8"))
         lines = [f"content: {line_count} lines, {byte_count} bytes"]
         lines.extend(content_text.splitlines())
+        category = "MODIFIES FILES" if treatment.role is _DecisionRole.MUTATING else None
         return _DecisionContent(
+            role=treatment.role,
             title="Write file?",
-            meta=f"{path_text}\n{safety} - cwd: {cwd_text}",
+            meta=_decision_meta(
+                treatment,
+                subject=path_text,
+                cwd=cwd,
+                label=category,
+            ),
             detail=_bounded_decision_preview(lines),
+            console_style=treatment.console_style,
         )
 
     if event.name == "edit":
@@ -185,10 +290,18 @@ def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionCon
             lines.append(f"+ {new_line}")
         if len(edit_items) > 2:
             lines.append(f"... {len(edit_items) - 2} more replacements")
+        category = "MODIFIES FILES" if treatment.role is _DecisionRole.MUTATING else None
         return _DecisionContent(
+            role=treatment.role,
             title="Edit file?",
-            meta=f"{path_text}\n{safety} - cwd: {cwd_text}",
+            meta=_decision_meta(
+                treatment,
+                subject=path_text,
+                cwd=cwd,
+                label=category,
+            ),
             detail=_bounded_decision_preview(lines),
+            console_style=treatment.console_style,
         )
 
     try:
@@ -202,15 +315,29 @@ def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionCon
     except (TypeError, ValueError):
         serialized = json.dumps(str(arguments), ensure_ascii=False)
     return _DecisionContent(
-        title=f"Allow {event.name}?",
-        meta=f"{safety} - cwd: {cwd_text}",
+        role=treatment.role,
+        title=_bounded_single_line(
+            f"Allow {tool_name}?",
+            max_cells=_DECISION_TITLE_CELLS,
+        ),
+        meta=_decision_meta(treatment, subject=tool_name, cwd=cwd),
         detail=_bounded_decision_preview(serialized.splitlines()),
+        console_style=treatment.console_style,
     )
 
 
 def _trust_content(event: TrustRequested) -> _DecisionContent:
     return _DecisionContent(
+        role=_TRUST_TREATMENT.role,
         title="Trust this project?",
-        meta=str(event.project_path),
-        detail="Trusting allows project-local settings and instructions to load.",
+        meta=_decision_meta(
+            _TRUST_TREATMENT,
+            subject=str(event.project_path),
+            cwd=None,
+        ),
+        detail=(
+            "Trusting loads project-controlled settings, instructions, and skills. "
+            "It does not bypass tool approvals."
+        ),
+        console_style=_TRUST_TREATMENT.console_style,
     )
