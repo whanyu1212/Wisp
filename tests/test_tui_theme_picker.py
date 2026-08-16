@@ -74,6 +74,27 @@ def test_theme_selection_persists_and_ctrl_t_returns_to_most_recent_dark(
     assert state.last_dark_theme == "wisp-ember"
 
 
+def test_theme_command_selects_storm_by_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    async def scenario() -> str:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.submit_command_line("/theme storm")
+            await pilot.pause()
+            return app.theme
+
+    active = anyio.run(scenario)
+    state = load_theme_state(home_dir=tmp_path)
+    assert active == "wisp-storm"
+    assert state.active_theme == "wisp-storm"
+    assert state.last_dark_theme == "wisp-storm"
+
+
 def test_ctrl_t_does_not_commit_while_picker_owns_a_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

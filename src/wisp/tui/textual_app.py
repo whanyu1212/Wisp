@@ -1055,7 +1055,7 @@ class TextualTui(App[None]):
             self.show_theme_picker()
             return True
         if len(parts) != 2:
-            self.write_error("Usage: /theme [vapor|orchid|ember|paper]")
+            self.write_error("Usage: /theme [vapor|orchid|ember|storm|paper]")
             return True
         spec = WISP_THEME_BY_SLUG.get(parts[1].casefold())
         if spec is None:

@@ -1225,7 +1225,9 @@ def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() ->
     assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
 
 
-@pytest.mark.parametrize("theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-light"])
+@pytest.mark.parametrize(
+    "theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-storm", "wisp-light"]
+)
 @pytest.mark.parametrize(
     ("foreground", "background"),
     [

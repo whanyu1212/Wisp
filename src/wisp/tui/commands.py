@@ -162,7 +162,7 @@ TEXTUAL_LOCAL_COMMAND_DESCRIPTORS = (
         title="Theme",
         description="Preview or choose a Wisp color theme",
         category="configuration",
-        arguments=(CommandArgument("name", "vapor, orchid, ember, or paper"),),
+        arguments=(CommandArgument("name", "vapor, orchid, ember, storm, or paper"),),
         accepts_arguments=True,
         order=58,
     ),
