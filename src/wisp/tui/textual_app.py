@@ -2787,7 +2787,9 @@ class TextualTui(App[None]):
         ):
             return
         viewport_height = transcript.scrollable_content_region.height
-        if viewport_height <= 0:
+        if viewport_height <= 0 or any(
+            _transcript_child_layout_pending(child) for child in transcript.children
+        ):
             self.call_after_refresh(
                 self._request_history_if_still_at_top,
                 transcript,
@@ -2795,10 +2797,9 @@ class TextualTui(App[None]):
                 epoch,
             )
             return
-        # A mounted widget can legitimately occupy zero rows (for example, a
-        # whitespace-only Markdown message), so its height cannot distinguish an
-        # unsettled layout from stable empty output. Child count remains a
-        # conservative lower bound while Textual updates virtual geometry.
+        # Child count remains a conservative lower bound while Textual updates
+        # virtual geometry. A measured-empty Markdown child still contributes to
+        # that bound even though it occupies no visible rows.
         # Never request another page merely because scroll_y has not caught up.
         if (
             len(transcript.children) > viewport_height
@@ -3032,6 +3033,14 @@ def _historical_message_needs_markdown(message: str) -> bool:
         return True
     first, separator, _rest = message.lstrip().partition(" ")
     return bool(separator and first.rstrip(".)").isdigit())
+
+
+def _transcript_child_layout_pending(child: Widget) -> bool:
+    """Return whether a zero-height transcript child has not completed measurement."""
+
+    if child.region.height > 0:
+        return False
+    return not isinstance(child, StreamMessage) or not child.has_measured_empty_render
 
 
 def _file_index_context(

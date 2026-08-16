@@ -3147,6 +3147,13 @@ class _SelectableMarkdownVisual(RichVisual):
         options = RenderOptions(self._widget._get_style, rules)
         return len(self._base_strips(width, self._widget.visual_style, options))
 
+    @property
+    def has_measured_empty_render(self) -> bool:
+        """Whether layout measured this Markdown document as zero visible rows."""
+
+        cached = self._base_strips_cache
+        return cached is not None and not cached[2]
+
     def render_strips(
         self,
         width: int,
@@ -3221,6 +3228,13 @@ class StreamMessage(Static):
         """Return the authoritative Markdown source currently represented."""
 
         return self._source
+
+    @property
+    def has_measured_empty_render(self) -> bool:
+        """Whether this document completed layout with no visible rows."""
+
+        visual = self._selection_visual
+        return visual is not None and visual.has_measured_empty_render
 
     def needs_reconciliation(self, content: str) -> bool:
         """Return whether authoritative content requires another Markdown render."""

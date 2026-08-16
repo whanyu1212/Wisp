@@ -49,6 +49,7 @@ from wisp.tui.textual_app import (
     _EMPTY_TRANSCRIPT_TAGLINE,
     TextualTui,
     TextualTuiRenderer,
+    _transcript_child_layout_pending,
     create_textual_tui,
 )
 from wisp.tui.transcript_window import (
@@ -5425,7 +5426,7 @@ def test_textual_transcript_loads_history_when_the_initial_page_fits() -> None:
 
 
 def test_textual_resumed_history_accepts_a_zero_height_message_as_settled() -> None:
-    async def scenario() -> tuple[int, tuple[int, ...]]:
+    async def scenario() -> tuple[int, tuple[tuple[bool, bool, bool], ...]]:
         app_instance, renderer = create_textual_tui()
         request_started = anyio.Event()
         requests = 0
@@ -5445,12 +5446,24 @@ def test_textual_resumed_history_accepts_a_zero_height_message_as_settled() -> N
             with anyio.fail_after(5):
                 await request_started.wait()
             transcript = app_instance.query_one("#transcript", Transcript)
-            return requests, tuple(child.region.height for child in transcript.children)
+            return requests, tuple(
+                (
+                    isinstance(child, StreamMessage),
+                    isinstance(child, StreamMessage) and child.has_measured_empty_render,
+                    _transcript_child_layout_pending(child),
+                )
+                for child in transcript.children
+                if child.region.height == 0
+            )
 
-    requests, child_heights = anyio.run(scenario)
+    pending_markdown = StreamMessage("nonempty")
+    assert pending_markdown.region.height == 0
+    assert _transcript_child_layout_pending(pending_markdown)
+
+    requests, zero_height_children = anyio.run(scenario)
 
     assert requests == 1
-    assert 0 in child_heights
+    assert zero_height_children == ((True, True, False),)
 
 
 def test_textual_transcript_waits_for_layout_before_requesting_history() -> None:
