@@ -5,12 +5,18 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from enum import Enum, auto
+from typing import Protocol
 
 import anyio
 
 from wisp.agent.configuration import validate_agent_runtime_limits
-from wisp.agent.execution import ToolExecutor
+from wisp.agent.execution import (
+    ContextOverflowHook,
+    ContextOverflowSnapshot,
+    RequestBoundaryDecision,
+    RequestBoundarySnapshot,
+    ToolExecutor,
+)
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator, run_agent_loop
 from wisp.agent.messages import (
     Message,
@@ -139,12 +145,21 @@ def _cancelled_events(
 
 @dataclass(slots=True)
 class _HarnessRunState:
-    """Offsets and active-turn state retained across loop segments."""
+    """Public turn lifecycle state retained for one primary loop invocation."""
 
-    next_turn_offset: int
-    next_tool_iteration_offset: int
     active_turn: int | None = None
     active_turn_completed: bool = False
+    had_tool_calls: bool = False
+
+    def observe(self, event: AgentLoopEvent) -> None:
+        if isinstance(event, TurnStarted):
+            self.active_turn = event.turn
+            self.active_turn_completed = False
+            self.had_tool_calls = False
+        elif isinstance(event, MessageCompleted) and event.tool_calls:
+            self.had_tool_calls = True
+        elif isinstance(event, TurnCompleted):
+            self.active_turn_completed = True
 
     def cancelled_events(self) -> tuple[AgentLoopEvent, ...]:
         return _cancelled_events(
@@ -153,47 +168,34 @@ class _HarnessRunState:
         )
 
 
-@dataclass(slots=True)
-class _HarnessSegmentState:
-    """Observable completion state for one invocation of the pure loop."""
+@dataclass(frozen=True, slots=True)
+class HarnessBoundaryContext:
+    """Harness state available to session-owned request-boundary preparation."""
 
-    run_finished: bool = False
-    had_tool_calls: bool = False
-    outcome: str | None = None
-    stream_ended: bool = False
-    restart_for_steering: bool = False
-
-    def observe(self, event: AgentLoopEvent, run: _HarnessRunState) -> None:
-        if isinstance(event, TurnStarted):
-            run.active_turn = event.turn
-            run.active_turn_completed = False
-            run.next_turn_offset = event.turn
-            self.run_finished = False
-        if isinstance(event, MessageCompleted):
-            self.run_finished = not event.tool_calls
-            if event.tool_calls:
-                self.had_tool_calls = True
-                run.next_tool_iteration_offset += 1
-        elif isinstance(event, TurnCompleted):
-            run.active_turn_completed = True
-            self.outcome = event.outcome
-            self.run_finished = self.run_finished or event.outcome != "completed"
-
-    def can_drain_follow_up(self, *, cancelled: bool) -> bool:
-        return (
-            self.stream_ended
-            and not cancelled
-            and self.outcome == "completed"
-            and self.run_finished
-        )
+    snapshot: RequestBoundarySnapshot
+    messages: tuple[Message, ...]
+    injected_messages: tuple[Message, ...]
+    stop_by_default: bool
 
 
-class _SegmentDisposition(Enum):
-    """Next harness action after a completed loop segment."""
+class HarnessBoundaryPreparer(Protocol):
+    """Prepare compaction/rebase decisions without owning queues or the loop."""
 
-    RESTART_FOR_STEERING = auto()
-    DRAIN_FOLLOW_UP = auto()
-    FINISH = auto()
+    async def prepare_boundary(
+        self, *, context: HarnessBoundaryContext
+    ) -> RequestBoundaryDecision | None:
+        """Return a complete loop decision, or ``None`` for harness defaults."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ArmedRequestBoundary:
+    """Queue effects exposed before the loop invokes its boundary hook."""
+
+    turn: int
+    had_tool_calls: bool
+    injected_messages: tuple[Message, ...]
+    stop_by_default: bool
 
 
 class AgentHarness:
@@ -367,6 +369,8 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        boundary_preparer: HarnessBoundaryPreparer | None = None,
+        context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Append a user message and start a run."""
         return self.prompt_message(
@@ -374,6 +378,8 @@ class AgentHarness:
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
+            boundary_preparer=boundary_preparer,
+            context_overflow_hook=context_overflow_hook,
         )
 
     def prompt_message(
@@ -383,6 +389,8 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        boundary_preparer: HarnessBoundaryPreparer | None = None,
+        context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Append an existing user message and start a run."""
         if message.role != "user":
@@ -392,6 +400,8 @@ class AgentHarness:
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
+            boundary_preparer=boundary_preparer,
+            context_overflow_hook=context_overflow_hook,
         )
 
     def continue_(
@@ -400,14 +410,16 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-        pause_after_tool_round: bool = False,
+        boundary_preparer: HarnessBoundaryPreparer | None = None,
+        context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Continue from the current transcript without adding a user message."""
         return self._run(
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
-            pause_after_tool_round=pause_after_tool_round,
+            boundary_preparer=boundary_preparer,
+            context_overflow_hook=context_overflow_hook,
         )
 
     async def _run(
@@ -417,7 +429,8 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-        pause_after_tool_round: bool = False,
+        boundary_preparer: HarnessBoundaryPreparer | None = None,
+        context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         self.repair_interrupted_tool_calls()
         self._running = True
@@ -426,128 +439,178 @@ class AgentHarness:
         if prompt_message is not None:
             self._messages.append(prompt_message)
 
-        run = _HarnessRunState(
-            next_turn_offset=turn_offset,
-            next_tool_iteration_offset=tool_iteration_offset,
+        run = _HarnessRunState()
+        armed_boundary: _ArmedRequestBoundary | None = None
+        pending_transcript_transition: (
+            tuple[RequestBoundaryDecision, tuple[Message, ...]] | None
+        ) = None
+
+        class _BoundaryHook:
+            async def before_next_request(
+                _self, *, snapshot: RequestBoundarySnapshot
+            ) -> RequestBoundaryDecision:
+                nonlocal armed_boundary, pending_transcript_transition
+                boundary = armed_boundary
+                if boundary is None:
+                    raise RuntimeError("AgentHarness received an unarmed request boundary")
+                if (
+                    snapshot.turn != boundary.turn
+                    or snapshot.had_tool_calls != boundary.had_tool_calls
+                ):
+                    raise RuntimeError(
+                        "AgentHarness request boundary did not match its completed turn"
+                    )
+                armed_boundary = None
+                if boundary_preparer is not None:
+                    decision = await boundary_preparer.prepare_boundary(
+                        context=HarnessBoundaryContext(
+                            snapshot=snapshot,
+                            messages=tuple(
+                                message.model_copy(deep=True) for message in self._messages
+                            ),
+                            injected_messages=boundary.injected_messages,
+                            stop_by_default=boundary.stop_by_default,
+                        )
+                    )
+                    if decision is not None:
+                        if decision.messages is not None or decision.context_rebase is not None:
+                            pending_transcript_transition = (
+                                decision,
+                                snapshot.continuation_messages,
+                            )
+                        return decision
+                if boundary.injected_messages:
+                    if snapshot.can_append_user_messages:
+                        return RequestBoundaryDecision(extra_messages=boundary.injected_messages)
+                    # Cursor-less structured history cannot be flattened into
+                    # extras. Replace from the complete normalized transcript,
+                    # retaining assistant/tool pairs atomically.
+                    return RequestBoundaryDecision(
+                        messages=normalize_provider_history(
+                            self._messages, active_from=_active_turn_start(self._messages)
+                        )
+                    )
+                return RequestBoundaryDecision(stop=boundary.stop_by_default)
+
+        class _OverflowHook:
+            async def recover_context_overflow(
+                _self, *, snapshot: ContextOverflowSnapshot
+            ) -> RequestBoundaryDecision | None:
+                nonlocal pending_transcript_transition
+                assert context_overflow_hook is not None
+                decision = await context_overflow_hook.recover_context_overflow(snapshot=snapshot)
+                if decision is not None and (
+                    decision.messages is not None or decision.context_rebase is not None
+                ):
+                    pending_transcript_transition = (decision, snapshot.continuation_messages)
+                return decision
+
+        config = AgentLoopConfig(
+            provider=self._config.provider,
+            tool_executor=self._config.tool_executor,
+            model=self._config.model,
+            tools=self._config.tools,
+            max_tool_iterations=self._config.max_tool_iterations,
+            cancellation_token=token,
+            effort=self._config.effort,
+            prompt_cache_key=self._config.prompt_cache_key,
+            context_window=self._config.context_window,
+            context_reserve_tokens=self._config.context_reserve_tokens,
+            context_pressure_threshold=self._config.context_pressure_threshold,
+            turn_offset=turn_offset,
+            tool_iteration_offset=tool_iteration_offset,
+            cost_estimator=self._config.cost_estimator,
+            defer_context_overflow_errors=defer_context_overflow_errors,
+            request_boundary_hook=_BoundaryHook(),
+            context_overflow_hook=_OverflowHook() if context_overflow_hook is not None else None,
         )
+        provider_messages = normalize_provider_history(
+            self._messages, active_from=_active_turn_start(self._messages)
+        )
+        loop_events = run_agent_loop(config, messages=provider_messages)
         try:
             while True:
-                segment = _HarnessSegmentState()
-                config = AgentLoopConfig(
-                    provider=self._config.provider,
-                    tool_executor=self._config.tool_executor,
-                    model=self._config.model,
-                    tools=self._config.tools,
-                    max_tool_iterations=self._config.max_tool_iterations,
-                    cancellation_token=token,
-                    effort=self._config.effort,
-                    prompt_cache_key=self._config.prompt_cache_key,
-                    context_window=self._config.context_window,
-                    context_reserve_tokens=self._config.context_reserve_tokens,
-                    context_pressure_threshold=self._config.context_pressure_threshold,
-                    turn_offset=run.next_turn_offset,
-                    tool_iteration_offset=run.next_tool_iteration_offset,
-                    cost_estimator=self._config.cost_estimator,
-                    defer_context_overflow_errors=defer_context_overflow_errors,
-                )
-                provider_messages = normalize_provider_history(
-                    self._messages, active_from=_active_turn_start(self._messages)
-                )
-                loop_events = run_agent_loop(config, messages=provider_messages)
-                try:
-                    while True:
-                        if token.is_cancelled() and not segment.run_finished:
-                            for cancellation_event in run.cancelled_events():
-                                yield cancellation_event
-                            return
+                if token.is_cancelled():
+                    for cancellation_event in run.cancelled_events():
+                        yield cancellation_event
+                    return
 
-                        scope = anyio.CancelScope()
-                        self._current_scope = scope
-                        event: AgentLoopEvent | None = None
-                        with scope:
-                            try:
-                                event = await anext(loop_events)
-                            except StopAsyncIteration:
-                                segment.stream_ended = True
-                        if self._current_scope is scope:
-                            self._current_scope = None
-
-                        if scope.cancel_called:
-                            if not segment.run_finished:
-                                for cancellation_event in run.cancelled_events():
-                                    yield cancellation_event
-                            return
-                        if segment.stream_ended:
-                            break
-                        assert event is not None
-
-                        segment.observe(event, run)
-                        if isinstance(
-                            event, MessageCompleted | ToolExecutionEnded
-                        ) and completion_event_has_history(event):
-                            # ToolResultReady copies the terminal tool payload; retain it now
-                            # so closing at this visible boundary cannot lose output. Empty
-                            # failed assistant completions settle lifecycle state only.
-                            self._messages.append(message_from_completion_event(event))
-                        yield event
-                        if (
-                            pause_after_tool_round
-                            and isinstance(event, TurnCompleted)
-                            and event.outcome == "completed"
-                            and segment.had_tool_calls
-                            and not self._steering_queue
-                        ):
-                            return
-                        if (
-                            isinstance(event, TurnCompleted)
-                            and event.outcome == "completed"
-                            and self._steering_queue
-                        ):
-                            segment.restart_for_steering = True
-                            break
-                finally:
+                scope = anyio.CancelScope()
+                self._current_scope = scope
+                event: AgentLoopEvent | None = None
+                stream_ended = False
+                with scope:
+                    try:
+                        event = await anext(loop_events)
+                    except StopAsyncIteration:
+                        stream_ended = True
+                if self._current_scope is scope:
                     self._current_scope = None
-                    with anyio.CancelScope(shield=True):
-                        await loop_events.aclose()
 
-                disposition = self._segment_disposition(segment, cancelled=token.is_cancelled())
-                if disposition is _SegmentDisposition.RESTART_FOR_STEERING:
-                    if token.is_cancelled():
-                        for cancellation_event in run.cancelled_events():
-                            yield cancellation_event
-                        return
-                    drain_batch = self._queued_batch("steering")
+                if scope.cancel_called:
+                    for cancellation_event in run.cancelled_events():
+                        yield cancellation_event
+                    return
+                if stream_ended:
+                    break
+                assert event is not None
+
+                run.observe(event)
+                if isinstance(event, TurnStarted) and pending_transcript_transition is not None:
+                    decision, continuation_messages = pending_transcript_transition
+                    self._apply_transcript_transition(
+                        decision, continuation_messages=continuation_messages
+                    )
+                    pending_transcript_transition = None
+                if isinstance(
+                    event, MessageCompleted | ToolExecutionEnded
+                ) and completion_event_has_history(event):
+                    # ToolResultReady copies the terminal tool payload; retain it now
+                    # so closing at this visible boundary cannot lose output. Empty
+                    # failed assistant completions settle lifecycle state only.
+                    self._messages.append(message_from_completion_event(event))
+                yield event
+
+                if not isinstance(event, TurnCompleted) or event.outcome != "completed":
+                    continue
+
+                queue_kind: QueueKind | None = None
+                if self._steering_queue:
+                    queue_kind = "steering"
+                elif not run.had_tool_calls and self._follow_up_queue:
+                    queue_kind = "follow_up"
+
+                injected_messages: list[Message] = []
+                if queue_kind is not None:
+                    drain_batch = self._queued_batch(queue_kind)
                     for message in drain_batch:
                         if token.is_cancelled():
                             for cancellation_event in run.cancelled_events():
                                 yield cancellation_event
                             return
-                        injected_event = self._inject_queued_message("steering", message)
+                        injected_event = self._inject_queued_message(queue_kind, message)
                         if injected_event is not None:
+                            injected_messages.append(message)
                             yield injected_event
+                    # Queue entries added after the boundary snapshot wait for
+                    # a later boundary, while edits to snapshotted entries are
+                    # visible between each individual injected event.
                     yield self.queue_updated_event()
-                    if pause_after_tool_round and segment.had_tool_calls:
-                        return
-                    continue
-
-                if disposition is _SegmentDisposition.FINISH:
-                    break
-
-                drain_batch = self._queued_batch("follow_up")
-                if not drain_batch:
-                    break
-
-                for message in drain_batch:
                     if token.is_cancelled():
                         for cancellation_event in run.cancelled_events():
                             yield cancellation_event
                         return
-                    injected_event = self._inject_queued_message("follow_up", message)
-                    if injected_event is not None:
-                        yield injected_event
-                yield self.queue_updated_event()
+
+                armed_boundary = _ArmedRequestBoundary(
+                    turn=event.turn,
+                    had_tool_calls=run.had_tool_calls,
+                    injected_messages=tuple(injected_messages),
+                    stop_by_default=not run.had_tool_calls and not injected_messages,
+                )
         finally:
             self._current_scope = None
+            with anyio.CancelScope(shield=True):
+                await loop_events.aclose()
             if self._current_token is token:
                 self._current_token = None
             self._running = False
@@ -573,15 +636,25 @@ class AgentHarness:
             timestamp=message.created_at,
         )
 
-    @staticmethod
-    def _segment_disposition(
-        segment: _HarnessSegmentState, *, cancelled: bool
-    ) -> _SegmentDisposition:
-        if segment.restart_for_steering:
-            return _SegmentDisposition.RESTART_FOR_STEERING
-        if segment.can_drain_follow_up(cancelled=cancelled):
-            return _SegmentDisposition.DRAIN_FOLLOW_UP
-        return _SegmentDisposition.FINISH
+    def _apply_transcript_transition(
+        self,
+        decision: RequestBoundaryDecision,
+        *,
+        continuation_messages: Sequence[Message],
+    ) -> None:
+        """Keep harness history atomic with a loop replacement or rebase."""
+
+        if decision.stop:
+            return
+        if decision.messages is not None:
+            self._messages = [*decision.messages, *decision.extra_messages]
+            return
+        if decision.context_rebase is not None:
+            self._messages = [
+                *decision.context_rebase.base_messages,
+                *continuation_messages,
+                *decision.extra_messages,
+            ]
 
     def _ensure_idle(self) -> None:
         if self._running:
@@ -612,6 +685,8 @@ __all__ = [
     "AgentHarness",
     "AgentHarnessConfig",
     "AgentHarnessEvent",
+    "HarnessBoundaryContext",
+    "HarnessBoundaryPreparer",
     "QueuedMessages",
     "QueueKind",
     "SimpleCancellationToken",

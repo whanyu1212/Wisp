@@ -131,6 +131,7 @@ class AnthropicProvider:
 
     name = "anthropic"
     supports_continuation_messages: Literal[True] = True
+    supports_context_rebase: Literal[True] = True
 
     def __init__(
         self,
@@ -340,7 +341,12 @@ class AnthropicProvider:
             )
 
         if failure is not None:
-            self._replays.discard(previous_response_id)
+            # A context rejection does not advance or invalidate the replay
+            # tail. Keep it available for a same-loop compacted retry.
+            if failure.failure_kind != "context_overflow" and not is_context_overflow_message(
+                failure.message
+            ):
+                self._replays.discard(previous_response_id)
             yield failure
             return
 

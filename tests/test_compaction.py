@@ -9,6 +9,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
+import wisp.agent.harness as agent_harness_module
 from wisp.agent.context import build_context_budget, estimate_context
 from wisp.agent.messages import Message
 from wisp.coding.compaction import (
@@ -1862,8 +1863,10 @@ def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disable
     assert not any(isinstance(event, CompactionStarted) for event in events)
 
 
+@pytest.mark.parametrize("operation_id", [None, "prompt-1"])
 def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     tmp_path: Path,
+    operation_id: str | None,
 ) -> None:
     """When every tool result in the active turn is already at (or below) the
     truncation floor, ``_recover_via_tool_result_truncation`` can make no further
@@ -1897,6 +1900,10 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
                     content="", tool_calls=(call,), finish_reason="tool_calls"
                 ),
             ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="recovered"),
+            ],
         ],
         default_model="model",
     )
@@ -1905,24 +1912,145 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
-    async def run() -> list[WispEvent]:
-        agent = CodingSession(
-            provider=provider,
-            sessions=store,
-            model="model",
-            models=_model_registry(
-                context_window=100,
-                auto_compact_token_limit=80,
-            ),
-            tool_registry=registry,
-            prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=1,
-        )
-        return [event async for event in agent.run("question", session=session)]
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=100,
+            auto_compact_token_limit=80,
+        ),
+        tool_registry=registry,
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=1,
+    )
+    first_events: list[WispEvent] = []
+
+    async def run_first() -> None:
+        async for event in agent.run("question", session=session, operation_id=operation_id):
+            first_events.append(event)
+
+    async def run_retry() -> list[WispEvent]:
+        return [
+            event
+            async for event in agent.run(
+                "retry",
+                session=session,
+                operation_id="retry-1" if operation_id is not None else None,
+            )
+        ]
 
     with pytest.raises(ContextOverflowError, match="Active tool result exceeds"):
-        anyio.run(run)
-    assert len(provider.calls) == 1
+        anyio.run(run_first)
+
+    # The overflow is raised at the request boundary after the tool turn
+    # completed, so it must not publish a conflicting failed terminal event.
+    assert [
+        (event.turn, event.outcome) for event in first_events if isinstance(event, TurnCompleted)
+    ] == [(1, "completed")]
+    assert not session.read_context_messages()
+
+    retry_events = anyio.run(run_retry)
+    assert len(provider.calls) == 2
+    assert provider.calls[1].messages[-1].content == "retry"
+    assert not any(isinstance(event, ErrorEvent) for event in retry_events)
+
+
+def test_threshold_compaction_rebases_tool_state_with_injected_steering(
+    tmp_path: Path,
+) -> None:
+    """Opaque replay providers retain tool state and append steering once."""
+
+    class BlockingReadTool:
+        name = "blocking_read"
+        safety = "read"
+        description = "Return a large result after steering has been queued."
+        input_schema = {"type": "object", "properties": {}}
+
+        def __init__(self, started: anyio.Event, release: anyio.Event) -> None:
+            self._started = started
+            self._release = release
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            self._started.set()
+            await self._release.wait()
+            return ToolResult(text="x" * 6_000)
+
+    class OpaqueRebaseProvider(ScriptedProvider):
+        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+            del effort
+            return False
+
+    started = anyio.Event()
+    release = anyio.Event()
+    call = ToolCall(
+        call_id="call-1",
+        name="blocking_read",
+        arguments={},
+        provider_call_id="opaque-provider-call-1",
+    )
+    provider = OpaqueRebaseProvider(
+        [
+            [
+                ProviderResponseStarted(model="model", response_id="tool-response"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id="tool-response",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after steering"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(BlockingReadTool(started, release))
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(context_window=10_000, auto_compact_token_limit=1_000),
+        tool_registry=registry,
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+    events: list[WispEvent] = []
+
+    async def consume() -> None:
+        events.extend([event async for event in agent.run("question two", session=session)])
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await started.wait()
+            await agent.steer("change direction")
+            release.set()
+
+    anyio.run(run)
+
+    assert any(
+        isinstance(event, CompactionCompleted)
+        and event.reason == "threshold"
+        and event.outcome == "completed"
+        for event in events
+    )
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert provider.calls[2].previous_response_id == "tool-response"
+    assert provider.calls[2].tool_results[0].call_id == "call-1"
+    assert [message.content for message in provider.calls[2].extra_messages] == ["change direction"]
 
 
 def test_coding_session_recovers_when_active_tool_turn_remains_over_provider_limit(
@@ -2011,7 +2139,10 @@ def test_coding_session_recovers_when_active_tool_turn_remains_over_provider_lim
     )
 
 
-def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:
+def test_coding_session_recovers_one_overflow_with_compaction_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -2031,6 +2162,15 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
     )
     store = JsonlSessionStore(tmp_path)
     session = store.create()
+    real_run_agent_loop = agent_harness_module.run_agent_loop
+    primary_loop_calls = 0
+
+    def recording_run_agent_loop(*args: object, **kwargs: object) -> object:
+        nonlocal primary_loop_calls
+        primary_loop_calls += 1
+        return real_run_agent_loop(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_harness_module, "run_agent_loop", recording_run_agent_loop)
 
     async def run() -> list[WispEvent]:
         await _append_turn(session, "one")
@@ -2081,6 +2221,8 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
     assert events[-1].turns == 2
     assert events[-1].outcome == "completed"
     assert len(provider.calls) == 3
+    # The isolated compaction summarizer is intentionally not counted here.
+    assert primary_loop_calls == 1
     entries = session.read_entries()
     overflow_record = next(
         entry.compaction

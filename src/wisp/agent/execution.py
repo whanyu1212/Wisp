@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from wisp.agent.messages import Message
-from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
+from wisp.events import (
+    ContextBudget,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolExecutionEnded,
+)
 from wisp.providers.events import ToolCall
 
 type ToolExecutionEvent = ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded
@@ -59,7 +64,23 @@ class RequestBoundarySnapshot:
     turn: int
     tool_iterations: int
     had_tool_calls: bool
+    can_append_user_messages: bool
     continuation_messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestContextRebase:
+    """Replace portable base context while retaining a live native continuation.
+
+    ``base_messages`` must exclude the loop-owned continuation supplied in
+    ``expected_continuation_messages``. The latter is an optimistic guard: it
+    must exactly match the loop's immutable snapshot when the decision is
+    applied, preventing a stale compaction plan from silently duplicating or
+    dropping active tool state.
+    """
+
+    base_messages: Sequence[Message]
+    expected_continuation_messages: Sequence[Message]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +93,11 @@ class RequestBoundaryDecision:
     fresh request. It may retain a valid active assistant tool call and its
     matching tool result; provider adapters serialize such fresh context in
     their native wire format.
+
+    `context_rebase`, when not ``None``, replaces only the portable base
+    context while retaining the provider cursor, pending tool results, and
+    opaque continuation tail. It requires an explicitly capable provider and
+    an exact continuation snapshot. It is mutually exclusive with ``messages``.
 
     `extra_messages` are one or more plain user messages for steering or a
     follow-up. With an active continuation-capable provider, they are sent
@@ -86,8 +112,27 @@ class RequestBoundaryDecision:
     """
 
     messages: Sequence[Message] | None = None
+    context_rebase: RequestContextRebase | None = None
     extra_messages: Sequence[Message] = ()
     stop: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ContextOverflowSnapshot:
+    """Read-only state for one rejected provider request.
+
+    The loop exposes the current context budget and whether user-visible stream
+    content has already escaped so callers can make a safe, bounded retry
+    decision without reconstructing lifecycle state from public events.
+    """
+
+    turn: int
+    tool_iterations: int
+    continuation_messages: tuple[Message, ...]
+    has_native_continuation: bool
+    context_budget: ContextBudget
+    had_streamed_delta: bool
+    message: str
 
 
 class RequestBoundaryHook(Protocol):
@@ -107,8 +152,21 @@ class RequestBoundaryHook(Protocol):
         ...
 
 
+class ContextOverflowHook(Protocol):
+    """Optionally recover a rejected context-overflow request in the same loop."""
+
+    async def recover_context_overflow(
+        self, *, snapshot: ContextOverflowSnapshot
+    ) -> RequestBoundaryDecision | None:
+        """Return a fresh/rebased retry decision, or ``None`` to decline recovery."""
+        ...
+
+
 __all__ = [
+    "ContextOverflowHook",
+    "ContextOverflowSnapshot",
     "RequestBoundaryDecision",
+    "RequestContextRebase",
     "RequestBoundaryHook",
     "RequestBoundarySnapshot",
     "RequestBoundaryUnsupportedError",

@@ -13,9 +13,11 @@ import pytest
 
 import wisp.agent.loop as agent_loop_module
 from wisp.agent.execution import (
+    ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
+    RequestContextRebase,
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
@@ -26,17 +28,25 @@ from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     BillableTokenUsage,
     ContextEstimated,
+    ContextOverflow,
     MessageCompleted,
+    MessageStarted,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
+    TurnCompleted,
     UsageCost,
     UsageCostRates,
     wisp_event_from_json,
 )
-from wisp.providers.base import ProviderProtocolError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ContextOverflowError,
+    ProviderProtocolError,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -2716,3 +2726,292 @@ def test_pure_loop_forwards_summary_across_the_wire() -> None:
     round_tripped_ended = wisp_event_from_json(ended.model_dump_json())
     assert round_tripped_ended.summary == "read 3 lines from f.txt"
     assert round_tripped_ended.truncated is True
+
+
+def test_request_boundary_context_rebase_keeps_live_native_continuation() -> None:
+    """A rebase changes only the portable base beneath an active tool cursor."""
+
+    tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="tool-response"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    response_id="tool-response",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("done", response_id="final-response"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+
+    class RebaseHook:
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            if snapshot.had_tool_calls:
+                return RequestBoundaryDecision(
+                    context_rebase=RequestContextRebase(
+                        base_messages=(Message(role="user", content="compacted summary"),),
+                        expected_continuation_messages=snapshot.continuation_messages,
+                    )
+                )
+            return RequestBoundaryDecision(stop=True)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    request_boundary_hook=RebaseHook(),
+                ),
+                messages=(Message(role="user", content="inspect"),),
+            )
+        ]
+
+    anyio.run(run)
+
+    assert len(provider.calls) == 2
+    second = provider.calls[1]
+    assert [(message.role, message.content) for message in second.messages] == [
+        ("user", "compacted summary")
+    ]
+    assert second.previous_response_id == "tool-response"
+    assert second.tool_results == (ToolCallResult(call_id="call-1", output="tool output"),)
+    assert second.extra_messages == ()
+    assert len(executor.calls) == 1
+
+
+def test_clean_boundary_rebase_drops_consumed_tool_results() -> None:
+    """A clean response must not resend the prior round's tool results."""
+
+    tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="tool-response"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    response_id="tool-response",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("clean", response_id="clean-response"),
+            _completed_stream("followed up", response_id="follow-up-response"),
+        ]
+    )
+
+    class CleanRebaseHook:
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            if snapshot.turn == 1:
+                return RequestBoundaryDecision()
+            if snapshot.turn == 2:
+                return RequestBoundaryDecision(
+                    context_rebase=RequestContextRebase(
+                        base_messages=(Message(role="user", content="compacted summary"),),
+                        expected_continuation_messages=snapshot.continuation_messages,
+                    ),
+                    extra_messages=(Message(role="user", content="follow up"),),
+                )
+            return RequestBoundaryDecision(stop=True)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=RecordingToolExecutor(),
+                    request_boundary_hook=CleanRebaseHook(),
+                ),
+                messages=(Message(role="user", content="inspect"),),
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.calls[1].tool_results == (
+        ToolCallResult(call_id="call-1", output="tool output"),
+    )
+    assert provider.calls[2].previous_response_id == "clean-response"
+    assert provider.calls[2].tool_results == ()
+    assert [message.content for message in provider.calls[2].extra_messages] == ["follow up"]
+
+
+def test_request_boundary_context_rebase_rejects_stale_continuation() -> None:
+    """A stale compaction plan must not mutate the loop's continuation state."""
+
+    provider = ScriptedProvider([_completed_stream("first")])
+
+    class StaleRebaseHook:
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            return RequestBoundaryDecision(
+                context_rebase=RequestContextRebase(
+                    base_messages=(Message(role="user", content="summary"),),
+                    expected_continuation_messages=(),
+                )
+            )
+
+    async def run() -> None:
+        with pytest.raises(
+            RequestBoundaryUnsupportedError,
+            match="expected continuation does not match",
+        ):
+            async for _event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    request_boundary_hook=StaleRebaseHook(),
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                pass
+
+    anyio.run(run)
+    assert len(provider.calls) == 1
+
+
+def test_raised_context_overflow_closes_started_message_before_retry() -> None:
+    """A raised overflow must settle the public response before a retry turn."""
+
+    class StartedOverflowProvider:
+        name = "started-overflow"
+        default_model = "test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+            effort: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del messages, model, tools, tool_results, previous_response_id, effort
+            self.calls += 1
+            yield ProviderResponseStarted(
+                model="test",
+                response_id="failed-response" if self.calls == 1 else "recovered-response",
+            )
+            if self.calls == 1:
+                raise ContextOverflowError("maximum context length exceeded")
+            yield ProviderResponseCompleted(
+                content="recovered",
+                response_id="recovered-response",
+            )
+
+    class RecoverOverflow:
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> RequestBoundaryDecision:
+            del snapshot
+            return RequestBoundaryDecision(
+                messages=(Message(role="user", content="compacted summary"),)
+            )
+
+    provider = StartedOverflowProvider()
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    context_overflow_hook=RecoverOverflow(),
+                ),
+                messages=(Message(role="user", content="long prompt"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    lifecycle_events = [
+        event for event in events if isinstance(event, MessageStarted | MessageCompleted)
+    ]
+    assert [type(event) for event in lifecycle_events] == [
+        MessageStarted,
+        MessageCompleted,
+        MessageStarted,
+        MessageCompleted,
+    ]
+    failed_completion = lifecycle_events[1]
+    assert isinstance(failed_completion, MessageCompleted)
+    assert failed_completion.finish_reason == "error"
+    assert failed_completion.response_id == "failed-response"
+    assert [event.turn for event in events if isinstance(event, TurnCompleted)] == [1, 2]
+    assert provider.calls == 2
+
+
+def test_context_overflow_hook_retries_in_the_same_loop() -> None:
+    """A hook may replace the failed request without constructing another loop."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseFailed(
+                    message="context window exceeded",
+                    failure_kind="context_overflow",
+                ),
+            ],
+            _completed_stream("recovered", response_id="recovered-response"),
+        ]
+    )
+
+    class RecoverOverflow:
+        def __init__(self) -> None:
+            self.snapshots: list[ContextOverflowSnapshot] = []
+
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> RequestBoundaryDecision | None:
+            self.snapshots.append(snapshot)
+            return RequestBoundaryDecision(
+                messages=(Message(role="user", content="compacted summary"),)
+            )
+
+    hook = RecoverOverflow()
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    context_window=100,
+                    context_overflow_hook=hook,
+                ),
+                messages=(Message(role="user", content="long prompt"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.turn for event in events if isinstance(event, TurnCompleted)] == [1, 2]
+    assert any(isinstance(event, ContextOverflow) for event in events)
+    assert hook.snapshots[0].had_streamed_delta is False
+    assert len(provider.calls) == 2
+    assert [(message.role, message.content) for message in provider.calls[1].messages] == [
+        ("user", "compacted summary")
+    ]
+    assert provider.calls[1].previous_response_id is None
+    assert provider.calls[1].tool_results == ()
+    assert provider.calls[1].extra_messages == ()

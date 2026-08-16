@@ -502,6 +502,47 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
     assert retry_body["prompt_cache_key"] == "wisp:session-1"
 
 
+def test_openai_codex_provider_preserves_continuation_after_context_overflow(
+    tmp_path: Path,
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-1"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            },
+            _completed_event("response-1"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    messages = [Message(role="user", content="hi")]
+
+    async def run() -> list[object]:
+        async for _event in provider.stream(messages):
+            pass
+        provider.events = [{"type": "error", "message": "maximum context length exceeded"}]
+        return [
+            event
+            async for event in provider.stream(
+                messages,
+                tool_results=[ToolCallResult(call_id="call-1", output="found")],
+                previous_response_id="response-1",
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert isinstance(events[-1], ProviderResponseFailed)
+    assert provider._continuations.get("response-1") is not None  # noqa: SLF001
+
+
 def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(

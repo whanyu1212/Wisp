@@ -1226,18 +1226,38 @@ def test_anthropic_provider_reports_context_window_exceeded_as_failure() -> None
     provider = StubAnthropicProvider(
         [_text_delta("partial answer"), _message_delta("model_context_window_exceeded")]
     )
+    provider._replays.remember("previous-response", ())  # noqa: SLF001
 
-    async def run() -> list[object]:
-        return [
-            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+    async def run() -> tuple[list[object], list[object]]:
+        failed = [
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")],
+                previous_response_id="previous-response",
+            )
         ]
+        provider.events = [
+            _message_start("recovered-response"),
+            _text_delta("recovered"),
+            _message_delta("end_turn"),
+        ]
+        recovered = [
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="summary")],
+                previous_response_id="previous-response",
+            )
+        ]
+        return failed, recovered
 
-    events = anyio.run(run)
+    events, recovered = anyio.run(run)
     failure = events[-1]
     assert failure == ProviderResponseFailed(
         message="Anthropic model_context_window_exceeded",
         partial_content="partial answer",
     )
+    assert isinstance(recovered[-1], ProviderResponseCompleted)
+    assert recovered[-1].content == "recovered"
 
 
 def test_anthropic_provider_defaults_unrecognized_stop_reason_to_length() -> None:

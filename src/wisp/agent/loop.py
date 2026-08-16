@@ -19,6 +19,8 @@ from wisp.agent.context import (
     trailing_context_estimate,
 )
 from wisp.agent.execution import (
+    ContextOverflowHook,
+    ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestBoundaryHook,
     RequestBoundarySnapshot,
@@ -29,6 +31,7 @@ from wisp.agent.execution import (
 )
 from wisp.agent.messages import Message
 from wisp.events import (
+    ContextBudget,
     ContextEstimated,
     ContextOverflow,
     ContextPressure,
@@ -124,6 +127,7 @@ class AgentLoopConfig:
     defer_context_overflow_errors: bool = False
     prompt_cache_key: str | None = None
     request_boundary_hook: RequestBoundaryHook | None = None
+    context_overflow_hook: ContextOverflowHook | None = None
 
     def __post_init__(self) -> None:
         validate_agent_runtime_limits(
@@ -200,73 +204,102 @@ def _fold_clean_continuation(
     return folded
 
 
-async def _at_request_boundary(
+def _continuation_snapshot(state: _AgentLoopState) -> tuple[Message, ...]:
+    """Return a deep, immutable-facing view of live continuation state."""
+
+    # `Message`/`ToolCallSnapshot` are frozen, but a `ToolCallSnapshot`'s
+    # arguments contain a mutable dict. Never expose the loop's live state.
+    return tuple(message.model_copy(deep=True) for message in state.continuation_messages)
+
+
+def _validate_replacement_messages(
+    config: AgentLoopConfig, messages: Sequence[Message]
+) -> tuple[Message, ...]:
+    """Validate a caller-owned portable base before a fresh/rebased request."""
+
+    replacement = tuple(messages)
+    if not _has_valid_replacement_tool_order(replacement):
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
+        )
+    if any(_is_tool_shaped(message) for message in replacement) and not (
+        _provider_supports_structured_tool_replacement(config.provider, effort=config.effort)
+    ):
+        raise RequestBoundaryUnsupportedError(
+            "The provider cannot fresh-replay a structured tool exchange for this effort"
+        )
+    return replacement
+
+
+def _apply_request_boundary_decision(
     config: AgentLoopConfig,
     state: _AgentLoopState,
     *,
     messages: Sequence[Message],
     had_tool_calls: bool,
-    stop_by_default: bool,
+    decision: RequestBoundaryDecision,
+    allow_extra_messages: bool,
 ) -> tuple[Sequence[Message], bool]:
-    """Apply a typed transition between a completed turn and the next request.
+    """Validate and atomically apply one caller-supplied loop transition."""
 
-    A replacement starts a fresh provider request and atomically discards all
-    old loop continuation state. User ``extra_messages`` instead append once
-    to a capable provider's active continuation. When a clean response has no
-    usable cursor, the loop can safely fold its portable text history into a
-    fresh request; it never flattens structured tool history to do so.
-    """
-
-    has_tool_history = had_tool_calls or any(
-        _is_tool_shaped(message) for message in state.continuation_messages
-    )
-    supports_continuation_messages = _provider_supports_continuation_messages(config.provider)
-
-    if config.request_boundary_hook is None:
-        return messages, stop_by_default
-
-    snapshot = RequestBoundarySnapshot(
-        turn=state.turn,
-        tool_iterations=state.tool_iterations,
-        had_tool_calls=had_tool_calls,
-        # `Message`/`ToolCallSnapshot` are frozen, but a `ToolCallSnapshot`'s
-        # arguments contain a mutable dict. Do not expose the loop's live state.
-        continuation_messages=tuple(
-            message.model_copy(deep=True) for message in state.continuation_messages
-        ),
-    )
-    decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
-        snapshot=snapshot
-    )
-    # No provider request follows a stop, so its unused content must not make
-    # a completed turn fail or mutate its logical continuation.
+    # No provider request follows a stop, so unused content must not make a
+    # completed turn fail or mutate its logical continuation.
     if decision.stop:
         return messages, True
+    if decision.messages is not None and decision.context_rebase is not None:
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryDecision.messages and context_rebase are mutually exclusive"
+        )
 
     extra_messages = tuple(decision.extra_messages)
+    if not allow_extra_messages and extra_messages:
+        raise RequestBoundaryUnsupportedError(
+            "Context-overflow recovery cannot append extra messages"
+        )
     if any(message.role != "user" or _is_tool_shaped(message) for message in extra_messages):
         raise RequestBoundaryUnsupportedError(
             "RequestBoundaryDecision.extra_messages must contain only plain user messages"
         )
 
     if decision.messages is not None:
-        if not _has_valid_replacement_tool_order(decision.messages):
-            raise RequestBoundaryUnsupportedError(
-                "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
-            )
-        if any(_is_tool_shaped(message) for message in decision.messages) and not (
-            _provider_supports_structured_tool_replacement(config.provider, effort=config.effort)
-        ):
-            raise RequestBoundaryUnsupportedError(
-                "The provider cannot fresh-replay a structured tool exchange for this effort"
-            )
+        replacement = _validate_replacement_messages(config, decision.messages)
         # A replacement is caller-owned, self-contained context. It may retain
         # the active structured tool pair; each adapter is responsible for
         # encoding that fresh context natively. Extras become part of the fresh
         # base, so this transition never depends on an optional capability.
         state.replace_context()
-        return (*decision.messages, *extra_messages), False
+        return (*replacement, *extra_messages), False
 
+    rebase = decision.context_rebase
+    if rebase is not None:
+        if not _provider_supports_context_rebase(config.provider):
+            raise RequestBoundaryUnsupportedError(
+                "The provider cannot rebase portable context beneath its continuation"
+            )
+        if state.previous_response_id is None:
+            raise RequestBoundaryUnsupportedError(
+                "Cannot rebase context without a usable provider continuation"
+            )
+        expected = tuple(rebase.expected_continuation_messages)
+        if expected != tuple(state.continuation_messages):
+            raise RequestBoundaryUnsupportedError(
+                "RequestContextRebase expected continuation does not match live state"
+            )
+        replacement = _validate_replacement_messages(config, rebase.base_messages)
+        # Do not call `replace_context`: rebase deliberately keeps the live
+        # provider cursor and opaque replay tail. Tool results remain pending
+        # only at the immediate post-tool boundary; a clean response has
+        # already consumed them.
+        if not had_tool_calls:
+            state.consume_pending_tool_results()
+        if extra_messages:
+            state.queue_extra_messages(extra_messages)
+        return replacement, False
+
+    has_tool_history = had_tool_calls or any(
+        _is_tool_shaped(message) for message in state.continuation_messages
+    )
+    supports_continuation_messages = _provider_supports_continuation_messages(config.provider)
     if not had_tool_calls:
         # The preceding provider request already consumed these outputs. Clear
         # them only when another request will actually be made.
@@ -299,8 +332,85 @@ async def _at_request_boundary(
     return _fold_clean_continuation(state, messages), False
 
 
+async def _at_request_boundary(
+    config: AgentLoopConfig,
+    state: _AgentLoopState,
+    *,
+    messages: Sequence[Message],
+    had_tool_calls: bool,
+    stop_by_default: bool,
+) -> tuple[Sequence[Message], bool]:
+    """Apply a typed transition between a completed turn and the next request."""
+
+    if config.request_boundary_hook is None:
+        return messages, stop_by_default
+    snapshot = RequestBoundarySnapshot(
+        turn=state.turn,
+        tool_iterations=state.tool_iterations,
+        had_tool_calls=had_tool_calls,
+        can_append_user_messages=(
+            _provider_supports_continuation_messages(config.provider)
+            and state.previous_response_id is not None
+        ),
+        continuation_messages=_continuation_snapshot(state),
+    )
+    decision = await config.request_boundary_hook.before_next_request(snapshot=snapshot)
+    return _apply_request_boundary_decision(
+        config,
+        state,
+        messages=messages,
+        had_tool_calls=had_tool_calls,
+        decision=decision,
+        allow_extra_messages=True,
+    )
+
+
+async def _at_context_overflow(
+    config: AgentLoopConfig,
+    state: _AgentLoopState,
+    *,
+    messages: Sequence[Message],
+    context_budget: ContextBudget,
+    had_streamed_delta: bool,
+    message: str,
+) -> tuple[Sequence[Message], bool]:
+    """Ask the optional hook whether this rejected request can retry safely."""
+
+    if config.context_overflow_hook is None:
+        return messages, False
+    snapshot = ContextOverflowSnapshot(
+        turn=state.turn,
+        tool_iterations=state.tool_iterations,
+        continuation_messages=_continuation_snapshot(state),
+        has_native_continuation=state.previous_response_id is not None,
+        context_budget=context_budget,
+        had_streamed_delta=had_streamed_delta,
+        message=message,
+    )
+    decision = await config.context_overflow_hook.recover_context_overflow(snapshot=snapshot)
+    if decision is None or decision.stop:
+        return messages, False
+    if decision.messages is None and decision.context_rebase is None:
+        raise RequestBoundaryUnsupportedError(
+            "Context-overflow recovery must provide a fresh replacement or context rebase"
+        )
+    rebased_messages, stop = _apply_request_boundary_decision(
+        config,
+        state,
+        messages=messages,
+        had_tool_calls=any(_is_tool_shaped(item) for item in state.continuation_messages),
+        decision=decision,
+        allow_extra_messages=False,
+    )
+    return rebased_messages, not stop
+
+
 def _provider_supports_continuation_messages(provider: Provider) -> bool:
     return getattr(provider, "supports_continuation_messages", False) is True
+
+
+def _provider_supports_context_rebase(provider: Provider) -> bool:
+    return getattr(provider, "supports_context_rebase", False) is True
 
 
 def _provider_supports_prompt_cache_key(provider: Provider) -> bool:
@@ -828,26 +938,27 @@ async def run_agent_loop(
                 and previous_observation.model == selected_model
                 else None
             )
+            context_budget = build_context_budget(
+                estimate,
+                context_window=config.context_window,
+                reserve_tokens=config.context_reserve_tokens,
+                observed_tokens=(
+                    previous_observation.input_tokens if previous_observation is not None else None
+                ),
+                observed_is_current=trailing_estimate is not None,
+                trailing_estimated_tokens=(
+                    trailing_estimate.total_tokens if trailing_estimate is not None else None
+                ),
+            )
             yield ContextEstimated(
                 turn=turn,
                 provider=config.provider.name,
                 model=selected_model,
-                budget=build_context_budget(
-                    estimate,
-                    context_window=config.context_window,
-                    reserve_tokens=config.context_reserve_tokens,
-                    observed_tokens=(
-                        previous_observation.input_tokens
-                        if previous_observation is not None
-                        else None
-                    ),
-                    observed_is_current=trailing_estimate is not None,
-                    trailing_estimated_tokens=(
-                        trailing_estimate.total_tokens if trailing_estimate is not None else None
-                    ),
-                ),
+                budget=context_budget,
             )
 
+            attempt_had_streamed_delta = False
+            request_overflow_error: ContextOverflowError | None = None
             try:
                 provider_stream = _provider_stream(
                     config,
@@ -856,53 +967,102 @@ async def run_agent_loop(
                     extra_messages=state.pending_extra_messages,
                     previous_response_id=state.previous_response_id,
                 )
+                async for provider_event in _provider_events(provider_stream):
+                    if _is_cancelled(config):
+                        for event in _cancelled_turn_events(turn):
+                            yield event
+                        return
+                    lifecycle.require_open()
+                    if isinstance(provider_event, ProviderResponseStarted):
+                        lifecycle.start(provider_event)
+                        yield MessageStarted(turn=turn)
+                    elif isinstance(provider_event, provider_events.ProviderRetrying):
+                        lifecycle.retry()
+                        yield ProviderRetrying(
+                            turn=turn,
+                            provider=config.provider.name,
+                            attempt=provider_event.attempt,
+                            max_attempts=provider_event.max_attempts,
+                            delay_seconds=provider_event.delay_seconds,
+                            reason=provider_event.reason,
+                            status_code=provider_event.status_code,
+                        )
+                    elif isinstance(provider_event, ProviderTextDelta):
+                        lifecycle.add_text(provider_event.delta)
+                        attempt_had_streamed_delta = True
+                        yield MessageDelta(
+                            turn=turn,
+                            delta=provider_event.delta,
+                            content_index=provider_event.content_index,
+                        )
+                    elif isinstance(provider_event, ProviderThinkingDelta):
+                        lifecycle.add_thinking(provider_event.delta)
+                        attempt_had_streamed_delta = True
+                        yield MessageDelta(
+                            turn=turn,
+                            delta=provider_event.delta,
+                            content_index=provider_event.content_index,
+                            content_kind="thinking",
+                        )
+                    elif isinstance(provider_event, ProviderToolCallCompleted):
+                        lifecycle.add_tool_call(provider_event.tool_call)
+                    elif isinstance(
+                        provider_event, ProviderResponseCompleted | ProviderResponseFailed
+                    ):
+                        lifecycle.complete(provider_event)
+                    else:
+                        event_type = type(provider_event).__name__
+                        raise ProviderProtocolError(
+                            f"Provider emitted unsupported event type: {event_type}"
+                        )
+            except ContextOverflowError as exc:
+                request_overflow_error = exc
             except Exception as exc:
                 if is_context_overflow_message(str(exc)):
-                    raise ContextOverflowError(str(exc)) from exc
-                raise
-            async for provider_event in _provider_events(provider_stream):
-                if _is_cancelled(config):
-                    for event in _cancelled_turn_events(turn):
-                        yield event
-                    return
-                lifecycle.require_open()
-                if isinstance(provider_event, ProviderResponseStarted):
-                    lifecycle.start(provider_event)
-                    yield MessageStarted(turn=turn)
-                elif isinstance(provider_event, provider_events.ProviderRetrying):
-                    lifecycle.retry()
-                    yield ProviderRetrying(
-                        turn=turn,
-                        provider=config.provider.name,
-                        attempt=provider_event.attempt,
-                        max_attempts=provider_event.max_attempts,
-                        delay_seconds=provider_event.delay_seconds,
-                        reason=provider_event.reason,
-                        status_code=provider_event.status_code,
-                    )
-                elif isinstance(provider_event, ProviderTextDelta):
-                    lifecycle.add_text(provider_event.delta)
-                    yield MessageDelta(
-                        turn=turn,
-                        delta=provider_event.delta,
-                        content_index=provider_event.content_index,
-                    )
-                elif isinstance(provider_event, ProviderThinkingDelta):
-                    lifecycle.add_thinking(provider_event.delta)
-                    yield MessageDelta(
-                        turn=turn,
-                        delta=provider_event.delta,
-                        content_index=provider_event.content_index,
-                        content_kind="thinking",
-                    )
-                elif isinstance(provider_event, ProviderToolCallCompleted):
-                    lifecycle.add_tool_call(provider_event.tool_call)
-                elif isinstance(provider_event, ProviderResponseCompleted | ProviderResponseFailed):
-                    lifecycle.complete(provider_event)
+                    request_overflow_error = ContextOverflowError(str(exc))
                 else:
-                    raise ProviderProtocolError(
-                        f"Provider emitted unsupported event type: {type(provider_event).__name__}"
+                    raise
+
+            if request_overflow_error is not None:
+                # A provider may open a public response lifecycle and then
+                # raise instead of yielding a typed terminal failure. Close
+                # that lifecycle before recovery starts another turn.
+                if lifecycle.started:
+                    yield MessageCompleted(
+                        turn=turn,
+                        content="".join(lifecycle.text),
+                        finish_reason="error",
+                        response_id=lifecycle.started_response_id,
                     )
+                # Preserve the historical raised-overflow path for callers
+                # without an explicit same-loop recovery hook. The outer
+                # handler owns its public terminal events and re-raises.
+                if config.context_overflow_hook is None:
+                    raise request_overflow_error
+                yield ContextOverflow(
+                    turn=turn,
+                    provider=config.provider.name,
+                    model=config.model or config.provider.default_model,
+                    context_window=config.context_window,
+                    message=str(request_overflow_error),
+                )
+                messages, retry = await _at_context_overflow(
+                    config,
+                    state,
+                    messages=messages,
+                    context_budget=context_budget,
+                    had_streamed_delta=attempt_had_streamed_delta,
+                    message=str(request_overflow_error),
+                )
+                if retry:
+                    yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
+                    turn_started = False
+                    continue
+                if config.defer_context_overflow_errors:
+                    return
+                yield ErrorEvent(message=str(request_overflow_error))
+                yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
+                return
 
             if _is_cancelled(config):
                 for event in _cancelled_turn_events(turn):
@@ -932,6 +1092,18 @@ async def run_agent_loop(
                         context_window=config.context_window,
                         message=failure.message,
                     )
+                    messages, retry = await _at_context_overflow(
+                        config,
+                        state,
+                        messages=messages,
+                        context_budget=context_budget,
+                        had_streamed_delta=attempt_had_streamed_delta,
+                        message=failure.message,
+                    )
+                    if retry:
+                        yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
+                        turn_started = False
+                        continue
                     if config.defer_context_overflow_errors:
                         return
                 yield ErrorEvent(message=failure.message)

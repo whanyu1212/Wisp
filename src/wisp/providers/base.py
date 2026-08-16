@@ -107,6 +107,17 @@ class Provider(Protocol):
         ...
 
 
+class ContextRebaseProvider(Protocol):
+    """Opt-in capability for replacing a portable base beneath a live cursor.
+
+    The provider's continuation cursor must identify only an adapter-owned
+    replay tail, so a changed ``messages`` base can safely be combined with
+    unchanged native continuation state in the same request.
+    """
+
+    supports_context_rebase: Literal[True]
+
+
 class PromptCacheKeyProvider(Protocol):
     """Opt-in provider capability for request-level prompt-cache routing."""
 
