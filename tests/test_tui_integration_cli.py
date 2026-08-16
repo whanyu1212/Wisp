@@ -5331,6 +5331,35 @@ def test_textual_transcript_loads_history_when_the_initial_page_fits() -> None:
     assert anyio.run(scenario) == 1
 
 
+def test_textual_resumed_history_accepts_a_zero_height_message_as_settled() -> None:
+    async def scenario() -> tuple[int, tuple[int, ...]]:
+        app_instance, renderer = create_textual_tui()
+        request_started = anyio.Event()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+            request_started.set()
+
+        async with app_instance.run_test(size=(80, 24)):
+            renderer.replace_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="\n"),),
+                session_label="Restored session",
+            )
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            with anyio.fail_after(5):
+                await request_started.wait()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return requests, tuple(child.region.height for child in transcript.children)
+
+    requests, child_heights = anyio.run(scenario)
+
+    assert requests == 1
+    assert 0 in child_heights
+
+
 def test_textual_transcript_waits_for_layout_before_requesting_history() -> None:
     async def scenario() -> int:
         app_instance, renderer = create_textual_tui()

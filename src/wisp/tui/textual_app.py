@@ -2783,7 +2783,7 @@ class TextualTui(App[None]):
         ):
             return
         viewport_height = transcript.scrollable_content_region.height
-        if viewport_height <= 0 or any(child.region.height <= 0 for child in transcript.children):
+        if viewport_height <= 0:
             self.call_after_refresh(
                 self._request_history_if_still_at_top,
                 transcript,
@@ -2791,8 +2791,10 @@ class TextualTui(App[None]):
                 epoch,
             )
             return
-        # A mounted widget occupies at least one row, so child count is a stable
-        # lower bound even while Textual is still updating virtual geometry.
+        # A mounted widget can legitimately occupy zero rows (for example, a
+        # whitespace-only Markdown message), so its height cannot distinguish an
+        # unsettled layout from stable empty output. Child count remains a
+        # conservative lower bound while Textual updates virtual geometry.
         # Never request another page merely because scroll_y has not caught up.
         if (
             len(transcript.children) > viewport_height
