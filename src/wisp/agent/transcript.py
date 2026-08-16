@@ -22,16 +22,23 @@ class TranscriptRepairPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class _MissingToolResult:
+class MissingToolResult:
     tool_call: ToolCallSnapshot
 
 
-def _order_tool_result_items[TranscriptItem](
+def order_tool_result_items[TranscriptItem](
     items: Sequence[TranscriptItem],
     *,
     message_of: Callable[[TranscriptItem], Message],
-) -> tuple[TranscriptItem | _MissingToolResult, ...]:
-    """Place each result after its nearest preceding unmatched call occurrence."""
+) -> tuple[TranscriptItem | MissingToolResult, ...]:
+    """Place each result after its nearest preceding unmatched call occurrence.
+
+    Shared across packages: ``wisp.sessions.replay`` also calls this to order
+    persisted session rows, but applies a different policy to the resulting
+    ``MissingToolResult`` markers (it filters them out, whereas
+    ``plan_interrupted_tool_repairs`` below synthesizes an error result for
+    each one). Keep both call sites in mind when changing this function.
+    """
 
     source = tuple(items)
     result_index_by_call_occurrence: dict[tuple[int, int], int] = {}
@@ -55,7 +62,7 @@ def _order_tool_result_items[TranscriptItem](
         result_index_by_call_occurrence[call_occurrence] = item_index
         matched_result_indices.add(item_index)
 
-    ordered: list[TranscriptItem | _MissingToolResult] = []
+    ordered: list[TranscriptItem | MissingToolResult] = []
     for item_index, item in enumerate(source):
         if item_index in matched_result_indices:
             continue
@@ -66,7 +73,7 @@ def _order_tool_result_items[TranscriptItem](
         for call_index, tool_call in enumerate(message.tool_calls):
             result_index = result_index_by_call_occurrence.get((item_index, call_index))
             if result_index is None:
-                ordered.append(_MissingToolResult(tool_call))
+                ordered.append(MissingToolResult(tool_call))
             else:
                 ordered.append(source[result_index])
     return tuple(ordered)
@@ -83,8 +90,8 @@ def plan_interrupted_tool_repairs(messages: Sequence[Message]) -> TranscriptRepa
     repaired: list[Message] = []
     repairs: list[Message] = []
 
-    for item in _order_tool_result_items(messages, message_of=lambda message: message):
-        if isinstance(item, _MissingToolResult):
+    for item in order_tool_result_items(messages, message_of=lambda message: message):
+        if isinstance(item, MissingToolResult):
             tool_call = item.tool_call
             repair = Message(
                 role="tool",
@@ -103,6 +110,8 @@ def plan_interrupted_tool_repairs(messages: Sequence[Message]) -> TranscriptRepa
 
 __all__ = [
     "INTERRUPTED_TOOL_RESULT_TEXT",
+    "MissingToolResult",
     "TranscriptRepairPlan",
+    "order_tool_result_items",
     "plan_interrupted_tool_repairs",
 ]

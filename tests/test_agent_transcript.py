@@ -3,6 +3,8 @@ from __future__ import annotations
 from wisp.agent.messages import Message
 from wisp.agent.transcript import (
     INTERRUPTED_TOOL_RESULT_TEXT,
+    MissingToolResult,
+    order_tool_result_items,
     plan_interrupted_tool_repairs,
 )
 from wisp.events import ToolCallSnapshot
@@ -136,6 +138,25 @@ def test_plan_interrupted_tool_repairs_consumes_reused_call_ids_per_occurrence()
 
     assert repeated.messages == plan.messages
     assert repeated.repairs == ()
+
+
+def test_order_tool_result_items_is_public_and_marks_missing_results() -> None:
+    # Regression for #358: sessions.replay depends on this ordering primitive
+    # directly, so it must be importable as a public name.
+    result = Message(
+        role="tool",
+        content="done",
+        tool_call_id="call-1",
+        tool_name="read",
+    )
+    messages = (_assistant_with_calls("call-1", "call-2"), result)
+
+    ordered = order_tool_result_items(messages, message_of=lambda message: message)
+
+    assert ordered[0] is messages[0]
+    assert ordered[1] is result
+    assert isinstance(ordered[2], MissingToolResult)
+    assert ordered[2].tool_call.call_id == "call-2"
 
 
 def test_plan_interrupted_tool_repairs_matches_reused_id_to_nearest_call() -> None:
