@@ -787,6 +787,13 @@ def test_google_provider_stream_forwards_effort_to_create_stream() -> None:
     assert provider.seen_effort == "HIGH"
 
 
+def test_google_provider_rejects_structured_tool_replacement() -> None:
+    provider = GoogleProvider(api_key="test-key")
+
+    assert not provider.supports_structured_tool_replacement(effort=None)
+    assert not provider.supports_structured_tool_replacement(effort="HIGH")
+
+
 def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> None:
     stub_models = StubModels()
     provider = GoogleProvider(

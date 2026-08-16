@@ -109,6 +109,18 @@ class GoogleProvider:
         # and evicted alongside it.
         self._call_info: OrderedDict[str, _CallInfo] = OrderedDict()
 
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        """Reject fresh tool replay because Gemini thought signatures are opaque.
+
+        Gemini 3 requires a function call's thought signature to accompany its
+        matching result. ``Message`` snapshots intentionally retain portable
+        text and calls, not the provider-native ``Part`` payload, so they
+        cannot safely rebuild an active tool exchange as fresh context.
+        """
+
+        del effort
+        return False
+
     async def stream(
         self,
         messages: Sequence[Message],
