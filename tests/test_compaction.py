@@ -9,6 +9,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
+import wisp.agent.harness as agent_harness_module
 from wisp.agent.context import build_context_budget, estimate_context
 from wisp.agent.messages import Message
 from wisp.coding.compaction import (
@@ -2011,7 +2012,10 @@ def test_coding_session_recovers_when_active_tool_turn_remains_over_provider_lim
     )
 
 
-def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:
+def test_coding_session_recovers_one_overflow_with_compaction_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -2031,6 +2035,15 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
     )
     store = JsonlSessionStore(tmp_path)
     session = store.create()
+    real_run_agent_loop = agent_harness_module.run_agent_loop
+    primary_loop_calls = 0
+
+    def recording_run_agent_loop(*args: object, **kwargs: object) -> object:
+        nonlocal primary_loop_calls
+        primary_loop_calls += 1
+        return real_run_agent_loop(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_harness_module, "run_agent_loop", recording_run_agent_loop)
 
     async def run() -> list[WispEvent]:
         await _append_turn(session, "one")
@@ -2081,6 +2094,8 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
     assert events[-1].turns == 2
     assert events[-1].outcome == "completed"
     assert len(provider.calls) == 3
+    # The isolated compaction summarizer is intentionally not counted here.
+    assert primary_loop_calls == 1
     entries = session.read_entries()
     overflow_record = next(
         entry.compaction

@@ -6,7 +6,13 @@ from typing import cast
 import anyio
 import pytest
 
-from wisp.agent.execution import ToolExecutionEvent
+import wisp.agent.harness as agent_harness_module
+from wisp.agent.execution import (
+    RequestBoundaryDecision,
+    RequestBoundaryUnsupportedError,
+    RequestContextRebase,
+    ToolExecutionEvent,
+)
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
 from wisp.agent.messages import Message
 from wisp.events import (
@@ -1035,7 +1041,11 @@ def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> N
     assert events[-1].outcome == "failed"
 
 
-def test_harness_pause_after_tool_round_injects_steering_before_returning() -> None:
+def test_harness_uses_one_primary_loop_for_tool_steering_and_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queue boundaries continue the same loop rather than reconstructing offsets."""
+
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -1047,26 +1057,78 @@ def test_harness_pause_after_tool_round_injects_steering_before_returning() -> N
                     tool_calls=(tool_call,),
                     finish_reason="tool_calls",
                 ),
-            ]
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="steered-response"),
+                ProviderResponseCompleted(content="steered", response_id="steered-response"),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="followed")],
         ]
     )
     harness = _harness(
         provider,
         tools=(ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),),
     )
-    harness.append_message(Message(role="user", content="initial"))
     harness.steer("change direction")
+    harness.follow_up("finish this")
+    real_run_agent_loop = agent_harness_module.run_agent_loop
+    loop_calls = 0
+
+    def recording_run_agent_loop(*args: object, **kwargs: object) -> object:
+        nonlocal loop_calls
+        loop_calls += 1
+        return real_run_agent_loop(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_harness_module, "run_agent_loop", recording_run_agent_loop)
 
     async def run() -> list[object]:
-        return [event async for event in harness.continue_(pause_after_tool_round=True)]
+        return [event async for event in harness.prompt("initial")]
 
     events = anyio.run(run)
 
-    assert len(provider.calls) == 1
-    assert any(isinstance(event, QueueMessageInjected) for event in events)
-    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
-        ("tool", "tool output"),
-        ("user", "change direction"),
+    assert loop_calls == 1
+    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
+        "change direction",
+        "finish this",
+    ]
+    assert provider.calls[1].messages[-1].content == "change direction"
+    assert [message.content for message in provider.calls[2].extra_messages] == ["finish this"]
+
+
+def test_harness_rejects_a_stale_rebase_without_mutating_its_transcript() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderResponseCompleted(content="answer", response_id="response-1"),
+            ]
+        ]
+    )
+    harness = _harness(provider)
+
+    class StalePreparer:
+        async def prepare_boundary(self, *, context: object) -> RequestBoundaryDecision | None:
+            del context
+            return RequestBoundaryDecision(
+                context_rebase=RequestContextRebase(
+                    base_messages=(Message(role="user", content="bad summary"),),
+                    expected_continuation_messages=(),
+                )
+            )
+
+    async def run() -> None:
+        with pytest.raises(
+            RequestBoundaryUnsupportedError,
+            match="expected continuation does not match",
+        ):
+            async for _event in harness.prompt("initial", boundary_preparer=StalePreparer()):
+                pass
+
+    anyio.run(run)
+
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial"),
+        ("assistant", "answer"),
     ]
 
 

@@ -76,6 +76,7 @@ class OpenAICompatibleProvider:
 
     name = OPENAI_COMPATIBLE_PROVIDER_NAME
     supports_continuation_messages: Literal[True] = True
+    supports_context_rebase: Literal[True] = True
 
     def __init__(
         self,

@@ -65,6 +65,7 @@ class OpenAICodexProvider:
     name = "openai-codex"
     supports_prompt_cache_key: Literal[True] = True
     supports_continuation_messages: Literal[True] = True
+    supports_context_rebase: Literal[True] = True
 
     def __init__(
         self,
