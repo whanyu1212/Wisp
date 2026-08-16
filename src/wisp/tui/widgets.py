@@ -2329,7 +2329,12 @@ class ToolCard(Static):
         *,
         arguments_available: bool = True,
     ) -> None:
-        super().__init__("")
+        # markup=False: every other content-bearing Static in this module
+        # takes untrusted tool/model text this way. _repaint() always wraps
+        # its content through Content(...) (never .from_markup), so this is
+        # currently inert defense-in-depth -- but it must stay true if a
+        # future call site ever updates this widget with a raw str directly.
+        super().__init__("", markup=False)
         # Not `_name`: Textual's DOMNode uses `self._name` to back the widget
         # `name` property (typed str | None), so a distinct field avoids
         # shadowing it and keeps this a plain str.

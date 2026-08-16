@@ -3230,6 +3230,37 @@ def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
     assert texts == ["The quick brown fox"]
 
 
+def test_textual_streaming_reanchors_at_most_once_per_turn() -> None:
+    # Regression: _anchor_stream_tail() re-armed Transcript.anchor() on every
+    # paced drain of the same followed turn, even when already anchored to it
+    # from an earlier drain -- redundant work on the hottest path in the TUI
+    # (every drain of every streaming turn). It must anchor once per turn, not
+    # once per drain.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            anchor_calls = 0
+            original_anchor = Transcript.anchor
+
+            def counting_anchor(self: Transcript, anchor: bool = True) -> None:
+                nonlocal anchor_calls
+                if anchor:
+                    anchor_calls += 1
+                original_anchor(self, anchor)
+
+            transcript.anchor = counting_anchor.__get__(transcript)  # type: ignore[method-assign]
+
+            for delta in ["first ", "second ", "third ", "fourth ", "fifth"]:
+                renderer.token_delta(delta)
+                await pilot.pause()
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            return anchor_calls
+
+    assert anyio.run(scenario) == 1
+
+
 def test_textual_streaming_coalesces_one_pending_drain_per_turn() -> None:
     async def scenario() -> tuple[int, str]:
         app_instance, renderer = create_textual_tui()
@@ -3661,6 +3692,44 @@ def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() 
     deferred_requests, resumed_requests = anyio.run(scenario)
     assert deferred_requests == 0
     assert resumed_requests == 1
+
+
+def test_textual_return_to_latest_dispatches_one_history_reload_worker() -> None:
+    # Regression: on_transcript_follow_changed's FollowChanged(True) branch
+    # called show_latest() (which can itself dispatch a reload via
+    # request_latest_history() when the retained window's newest edge was
+    # evicted) and then unconditionally called _request_live_history_reload()
+    # too. request_latest_history() used to launch its worker without setting
+    # _live_history_reload_pending, so the second call's guard never saw it
+    # and dispatched a redundant second worker for the same reload.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_latest() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test() as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            app_instance.set_history_latest_request_hook(request_latest)
+            # Reader is browsing, not following, so eviction below only records
+            # that a reload is needed -- it must not dispatch one yet.
+            transcript._follow = False
+            # Precondition 1: the retained window's newest edge was evicted by
+            # paging far back into older history (see TranscriptWindow.prepend's
+            # overflow eviction), so show_latest() itself requests a reload.
+            renderer._history._window._latest_is_retained = False
+            # Precondition 2: a live transcript widget was separately evicted,
+            # so _request_live_history_reload()'s own guard is satisfied too.
+            app_instance.live_transcript_widget_evicted(Widget())
+            assert requests == 0  # nothing dispatched yet -- reader isn't following
+
+            transcript.return_to_latest()
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 1
 
 
 def test_textual_output_survives_eviction_during_latest_history_reload() -> None:
@@ -4675,7 +4744,14 @@ def test_textual_compaction_notices_and_rpc_completion_stop_progress() -> None:
     assert progress_stopped
 
 
-def test_textual_threshold_compaction_failure_is_a_notice() -> None:
+def test_textual_threshold_compaction_failure_is_an_error() -> None:
+    # Regression: a failed automatic (threshold) compaction used to render with
+    # the identical "message--notice" role as "Compacting..." and a successful
+    # completion -- no visual distinction at all, so a reader scanning by
+    # color/shape could miss that automatic compaction just failed (context
+    # may then overflow unexpectedly on the next turn). Both console renderers
+    # already style a threshold failure distinctly (yellow, vs. plain/cyan for
+    # success); the Textual renderer must distinguish it too.
     async def scenario() -> tuple[list[str], list[tuple[str | None, object]]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -4716,7 +4792,7 @@ def test_textual_threshold_compaction_failure_is_a_notice() -> None:
     assert [role for role, _title in cards] == [
         "message--notice",
         "message--notice",
-        "message--notice",
+        "message--error",
     ]
 
 

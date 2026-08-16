@@ -593,6 +593,32 @@ def test_line_tui_renderer_renders_threshold_compaction_as_automatic_notices() -
     assert "Warning: Event publication failed: listener failed" in rendered
 
 
+def test_line_tui_renderer_renders_failed_manual_compaction_as_error() -> None:
+    # Regression: a manual /compact failure (reason="manual", the default) fell
+    # through to the bare unstyled branch -- rendered in default terminal
+    # color, less visually distinct than a routine successful compaction (which
+    # gets Rich's automatic number highlighting). FullscreenTuiRenderer and
+    # TextualTuiRenderer both already style this red; LineTuiRenderer must too.
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=120)
+    renderer = LineTuiRenderer(console)
+
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="manual",
+            outcome="failed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+            error="disk full",
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "Compaction failed: disk full" in rendered
+    assert "\x1b[31m" in rendered  # red, matching the threshold/overflow failure styling
+
+
 def test_tui_renderers_distinguish_overflow_recovery() -> None:
     console, output = _console()
     line = LineTuiRenderer(console)
@@ -1492,6 +1518,67 @@ def test_fullscreen_tui_renderer_preserves_scrolled_view_during_new_output() -> 
         "message 5",
         "streaming",
     ]
+
+
+def test_fullscreen_tui_renderer_token_delta_matches_full_rewrap_baseline_under_wrapping() -> None:
+    # Regression: token_delta() computes the appended-line count incrementally
+    # from just the streaming entry (see its docstring) instead of re-wrapping
+    # the entire transcript on every token. That must produce byte-identical
+    # transcript_scroll_offset to re-wrapping everything from scratch,
+    # including when word-wrapping is active and a delta lands exactly on a
+    # wrap boundary -- the case a naive delta computation could get wrong.
+    def build_renderer() -> FullscreenTuiRenderer:
+        renderer = FullscreenTuiRenderer(
+            _console()[0], clear_screen=False, transcript_view_entries=3
+        )
+        renderer._transcript_wrap_width = lambda: 10  # type: ignore[method-assign]
+        for index in range(5):
+            renderer.event(completed_message(content=f"message {index} has a fairly long line"))
+        renderer.scroll_transcript_up(1)
+        return renderer
+
+    baseline = build_renderer()
+    under_test = build_renderer()
+    assert baseline.state.transcript_scroll_offset == under_test.state.transcript_scroll_offset
+
+    for delta in ["stream", "ing ", "a lo", "ng w", "ord ", "boun", "dary", " end"]:
+        previous_lines = len(baseline._rendered_transcript_lines())
+        baseline.state.streaming_text += delta
+        appended = len(baseline._rendered_transcript_lines()) - previous_lines
+        baseline._preserve_scroll_after_appended_lines(appended)
+
+        under_test.token_delta(delta)
+
+        assert under_test.state.streaming_text == baseline.state.streaming_text
+        assert under_test.state.transcript_scroll_offset == baseline.state.transcript_scroll_offset
+
+
+def test_fullscreen_tui_renderer_token_delta_does_not_double_rewrap_transcript() -> None:
+    # Regression: the old token_delta() called _rendered_transcript_lines()
+    # (a full re-wrap of the whole transcript plus the whole streaming_text)
+    # twice per token -- once directly, once again inside
+    # _preserve_scroll_after_line_count_change. token_delta() itself must call
+    # it at most once now (via _clamp_transcript_scroll's ceiling check, which
+    # is unavoidable and unrelated to this fix); the appended-line count comes
+    # from _rendered_streaming_entry_line_count(), which only re-wraps the
+    # single streaming entry, not the rest of the transcript.
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    for index in range(20):
+        renderer.event(completed_message(content=f"message {index}"))
+
+    call_count = 0
+    original = FullscreenTuiRenderer._rendered_transcript_lines
+
+    def counting_rewrap(self: FullscreenTuiRenderer) -> list[object]:
+        nonlocal call_count
+        call_count += 1
+        return original(self)
+
+    renderer._rendered_transcript_lines = counting_rewrap.__get__(renderer)  # type: ignore[method-assign]
+
+    renderer.token_delta("one token")
+
+    assert call_count <= 1
 
 
 def test_fullscreen_tui_renderer_preserves_scrolled_view_when_pruning_cap() -> None:
