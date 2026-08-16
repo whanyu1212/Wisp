@@ -18,8 +18,10 @@ from wisp.tui.diff_presentation import (
     DIFF_GUTTER_STYLE,
     DIFF_HUNK_STYLE,
     DIFF_META_STYLE,
+    DIFF_SPLIT_DIVIDER_WIDTH,
     DiffRow,
     DiffRowKind,
+    DiffSplitRow,
     DiffVisibleRow,
 )
 from wisp.tui.rendering import _truncate_to_cell_width
@@ -74,6 +76,85 @@ def render_diff_visible_row(
         fill = source_width - cell_len(source)
         if fill > 0:
             content += Content.styled(" " * fill, row_style)
+    return content
+
+
+def render_diff_split_row(
+    split_row: DiffSplitRow,
+    *,
+    width: int,
+    show_line_numbers: bool,
+    line_number_width: int = 4,
+) -> Content:
+    """Paint one planned split row without inventing an opposite source line."""
+
+    if split_row.metadata is not None:
+        row = split_row.metadata.row
+        return Content.styled(
+            _truncate_to_cell_width(row.text, width),
+            DIFF_HUNK_STYLE if row.kind is DiffRowKind.hunk else DIFF_META_STYLE,
+        )
+
+    available = max(2, width - DIFF_SPLIT_DIVIDER_WIDTH)
+    left_width = available // 2
+    right_width = available - left_width
+    divider = Content.styled(" │ ", DIFF_GUTTER_STYLE)
+    return (
+        _render_diff_split_pane(
+            split_row.left,
+            width=left_width,
+            show_line_numbers=show_line_numbers,
+            line_number_width=line_number_width,
+            left=True,
+        )
+        + divider
+        + _render_diff_split_pane(
+            split_row.right,
+            width=right_width,
+            show_line_numbers=show_line_numbers,
+            line_number_width=line_number_width,
+            left=False,
+        )
+    )
+
+
+def _render_diff_split_pane(
+    visible_row: DiffVisibleRow | None,
+    *,
+    width: int,
+    show_line_numbers: bool,
+    line_number_width: int,
+    left: bool,
+) -> Content:
+    if visible_row is None:
+        return Content(" " * width)
+    row = visible_row.row
+    marker = {
+        DiffRowKind.context: " ",
+        DiffRowKind.addition: "+",
+        DiffRowKind.deletion: "-",
+    }[row.kind]
+    if show_line_numbers:
+        line_number = row.old_line if left else row.new_line
+        numbers = f"{'' if line_number is None else line_number:>{line_number_width}} "
+    else:
+        numbers = ""
+    gutter_style, sign_style = _diff_gutter_styles(row)
+    gutter = Content.styled(numbers, gutter_style)
+    gutter += Content.styled(marker, sign_style)
+    gutter += Content.styled(" │ ", gutter_style)
+    source_width = max(1, width - cell_len(numbers) - cell_len(" │ ") - 1)
+    source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
+    row_style = _diff_row_style(row)
+    content = gutter + _styled_diff_source(
+        source,
+        emphasis_ranges,
+        _diff_token_style(row),
+        row_style,
+    )
+    fill = source_width - cell_len(source)
+    if fill > 0:
+        content += Content.styled(" " * fill, row_style) if row_style else Content(" " * fill)
     return content
 
 
@@ -252,4 +333,4 @@ def _styled_diff_source(
     return content
 
 
-__all__ = ["render_diff_visible_row"]
+__all__ = ["render_diff_split_row", "render_diff_visible_row"]
