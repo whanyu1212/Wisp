@@ -838,14 +838,12 @@ class TextualTui(App[None]):
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
-            if self._oldest_navigation_generation is not None:
-                # Window reconciliation can briefly collapse max_scroll_y to zero,
-                # which looks like tail-following even though Home still owns the
-                # navigation. Preserve that explicit reader intent; End cancels the
-                # generation before it deliberately restores tail following.
-                if self._transcript is not None:
-                    self._transcript.stop_following()
-                return
+            # Transcript.watch_scroll_y only reports True from genuine reader- or
+            # app-driven movement to the tail (content-driven clamps are excluded
+            # at the source — see Transcript._size_updated), so an in-flight Home
+            # traversal never observes a spurious follow here. End explicitly
+            # cancels the oldest-navigation generation before restoring tail
+            # intent, so this is always real reader intent to resume following.
             self._cancel_oldest_navigation()
             show_latest = self._history_window_latest_hook
             if show_latest is not None:
