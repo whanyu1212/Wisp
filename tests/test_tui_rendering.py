@@ -1225,7 +1225,9 @@ def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() ->
     assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
 
 
-@pytest.mark.parametrize("theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-light"])
+@pytest.mark.parametrize(
+    "theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-storm", "wisp-light"]
+)
 @pytest.mark.parametrize(
     ("foreground", "background"),
     [
@@ -1323,6 +1325,17 @@ def test_muted_text_role_meets_contrast_target() -> None:
         muted = muted_by_theme[theme.name]
         assert contrast_ratio(muted, theme.background) >= 4.5
         assert contrast_ratio(muted, theme.panel) >= 4.5
+
+
+def test_primary_on_panel_meets_contrast_target_in_every_theme() -> None:
+    # JumpToLatest renders `color: $primary` on `background: $panel` for the
+    # jump-to-latest badge. A theme whose primary only clears 4.5:1 against
+    # its background (not against panel too) still ships with an illegible
+    # badge, so every registered theme must clear the pairing directly.
+    from wisp.tui.theme import WISP_THEMES, contrast_ratio
+
+    for theme in WISP_THEMES:
+        assert contrast_ratio(theme.primary, theme.panel) >= 4.5, theme.name
 
 
 def test_line_messages_keep_literal_content_without_baked_rich_styles() -> None:

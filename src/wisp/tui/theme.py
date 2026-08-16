@@ -113,6 +113,25 @@ WISP_THEME_EMBER = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a29a95"),
 )
 
+WISP_THEME_STORM = Theme(
+    name="wisp-storm",
+    # Tokyo Night's normal-intensity blue (#7aa2f7) clears 4.5:1 against the
+    # background but only 4.28:1 against $panel (e.g. JumpToLatest's badge
+    # text), so this uses the scheme's own bright-blue variant instead.
+    primary="#8db0ff",
+    secondary="#bb9af7",
+    accent="#7dcfff",
+    warning="#e0af68",
+    error="#f7768e",
+    success="#9ece6a",
+    foreground="#c0caf5",
+    background="#1a1b26",
+    surface="#24283b",
+    panel="#2e3c64",
+    dark=True,
+    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a9b1d6"),
+)
+
 WISP_THEME_LIGHT = Theme(
     name="wisp-light",
     primary="#277795",
@@ -133,6 +152,7 @@ WISP_THEME_SPECS = (
     WispThemeSpec("vapor", "Vapor", "Cool cyan and vapor teal", WISP_THEME_DARK),
     WispThemeSpec("orchid", "Orchid", "Indigo and muted violet", WISP_THEME_ORCHID),
     WispThemeSpec("ember", "Ember", "Warm amber and restrained coral", WISP_THEME_EMBER),
+    WispThemeSpec("storm", "Storm", "Tokyo Night blues and violet", WISP_THEME_STORM),
     WispThemeSpec("paper", "Paper", "Clean light neutrals", WISP_THEME_LIGHT),
 )
 WISP_THEMES = tuple(spec.theme for spec in WISP_THEME_SPECS)
@@ -180,6 +200,7 @@ __all__ = [
     "WISP_THEME_NAMES",
     "WISP_THEME_ORCHID",
     "WISP_THEME_SPECS",
+    "WISP_THEME_STORM",
     "WISP_THEMES",
     "WispThemeSpec",
     "contrast_ratio",
