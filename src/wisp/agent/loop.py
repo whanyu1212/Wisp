@@ -138,6 +138,24 @@ def _is_cancelled(config: AgentLoopConfig) -> bool:
     return token is not None and token.is_cancelled()
 
 
+def _fold_clean_continuation(
+    state: _AgentLoopState, messages: Sequence[Message]
+) -> Sequence[Message]:
+    """Fold the just-finished turn's own answer into `messages` and reset.
+
+    Only called when nothing in `state.continuation_messages` is tool-shaped
+    (see `_at_request_boundary`) -- folding a plain completed-turn answer and
+    resetting `previous_response_id` is always safe there, since every
+    provider's plain-message converter round-trips ordinary text messages
+    correctly.
+    """
+
+    folded = (*messages, *state.continuation_messages)
+    state.continuation_messages.clear()
+    state.reset_continuation()
+    return folded
+
+
 async def _at_request_boundary(
     config: AgentLoopConfig,
     state: _AgentLoopState,
@@ -156,38 +174,38 @@ async def _at_request_boundary(
     run; a completed tool round always continued into the next provider
     sample.
 
-    Every provider treats `messages` as the original, never-mutated turn-1
-    history and only ever *appends* new content on top of it via
-    `tool_results` + `previous_response_id` -- none of them can be told to
-    splice caller-supplied content into an active continuation chain. After a
-    turn with no tool calls, every provider already ignores
-    `previous_response_id` whenever `tool_results` is empty (which it always
-    is here), so `messages` alone must already be complete: the
-    just-completed turn's own answer, sitting only in
-    `state.continuation_messages`, is folded in unconditionally so a
-    continuation actually follows up on what it claims to follow up on.
+    A plain continuation -- no hook, or a hook that returns an empty
+    decision -- never needs `messages` touched at all: every provider
+    natively continues from `state.previous_response_id`, and clearing
+    `state.pending_tool_results` (below) is enough to stop resending an
+    earlier round's already-consumed results.
 
-    After a tool round, `messages`/`extra_messages` are intentionally
-    unsupported (see `RequestBoundaryDecision`): `tool_results` is non-empty
-    there, and rebuilding that continuation from scratch would require
-    replaying `state.continuation_messages`' assistant tool-call and tool-
-    result messages through each provider's plain-message converter, which
-    flattens them to ordinary text/user turns instead of the structured
-    function-call/output pairs a provider expects -- corrupting history
-    rather than fixing it. A hook may still choose to `stop` after a tool
-    round; it just cannot inject or replace content there yet.
+    `messages`/`extra_messages` are a different matter. Every provider
+    treats `messages` as the original, never-mutated turn-1 history and only
+    ever *appends* new content on top of it via `tool_results` +
+    `previous_response_id` -- none of them can be told to splice
+    caller-supplied content into an active continuation chain, so injecting
+    or replacing content forces a fresh, self-contained request built from
+    `messages` alone. That rebuild is only safe when this run has had no
+    tool round yet: none of the providers preserve `Message.tool_calls`/a
+    `role="tool"` message's structure when it is replayed through their
+    plain-message converter instead (confirmed for
+    `_messages_to_response_input`/`_messages_to_anthropic`/
+    `_messages_to_google`: a tool round's assistant/tool rows flatten to a
+    blank assistant turn and an ordinary user message containing raw tool
+    output). Once the run has tool history, a hook may still choose to
+    `stop`; it may not inject or replace content.
     """
 
+    has_tool_history = had_tool_calls or any(
+        message.tool_calls or message.role == "tool" for message in state.continuation_messages
+    )
     if not had_tool_calls:
-        # The provider's own answer to the just-finished turn lives only in
-        # `continuation_messages` today -- fold it in before anything else so
-        # a continuation actually follows up on what happened, whether or not
-        # a hook is configured.
-        messages = (*messages, *state.continuation_messages)
-        state.continuation_messages.clear()
-        state.reset_continuation()
+        state.consume_pending_tool_results()
 
     if config.request_boundary_hook is None:
+        if not had_tool_calls and not has_tool_history:
+            messages = _fold_clean_continuation(state, messages)
         return messages, stop_by_default
 
     snapshot = RequestBoundarySnapshot(
@@ -199,13 +217,16 @@ async def _at_request_boundary(
     decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
         snapshot=snapshot
     )
-    if had_tool_calls and (decision.messages is not None or decision.extra_messages):
+    if has_tool_history and (decision.messages is not None or decision.extra_messages):
         raise RequestBoundaryUnsupportedError(
             "RequestBoundaryDecision.messages/extra_messages are not supported "
-            "immediately after a tool round -- rebuilding that continuation would "
-            "flatten structured tool calls/results into plain text for at least "
-            "one provider. A hook may only return stop=True/False at this boundary."
+            "once this run has had a tool round -- rebuilding that continuation "
+            "would flatten structured tool calls/results into plain text for at "
+            "least one provider. A hook may only return stop=True/False at this "
+            "boundary."
         )
+    if not had_tool_calls and not has_tool_history:
+        messages = _fold_clean_continuation(state, messages)
     if decision.messages is not None:
         messages = decision.messages
     if decision.extra_messages:
@@ -450,6 +471,19 @@ class _AgentLoopState:
 
     def complete_tool_round(self, results: Sequence[ToolCallResult]) -> None:
         self.pending_tool_results = tuple(results)
+
+    def consume_pending_tool_results(self) -> None:
+        """Clear tool results once the request carrying them has been sent.
+
+        Without this, a completed round's results stay in
+        `pending_tool_results` and leak into a later, unrelated request --
+        e.g. once the loop continues past a turn that had no tool calls of
+        its own. `previous_response_id` is left untouched: it still points
+        at the just-completed turn, and every provider natively continues
+        from it with an empty `tool_results` -- no `messages` rebuild needed.
+        """
+
+        self.pending_tool_results = ()
 
     def reset_continuation(self) -> None:
         """Discard provider-native continuation state for the next request.

@@ -20,8 +20,9 @@ class ToolExecutionProtocolError(RuntimeError):
 class RequestBoundaryUnsupportedError(RuntimeError):
     """Raised when a `RequestBoundaryHook` returns a decision the loop cannot apply.
 
-    Currently: `messages`/`extra_messages` immediately after a tool round,
-    where `tool_results` is non-empty. See `RequestBoundaryDecision`.
+    Currently: `messages`/`extra_messages` at any boundary once the run has
+    had a tool round, whether or not the boundary immediately follows one.
+    See `RequestBoundaryDecision`.
     """
 
 
@@ -83,15 +84,16 @@ class RequestBoundaryDecision:
     decision (`RequestBoundaryDecision()`) rather than repeat what the loop
     already has.
 
-    `messages`/`extra_messages` are only supported at the boundary that
-    follows a turn with **no tool calls**. Immediately after a tool round,
-    `tool_results` is non-empty and rebuilding that continuation would mean
-    replaying the round's assistant tool-call/tool-result messages through
-    each provider's plain-message converter, which flattens them to
-    ordinary text instead of the structured pairs a provider expects --
-    corrupting history rather than fixing it. `run_agent_loop` raises
-    `RequestBoundaryUnsupportedError` if a hook returns either field non-empty
-    at that boundary; `stop` is still honored there.
+    `messages`/`extra_messages` are only supported while this run has never
+    had a tool round: not immediately after one, and not at a later
+    no-tool-calls boundary that followed one earlier in the same run either.
+    Rebuilding either continuation would mean replaying accumulated
+    assistant tool-call/tool-result messages through each provider's
+    plain-message converter, which flattens them to ordinary text instead of
+    the structured pairs a provider expects -- corrupting history rather
+    than fixing it. `run_agent_loop` raises `RequestBoundaryUnsupportedError`
+    if a hook returns either field non-empty once the run has tool history;
+    `stop` is always honored regardless.
     """
 
     messages: Sequence[Message] | None = None

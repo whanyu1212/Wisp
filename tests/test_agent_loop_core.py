@@ -508,7 +508,11 @@ def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
                     finish_reason="tool_calls",
                 ),
             ],
-            _completed_stream("no more tools"),
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="no more tools"),
+                ProviderResponseCompleted(content="no more tools", response_id="resp-2"),
+            ],
             _completed_stream("final"),
         ]
     )
@@ -540,6 +544,66 @@ def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
         ToolCallResult(call_id="call-1", output="tool output", is_error=False),
     )
     assert provider.calls[2].tool_results == ()
+    # A plain continuation (no injected content) never needs `messages`
+    # rebuilt: every provider natively continues from previous_response_id,
+    # which still correctly points at the just-completed clean turn.
+    assert provider.calls[2].messages == messages
+    assert provider.calls[2].previous_response_id == "resp-2"
+
+
+def test_request_boundary_hook_rejects_injection_after_earlier_tool_round() -> None:
+    """`messages`/`extra_messages` stay unsupported at a *later* clean-turn
+    boundary once this run has had a tool round, not just immediately after
+    one.
+
+    Regression for #363 review: an earlier version only rejected injection
+    at the boundary immediately following a tool round, but a subsequent
+    no-tool-calls boundary in the same run still unconditionally folded
+    `state.continuation_messages` -- including that earlier round's
+    assistant tool-call/tool-result messages -- into `messages`, which
+    would corrupt history the same way once sent through a real provider's
+    plain-message converter.
+    """
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("no more tools"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+    injected = Message(role="user", content="steered")
+    hook = RecordingRequestBoundaryHook(
+        [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(extra_messages=(injected,))]
+    )
+    messages = (Message(role="user", content="hi"),)
+    collected: list[object] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=executor,
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            collected.append(event)
+
+    with pytest.raises(RequestBoundaryUnsupportedError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 2
 
 
 def test_request_boundary_hook_can_replace_base_messages() -> None:
