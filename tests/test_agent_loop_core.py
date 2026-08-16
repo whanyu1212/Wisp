@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import shlex
 import sys
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Iterable
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -11,7 +12,13 @@ import anyio
 import pytest
 
 import wisp.agent.loop as agent_loop_module
-from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError, ToolExecutor
+from wisp.agent.execution import (
+    RequestBoundaryDecision,
+    RequestBoundarySnapshot,
+    ToolExecutionEvent,
+    ToolExecutionProtocolError,
+    ToolExecutor,
+)
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.coding.tool_execution import ConfiguredToolExecutor
@@ -253,6 +260,158 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert completed.usage is not None
     assert completed.usage.total_tokens == 19
     assert provider.calls[0].messages == messages
+
+
+class RecordingRequestBoundaryHook:
+    """Records each boundary snapshot and replays scripted decisions in order."""
+
+    def __init__(self, decisions: Iterable[RequestBoundaryDecision]) -> None:
+        self._decisions = deque(decisions)
+        self.snapshots: list[RequestBoundarySnapshot] = []
+
+    async def before_next_request(
+        self, *, snapshot: RequestBoundarySnapshot
+    ) -> RequestBoundaryDecision:
+        self.snapshots.append(snapshot)
+        if not self._decisions:
+            return RequestBoundaryDecision(stop=True)
+        return self._decisions.popleft()
+
+
+def _completed_stream(content: str) -> list[ProviderEvent]:
+    return [
+        ProviderResponseStarted(model="test"),
+        ProviderTextDelta(delta=content),
+        ProviderResponseCompleted(content=content),
+    ]
+
+
+def test_request_boundary_hook_not_configured_matches_default_behavior() -> None:
+    """No hook configured must produce the exact same events as before hooks existed."""
+
+    provider = ScriptedProvider([_completed_stream("hi")])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
+    ]
+    assert len(provider.calls) == 1
+
+
+def test_request_boundary_hook_fires_after_tool_round_and_can_inject_messages() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("done"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+    injected = Message(role="user", content="steered")
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(injected,))])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events].count("turn.completed") == 2
+    assert len(provider.calls) == 2
+    assert hook.snapshots[0].had_tool_calls is True
+    # The injected message must reach the second provider request's continuation
+    # history (appended after the tool result, before the next sample).
+    second_request_messages = provider.calls[1].messages
+    assert second_request_messages[-1] is injected
+
+
+def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None:
+    """A hook can turn a would-be-final turn (no tool calls) into a follow-up."""
+
+    provider = ScriptedProvider([_completed_stream("first"), _completed_stream("second")])
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(stop=False)])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events].count("turn.started") == 2
+    assert len(provider.calls) == 2
+    assert hook.snapshots[0].had_tool_calls is False
+
+
+def test_request_boundary_hook_can_replace_base_messages() -> None:
+    """A hook can replace the loop's base history (e.g. after compaction)."""
+
+    provider = ScriptedProvider([_completed_stream("first"), _completed_stream("second")])
+    replacement = (Message(role="user", content="compacted summary"),)
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(messages=replacement)])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.calls[0].messages == messages
+    assert provider.calls[1].messages == replacement
 
 
 class RaisingCancellationToken:

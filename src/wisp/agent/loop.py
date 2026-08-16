@@ -19,6 +19,9 @@ from wisp.agent.context import (
     trailing_context_estimate,
 )
 from wisp.agent.execution import (
+    RequestBoundaryDecision,
+    RequestBoundaryHook,
+    RequestBoundarySnapshot,
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
@@ -116,6 +119,7 @@ class AgentLoopConfig:
     cost_estimator: UsageCostEstimator | None = None
     defer_context_overflow_errors: bool = False
     prompt_cache_key: str | None = None
+    request_boundary_hook: RequestBoundaryHook | None = None
 
     def __post_init__(self) -> None:
         validate_agent_runtime_limits(
@@ -131,6 +135,48 @@ class AgentLoopConfig:
 def _is_cancelled(config: AgentLoopConfig) -> bool:
     token = config.cancellation_token
     return token is not None and token.is_cancelled()
+
+
+async def _at_request_boundary(
+    config: AgentLoopConfig,
+    state: _AgentLoopState,
+    *,
+    messages: Sequence[Message],
+    had_tool_calls: bool,
+    stop_by_default: bool,
+) -> tuple[Sequence[Message], bool]:
+    """Apply the configured `RequestBoundaryHook`'s decision, if any.
+
+    Returns the (possibly replaced/extended) base message history and whether
+    the loop should stop at this boundary. A `None` hook is a no-op: the loop
+    keeps its current messages and does whatever it would have done at this
+    boundary before hooks existed (`stop_by_default`), matching pre-hook
+    behavior exactly -- a completed turn with no tool calls always ended the
+    run; a completed tool round always continued into the next provider
+    sample.
+
+    `extra_messages` are folded into the returned base `messages` (not
+    `state.continuation_messages`) because the next provider request is built
+    from `messages` directly -- the loop reconstructs continuation from
+    `tool_results`/`previous_response_id`, not from a flattened message list.
+    """
+
+    if config.request_boundary_hook is None:
+        return messages, stop_by_default
+    snapshot = RequestBoundarySnapshot(
+        turn=state.turn,
+        tool_iterations=state.tool_iterations,
+        had_tool_calls=had_tool_calls,
+        continuation_messages=tuple(state.continuation_messages),
+    )
+    decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
+        snapshot=snapshot
+    )
+    if decision.messages is not None:
+        messages = decision.messages
+    if decision.extra_messages:
+        messages = (*messages, *decision.extra_messages)
+    return messages, decision.stop
 
 
 def _provider_stream(
@@ -783,6 +829,16 @@ async def run_agent_loop(
                     outcome="completed",
                     finish_reason=response.finish_reason,
                 )
+                if not _is_cancelled(config):
+                    messages, stop = await _at_request_boundary(
+                        config,
+                        state,
+                        messages=messages,
+                        had_tool_calls=False,
+                        stop_by_default=True,
+                    )
+                    if not stop:
+                        continue
                 break
             if _is_cancelled(config):
                 for event in _cancelled_turn_events(turn):
@@ -851,6 +907,16 @@ async def run_agent_loop(
                 outcome="completed",
                 finish_reason=response.finish_reason,
             )
+            if not _is_cancelled(config):
+                messages, stop = await _at_request_boundary(
+                    config,
+                    state,
+                    messages=messages,
+                    had_tool_calls=True,
+                    stop_by_default=False,
+                )
+                if stop:
+                    break
     except Exception as exc:
         overflow_error: ContextOverflowError | None = None
         if isinstance(exc, ContextOverflowError):

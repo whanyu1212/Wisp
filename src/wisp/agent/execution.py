@@ -1,10 +1,12 @@
-"""Tool-execution contract consumed by the pure agent loop."""
+"""Tool-execution and request-boundary contracts consumed by the pure agent loop."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
+from wisp.agent.messages import Message
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
 from wisp.providers.events import ToolCall
 
@@ -36,7 +38,58 @@ class ToolExecutor(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class RequestBoundarySnapshot:
+    """Read-only view of loop state offered to a `RequestBoundaryHook`.
+
+    Exposes only what a caller needs to decide what happens next -- never the
+    loop's live mutable state -- so a hook cannot reach back into the loop's
+    internals.
+    """
+
+    turn: int
+    tool_iterations: int
+    had_tool_calls: bool
+    continuation_messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestBoundaryDecision:
+    """What the loop should do before its next provider sample, if anything.
+
+    `messages`, when not `None`, replaces the loop's base message history
+    (e.g. after compaction). `extra_messages` are appended after the base/
+    replacement history and before the next provider request (e.g. steering
+    or follow-up injection). `stop`, when `True`, ends the run at this
+    boundary through the loop's normal clean-completion path.
+    """
+
+    messages: Sequence[Message] | None = None
+    extra_messages: Sequence[Message] = ()
+    stop: bool = False
+
+
+class RequestBoundaryHook(Protocol):
+    """Called once per boundary between a finished turn and the next provider sample.
+
+    Fires after a tool round completes and after a turn completes with no
+    tool calls, before the loop would otherwise continue or stop. Lets a
+    caller (e.g. `AgentHarness`) inject compaction, steering, or follow-up
+    without the pure loop constructing a new run or knowing what any of
+    those mean.
+    """
+
+    async def before_next_request(
+        self, *, snapshot: RequestBoundarySnapshot
+    ) -> RequestBoundaryDecision:
+        """Return the decision to apply before the loop's next provider sample."""
+        ...
+
+
 __all__ = [
+    "RequestBoundaryDecision",
+    "RequestBoundaryHook",
+    "RequestBoundarySnapshot",
     "ToolExecutionEvent",
     "ToolExecutionProtocolError",
     "ToolExecutor",
