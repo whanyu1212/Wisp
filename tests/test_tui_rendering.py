@@ -55,6 +55,106 @@ def test_renderers_clear_session_for_new_session() -> None:
     assert fullscreen.state.transcript_scroll_offset == 0
 
 
+@pytest.mark.parametrize(
+    ("event", "category", "style"),
+    [
+        (
+            ToolApprovalRequested(
+                call_id="read-1",
+                name="inspect",
+                arguments={"path": "README.md"},
+                safety="read",
+            ),
+            "○ READ-ONLY ACCESS · inspect",
+            "cyan",
+        ),
+        (
+            ToolApprovalRequested(
+                call_id="write-1",
+                name="write",
+                arguments={"path": "notes.txt", "content": "hello"},
+                safety="mutating",
+            ),
+            "△ MODIFIES FILES · notes.txt",
+            "yellow",
+        ),
+        (
+            ToolApprovalRequested(
+                call_id="command-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            ),
+            "! COMMAND EXECUTION · bash",
+            "bold red",
+        ),
+    ],
+)
+def test_line_and_fullscreen_approval_renderers_keep_category_labels(
+    event: ToolApprovalRequested,
+    category: str,
+    style: str,
+) -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    line.approval_request(event)
+    fullscreen.approval_request(event)
+
+    assert category in output.getvalue()
+    assert len(fullscreen.state.transcript) == 1
+    entry = fullscreen.state.transcript[0]
+    assert entry.role == "approval"
+    assert category in entry.content
+    assert entry.style == style
+
+
+def test_line_and_fullscreen_trust_renderers_explain_project_resources() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    event = TrustRequested(request_id="trust-1", project_path=Path("/work/project"))
+
+    line.trust_request(event)
+    fullscreen.trust_request(event)
+
+    rendered = output.getvalue()
+    assert "◆ PROJECT TRUST · /work/project" in rendered
+    assert "project-controlled settings, instructions, and skills" in rendered
+    assert len(fullscreen.state.transcript) == 1
+    entry = fullscreen.state.transcript[0]
+    assert entry.role == "trust"
+    assert "◆ PROJECT TRUST · /work/project" in entry.content
+    assert "does not bypass tool approvals" in entry.content
+    assert entry.style == "magenta"
+
+
+def test_line_and_fullscreen_approval_details_are_bounded_and_literal() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    event = ToolApprovalRequested(
+        call_id="extension-1",
+        name="[red]extension-tool[/red]",
+        arguments={"payload": "[bold]literal[/bold]" + ("x" * 500)},
+        safety="mutating",
+    )
+
+    line.approval_request(event)
+    fullscreen.approval_request(event)
+
+    rendered = output.getvalue()
+    entry = fullscreen.state.transcript[0]
+    for notice in (rendered, entry.content):
+        assert "[red]extension-tool[/red]" in notice
+        assert "[bold]literal[/bold]" in notice
+        assert "... preview truncated" in notice
+        assert "x" * 400 not in notice
+    assert len(rendered) < 800
+    assert len(entry.content) < 800
+
+
 def _rpc_message(
     role: MessageRole,
     content: str,

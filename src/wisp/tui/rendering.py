@@ -40,6 +40,7 @@ from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.context_widget import format_prompt_cache_usage
+from wisp.tui.decision_content import _approval_content, _decision_notice, _trust_content
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalSkillInvocation,
@@ -321,18 +322,12 @@ class LineTuiRenderer:
         self.console.print()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
-        self.console.print(
-            "[yellow]? approval required[/yellow] "
-            f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
-            f"{_markup_escape(event.arguments)}"
-        )
+        content = _approval_content(event)
+        self.console.print(Text(_decision_notice(content), style=content.console_style))
 
     def trust_request(self, event: TrustRequested) -> None:
-        self.console.print(
-            "[yellow]? trust this project?[/yellow] "
-            f"{_markup_escape(event.project_path)}\n"
-            "Trusting lets Wisp load this project's local configuration."
-        )
+        content = _trust_content(event)
+        self.console.print(Text(_decision_notice(content), style=content.console_style))
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
         pass
@@ -751,18 +746,20 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
+        content = _approval_content(event)
         self._append(
             "approval",
-            f"? approval required {event.name} ({event.safety}) {event.arguments}",
-            style="yellow",
+            _decision_notice(content),
+            style=content.console_style,
         )
         self._refresh()
 
     def trust_request(self, event: TrustRequested) -> None:
+        content = _trust_content(event)
         self._append(
             "trust",
-            f"? trust this project? {event.project_path}",
-            style="yellow",
+            _decision_notice(content),
+            style=content.console_style,
         )
         self._refresh()
 

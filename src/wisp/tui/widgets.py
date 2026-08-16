@@ -73,6 +73,7 @@ from wisp.tui.decision_content import (
     _approval_content,
     _bounded_tool_session_option_name,
     _DecisionContent,
+    _DecisionRole,
     _trust_content,
 )
 from wisp.tui.diff_presentation import (
@@ -434,7 +435,7 @@ class DecisionPanel(Vertical):
     **Approve once** permits only this request. A tool-session choice permits the
     named tool until this Wisp process exits. **YOLO** permits every mutating and
     command tool for the process. Project trust permits loading that project's
-    local configuration. Escape always chooses the conservative deny result.
+    local settings, instructions, and skills. Escape always chooses the conservative deny result.
     """
     BINDINGS = [
         Binding("1", "choose(1)", "Choose option 1", show=False),
@@ -461,6 +462,46 @@ class DecisionPanel(Vertical):
         height: 1;
         color: $warning;
         text-style: bold;
+    }
+
+    DecisionPanel.decision--read {
+        border: round $primary;
+    }
+
+    DecisionPanel.decision--read #decision-title {
+        color: $primary;
+    }
+
+    DecisionPanel.decision--mutating {
+        border: round $warning;
+    }
+
+    DecisionPanel.decision--mutating #decision-title {
+        color: $warning;
+    }
+
+    DecisionPanel.decision--command {
+        border: heavy $error;
+    }
+
+    DecisionPanel.decision--command #decision-title {
+        color: $error;
+    }
+
+    DecisionPanel.decision--trust {
+        border: double $accent;
+    }
+
+    DecisionPanel.decision--trust #decision-title {
+        color: $accent;
+    }
+
+    DecisionPanel.decision--fallback {
+        border: round $warning;
+    }
+
+    DecisionPanel.decision--fallback #decision-title {
+        color: $warning;
     }
 
     DecisionPanel #decision-meta {
@@ -545,7 +586,7 @@ class DecisionPanel(Vertical):
         self._options.action_last()
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
-        content = _approval_content(event, cwd=cwd)
+        content = _approval_content(event, cwd=_format_cwd_for_footer(cwd))
         tool_name = _bounded_tool_session_option_name(event.name)
         self._show(
             content,
@@ -581,6 +622,9 @@ class DecisionPanel(Vertical):
         self._submitted = False
         self._mode = mode
         self._opened_at = time.monotonic()
+        for role in _DecisionRole:
+            self.remove_class(f"decision--{role.value}")
+        self.add_class(f"decision--{content.role.value}")
         self._title.update(content.title)
         self._meta.update(content.meta)
         self._detail.update(content.detail)
