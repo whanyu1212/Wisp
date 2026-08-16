@@ -20,9 +20,10 @@ class ToolExecutionProtocolError(RuntimeError):
 class RequestBoundaryUnsupportedError(RuntimeError):
     """Raised when a `RequestBoundaryHook` returns a decision the loop cannot apply.
 
-    Currently: `messages`/`extra_messages` at any boundary once the run has
-    had a tool round, whether or not the boundary immediately follows one.
-    See `RequestBoundaryDecision`.
+    Currently: `messages`/`extra_messages` immediately after a tool round; or
+    any decision other than `stop=True` (including a plain, unmodified
+    continuation) at a later no-tool-calls boundary once the run has had a
+    tool round earlier. See `RequestBoundaryDecision`.
     """
 
 
@@ -85,15 +86,22 @@ class RequestBoundaryDecision:
     already has.
 
     `messages`/`extra_messages` are only supported while this run has never
-    had a tool round: not immediately after one, and not at a later
-    no-tool-calls boundary that followed one earlier in the same run either.
-    Rebuilding either continuation would mean replaying accumulated
-    assistant tool-call/tool-result messages through each provider's
-    plain-message converter, which flattens them to ordinary text instead of
-    the structured pairs a provider expects -- corrupting history rather
-    than fixing it. `run_agent_loop` raises `RequestBoundaryUnsupportedError`
-    if a hook returns either field non-empty once the run has tool history;
-    `stop` is always honored regardless.
+    had a tool round. Immediately after one, rebuilding the continuation
+    would mean replaying accumulated assistant tool-call/tool-result
+    messages through each provider's plain-message converter, which
+    flattens them to ordinary text instead of the structured pairs a
+    provider expects -- corrupting history rather than fixing it. At a
+    *later* no-tool-calls boundary that followed a tool round earlier in the
+    run, not even a plain, unmodified continuation (an empty decision) is
+    possible: the provider-native replay that would carry the tool round
+    forward is only loaded when this boundary's `tool_results` is non-empty,
+    which it never is here, so continuing at all -- injected content or
+    not -- would silently drop the tool round from what the provider sees.
+    `run_agent_loop` raises `RequestBoundaryUnsupportedError` for any
+    decision other than `stop=True` once a no-tool-calls boundary has tool
+    history behind it, and for `messages`/`extra_messages` immediately after
+    a tool round; `stop` is always honored regardless of what else a
+    decision carries.
     """
 
     messages: Sequence[Message] | None = None

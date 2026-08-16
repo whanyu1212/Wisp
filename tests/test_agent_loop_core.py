@@ -357,6 +357,58 @@ def test_request_boundary_hook_can_stop_after_tool_round() -> None:
     assert hook.snapshots[0].had_tool_calls is True
 
 
+def test_request_boundary_hook_stop_wins_over_unused_message_edits() -> None:
+    """`stop=True` is honored even when combined with `messages`/`extra_messages`.
+
+    Regression for #363 review: the loop previously raised
+    RequestBoundaryUnsupportedError before checking `decision.stop`, even
+    though no provider request is made when stopping -- so the supplied
+    history can't cause the corruption that validation exists to prevent.
+    `stop` must always be honored regardless, per `RequestBoundaryDecision`'s
+    documented contract.
+    """
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    executor = RecordingToolExecutor()
+    unused_replacement = (Message(role="user", content="compacted summary"),)
+    hook = RecordingRequestBoundaryHook(
+        [RequestBoundaryDecision(stop=True, messages=unused_replacement)]
+    )
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    request_boundary_hook=hook,
+                ),
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events].count("turn.completed") == 1
+    assert len(provider.calls) == 1
+
+
 def test_request_boundary_hook_rejects_injection_after_tool_round() -> None:
     """`messages`/`extra_messages` are unsupported immediately after a tool round.
 
@@ -492,8 +544,21 @@ def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> No
     assert [event.type for event in collected].count("error") == 1
 
 
-def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
-    """A tool round's results must not leak into a later, unrelated request."""
+def test_request_boundary_hook_stops_clean_turn_after_earlier_tool_round() -> None:
+    """A clean turn that follows an earlier tool round can only stop, not continue.
+
+    Regression for #363 review: no provider-native mechanism carries a tool
+    round forward past a *later* no-tool-calls boundary -- the
+    `previous_response_id`-anchored replay tail that would carry it is only
+    loaded when `tool_results` is non-empty (confirmed for
+    anthropic.py/google.py/openai_compatible.py's `_create_stream`), and this
+    boundary always sends an empty `tool_results`. A plain "just continue"
+    decision here would silently sample from only the original base
+    `messages`, missing the tool round and the turn that followed it. Only
+    `stop=True` is supported; the loop must still clear
+    `pending_tool_results` so nothing stale would leak if this boundary
+    were ever reached with a decision that could continue.
+    """
 
     provider = ScriptedProvider(
         [
@@ -508,17 +573,12 @@ def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
                     finish_reason="tool_calls",
                 ),
             ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="no more tools"),
-                ProviderResponseCompleted(content="no more tools", response_id="resp-2"),
-            ],
-            _completed_stream("final"),
+            _completed_stream("no more tools"),
         ]
     )
     executor = RecordingToolExecutor()
     hook = RecordingRequestBoundaryHook(
-        [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=False)]
+        [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=True)]
     )
     messages = (Message(role="user", content="hi"),)
 
@@ -535,20 +595,62 @@ def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
             )
         ]
 
-    anyio.run(run)
+    events = anyio.run(run)
 
-    assert len(provider.calls) == 3
-    # Call 1 legitimately carries call-1's result. Call 2 (after the clean
-    # turn that consumed it) must not still be sending it.
+    assert len(provider.calls) == 2
+    assert [event.type for event in events].count("turn.completed") == 2
+    # Call 1 legitimately carries call-1's result.
     assert provider.calls[1].tool_results == (
         ToolCallResult(call_id="call-1", output="tool output", is_error=False),
     )
-    assert provider.calls[2].tool_results == ()
-    # A plain continuation (no injected content) never needs `messages`
-    # rebuilt: every provider natively continues from previous_response_id,
-    # which still correctly points at the just-completed clean turn.
-    assert provider.calls[2].messages == messages
-    assert provider.calls[2].previous_response_id == "resp-2"
+
+
+def test_request_boundary_hook_rejects_plain_continuation_after_tool_round() -> None:
+    """A hook cannot continue past a no-tool-calls boundary once a tool round happened.
+
+    Unlike `test_request_boundary_hook_stops_clean_turn_after_earlier_tool_round`,
+    this asserts the loop raises rather than silently accepting a decision it
+    cannot honor when the hook tries to keep going (`stop=False`, no injected
+    content) at that boundary.
+    """
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _completed_stream("no more tools"),
+        ]
+    )
+    executor = RecordingToolExecutor()
+    hook = RecordingRequestBoundaryHook(
+        [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=False)]
+    )
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> None:
+        async for _event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=executor,
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            pass
+
+    with pytest.raises(RequestBoundaryUnsupportedError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 2
 
 
 def test_request_boundary_hook_rejects_injection_after_earlier_tool_round() -> None:

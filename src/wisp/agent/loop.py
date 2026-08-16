@@ -174,37 +174,50 @@ async def _at_request_boundary(
     run; a completed tool round always continued into the next provider
     sample.
 
-    A plain continuation -- no hook, or a hook that returns an empty
-    decision -- never needs `messages` touched at all: every provider
-    natively continues from `state.previous_response_id`, and clearing
-    `state.pending_tool_results` (below) is enough to stop resending an
-    earlier round's already-consumed results.
+    The tool-round boundary itself (`had_tool_calls=True`) is unaffected by
+    any of this: `state.pending_tool_results` is this round's own results,
+    non-empty, and every provider's existing `tool_results`-gated replay load
+    already carries prior tool history forward correctly there -- exactly as
+    it did before this hook existed. Continuing with an empty decision at
+    that boundary is always safe.
 
-    `messages`/`extra_messages` are a different matter. Every provider
-    treats `messages` as the original, never-mutated turn-1 history and only
-    ever *appends* new content on top of it via `tool_results` +
-    `previous_response_id` -- none of them can be told to splice
-    caller-supplied content into an active continuation chain, so injecting
-    or replacing content forces a fresh, self-contained request built from
-    `messages` alone. That rebuild is only safe when this run has had no
-    tool round yet: none of the providers preserve `Message.tool_calls`/a
-    `role="tool"` message's structure when it is replayed through their
-    plain-message converter instead (confirmed for
+    A *no-tool-calls* boundary is different. A plain continuation there --
+    no hook, or a hook that returns an empty decision -- is only supported
+    while this run has had no tool round yet: with no tool round behind it,
+    every provider natively continues from `state.previous_response_id`
+    (clearing `state.pending_tool_results`, below, is enough to stop
+    resending an earlier round's already-consumed results). But once a tool
+    round *has* happened earlier in the run, there is no provider-native way
+    to continue past a no-tool-calls boundary at all, not even a plain
+    "no-op" continuation: the `previous_response_id`-anchored replay tail
+    that would carry the tool exchange forward is loaded only when
+    `tool_results` is non-empty (confirmed for `_create_stream` in
+    anthropic.py/google.py/openai_compatible.py), and this boundary always
+    sends an empty `tool_results` -- so the next request would silently
+    sample from only the original base `messages`, missing the tool round
+    and the turn that followed it entirely. Rebuilding from `messages`
+    instead is equally unsafe: none of the providers preserve
+    `Message.tool_calls`/a `role="tool"` message's structure when replayed
+    through their plain-message converter (confirmed for
     `_messages_to_response_input`/`_messages_to_anthropic`/
-    `_messages_to_google`: a tool round's assistant/tool rows flatten to a
-    blank assistant turn and an ordinary user message containing raw tool
-    output). Once the run has tool history, a hook may still choose to
-    `stop`; it may not inject or replace content.
+    `_messages_to_google`), so folding `state.continuation_messages` in
+    would flatten a tool round's assistant/tool rows into a blank assistant
+    turn and an ordinary user message containing raw tool output. So once a
+    no-tool-calls boundary has tool history behind it, a hook may only
+    `stop`; every other decision is rejected.
     """
 
     has_tool_history = had_tool_calls or any(
         message.tool_calls or message.role == "tool" for message in state.continuation_messages
     )
+    blocked = not had_tool_calls and has_tool_history
     if not had_tool_calls:
         state.consume_pending_tool_results()
 
     if config.request_boundary_hook is None:
-        if not had_tool_calls and not has_tool_history:
+        if blocked:
+            return messages, True
+        if not had_tool_calls:
             messages = _fold_clean_continuation(state, messages)
         return messages, stop_by_default
 
@@ -217,15 +230,26 @@ async def _at_request_boundary(
     decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
         snapshot=snapshot
     )
-    if has_tool_history and (decision.messages is not None or decision.extra_messages):
+    if decision.stop:
+        return messages, True
+    if blocked:
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryHook cannot continue past a no-tool-calls boundary "
+            "once this run has had a tool round -- no provider-native mechanism "
+            "carries the tool round forward without either resending stale "
+            "tool_results or replaying continuation_messages through a "
+            "plain-message converter that would corrupt the structured tool "
+            "history. A hook may only return stop=True at this boundary."
+        )
+    if had_tool_calls and (decision.messages is not None or decision.extra_messages):
         raise RequestBoundaryUnsupportedError(
             "RequestBoundaryDecision.messages/extra_messages are not supported "
-            "once this run has had a tool round -- rebuilding that continuation "
-            "would flatten structured tool calls/results into plain text for at "
-            "least one provider. A hook may only return stop=True/False at this "
-            "boundary."
+            "immediately after a tool round -- rebuilding that continuation "
+            "would flatten structured tool calls/results into plain text for "
+            "at least one provider. A hook may only return stop=True/False at "
+            "this boundary."
         )
-    if not had_tool_calls and not has_tool_history:
+    if not had_tool_calls:
         messages = _fold_clean_continuation(state, messages)
     if decision.messages is not None:
         messages = decision.messages
