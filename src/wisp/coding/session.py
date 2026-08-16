@@ -815,29 +815,80 @@ class CodingSession:
         completed_turn_had_tool_calls = False
         queue_batch_started_new_turn = False
 
+        def matches_provider_suffix(messages: Sequence[Message], suffix: Sequence[Message]) -> bool:
+            """Compare provider-visible fields without persistence-only metadata."""
+
+            if len(messages) < len(suffix):
+                return False
+            for persisted, live in zip(messages[-len(suffix) :], suffix, strict=True):
+                persisted_calls = (
+                    tuple(
+                        (
+                            tool_call.call_id,
+                            tool_call.name,
+                            dict(tool_call.arguments),
+                            tool_call.parse_error,
+                        )
+                        for tool_call in persisted.tool_calls
+                    )
+                    if persisted.tool_calls is not None
+                    else None
+                )
+                live_calls = (
+                    tuple(
+                        (
+                            tool_call.call_id,
+                            tool_call.name,
+                            dict(tool_call.arguments),
+                            tool_call.parse_error,
+                        )
+                        for tool_call in live.tool_calls
+                    )
+                    if live.tool_calls is not None
+                    else None
+                )
+                if (
+                    persisted.role,
+                    persisted.content,
+                    persisted.tool_call_id,
+                    persisted.tool_name,
+                    persisted_calls,
+                    persisted.is_error,
+                ) != (
+                    live.role,
+                    live.content,
+                    live.tool_call_id,
+                    live.tool_name,
+                    live_calls,
+                    live.is_error,
+                ):
+                    return False
+            return True
+
         async def replacement_after_compaction(
             continuation_messages: Sequence[Message],
             *,
             has_native_continuation: bool,
+            injected_messages: Sequence[Message] = (),
         ) -> RequestBoundaryDecision:
             """Rehydrate durable context into the least disruptive loop transition."""
 
             active_history = await anyio.to_thread.run_sync(session.read_context_messages)
             replacement = (*prompt_messages, *self._conversation_history(active_history))
             tail = tuple(continuation_messages)
-            if (
-                has_native_continuation
-                and tail
-                and len(replacement) >= len(tail)
-                and tuple(replacement[-len(tail) :]) == tail
-            ):
+            injected = tuple(injected_messages)
+            portable_base = replacement
+            if injected and matches_provider_suffix(replacement, injected):
+                portable_base = replacement[: -len(injected)]
+            if has_native_continuation and tail and matches_provider_suffix(portable_base, tail):
                 supports_rebase = getattr(self.provider, "supports_context_rebase", False) is True
                 if supports_rebase:
                     return RequestBoundaryDecision(
                         context_rebase=RequestContextRebase(
-                            base_messages=replacement[: -len(tail)],
+                            base_messages=portable_base[: -len(tail)],
                             expected_continuation_messages=tail,
-                        )
+                        ),
+                        extra_messages=injected,
                     )
             return RequestBoundaryDecision(messages=replacement)
 
@@ -866,6 +917,7 @@ class CodingSession:
                     return await replacement_after_compaction(
                         context.snapshot.continuation_messages,
                         has_native_continuation=context.snapshot.can_append_user_messages,
+                        injected_messages=context.injected_messages,
                     )
 
                 # A provider catalog limit can leave the active tool result as

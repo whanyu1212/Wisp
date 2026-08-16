@@ -1926,6 +1926,103 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     assert len(provider.calls) == 1
 
 
+def test_threshold_compaction_rebases_tool_state_with_injected_steering(
+    tmp_path: Path,
+) -> None:
+    """Opaque replay providers retain tool state and append steering once."""
+
+    class BlockingReadTool:
+        name = "blocking_read"
+        safety = "read"
+        description = "Return a large result after steering has been queued."
+        input_schema = {"type": "object", "properties": {}}
+
+        def __init__(self, started: anyio.Event, release: anyio.Event) -> None:
+            self._started = started
+            self._release = release
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            self._started.set()
+            await self._release.wait()
+            return ToolResult(text="x" * 6_000)
+
+    class OpaqueRebaseProvider(ScriptedProvider):
+        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+            del effort
+            return False
+
+    started = anyio.Event()
+    release = anyio.Event()
+    call = ToolCall(
+        call_id="call-1",
+        name="blocking_read",
+        arguments={},
+        provider_call_id="opaque-provider-call-1",
+    )
+    provider = OpaqueRebaseProvider(
+        [
+            [
+                ProviderResponseStarted(model="model", response_id="tool-response"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id="tool-response",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after steering"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(BlockingReadTool(started, release))
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(context_window=10_000, auto_compact_token_limit=1_000),
+        tool_registry=registry,
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+    events: list[WispEvent] = []
+
+    async def consume() -> None:
+        events.extend([event async for event in agent.run("question two", session=session)])
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await started.wait()
+            await agent.steer("change direction")
+            release.set()
+
+    anyio.run(run)
+
+    assert any(
+        isinstance(event, CompactionCompleted)
+        and event.reason == "threshold"
+        and event.outcome == "completed"
+        for event in events
+    )
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert provider.calls[2].previous_response_id == "tool-response"
+    assert provider.calls[2].tool_results[0].call_id == "call-1"
+    assert [message.content for message in provider.calls[2].extra_messages] == ["change direction"]
+
+
 def test_coding_session_recovers_when_active_tool_turn_remains_over_provider_limit(
     tmp_path: Path,
 ) -> None:
