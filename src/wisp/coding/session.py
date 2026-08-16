@@ -814,6 +814,7 @@ class CodingSession:
         current_turn_had_tool_calls = False
         completed_turn_had_tool_calls = False
         queue_batch_started_new_turn = False
+        active_loop_turn = False
 
         def matches_provider_suffix(messages: Sequence[Message], suffix: Sequence[Message]) -> bool:
             """Compare provider-visible fields without persistence-only metadata."""
@@ -1067,6 +1068,7 @@ class CodingSession:
                         yield boundary_events.popleft()
                     if isinstance(event, TurnStarted):
                         turns = event.turn
+                        active_loop_turn = True
                         current_turn_had_tool_calls = False
                         if recovered_from_overflow:
                             overflow_error = None
@@ -1079,6 +1081,7 @@ class CodingSession:
                     elif isinstance(event, ContextOverflow):
                         overflow_error = ContextOverflowError(event.message)
                     elif isinstance(event, TurnCompleted):
+                        active_loop_turn = False
                         terminal_outcome = event.outcome
                         completed_turn_had_tool_calls = current_turn_had_tool_calls
                         queue_batch_started_new_turn = False
@@ -1172,8 +1175,15 @@ class CodingSession:
             # decision. A declined decision reaches this terminal path without
             # closing/recreating a harness generator.
             terminal_overflow = overflow_recovery_failure or overflow_error
+            # A boundary failure follows an already-completed tool turn. Roll
+            # the active branch back to its pre-prompt leaf so an irreducible
+            # tool result cannot poison every later request, and do not publish
+            # a contradictory second terminal event for that completed turn.
+            if not active_loop_turn:
+                await rollback_active_prompt()
             yield await emit(ErrorEvent(message=str(terminal_overflow)))
-            yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+            if active_loop_turn:
+                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
             yield await emit(
                 AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
             )

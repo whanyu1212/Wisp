@@ -1863,8 +1863,10 @@ def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disable
     assert not any(isinstance(event, CompactionStarted) for event in events)
 
 
+@pytest.mark.parametrize("operation_id", [None, "prompt-1"])
 def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     tmp_path: Path,
+    operation_id: str | None,
 ) -> None:
     """When every tool result in the active turn is already at (or below) the
     truncation floor, ``_recover_via_tool_result_truncation`` can make no further
@@ -1898,6 +1900,10 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
                     content="", tool_calls=(call,), finish_reason="tool_calls"
                 ),
             ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="recovered"),
+            ],
         ],
         default_model="model",
     )
@@ -1906,24 +1912,48 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
-    async def run() -> list[WispEvent]:
-        agent = CodingSession(
-            provider=provider,
-            sessions=store,
-            model="model",
-            models=_model_registry(
-                context_window=100,
-                auto_compact_token_limit=80,
-            ),
-            tool_registry=registry,
-            prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=1,
-        )
-        return [event async for event in agent.run("question", session=session)]
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=100,
+            auto_compact_token_limit=80,
+        ),
+        tool_registry=registry,
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=1,
+    )
+    first_events: list[WispEvent] = []
+
+    async def run_first() -> None:
+        async for event in agent.run("question", session=session, operation_id=operation_id):
+            first_events.append(event)
+
+    async def run_retry() -> list[WispEvent]:
+        return [
+            event
+            async for event in agent.run(
+                "retry",
+                session=session,
+                operation_id="retry-1" if operation_id is not None else None,
+            )
+        ]
 
     with pytest.raises(ContextOverflowError, match="Active tool result exceeds"):
-        anyio.run(run)
-    assert len(provider.calls) == 1
+        anyio.run(run_first)
+
+    # The overflow is raised at the request boundary after the tool turn
+    # completed, so it must not publish a conflicting failed terminal event.
+    assert [
+        (event.turn, event.outcome) for event in first_events if isinstance(event, TurnCompleted)
+    ] == [(1, "completed")]
+    assert not session.read_context_messages()
+
+    retry_events = anyio.run(run_retry)
+    assert len(provider.calls) == 2
+    assert provider.calls[1].messages[-1].content == "retry"
+    assert not any(isinstance(event, ErrorEvent) for event in retry_events)
 
 
 def test_threshold_compaction_rebases_tool_state_with_injected_steering(
