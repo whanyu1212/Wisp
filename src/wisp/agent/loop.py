@@ -22,6 +22,7 @@ from wisp.agent.execution import (
     RequestBoundaryDecision,
     RequestBoundaryHook,
     RequestBoundarySnapshot,
+    RequestBoundaryUnsupportedError,
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
@@ -158,34 +159,35 @@ async def _at_request_boundary(
     Every provider treats `messages` as the original, never-mutated turn-1
     history and only ever *appends* new content on top of it via
     `tool_results` + `previous_response_id` -- none of them can be told to
-    splice caller-supplied content into an active continuation chain. So:
+    splice caller-supplied content into an active continuation chain. After a
+    turn with no tool calls, every provider already ignores
+    `previous_response_id` whenever `tool_results` is empty (which it always
+    is here), so `messages` alone must already be complete: the
+    just-completed turn's own answer, sitting only in
+    `state.continuation_messages`, is folded in unconditionally so a
+    continuation actually follows up on what it claims to follow up on.
 
-    - After a turn with no tool calls, every provider already ignores
-      `previous_response_id` whenever `tool_results` is empty (which it
-      always is here), so `messages` alone must already be complete: the
-      just-completed turn's own answer, sitting only in
-      `state.continuation_messages`, is folded in unconditionally so a
-      continuation actually follows up on what it claims to follow up on.
-    - After a tool round, `tool_results` is non-empty, and at least one
-      provider (OpenAI) reads *only* `tool_results` in that case, ignoring
-      `messages` entirely. A hook that wants the next request to see new
-      content there has no choice but to reset the continuation chain: fold
-      the accumulated `continuation_messages` (the tool call/result pairs a
-      resumed provider would otherwise only know via `previous_response_id`)
-      into `messages` and clear both, so the request is rebuilt as a fresh,
-      self-contained turn 1 that every provider reads the same way.
+    After a tool round, `messages`/`extra_messages` are intentionally
+    unsupported (see `RequestBoundaryDecision`): `tool_results` is non-empty
+    there, and rebuilding that continuation from scratch would require
+    replaying `state.continuation_messages`' assistant tool-call and tool-
+    result messages through each provider's plain-message converter, which
+    flattens them to ordinary text/user turns instead of the structured
+    function-call/output pairs a provider expects -- corrupting history
+    rather than fixing it. A hook may still choose to `stop` after a tool
+    round; it just cannot inject or replace content there yet.
     """
 
-    def _reset_continuation_onto(base: Sequence[Message]) -> Sequence[Message]:
-        """Discard provider-native continuation, replaying `base` as the new turn 1."""
-
+    if not had_tool_calls:
+        # The provider's own answer to the just-finished turn lives only in
+        # `continuation_messages` today -- fold it in before anything else so
+        # a continuation actually follows up on what happened, whether or not
+        # a hook is configured.
+        messages = (*messages, *state.continuation_messages)
         state.continuation_messages.clear()
         state.reset_continuation()
-        return base
 
     if config.request_boundary_hook is None:
-        if not had_tool_calls:
-            messages = _reset_continuation_onto((*messages, *state.continuation_messages))
         return messages, stop_by_default
 
     snapshot = RequestBoundarySnapshot(
@@ -197,17 +199,15 @@ async def _at_request_boundary(
     decision: RequestBoundaryDecision = await config.request_boundary_hook.before_next_request(
         snapshot=snapshot
     )
+    if had_tool_calls and (decision.messages is not None or decision.extra_messages):
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryDecision.messages/extra_messages are not supported "
+            "immediately after a tool round -- rebuilding that continuation would "
+            "flatten structured tool calls/results into plain text for at least "
+            "one provider. A hook may only return stop=True/False at this boundary."
+        )
     if decision.messages is not None:
-        # A full replacement (e.g. post-compaction) discards everything
-        # accumulated so far in favor of the hook's own base.
-        messages = _reset_continuation_onto(decision.messages)
-    elif not had_tool_calls or decision.extra_messages:
-        # Either the just-completed turn's own answer must become visible
-        # (no tool calls), or new content is being injected onto a tool-round
-        # continuation that at least one provider can't otherwise see it on.
-        # Either way, fold everything accumulated so far forward instead of
-        # losing it.
-        messages = _reset_continuation_onto((*messages, *state.continuation_messages))
+        messages = decision.messages
     if decision.extra_messages:
         messages = (*messages, *decision.extra_messages)
     return messages, decision.stop
@@ -880,6 +880,11 @@ async def run_agent_loop(
                     outcome="completed",
                     finish_reason=response.finish_reason,
                 )
+                # This turn has already yielded its one terminal event -- a
+                # boundary-hook failure past this point is not a failure *of*
+                # `turn` and must not produce a second, contradictory
+                # TurnCompleted for it in the except block below.
+                turn_started = False
                 if not _is_cancelled(config):
                     messages, stop = await _at_request_boundary(
                         config,
@@ -958,6 +963,9 @@ async def run_agent_loop(
                 outcome="completed",
                 finish_reason=response.finish_reason,
             )
+            # See the no-tool-calls boundary above: this turn's one terminal
+            # event has already been yielded.
+            turn_started = False
             if not _is_cancelled(config):
                 messages, stop = await _at_request_boundary(
                     config,

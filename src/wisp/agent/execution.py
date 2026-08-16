@@ -17,6 +17,14 @@ class ToolExecutionProtocolError(RuntimeError):
     """Raised when an executor emits an invalid event sequence."""
 
 
+class RequestBoundaryUnsupportedError(RuntimeError):
+    """Raised when a `RequestBoundaryHook` returns a decision the loop cannot apply.
+
+    Currently: `messages`/`extra_messages` immediately after a tool round,
+    where `tool_results` is non-empty. See `RequestBoundaryDecision`.
+    """
+
+
 class ToolResultProcessingError(RuntimeError):
     """Raised when Wisp cannot normalize an otherwise returned tool result."""
 
@@ -65,15 +73,25 @@ class RequestBoundaryDecision:
     `stop`, when `True`, ends the run at this boundary through the loop's
     normal clean-completion path.
 
-    A non-empty `messages` or `extra_messages` always resets the provider's
-    native continuation state (`previous_response_id`, pending tool results)
-    for the next request: every provider only ever appends new content on
-    top of what it already remembers, so there is no cross-provider-safe way
-    to splice caller-supplied content into an active continuation chain --
-    the next request is rebuilt as a fresh, self-contained turn instead. A
-    hook that wants a plain, unmodified continuation should return an empty
+    A non-empty `messages`/`extra_messages` resets the provider's native
+    continuation state (`previous_response_id`, pending tool results) for the
+    next request: every provider only ever appends new content on top of
+    what it already remembers, so there is no cross-provider-safe way to
+    splice caller-supplied content into an active continuation chain -- the
+    next request is rebuilt as a fresh, self-contained turn instead. A hook
+    that wants a plain, unmodified continuation should return an empty
     decision (`RequestBoundaryDecision()`) rather than repeat what the loop
     already has.
+
+    `messages`/`extra_messages` are only supported at the boundary that
+    follows a turn with **no tool calls**. Immediately after a tool round,
+    `tool_results` is non-empty and rebuilding that continuation would mean
+    replaying the round's assistant tool-call/tool-result messages through
+    each provider's plain-message converter, which flattens them to
+    ordinary text instead of the structured pairs a provider expects --
+    corrupting history rather than fixing it. `run_agent_loop` raises
+    `RequestBoundaryUnsupportedError` if a hook returns either field non-empty
+    at that boundary; `stop` is still honored there.
     """
 
     messages: Sequence[Message] | None = None
@@ -102,6 +120,7 @@ __all__ = [
     "RequestBoundaryDecision",
     "RequestBoundaryHook",
     "RequestBoundarySnapshot",
+    "RequestBoundaryUnsupportedError",
     "ToolExecutionEvent",
     "ToolExecutionProtocolError",
     "ToolExecutor",

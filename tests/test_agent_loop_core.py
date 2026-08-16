@@ -15,6 +15,7 @@ import wisp.agent.loop as agent_loop_module
 from wisp.agent.execution import (
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
+    RequestBoundaryUnsupportedError,
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
@@ -314,7 +315,9 @@ def test_request_boundary_hook_not_configured_matches_default_behavior() -> None
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_fires_after_tool_round_and_can_inject_messages() -> None:
+def test_request_boundary_hook_can_stop_after_tool_round() -> None:
+    """A hook may still stop the run at the tool-round boundary."""
+
     provider = ScriptedProvider(
         [
             [
@@ -327,13 +330,11 @@ def test_request_boundary_hook_fires_after_tool_round_and_can_inject_messages() 
                     tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
                     finish_reason="tool_calls",
                 ),
-            ],
-            _completed_stream("done"),
+            ]
         ]
     )
     executor = RecordingToolExecutor()
-    injected = Message(role="user", content="steered")
-    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(injected,))])
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(stop=True)])
     messages = (Message(role="user", content="hi"),)
 
     async def run() -> list[object]:
@@ -351,28 +352,65 @@ def test_request_boundary_hook_fires_after_tool_round_and_can_inject_messages() 
 
     events = anyio.run(run)
 
-    assert [event.type for event in events].count("turn.completed") == 2
-    assert len(provider.calls) == 2
+    assert [event.type for event in events].count("turn.completed") == 1
+    assert len(provider.calls) == 1
     assert hook.snapshots[0].had_tool_calls is True
-    # OpenAI's Responses API reads *either* tool_results *or* messages, never
-    # both, whenever tool_results is non-empty -- so injecting content after a
-    # tool round only reaches every provider if the continuation chain resets
-    # (previous_response_id/tool_results cleared) and the full accumulated
-    # history, including this round's tool call/result, is replayed via
-    # messages instead. Regression for #363 review: an earlier version folded
-    # extra_messages into `messages` while still sending the stale
-    # tool_results/previous_response_id pair, which OpenAI's provider would
-    # have silently ignored.
-    second_call = provider.calls[1]
-    assert second_call.tool_results == ()
-    assert second_call.previous_response_id is None
-    assert [(m.role, m.content) for m in second_call.messages] == [
-        ("user", "hi"),
-        ("assistant", ""),
-        ("tool", "tool output"),
-        ("user", "steered"),
-    ]
-    assert second_call.messages[-1] is injected
+
+
+def test_request_boundary_hook_rejects_injection_after_tool_round() -> None:
+    """`messages`/`extra_messages` are unsupported immediately after a tool round.
+
+    Regression for #363 review: rebuilding that continuation would replay the
+    round's assistant tool-call/tool-result messages through each provider's
+    plain-message converter, which flattens them to ordinary text instead of
+    the structured function-call/output pairs a provider expects (confirmed
+    against `_messages_to_response_input`/`_messages_to_anthropic`/
+    `_messages_to_google`, none of which special-case `Message.tool_calls`/
+    `tool_call_id`). The loop must raise loudly rather than silently corrupt
+    history.
+    """
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
+                ),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    executor = RecordingToolExecutor()
+    injected = Message(role="user", content="steered")
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(injected,))])
+    messages = (Message(role="user", content="hi"),)
+    collected: list[object] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=executor,
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            collected.append(event)
+
+    with pytest.raises(RequestBoundaryUnsupportedError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 1
+    # The turn already completed successfully (exactly one TurnCompleted)
+    # before the hook raised; the loop must not emit a second, contradictory
+    # TurnCompleted for the same turn once the exception propagates.
+    assert [event.type for event in collected].count("turn.completed") == 1
+    assert [event.type for event in collected].count("error") == 1
 
 
 def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None:
@@ -410,6 +448,48 @@ def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None
         ("user", "hi"),
         ("assistant", "first"),
     ]
+
+
+class RaisingRequestBoundaryHook:
+    """A hook whose `before_next_request` always raises."""
+
+    async def before_next_request(
+        self, *, snapshot: RequestBoundarySnapshot
+    ) -> RequestBoundaryDecision:
+        raise RuntimeError("boundary hook failed")
+
+
+def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> None:
+    """A hook failure after a clean turn must not emit a second TurnCompleted.
+
+    Regression for #363 review: the turn's one terminal TurnCompleted(outcome=
+    "completed") is yielded before the hook is invoked. If the hook then
+    raises, the outer exception handler previously still saw `turn_started`
+    as true and emitted a second, contradictory TurnCompleted(outcome=
+    "failed") for the same turn.
+    """
+
+    provider = ScriptedProvider([_completed_stream("first")])
+    hook = RaisingRequestBoundaryHook()
+    messages = (Message(role="user", content="hi"),)
+    collected: list[object] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            collected.append(event)
+
+    with pytest.raises(RuntimeError, match="boundary hook failed"):
+        anyio.run(run)
+
+    assert [event.type for event in collected].count("turn.completed") == 1
+    assert [event.type for event in collected].count("error") == 1
 
 
 def test_request_boundary_hook_clears_stale_pending_tool_results() -> None:
