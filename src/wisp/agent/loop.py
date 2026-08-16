@@ -512,6 +512,10 @@ async def run_agent_loop(
         turn=config.turn_offset,
         tool_iterations=config.tool_iteration_offset,
     )
+    # Bind `turn` before the loop so the outer `except` below can always
+    # reference it, even if an exception (e.g. a raising CancellationToken)
+    # fires before the first `state.begin_turn()` call.
+    turn = config.turn_offset
 
     try:
         while True:
