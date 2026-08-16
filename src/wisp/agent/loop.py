@@ -138,6 +138,17 @@ def _is_cancelled(config: AgentLoopConfig) -> bool:
     return token is not None and token.is_cancelled()
 
 
+def _is_tool_shaped(message: Message) -> bool:
+    """A message whose structure a provider's plain-message converter cannot preserve.
+
+    OpenAI/Anthropic/Google all ignore `Message.tool_calls` and flatten a
+    `role="tool"` message to ordinary text/user content when building a
+    request from `messages` directly -- see `_at_request_boundary`.
+    """
+
+    return bool(message.tool_calls) or message.role == "tool"
+
+
 def _fold_clean_continuation(
     state: _AgentLoopState, messages: Sequence[Message]
 ) -> Sequence[Message]:
@@ -205,10 +216,17 @@ async def _at_request_boundary(
     turn and an ordinary user message containing raw tool output. So once a
     no-tool-calls boundary has tool history behind it, a hook may only
     `stop`; every other decision is rejected.
+
+    Independent of any of that: a hook's own `messages`/`extra_messages`
+    must never themselves contain a tool-shaped message (an assistant
+    message with `tool_calls`, or a `role="tool"` result) even at a
+    boundary with no loop-generated tool history at all -- the same
+    plain-message-converter flattening applies regardless of where the
+    tool-shaped content came from.
     """
 
     has_tool_history = had_tool_calls or any(
-        message.tool_calls or message.role == "tool" for message in state.continuation_messages
+        _is_tool_shaped(message) for message in state.continuation_messages
     )
     blocked = not had_tool_calls and has_tool_history
     if not had_tool_calls:
@@ -256,6 +274,16 @@ async def _at_request_boundary(
             "would flatten structured tool calls/results into plain text for "
             "at least one provider. A hook may only return stop=True/False at "
             "this boundary."
+        )
+    if any(_is_tool_shaped(message) for message in (decision.messages or ())) or any(
+        _is_tool_shaped(message) for message in decision.extra_messages
+    ):
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryDecision.messages/extra_messages must not contain "
+            "tool-shaped messages (an assistant message with tool_calls, or a "
+            'role="tool" message) -- every provider\'s plain-message converter '
+            "flattens them to ordinary text instead of the structured pairs a "
+            "provider expects, corrupting history rather than continuing it."
         )
     if not had_tool_calls:
         messages = _fold_clean_continuation(state, messages)

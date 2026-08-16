@@ -20,10 +20,12 @@ class ToolExecutionProtocolError(RuntimeError):
 class RequestBoundaryUnsupportedError(RuntimeError):
     """Raised when a `RequestBoundaryHook` returns a decision the loop cannot apply.
 
-    Currently: `messages`/`extra_messages` immediately after a tool round; or
+    Currently: `messages`/`extra_messages` immediately after a tool round;
     any decision other than `stop=True` (including a plain, unmodified
     continuation) at a later no-tool-calls boundary once the run has had a
-    tool round earlier. See `RequestBoundaryDecision`.
+    tool round earlier; or `messages`/`extra_messages` containing a
+    tool-shaped message (an assistant message with `tool_calls`, or a
+    `role="tool"` message) at any boundary. See `RequestBoundaryDecision`.
     """
 
 
@@ -102,6 +104,13 @@ class RequestBoundaryDecision:
     history behind it, and for `messages`/`extra_messages` immediately after
     a tool round; `stop` is always honored regardless of what else a
     decision carries.
+
+    Independent of any of that, `messages`/`extra_messages` must never
+    themselves contain a tool-shaped message (an assistant message with
+    `tool_calls`, or a `role="tool"` message) at *any* boundary, even one
+    with no loop-generated tool history at all -- the same plain-message-
+    converter flattening applies regardless of where the tool-shaped
+    content came from.
     """
 
     messages: Sequence[Message] | None = None

@@ -543,6 +543,72 @@ def test_request_boundary_hook_rejects_injection_after_tool_round() -> None:
     assert [event.type for event in collected].count("error") == 1
 
 
+def test_request_boundary_hook_rejects_tool_shaped_extra_message_with_no_history() -> None:
+    """A hook's own `extra_messages` must not carry tool-shaped content either.
+
+    Regression for #363 review: earlier validation only checked the loop's
+    own accumulated `state.continuation_messages` for tool-shaped content.
+    A hook can independently hand the loop a tool-shaped message even at
+    the very first no-tool-calls boundary, before any loop-generated tool
+    round has ever happened -- the same plain-message-converter flattening
+    applies regardless of where the content came from, so this must be
+    rejected too, not just content that originated from a real tool round.
+    """
+
+    provider = ScriptedProvider([_completed_stream("first")])
+    tool_shaped = Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCallSnapshot(call_id="fake-1", name="noop", arguments={}),),
+    )
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(tool_shaped,))])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> None:
+        async for _event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            pass
+
+    with pytest.raises(RequestBoundaryUnsupportedError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 1
+
+
+def test_request_boundary_hook_rejects_tool_shaped_replacement_message() -> None:
+    """A hook's `messages` replacement must not carry a `role="tool"` message."""
+
+    provider = ScriptedProvider([_completed_stream("first")])
+    tool_shaped_replacement = (
+        Message(role="user", content="hi"),
+        Message(role="tool", content="fake tool output", tool_call_id="fake-1"),
+    )
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(messages=tool_shaped_replacement)])
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> None:
+        async for _event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                request_boundary_hook=hook,
+            ),
+            messages=messages,
+        ):
+            pass
+
+    with pytest.raises(RequestBoundaryUnsupportedError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 1
+
+
 def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None:
     """A hook can turn a would-be-final turn (no tool calls) into a follow-up."""
 
