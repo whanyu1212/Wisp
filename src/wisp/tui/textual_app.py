@@ -449,7 +449,9 @@ class TextualTui(App[None]):
         ),
         Binding("up", "menu_move(-1)", "Previous suggestion", priority=True, show=False),
         Binding("down", "menu_move(1)", "Next suggestion", priority=True, show=False),
-        Binding("tab", "menu_complete", "Complete suggestion", priority=True, show=False),
+        Binding("left", "file_tree_move(False)", "Collapse directory", priority=True, show=False),
+        Binding("right", "file_tree_move(True)", "Expand directory", priority=True, show=False),
+        Binding("tab", "menu_complete", "Complete / switch picker", priority=True, show=False),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+t", "toggle_theme", "Light/dark", priority=True, show=False),
@@ -488,7 +490,6 @@ class TextualTui(App[None]):
         self._file_index_generation = 0
         self._file_index_cwd: str | None = None
         self._file_index_request: FileIndexRequest | None = None
-        self._file_mention_active = False
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -702,11 +703,10 @@ class TextualTui(App[None]):
         typed name before Enter dispatches them.
         """
 
-        # An open file menu claims Enter first: the user is picking a path, not
-        # submitting the prompt. Completion leaves the line intact for further
-        # typing, so this always swallows the keypress.
-        if self._file_suggest is not None and self._file_suggest.is_open:
-            if self._complete_path_from_menu():
+        # An active file picker claims Enter first: files are inserted and tree
+        # directories expand/collapse without submitting the prompt.
+        if self._file_suggest is not None and self._file_suggest.is_active:
+            if self._activate_file_picker():
                 return True
 
         suggest = self._suggest
@@ -754,21 +754,38 @@ class TextualTui(App[None]):
                 self.refresh_bindings()
             return
         if slash_matches:
-            self._file_mention_active = False
-            self._file_suggest.hide()
+            self._file_suggest.end_mention()
             if menu_was_open != self._suggestion_menu_is_open():
                 self.refresh_bindings()
             return
-        cursor = self._file_offset_of_cursor(event.text_area)
-        mention_active = FileSuggest.query_from_value(event.text_area.text, cursor) is not None
-        if mention_active and not self._file_mention_active:
+        self._sync_file_suggest(event.text_area)
+        if menu_was_open != self._suggestion_menu_is_open():
+            self.refresh_bindings()
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        """Keep a cursor-relative mention synchronized on caret-only movement."""
+
+        if event.text_area is not self._input or self._file_suggest is None:
+            return
+        menu_was_open = self._suggestion_menu_is_open()
+        if self._suggest is not None and self._suggest.is_open:
+            self._file_suggest.end_mention()
+        else:
+            self._sync_file_suggest(event.text_area)
+        if menu_was_open != self._suggestion_menu_is_open():
+            self.refresh_bindings()
+
+    def _sync_file_suggest(self, editor: TextArea) -> None:
+        picker = self._file_suggest
+        if picker is None:
+            return
+        cursor = self._file_offset_of_cursor(editor)
+        mention_was_active = picker.mention_active
+        picker.show_for(editor.text, cursor)
+        if picker.mention_active and not mention_was_active:
             # A mention session gets exactly one refresh. Reopening on the same root
             # can continue displaying the immutable old snapshot while this runs.
             self._refresh_file_suggestions()
-        self._file_mention_active = mention_active
-        self._file_suggest.show_for(event.text_area.text, cursor)
-        if menu_was_open != self._suggestion_menu_is_open():
-            self.refresh_bindings()
 
     @staticmethod
     def _file_offset_of_cursor(editor: TextArea) -> int:
@@ -1369,77 +1386,51 @@ class TextualTui(App[None]):
             return
         await super().on_event(event)
 
-    async def on_key(self, event: events.Key) -> None:
-        # Menu-scoped keys, handled only while a menu is open so normal input (Tab
-        # focus, Escape, arrows in the editor) is untouched otherwise. Enter is
-        # intentionally NOT intercepted — on_input_submitted runs the line, and
-        # _accept_menu_highlight_on_enter decides whether a menu claims it first.
-        file_suggest = self._file_suggest
-        if file_suggest is not None and file_suggest.is_open:
-            if event.key in {"down", "up", "tab", "escape"}:
-                if event.key == "down":
-                    file_suggest.action_cursor_down()
-                elif event.key == "up":
-                    file_suggest.action_cursor_up()
-                elif event.key == "tab":
-                    self._complete_path_from_menu()
-                else:
-                    # Dismiss but keep whatever the user typed.
-                    file_suggest.hide()
-                    self.refresh_bindings()
-                event.prevent_default()
-                event.stop()
-            return
-
-        suggest = self._suggest
-        if suggest is None or not suggest.is_open:
-            return
-        if event.key == "down":
-            suggest.action_cursor_down()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "up":
-            suggest.action_cursor_up()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "tab":
-            self._complete_from_menu()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "escape":
-            # Dismiss but keep whatever the user typed.
-            suggest.hide()
-            self.refresh_bindings()
-            event.prevent_default()
-            event.stop()
-
     def _suggestion_menu_is_open(self) -> bool:
         return bool(
             (self._file_suggest is not None and self._file_suggest.is_open)
             or (self._suggest is not None and self._suggest.is_open)
         )
 
+    def _file_picker_is_active(self) -> bool:
+        return self._file_suggest is not None and self._file_suggest.is_active
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"menu_move", "menu_complete"}:
-            return self._suggestion_menu_is_open()
+            return self._file_picker_is_active() or bool(
+                self._suggest is not None and self._suggest.is_open
+            )
+        if action == "file_tree_move":
+            return bool(
+                self._file_suggest is not None
+                and self._file_suggest.is_active
+                and self._file_suggest.is_tree_mode
+            )
         return super().check_action(action, parameters)
 
     def action_menu_move(self, direction: int) -> None:
-        menu = (
-            self._file_suggest
-            if self._file_suggest is not None and self._file_suggest.is_open
-            else self._suggest
-        )
-        if menu is None or not menu.is_open:
+        picker = self._file_suggest
+        if picker is not None and picker.is_active:
+            picker.move_selection(direction)
+            return
+        suggest = self._suggest
+        if suggest is None or not suggest.is_open:
             return
         if direction < 0:
-            menu.action_cursor_up()
+            suggest.action_cursor_up()
         else:
-            menu.action_cursor_down()
+            suggest.action_cursor_down()
+
+    def action_file_tree_move(self, expand: bool) -> None:
+        picker = self._file_suggest
+        if picker is not None:
+            picker.move_tree_horizontal(expand=expand)
 
     def action_menu_complete(self) -> None:
-        if self._file_suggest is not None and self._file_suggest.is_open:
-            self._complete_path_from_menu()
+        picker = self._file_suggest
+        if picker is not None and picker.is_active:
+            # Tab changes project-file presentation; Enter performs activation.
+            picker.toggle_mode()
         else:
             self._complete_from_menu()
         self.refresh_bindings()
@@ -1459,39 +1450,43 @@ class TextualTui(App[None]):
         suggest.hide()
         self.refresh_bindings()
 
-    def _complete_path_from_menu(self) -> bool:
-        """Replace the in-progress `@query` with the highlighted path.
+    def on_file_suggest_activation_requested(self, event: FileSuggest.ActivationRequested) -> None:
+        """Route mouse rows through the same activation seam as Enter."""
 
-        Unlike `_complete_from_menu`, this must NOT use `prefill_command` — that
-        replaces the whole buffer, which is right for a slash command that owns the
-        line but would destroy the surrounding prose of a mid-prompt mention. Only
-        the `@…` span itself is spliced, and the caret lands after the inserted
-        path so typing continues naturally.
+        self._activate_file_picker(event.path)
 
-        Returns whether a completion was applied.
-        """
+    def _activate_file_picker(self, requested_path: str | None = None) -> bool:
+        """Activate a picker row and splice an insertable path into the draft."""
 
         picker = self._file_suggest
         editor = self._input
-        if picker is None or editor is None or not picker.is_open:
+        if picker is None or editor is None:
             return False
-        path = picker.highlighted_path()
-        if path is None:
-            return False
-
         value = editor.text
         cursor = self._file_offset_of_cursor(editor)
         query = picker.query_from_value(value, cursor)
-        if query is None:
+        if query is None or query != picker.current_query or not picker.is_active:
+            # A caret move can race a keyboard/mouse activation message. Reconcile
+            # from the authoritative editor first and perform no picker side effect.
+            picker.show_for(value, cursor)
+            self.refresh_bindings()
             return False
 
-        # The mention spans from its `@` through the fragment typed so far. The
-        # pure formatter applies standard JSON escaping whenever quoting is needed.
+        activation = picker.activate(requested_path)
+        if not activation.handled:
+            return False
+        path = activation.insertion_path
+        if path is None:
+            # Tree directories only expand/collapse and still consume Enter/click.
+            return True
+
+        # Keyboard and mouse both use this pure formatter and this one splice.
         start = cursor - len(query) - 1
         replacement = f"{format_file_reference(path)} "
         editor.value = f"{value[:start]}{replacement}{value[cursor:]}"
         editor.cursor_position = start + len(replacement)
-        picker.hide()
+        picker.end_mention()
+        editor.focus()
         self.refresh_bindings()
         return True
 
@@ -1675,8 +1670,8 @@ class TextualTui(App[None]):
         """Dismiss the nearest UI layer, then fall back to shell cancellation."""
 
         file_suggest = self._file_suggest
-        if file_suggest is not None and file_suggest.is_open:
-            file_suggest.hide()
+        if file_suggest is not None and file_suggest.is_active:
+            file_suggest.dismiss()
             self.refresh_bindings()
             return
         suggest = self._suggest
