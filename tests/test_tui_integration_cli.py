@@ -19,6 +19,7 @@ from textual.widgets import Header, Label, OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
@@ -44,6 +45,7 @@ from wisp.tui.history import (
     history_entries_from_rpc_messages,
 )
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
     _EMPTY_TRANSCRIPT_TAGLINE,
@@ -63,6 +65,7 @@ from wisp.tui.widgets import (
     ComposerPanel,
     JumpToLatest,
     LineMessage,
+    ProcessCard,
     SlashSuggest,
     StatusBar,
     StreamMessage,
@@ -1209,6 +1212,46 @@ def test_textual_tui_renderer_renders_historical_edit_with_structured_diff() -> 
     assert "Applied 1 edit" not in rendered
 
 
+def test_textual_history_coalesces_process_poll_cards() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-1",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nfirst chunk\n",
+                        is_error=False,
+                        tool_call_id="poll-1",
+                    ),
+                    HistoricalToolCard(
+                        card_id="history:poll-2",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output=(
+                            "Process proc-1 completed with exit code 0\nstdout:\nsecond chunk\n"
+                        ),
+                        is_error=False,
+                        status="done",
+                        exit_code=0,
+                        tool_call_id="poll-2",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            return [card.render().plain for card in app_instance.query(ProcessCard)]
+
+    cards = anyio.run(scenario)
+
+    assert len(cards) == 1
+    assert cards[0].startswith("• Process completed proc-1 · 2 polls")
+    assert "first chunk" in cards[0]
+    assert "second chunk" in cards[0]
+
+
 def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> None:
     async def scenario() -> tuple[str, int, str, str]:
         app_instance, renderer = create_textual_tui()
@@ -1711,6 +1754,572 @@ def test_textual_renderer_collapses_call_and_result_into_one_card() -> None:
     assert "match" in texts[0]
 
 
+def test_textual_renderer_coalesces_repeated_process_polls() -> None:
+    async def scenario() -> tuple[list[str], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output="Process proc-1 is still running\nstdout:\nfirst chunk\n",
+                    is_error=False,
+                    process_id="proc-1",
+                    process_state="running",
+                    stdout="first chunk\n",
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-2",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-2",
+                    name="bash",
+                    output="Process proc-1 completed with exit code 0\nstdout:\nsecond chunk\n",
+                    is_error=False,
+                    exit_code=0,
+                    process_id="proc-1",
+                    process_state="completed",
+                    stdout="second chunk\n",
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            return [card.render().plain for card in cards], len(renderer._history._live_entries)
+
+    cards, live_entry_count = anyio.run(scenario)
+
+    assert len(cards) == 1
+    assert cards[0].startswith("• Process completed proc-1 · 2 polls")
+    assert "first chunk" in cards[0]
+    assert "second chunk" in cards[0]
+    # Presentation is coalesced, but every result remains represented in the live
+    # durable-history suffix under its original call ID.
+    assert live_entry_count == 2
+
+
+def test_textual_renderer_preserves_process_failure_reason_with_or_without_output() -> None:
+    async def scenario(stdout: str | None) -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            body = f"\nstdout:\n{stdout}" if stdout else ""
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output=f"Process proc-1 failed: cleanup failed{body}",
+                    is_error=True,
+                    process_id="proc-1",
+                    process_state="failed",
+                    process_error="cleanup failed",
+                    stdout=stdout,
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            assert len(cards) == 1
+            return cards[0].render().plain
+
+    with_output = anyio.run(scenario, "partial output\n")
+    without_output = anyio.run(scenario, None)
+
+    assert with_output.startswith("• Process failed proc-1 · 1 poll")
+    assert "cleanup failed" in with_output
+    assert "partial output" in with_output
+    assert "no process output yet" not in with_output
+    assert without_output.startswith("• Process failed proc-1 · 1 poll")
+    assert without_output.count("cleanup failed") == 1
+    assert "no process output yet" not in without_output
+
+
+def test_textual_live_poll_takes_ownership_of_resumed_process_card() -> None:
+    async def scenario() -> tuple[int, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-1",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nold output\n",
+                        is_error=False,
+                        tool_call_id="poll-1",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            historical_card = app_instance.query_one(ProcessCard)
+
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-2",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            # Simulate the retained history entry leaving the paging window while
+            # its shared card is now owned by the pending live poll.
+            app_instance.remove_historical_widget(historical_card)
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-2",
+                    name="bash",
+                    output="Process proc-1 completed with exit code 0\nstdout:\nnew output\n",
+                    is_error=False,
+                    exit_code=0,
+                    process_id="proc-1",
+                    process_state="completed",
+                    stdout="new output\n",
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            return len(cards), historical_card.render().plain
+
+    card_count, rendered = anyio.run(scenario)
+
+    assert card_count == 1
+    assert rendered.startswith("• Process completed proc-1 · 2 polls")
+    assert "old output" in rendered
+    assert "new output" in rendered
+
+
+def test_textual_aborted_pending_process_poll_enters_settled_retention() -> None:
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.cancelled()
+            await pilot.pause()
+            card = app_instance.query_one(ProcessCard)
+            return (
+                card.render().plain,
+                any(
+                    candidate is card
+                    for candidate, _entry_count in (
+                        app_instance._transcript_controller._settled_widgets
+                    )
+                ),
+            )
+
+    rendered, card_settled = anyio.run(scenario)
+
+    assert rendered.startswith("• Process poll interrupted proc-1 · 1 poll")
+    assert card_settled
+
+
+def test_textual_process_card_bounds_malformed_process_id_display() -> None:
+    malformed_id = "first line\n" + "x" * 10_000
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": malformed_id},
+                )
+            )
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+    header = rendered.splitlines()[0]
+
+    assert len(header) < 100
+    assert "first line x" in header
+    assert "x" * 100 not in rendered
+
+
+def test_textual_paging_older_polls_keeps_live_process_card_untouched() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-1",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nnewer output\n",
+                        is_error=False,
+                        tool_call_id="poll-1",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-2",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.prepend_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-0",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nolder output\n",
+                        is_error=False,
+                        tool_call_id="poll-0",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            return [card.render().plain for card in app_instance.query(ProcessCard)]
+
+    cards = anyio.run(scenario)
+
+    assert len(cards) == 2
+    live = next(card for card in cards if card.startswith("• Polling process"))
+    history = next(card for card in cards if card != live)
+    assert "newer output" in live
+    assert "older output" not in live
+    assert "older output" in history
+    assert "newer output" not in history
+    assert "· 1 poll" in history
+
+
+def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:
+    async def scenario() -> tuple[int, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for index, state in enumerate(("completed", "running"), start=1):
+                call_id = f"poll-{index}"
+                renderer.event(
+                    ToolCallRequested(
+                        call_id=call_id,
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                    )
+                )
+                renderer.event(
+                    ToolResultReady(
+                        call_id=call_id,
+                        name="bash",
+                        output=(
+                            "Process proc-1 completed with exit code 0"
+                            if state == "completed"
+                            else "Process proc-1 is still running"
+                        ),
+                        is_error=False,
+                        exit_code=0 if state == "completed" else None,
+                        process_id="proc-1",
+                        process_state=state,
+                    )
+                )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            return len(cards), cards[0].render().plain
+
+    count, rendered = anyio.run(scenario)
+
+    assert count == 1
+    assert rendered.startswith("• Running process proc-1 · 2 polls")
+
+
+def test_textual_renderer_keeps_interleaved_processes_independent() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for process_id in ("proc-a", "proc-b"):
+                call_id = f"poll-{process_id}"
+                renderer.event(
+                    ToolCallRequested(
+                        call_id=call_id,
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": process_id},
+                    )
+                )
+                renderer.event(
+                    ToolResultReady(
+                        call_id=call_id,
+                        name="bash",
+                        output=f"Process {process_id} is still running",
+                        is_error=False,
+                        process_id=process_id,
+                        process_state="running",
+                    )
+                )
+            await pilot.pause()
+            return [card.render().plain for card in app_instance.query(ProcessCard)]
+
+    cards = anyio.run(scenario)
+
+    assert len(cards) == 2
+    assert any("Running process proc-a · 1 poll" in card for card in cards)
+    assert any("Running process proc-b · 1 poll" in card for card in cards)
+
+
+def test_textual_process_cancellation_settles_the_shared_card() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output="Process proc-1 is still running",
+                    is_error=False,
+                    process_id="proc-1",
+                    process_state="running",
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="cancel-1",
+                    name="bash",
+                    arguments={"operation": "cancel", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="cancel-1",
+                    name="bash",
+                    output="Process proc-1 cancelled",
+                    is_error=False,
+                    process_id="proc-1",
+                    process_state="cancelled",
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            assert len(cards) == 1
+            return cards[0].render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith("• Process cancelled proc-1 · 1 poll")
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_action"),
+    [
+        ("poll", "Process poll denied"),
+        ("cancel", "Process cancellation denied"),
+    ],
+)
+def test_textual_denied_process_operation_retains_reason_after_result(
+    operation: str,
+    expected_action: str,
+) -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="process-1",
+                    name="bash",
+                    arguments={"operation": operation, "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="process-1",
+                    name="bash",
+                    approved=False,
+                    reason="not now",
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="process-1",
+                    name="bash",
+                    output="not now",
+                    is_error=True,
+                    process_state="cancelled",
+                )
+            )
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith(f"• {expected_action} proc-1")
+    assert "not now" in rendered
+    assert "Process cancelled" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_action"),
+    [
+        ("poll", "Process poll denied"),
+        ("cancel", "Process cancellation denied"),
+    ],
+)
+def test_textual_abort_preserves_resolved_process_denial(
+    operation: str,
+    expected_action: str,
+) -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="process-1",
+                    name="bash",
+                    arguments={"operation": operation, "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="process-1",
+                    name="bash",
+                    approved=False,
+                    reason="not now",
+                )
+            )
+            renderer.cancelled()
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith(f"• {expected_action} proc-1")
+    assert "not now" in rendered
+    assert "interrupted" not in rendered
+
+
+def test_textual_concurrent_result_does_not_overwrite_denied_process_call() -> None:
+    async def scenario() -> tuple[str, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="cancel-1",
+                    name="bash",
+                    arguments={"operation": "cancel", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="cancel-1",
+                    name="bash",
+                    approved=False,
+                    reason="keep it running",
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output="Process proc-1 is still running\nstdout:\nfresh output\n",
+                    is_error=False,
+                    process_id="proc-1",
+                    process_state="running",
+                    stdout="fresh output\n",
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="cancel-1",
+                    name="bash",
+                    output="keep it running",
+                    is_error=True,
+                )
+            )
+            await pilot.pause()
+            card = app_instance.query_one(ProcessCard)
+            return card.render().plain, card.lifecycle_presentation.call_count
+
+    rendered, call_count = anyio.run(scenario)
+
+    assert rendered.startswith("• Process cancellation denied proc-1")
+    assert "keep it running" in rendered
+    assert "fresh output" in rendered
+    assert call_count == 2
+
+
+def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output=INTERRUPTED_TOOL_RESULT_TEXT,
+                    is_error=True,
+                    process_state="cancelled",
+                    failure_code="internal_error",
+                    retryable=True,
+                    recovery_hint=("Retry the tool call if its effects can be safely repeated."),
+                )
+            )
+            await pilot.pause()
+            card = app_instance.query_one(ProcessCard)
+            return card.render().plain, card._status, card._timer is None
+
+    rendered, status, timer_stopped = anyio.run(scenario)
+
+    assert rendered.startswith("• Process poll interrupted proc-1 · 1 poll")
+    assert "Process cancelled" not in rendered
+    assert status == "cancelled"
+    assert timer_stopped
+
+
+def test_textual_renderer_forgets_evicted_process_lifecycle_state() -> None:
+    _app_instance, renderer = create_textual_tui()
+    renderer._process_lifecycles["proc-1"] = ProcessLifecycle("proc-1")
+    renderer._process_started["proc-1"] = datetime.now(UTC)
+
+    renderer._forget_live_widget(ProcessCard("proc-1"))
+
+    assert "proc-1" not in renderer._process_lifecycles
+    assert "proc-1" not in renderer._process_started
+
+
 def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:
     # A resolved card freezes at the wall-clock duration between the request and
     # result event timestamps (not the live tick count), so the resting number is
@@ -1847,8 +2456,8 @@ def test_textual_tool_card_timed_out_process_state_renders_as_failure() -> None:
         ]
     )
 
-    assert "• Failed to run  poll proc-1" in rendered
-    assert "Process proc-1 timed out" in rendered
+    assert "• Process timed out proc-1 · 1 poll" in rendered
+    assert "Process cancelled" not in rendered
 
 
 def test_textual_tool_card_edit_renders_colored_diff() -> None:
@@ -3627,25 +4236,29 @@ def test_textual_stream_completion_skips_identical_final_rerender(
     assert replacements == []
 
 
-def test_textual_completion_removes_working_indicator_after_stream_settlement(
+def test_textual_first_visible_stream_frame_removes_working_indicator(
     monkeypatch: MonkeyPatch,
 ) -> None:
     ordering: list[str] = []
 
     async def scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
-        original_settle = app_instance.settle_stream_widget
+        original_append = StreamMessage.append_markdown
         original_hide = app_instance._transcript_controller.hide_working_indicator_if_current
 
-        def track_settle(widget: Widget) -> None:
-            ordering.append("stream settled")
-            original_settle(widget)
+        async def track_append(widget: StreamMessage, fragment: str) -> None:
+            await original_append(widget, fragment)
+            ordering.append("stream visible")
 
-        def track_hide(indicator: WorkingIndicator) -> None:
+        def track_hide(
+            indicator: WorkingIndicator,
+            *,
+            generation: int | None = None,
+        ) -> None:
             ordering.append("indicator removed")
-            original_hide(indicator)
+            original_hide(indicator, generation=generation)
 
-        monkeypatch.setattr(app_instance, "settle_stream_widget", track_settle)
+        monkeypatch.setattr(StreamMessage, "append_markdown", track_append)
         monkeypatch.setattr(
             app_instance._transcript_controller,
             "hide_working_indicator_if_current",
@@ -3653,29 +4266,63 @@ def test_textual_completion_removes_working_indicator_after_stream_settlement(
         )
         async with app_instance.run_test() as pilot:
             renderer.running()
-            renderer.token_delta("final response")
-            renderer.end_token_stream_with_content("final response")
-            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
-            renderer.event(RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True))
-            renderer.view_updated(
-                TuiViewSnapshot(
-                    status="idle",
-                    input_hint="wisp> ",
-                    input_mode="idle",
-                    queued_follow_ups=0,
-                )
-            )
-            indicator_retained = app_instance._transcript_controller.working_indicator is not None
+            indicator_started = app_instance._transcript_controller.working_indicator is not None
+            renderer.token_delta("visible response")
             await app_instance.wait_for_stream_idle()
             await pilot.pause()
             indicator_removed = app_instance._transcript_controller.working_indicator is None
-            return indicator_retained, indicator_removed
+            renderer.end_token_stream_with_content("visible response")
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            await app_instance.wait_for_stream_idle()
+            return indicator_started, indicator_removed
 
-    indicator_retained, indicator_removed = anyio.run(scenario)
+    indicator_started, indicator_removed = anyio.run(scenario)
 
-    assert indicator_retained
+    assert indicator_started
     assert indicator_removed
-    assert ordering == ["stream settled", "indicator removed"]
+    assert ordering == ["stream visible", "indicator removed"]
+
+
+def test_textual_long_markdown_completion_does_not_shift_the_visible_frame() -> None:
+    source = "".join(
+        f"## Phase {index}\n\n"
+        f"- inspect lifecycle {index}\n"
+        f"- preserve the viewport for **phase {index}**\n\n"
+        "```python\n"
+        f"def phase_{index}() -> int:\n    return {index}\n"
+        "```\n\n"
+        for index in range(24)
+    )
+
+    async def scenario() -> tuple[str, str, tuple[float, float], tuple[float, float]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            renderer.running()
+            renderer.token_delta(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert app_instance._transcript_controller.working_indicator is None
+            before = "\n".join(
+                strip.text for strip in app_instance.screen._compositor.render_strips()
+            )
+            before_scroll = (float(transcript.scroll_y), float(transcript.max_scroll_y))
+
+            renderer.end_token_stream_with_content(source)
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            after = "\n".join(
+                strip.text for strip in app_instance.screen._compositor.render_strips()
+            )
+            after_scroll = (float(transcript.scroll_y), float(transcript.max_scroll_y))
+            return before, after, before_scroll, after_scroll
+
+    before, after, before_scroll, after_scroll = anyio.run(scenario)
+
+    assert before == after
+    assert before_scroll == after_scroll
+    assert before_scroll[0] == before_scroll[1]
 
 
 def test_old_stream_completion_does_not_remove_a_new_prompt_indicator() -> None:
@@ -3695,6 +4342,58 @@ def test_old_stream_completion_does_not_remove_a_new_prompt_indicator() -> None:
             )
 
     assert anyio.run(scenario)
+
+
+def test_flushed_stream_does_not_retire_indicator_reused_by_a_later_turn() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            indicator = app_instance._transcript_controller.working_indicator
+            renderer.token_delta("first response")
+            renderer.end_token_stream_with_content("first response")
+
+            # TurnStarted refreshes the current object rather than remounting it.
+            # The flushed stream's deferred finalizer must respect the new logical
+            # owner even though object identity did not change.
+            renderer.event(TurnStarted(turn=2))
+            reused = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return (
+                reused is indicator,
+                app_instance._transcript_controller.working_indicator is reused,
+            )
+
+    reused_same_widget, retained_for_later_turn = anyio.run(scenario)
+
+    assert reused_same_widget
+    assert retained_for_later_turn
+
+
+def test_flushed_stream_does_not_retire_reused_approval_indicator() -> None:
+    async def scenario() -> tuple[bool, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            indicator = app_instance._transcript_controller.working_indicator
+            renderer.token_delta("first response")
+            renderer.end_token_stream_with_content("first response")
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="approval-1",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            reused = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return reused is indicator, _working_activity(app_instance)
+
+    reused_same_widget, activity = anyio.run(scenario)
+
+    assert reused_same_widget
+    assert "Waiting for approval" in activity
 
 
 def test_textual_stream_widget_is_available_before_async_finalization() -> None:
@@ -4964,7 +5663,7 @@ def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> N
 
 
 def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
-    async def scenario() -> tuple[str, str, bool, bool]:
+    async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
@@ -4982,16 +5681,14 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
                 recovered,
                 "\n".join(texts),
                 app_instance._transcript_controller.working_indicator is None,
-                app_instance._transcript_controller.working_indicator is not None,
             )
 
-    recovered, transcript, timer_stopped, active = anyio.run(scenario)
+    recovered, transcript, indicator_retired = anyio.run(scenario)
     assert "Working" in recovered
     assert "Retrying" not in recovered
     assert "response" in transcript
     assert "Retrying" not in transcript
-    assert not timer_stopped
-    assert active
+    assert indicator_retired
 
 
 def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
@@ -5605,29 +6302,22 @@ def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
     assert focus_ok
 
 
-def test_textual_working_status_persists_at_tail_during_stream_output() -> None:
-    async def scenario() -> tuple[str, str, list[str], bool]:
+def test_textual_working_status_retires_when_stream_output_becomes_visible() -> None:
+    async def scenario() -> tuple[str, str, list[str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
             before = _working_activity(app_instance)
             renderer.token_delta("hello")
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
-            indicator = app_instance._transcript_controller.working_indicator
-            transcript = app_instance.query_one("#transcript", Transcript)
-            return (
-                before,
-                _working_activity(app_instance),
-                _transcript_texts(app_instance),
-                indicator is not None and transcript.children[-1] is indicator,
-            )
+            return before, _working_activity(app_instance), _transcript_texts(app_instance)
 
-    before, after, transcript, indicator_is_tail = anyio.run(scenario)
+    before, after, transcript = anyio.run(scenario)
     assert "Working" in before
-    assert "Working" in after
+    assert after == ""
     assert any("hello" in text for text in transcript)
-    assert indicator_is_tail
 
 
 def test_textual_working_status_persists_after_tool_card_mount() -> None:

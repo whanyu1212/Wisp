@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 from textual.content import Content
 from textual.widget import Widget
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
@@ -28,6 +29,12 @@ from wisp.tui.history import (
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     historical_tool_status,
+)
+from wisp.tui.process_lifecycle import (
+    ProcessLifecycle,
+    ProcessLifecyclePresentation,
+    historical_process_observation,
+    process_call_identity,
 )
 from wisp.tui.skills import format_skill_invocation
 from wisp.tui.tool_call import ToolActionStatus
@@ -70,6 +77,21 @@ class TextualHistorySurface(Protocol):
         message: str,
         *,
         before: Widget | None = None,
+    ) -> Widget | None: ...
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+        reposition: bool = False,
+    ) -> Widget | None: ...
+
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
     ) -> Widget | None: ...
 
     def mount_tool_call(
@@ -126,6 +148,15 @@ class _BoundaryToolCall:
 
 
 @dataclass(frozen=True)
+class _HistoricalProcessGroup:
+    """One process lifecycle projected from visible audited history entries."""
+
+    first_entry_id: int
+    member_entry_ids: frozenset[int]
+    presentation: ProcessLifecyclePresentation
+
+
+@dataclass(frozen=True)
 class _LiveHistoryEntry:
     """One persisted entry already represented by a live transcript widget."""
 
@@ -159,6 +190,8 @@ class TextualHistoryController:
         self._boundary_tool_calls: dict[str, _BoundaryToolCall] = {}
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
+        self._transferred_history_entry_ids: dict[Widget, set[int]] = {}
+        self._transferred_history_entries: dict[Widget, list[HistoricalTranscriptEntry]] = {}
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
         self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
@@ -251,10 +284,35 @@ class TextualHistoryController:
             )
         )
 
+    def transfer_widget_to_live(self, widget: Widget) -> None:
+        """Detach historical aliases when a resumed process card becomes live-owned."""
+
+        transferred_entry_ids = {
+            entry_id for entry_id, candidate in self._widgets.items() if candidate is widget
+        }
+        if transferred_entry_ids:
+            self._transferred_history_entry_ids.setdefault(widget, set()).update(
+                transferred_entry_ids
+            )
+            retained_by_id = {item.id: item.entry for item in self._window.entries}
+            transferred_entries = self._transferred_history_entries.setdefault(widget, [])
+            transferred_entries.extend(
+                retained_by_id[entry_id]
+                for entry_id in sorted(transferred_entry_ids)
+                if entry_id in retained_by_id
+            )
+        self._widgets = {
+            entry_id: candidate
+            for entry_id, candidate in self._widgets.items()
+            if candidate is not widget
+        }
+
     def forget_live_widget(self, widget: Widget) -> None:
         """Allow an evicted live entry to reappear through durable history paging."""
 
         self._live_entries = [entry for entry in self._live_entries if entry.widget is not widget]
+        self._transferred_history_entry_ids.pop(widget, None)
+        self._transferred_history_entries.pop(widget, None)
         snapshot = self._latest_reload_live_entries
         if snapshot is not None:
             self._latest_reload_live_entries = tuple(
@@ -364,7 +422,9 @@ class TextualHistoryController:
         try:
             self._remove_historical_widgets()
             self._clear(clear_live=False)
-            self._window.replace(self._retain(reloaded_entries))
+            retained = self._retain(reloaded_entries)
+            self._remap_transferred_history_entry_ids(retained)
+            self._window.replace(retained)
             self._reconcile()
             self._surface.follow_transcript_tail_after_refresh()
         finally:
@@ -425,6 +485,10 @@ class TextualHistoryController:
         self._next_entry_id = 0
         if clear_live:
             self._live_entries.clear()
+            self._transferred_history_entry_ids.clear()
+            self._transferred_history_entries.clear()
+        else:
+            self._transferred_history_entry_ids.clear()
         self._latest_reload_live_entries = None
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
@@ -447,6 +511,26 @@ class TextualHistoryController:
         )
         self._next_entry_id += len(retained)
         return retained
+
+    def _remap_transferred_history_entry_ids(
+        self,
+        retained: tuple[_RetainedHistoryEntry, ...],
+    ) -> None:
+        """Remap live-owned records after a latest-page rebuild resets local ids."""
+
+        for widget, transferred_entries in self._transferred_history_entries.items():
+            available = list(retained)
+            remapped: set[int] = set()
+            for transferred in reversed(transferred_entries):
+                for index in range(len(available) - 1, -1, -1):
+                    candidate = available[index]
+                    if not _same_durable_history_entry(candidate.entry, transferred):
+                        continue
+                    remapped.add(candidate.id)
+                    del available[index]
+                    break
+            if remapped:
+                self._transferred_history_entry_ids[widget] = remapped
 
     def _remove_historical_widgets(self) -> None:
         for widget in set(self._widgets.values()):
@@ -530,7 +614,17 @@ class TextualHistoryController:
         """Apply only the changed edges of the retained history window."""
 
         visible = self._window.visible
+        live_owned_history_entry_ids = (
+            set().union(*self._transferred_history_entry_ids.values())
+            if self._transferred_history_entry_ids
+            else set()
+        )
+        process_groups = self._historical_process_groups(
+            visible,
+            excluded_entry_ids=live_owned_history_entry_ids,
+        )
         visible_ids = {item.id for item in visible}
+        reposition_widgets: set[Widget] = set()
         self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
         for item_id, widget in tuple(self._widgets.items()):
             if item_id not in self._widgets:
@@ -542,6 +636,8 @@ class TextualHistoryController:
                     if other_widget is widget
                 ]
                 if any(other_id in visible_ids for other_id in aliases):
+                    del self._widgets[item_id]
+                    reposition_widgets.add(widget)
                     continue
                 if len(aliases) > 1:
                     if item_id != min(aliases):
@@ -554,7 +650,41 @@ class TextualHistoryController:
                 self._surface.remove_historical_widget(widget)
 
         for index, item in enumerate(visible):
+            if item.id in live_owned_history_entry_ids:
+                continue
+            process_group = process_groups.get(item.id)
             if item.id in self._widgets:
+                if process_group is not None and item.id == process_group.first_entry_id:
+                    widget = self._widgets[item.id]
+                    if widget in reposition_widgets:
+                        before = next(
+                            (
+                                self._widgets[later.id]
+                                for later in visible[index + 1 :]
+                                if later.id in self._widgets
+                                and self._widgets[later.id] is not widget
+                            ),
+                            None,
+                        )
+                        if before is None:
+                            before = self._surface.history_insertion_boundary(
+                                set(self._widgets.values())
+                            )
+                        self._surface.mount_process_card(
+                            process_group.presentation.process_id,
+                            historical=True,
+                            before=before,
+                            reposition=True,
+                        )
+                    self._surface.update_historical_process_card(
+                        widget,
+                        process_group.presentation,
+                    )
+                continue
+            if process_group is not None and item.id != process_group.first_entry_id:
+                first_widget = self._widgets.get(process_group.first_entry_id)
+                if first_widget is not None:
+                    self._widgets[item.id] = first_widget
                 continue
             before = next(
                 (
@@ -566,9 +696,135 @@ class TextualHistoryController:
             )
             if before is None:
                 before = self._surface.history_insertion_boundary(set(self._widgets.values()))
-            mounted = self._mount_entry(item.entry, before=before)
+            if process_group is None:
+                mounted = self._mount_entry(item.entry, before=before)
+            else:
+                mounted = self._surface.mount_process_card(
+                    process_group.presentation.process_id,
+                    historical=True,
+                    before=before,
+                )
+                if mounted is not None:
+                    self._surface.update_historical_process_card(
+                        mounted,
+                        process_group.presentation,
+                    )
+                    superseded = {
+                        self._widgets[member_id]
+                        for member_id in process_group.member_entry_ids
+                        if member_id in self._widgets and self._widgets[member_id] is not mounted
+                    }
+                    for widget in superseded:
+                        self._surface.remove_historical_widget(widget)
+                    if superseded:
+                        self._widgets = {
+                            entry_id: widget
+                            for entry_id, widget in self._widgets.items()
+                            if widget not in superseded
+                        }
             if mounted is not None:
                 self._widgets[item.id] = mounted
+                if process_group is not None:
+                    for member_id in process_group.member_entry_ids:
+                        self._widgets[member_id] = mounted
+
+    @staticmethod
+    def _historical_process_groups(
+        visible: tuple[_RetainedHistoryEntry, ...],
+        *,
+        excluded_entry_ids: set[int] | None = None,
+    ) -> dict[int, _HistoricalProcessGroup]:
+        """Project visible poll/cancel records into stable process-level groups."""
+
+        excluded_entry_ids = excluded_entry_ids or set()
+        split_results: dict[str, deque[_RetainedHistoryEntry]] = {}
+        for item in visible:
+            entry = item.entry
+            if item.id in excluded_entry_ids:
+                continue
+            if (
+                isinstance(entry, HistoricalToolCard)
+                and entry.call_missing
+                and entry.tool_call_id is not None
+            ):
+                split_results.setdefault(entry.tool_call_id, deque()).append(item)
+        paired_results: dict[int, _RetainedHistoryEntry] = {}
+        paired_result_ids: set[int] = set()
+        for item in visible:
+            entry = item.entry
+            if item.id in excluded_entry_ids:
+                continue
+            if (
+                isinstance(entry, HistoricalToolCard)
+                and entry.missing_result
+                and entry.tool_call_id is not None
+                and (results := split_results.get(entry.tool_call_id))
+            ):
+                result = results.popleft()
+                paired_results[item.id] = result
+                paired_result_ids.add(result.id)
+        lifecycles: dict[str, ProcessLifecycle] = {}
+        first_ids: dict[str, int] = {}
+        member_ids: dict[str, set[int]] = {}
+        for item in visible:
+            entry = item.entry
+            if (
+                not isinstance(entry, HistoricalToolCard)
+                or item.id in excluded_entry_ids
+                or item.id in paired_result_ids
+            ):
+                continue
+            observation = entry
+            observation_member_ids = {item.id}
+            if entry.missing_result:
+                paired_result = paired_results.get(item.id)
+                if paired_result is not None and isinstance(
+                    paired_result.entry,
+                    HistoricalToolCard,
+                ):
+                    observation = paired_result.entry
+                    observation_member_ids.add(paired_result.id)
+            identity = process_call_identity(entry.name, entry.arguments)
+            if identity is None:
+                continue
+            lifecycle = lifecycles.setdefault(
+                identity.process_id,
+                ProcessLifecycle(identity.process_id),
+            )
+            first_ids.setdefault(identity.process_id, item.id)
+            member_ids.setdefault(identity.process_id, set()).update(observation_member_ids)
+            lifecycle.begin(identity.operation)
+            historical_status = historical_tool_status(observation)
+            if historical_status == "denied":
+                lifecycle.deny(identity.operation, observation.output or "denied")
+            elif historical_status == "cancelled" and (
+                observation.missing_result or observation.output == INTERRUPTED_TOOL_RESULT_TEXT
+            ):
+                lifecycle.interrupt(identity.operation)
+            else:
+                state, output = historical_process_observation(
+                    identity.process_id,
+                    observation.output,
+                )
+                lifecycle.observe(
+                    operation=identity.operation,
+                    state=state,
+                    fallback_output=output,
+                    source_truncated=observation.truncated,
+                    failed=historical_status == "error",
+                )
+
+        by_entry_id: dict[int, _HistoricalProcessGroup] = {}
+        for process_id, lifecycle in lifecycles.items():
+            group_members = frozenset(member_ids[process_id])
+            group = _HistoricalProcessGroup(
+                first_entry_id=first_ids[process_id],
+                member_entry_ids=group_members,
+                presentation=lifecycle.presentation(),
+            )
+            for member_id in group_members:
+                by_entry_id[member_id] = group
+        return by_entry_id
 
     def _mount_entry(
         self,
@@ -793,6 +1049,29 @@ def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
     if isinstance(entry, HistoricalSkillInvocation):
         return entry.entry_id
     return entry.card_id
+
+
+def _same_durable_history_entry(
+    left: HistoricalTranscriptEntry,
+    right: HistoricalTranscriptEntry,
+) -> bool:
+    """Match one persisted projection across destructive latest-page reloads."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, HistoricalTranscriptMessage) and isinstance(
+        right, HistoricalTranscriptMessage
+    ):
+        if left.entry_id is not None or right.entry_id is not None:
+            return left.entry_id == right.entry_id
+        return left == right
+    if isinstance(left, HistoricalSkillInvocation) and isinstance(right, HistoricalSkillInvocation):
+        return left.entry_id == right.entry_id
+    if isinstance(left, HistoricalToolCard) and isinstance(right, HistoricalToolCard):
+        if left.missing_result or right.missing_result:
+            return left == right and left.tool_call_id == right.tool_call_id
+        return left.card_id == right.card_id
+    return False
 
 
 def _history_entry_matches_live(

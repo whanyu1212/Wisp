@@ -84,6 +84,7 @@ from wisp.tui.diff_presentation import (
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.file_index import ProjectSnapshot
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_highlighting import PromptHighlightKind, prompt_line_highlights
 from wisp.tui.rendering import (
     TuiViewSnapshot,
@@ -101,6 +102,7 @@ from wisp.tui.tool_call import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
+_PROCESS_ID_DISPLAY_CELLS = 40
 _MARKDOWN_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _PROMPT_HIGHLIGHT_COMPONENTS: dict[PromptHighlightKind, str] = {
     "command": "prompt-editor--command",
@@ -2458,6 +2460,7 @@ class ToolCard(Static):
         arguments: object,
         *,
         arguments_available: bool = True,
+        track_elapsed: bool = True,
     ) -> None:
         # markup=False: every other content-bearing Static in this module
         # takes untrusted tool/model text this way. _repaint() always wraps
@@ -2495,15 +2498,26 @@ class ToolCard(Static):
         # `set_state(elapsed=…)`), so the number that rests on screen is honest.
         self._elapsed: float | None = None
         self._timer: Timer | None = None
+        self._track_elapsed = track_elapsed
         self.set_state("pending")
 
     def on_mount(self) -> None:
         # A pending card ticks a running counter; a card that mounts already
         # resolved (e.g. rebuilt from history) has no timer to start.
         if self._role == "tool":
+            self._start_timer(force=True)
+
+    def _start_timer(self, *, force: bool = False) -> None:
+        if (
+            not self._track_elapsed
+            or self._timer is not None
+            or (not force and not self.is_mounted)
+        ):
+            return
+        if self._elapsed is None:
             self._elapsed = 0.0
-            self._timer = self.set_interval(self._TICK, self._tick)
-            self._repaint()
+        self._timer = self.set_interval(self._TICK, self._tick)
+        self._repaint()
 
     def on_resize(self, event: events.Resize) -> None:
         """Rewrap the tree when a terminal resize changes available width."""
@@ -2571,6 +2585,10 @@ class ToolCard(Static):
             if elapsed is not None:
                 self._elapsed = elapsed
             self._stop_timer()
+        else:
+            # A process lifecycle may recover from a denied or failed observation
+            # when a later poll arrives on the same stable card.
+            self._start_timer()
         if role != self._role:
             if self._role:
                 self.remove_class(f"message--{self._role}")
@@ -2668,12 +2686,7 @@ class ToolCard(Static):
         # text. Trusted bullets and branches are also literal chrome; semantic state
         # is explicit in the action words and available to styling via the role class.
         width = max(8, self.content_size.width or self.size.width or 80)
-        action = _format_tool_call_action_from_rendered(
-            self._tool_name,
-            self._call_arguments,
-            status=self._status,
-            arguments_available=self._arguments_available,
-        )
+        action = self._action_content()
         if self._elapsed is not None:
             action += Content.styled(f" · {_format_duration(self._elapsed)}", "$text-muted")
         # Label the affordance so a reader does not have to infer what a bare
@@ -2721,14 +2734,140 @@ class ToolCard(Static):
 
         self.update(content, layout=layout)
 
+    def _action_content(self) -> Content:
+        return _format_tool_call_action_from_rendered(
+            self._tool_name,
+            self._call_arguments,
+            status=self._status,
+            arguments_available=self._arguments_available,
+        )
+
+
+def _process_id_for_display(process_id: str) -> str:
+    """Bound and flatten an untrusted process ID before building Textual content."""
+
+    # Slice before normalization so even a malformed multi-megabyte argument has
+    # constant presentation cost. Managed IDs are 32 lowercase hexadecimal chars.
+    single_line = " ".join(process_id[:64].split()) or "(invalid process id)"
+    return _truncate_to_cell_width(single_line, _PROCESS_ID_DISPLAY_CELLS)
+
+
+class ProcessCard(ToolCard):
+    """One bounded presentation card spanning repeated polls for a process ID."""
+
+    _STATE_WORDS = {
+        "polling": "Polling process",
+        "cancelling": "Cancelling process",
+        "running": "Running process",
+        "completed": "Process completed",
+        "failed": "Process failed",
+        "timed_out": "Process timed out",
+        "cancelled": "Process cancelled",
+        "poll_denied": "Process poll denied",
+        "cancel_denied": "Process cancellation denied",
+        "poll_interrupted": "Process poll interrupted",
+        "cancel_interrupted": "Process cancellation interrupted",
+        "poll_failed": "Process poll failed",
+        "cancel_failed": "Process cancellation failed",
+        "observed": "Observed process",
+    }
+    _STATUS_STYLE = {
+        "pending": "bold $accent",
+        "done": "bold $success",
+        "error": "bold $error",
+        "denied": "bold $warning",
+        "cancelled": "bold $warning",
+    }
+
+    def __init__(self, process_id: str, *, track_elapsed: bool = True) -> None:
+        self._process_id = process_id
+        self._process_presentation = ProcessLifecyclePresentation(
+            process_id=process_id,
+            display_state="observed",
+            poll_count=0,
+            call_count=0,
+            detail="(no process output yet)",
+            full_output="",
+            retained_output="",
+            source_truncated=False,
+            ui_dropped_bytes=0,
+        )
+        super().__init__(
+            "bash",
+            {"operation": "poll", "process_id": process_id},
+            track_elapsed=track_elapsed,
+        )
+
+    @property
+    def process_id(self) -> str:
+        return self._process_id
+
+    @property
+    def lifecycle_presentation(self) -> ProcessLifecyclePresentation:
+        """Return the latest bounded snapshot for history-to-live transfer."""
+
+        return self._process_presentation
+
+    def start_live_updates(self) -> None:
+        """Enable elapsed tracking when a resumed historical card becomes live."""
+
+        self._track_elapsed = True
+        self._start_timer()
+
+    def set_lifecycle(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+    ) -> None:
+        """Replace the bounded lifecycle snapshot and repaint this card in place."""
+
+        self._process_presentation = presentation
+        self._detail = presentation.detail
+        self._full_output = presentation.full_output
+        self._truncated = presentation.source_truncated
+        state = presentation.display_state
+        if state == "completed":
+            status: ToolActionStatus = "done"
+        elif state in {"failed", "timed_out", "poll_failed", "cancel_failed"}:
+            status = "error"
+        elif state in {"cancelled", "poll_interrupted", "cancel_interrupted"}:
+            status = "cancelled"
+        elif state in {"poll_denied", "cancel_denied"}:
+            status = "denied"
+        else:
+            status = "pending"
+        self.set_state(
+            status,
+            elapsed=elapsed,
+            truncated=presentation.source_truncated,
+        )
+
+    def _action_content(self) -> Content:
+        presentation = self._process_presentation
+        words = self._STATE_WORDS[presentation.display_state]
+        content = Content.styled(words, self._STATUS_STYLE[self._status])
+        content += Content(" ") + Content.styled(
+            _process_id_for_display(self._process_id),
+            "$secondary",
+        )
+        if presentation.poll_count:
+            unit = "poll" if presentation.poll_count == 1 else "polls"
+            content += Content.styled(
+                f" · {presentation.poll_count} {unit}",
+                "$text-muted",
+            )
+        return content
+
 
 class WorkingIndicator(Static):
     """Command-scoped heartbeat shown in the *transcript*, not the footer.
 
-    A dim ``⠋ Working… · 3s`` row remains at the live transcript tail while
-    assistant output and tool cards appear ahead of it. It may be relabeled for
-    retries, approvals, trust, or compaction, and is removed only when the command
-    settles. The footer stays stable (cwd / session / model) — quiet over noisy.
+    A dim ``⠋ Working… · 3s`` row remains at the live transcript tail while the
+    command has not produced visible assistant output. It may be relabeled for
+    retries, approvals, trust, or compaction. The first visible stream frame retires
+    it to avoid a completion-time layout jump; tool-only commands retain it until
+    settlement. The footer stays stable (cwd / session / model) — quiet over noisy.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")

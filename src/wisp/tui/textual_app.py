@@ -61,6 +61,7 @@ from wisp.tui.overlay import (
     TextualOverlayController,
     TranscriptViewportState,
 )
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
@@ -90,6 +91,7 @@ from wisp.tui.widgets import (
     LineMessage,
     ModelPicker,
     OperationIndicator,
+    ProcessCard,
     PromptEditor,
     SessionPicker,
     SlashSuggest,
@@ -97,6 +99,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    WorkingIndicator,
 )
 
 # The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
@@ -2238,6 +2241,26 @@ class TextualTui(App[None]):
         with suppress(Exception):
             widget.remove()
 
+    def move_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        """Move an existing lifecycle card without remounting or losing focus state."""
+
+        transcript = self._transcript
+        if transcript is None or widget.parent is not transcript:
+            return
+        if before is not None and before.parent is transcript and before is not widget:
+            transcript.move_child(widget, before=before)
+            return
+        indicator = self._transcript_controller.working_indicator
+        if indicator is not None and indicator.parent is transcript and indicator is not widget:
+            transcript.move_child(widget, before=indicator)
+        elif transcript.children and transcript.children[-1] is not widget:
+            transcript.move_child(widget, after=transcript.children[-1])
+
     def live_transcript_widget_evicted(self, widget: Widget) -> None:
         """Let the renderer release live de-duplication after bounded eviction."""
 
@@ -2421,6 +2444,11 @@ class TextualTui(App[None]):
     def show_working_indicator(self) -> None:
         self._transcript_controller.show_working_indicator()
 
+    def renew_working_indicator(self) -> None:
+        """Transfer the heartbeat to a newer model turn without remounting it."""
+
+        self._transcript_controller.renew_working_indicator()
+
     def show_retry_indicator(self, label: str) -> None:
         self._transcript_controller.show_retry_indicator(label)
 
@@ -2435,18 +2463,104 @@ class TextualTui(App[None]):
     def hide_working_indicator(self) -> None:
         self._transcript_controller.hide_working_indicator()
 
+    def working_indicator_for_stream(self) -> tuple[WorkingIndicator, int] | None:
+        """Capture the heartbeat lease owned by a newly mounted assistant stream."""
+
+        return self._transcript_controller.working_indicator_identity
+
+    def hide_working_indicator_if_current(
+        self,
+        indicator: WorkingIndicator,
+        *,
+        generation: int,
+    ) -> None:
+        """Retire a stream heartbeat only while its captured turn still owns it."""
+
+        self._transcript_controller.hide_working_indicator_if_current(
+            indicator,
+            generation=generation,
+        )
+
     def hide_working_indicator_after_stream(self) -> None:
         """Remove the current heartbeat with the completed stream's final layout."""
 
-        indicator = self._transcript_controller.working_indicator
-        if indicator is None:
+        identity = self._transcript_controller.working_indicator_identity
+        if identity is None:
             return
+        indicator, generation = identity
 
         def hide_if_current() -> None:
-            self._transcript_controller.hide_working_indicator_if_current(indicator)
+            self._transcript_controller.hide_working_indicator_if_current(
+                indicator,
+                generation=generation,
+            )
 
         if not self._stream.defer_until_latest_stream_settles(hide_if_current):
             hide_if_current()
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+        reposition: bool = False,
+    ) -> ProcessCard | None:
+        """Mount or recover one process-level presentation card."""
+
+        return self._transcript_controller.mount_process_card(
+            process_id,
+            historical=historical,
+            before=before,
+            reposition=reposition,
+        )
+
+    def mount_process_call(self, call_id: str, process_id: str) -> ProcessCard | None:
+        """Alias one live poll/cancel call to its process-level card."""
+
+        return self._transcript_controller.mount_process_call(call_id, process_id)
+
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
+    ) -> ProcessCard | None:
+        """Update one retained process replay card independently of live output."""
+
+        return self._transcript_controller.update_historical_process_card(
+            card,
+            presentation,
+        )
+
+    def update_process_card(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+        settle_terminal: bool = False,
+    ) -> ProcessCard | None:
+        """Apply one bounded lifecycle snapshot to a process card."""
+
+        return self._transcript_controller.update_process_card(
+            presentation,
+            elapsed=elapsed,
+            settle_terminal=settle_terminal,
+        )
+
+    def resolve_process_call(
+        self,
+        call_id: str,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+    ) -> ProcessCard | None:
+        """Finish one call alias and update its stable process card."""
+
+        return self._transcript_controller.resolve_process_call(
+            call_id,
+            presentation,
+            elapsed=elapsed,
+        )
 
     def mount_tool_call(
         self,
@@ -2744,10 +2858,10 @@ class TextualTui(App[None]):
         )
 
     def remove_historical_widget(self, widget: Widget) -> None:
-        """Evict one retained widget and its transient live-transcript lookups."""
+        """Evict retained history without removing a card transferred to live output."""
 
-        self._transcript_controller.forget_widget(widget)
-        widget.remove()
+        if self._transcript_controller.release_historical_widget(widget):
+            widget.remove()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""

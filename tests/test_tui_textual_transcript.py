@@ -8,14 +8,16 @@ import anyio
 import pytest
 from textual.widget import Widget
 
+from wisp.events import ManagedProcessState
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_transcript import (
     TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
     TextualTranscriptController,
 )
-from wisp.tui.widgets import LineMessage, StreamMessage, ToolCard, WorkingIndicator
+from wisp.tui.widgets import LineMessage, ProcessCard, StreamMessage, ToolCard, WorkingIndicator
 
 pytestmark = pytest.mark.tui
 
@@ -48,6 +50,20 @@ class _Surface:
             self.mounted.remove(widget)
         if isinstance(widget, WorkingIndicator):
             widget.on_unmount()
+
+    def move_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        if widget not in self.mounted:
+            return
+        self.mounted.remove(widget)
+        if before is None:
+            self.mounted.append(widget)
+        else:
+            self.mounted.insert(self.mounted.index(before), widget)
 
     def transcript_is_following(self) -> bool:
         return self.following
@@ -189,6 +205,157 @@ def test_tool_cards_resolve_by_id_and_terminal_states_do_not_leak() -> None:
     assert controller.pending_tool_count == 0
     assert first._status == "cancelled"
     assert first._timer is None
+
+
+def test_live_process_reuse_detaches_historical_card_ownership() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    historical = controller.mount_process_card("proc-1", historical=True)
+    assert isinstance(historical, ProcessCard)
+
+    live = controller.mount_process_call("poll-1", "proc-1")
+
+    assert live is historical
+    assert controller.release_historical_widget(historical) is False
+    assert historical in surface.mounted
+
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+    assert controller.settled_widget_count == 1
+
+
+def test_historical_process_mount_stays_separate_from_live_owned_card() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    live = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(live, ProcessCard)
+
+    historical = controller.mount_process_card("proc-1", historical=True)
+
+    assert isinstance(historical, ProcessCard)
+    assert historical is not live
+    assert surface.mounted == [live, historical]
+
+
+def test_resolved_process_operation_settles_and_reuse_unsettles_card() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    card = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(card, ProcessCard)
+    lifecycle.begin("poll")
+
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+
+    reused = controller.mount_process_call("poll-2", "proc-1")
+
+    assert reused is card
+    assert controller.pending_tool_count == 1
+    assert controller.settled_widget_count == 0
+
+
+def test_process_card_settles_only_after_its_final_call_alias_resolves() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=1)
+    surface.controller = controller
+    lifecycle = ProcessLifecycle("proc-1")
+    first = controller.mount_process_call("poll-1", "proc-1")
+    second = controller.mount_process_call("poll-2", "proc-1")
+    assert isinstance(first, ProcessCard)
+    assert second is first
+    lifecycle.begin("poll")
+    lifecycle.begin("poll")
+
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+    controller.settle_widget(Widget())
+
+    assert controller.pending_tool_count == 1
+    assert controller.settled_widget_count == 1
+    assert first not in surface.removed
+
+    controller.resolve_process_call("poll-2", lifecycle.interrupt("poll"))
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+    assert first not in surface.removed
+
+
+@pytest.mark.parametrize("state", ["running", None])
+def test_successful_process_poll_observation_enters_settled_retention(
+    state: ManagedProcessState | None,
+) -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    card = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(card, ProcessCard)
+
+    controller.resolve_process_call(
+        "poll-1",
+        lifecycle.observe(operation="poll", state=state),
+    )
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+
+    assert controller.mount_process_call("poll-2", "proc-1") is card
+    assert controller.settled_widget_count == 0
+
+
+def test_long_process_lifecycle_keeps_latest_card_with_capped_retention_weight() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    card: ProcessCard | None = None
+
+    for index in range(37):
+        call_id = f"poll-{index}"
+        mounted = controller.mount_process_call(call_id, "proc-1")
+        assert isinstance(mounted, ProcessCard)
+        card = mounted
+        lifecycle.begin("poll")
+        controller.resolve_process_call(
+            call_id,
+            lifecycle.observe(operation="poll", state="running"),
+        )
+
+    assert card is not None
+    assert card not in surface.removed
+    assert card in surface.mounted
+    assert controller.settled_widget_count == 1
+
+
+def test_resolved_process_operations_are_evicted_with_bounded_retention() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=1)
+    surface.controller = controller
+
+    cards: list[ProcessCard] = []
+    for index in range(2):
+        process_id = f"proc-{index}"
+        lifecycle = ProcessLifecycle(process_id)
+        card = controller.mount_process_call(f"poll-{index}", process_id)
+        assert isinstance(card, ProcessCard)
+        cards.append(card)
+        lifecycle.begin("poll")
+        controller.resolve_process_call(
+            f"poll-{index}",
+            lifecycle.interrupt("poll"),
+        )
+
+    assert controller.settled_widget_count == 1
+    assert surface.removed == [cards[0]]
+    assert surface.evicted == [cards[0]]
+
+    remounted = controller.mount_process_call("poll-retry", "proc-0")
+    assert isinstance(remounted, ProcessCard)
+    assert remounted is not cards[0]
+    assert remounted in surface.mounted
 
 
 def test_historical_card_lookup_is_evicted_with_its_widget() -> None:

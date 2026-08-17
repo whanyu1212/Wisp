@@ -7,6 +7,7 @@ import pytest
 from textual.content import Content
 from textual.widget import Widget
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
 from wisp.tui.history import (
     TUI_HISTORY_PAGE_LIMIT,
@@ -14,6 +15,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptMessage,
 )
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.textual_history import TextualHistoryController
 from wisp.tui.transcript_window import (
     TUI_TRANSCRIPT_WINDOW_SHIFT,
@@ -117,6 +119,41 @@ class _HistorySurface:
         if self.fail_line_mount:
             raise RuntimeError("mount failed")
         return cast(Widget, self._mount(f"{role}: {message}", before=before))
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+        reposition: bool = False,
+    ) -> Widget:
+        del historical
+        existing = self.historical_cards.get(f"process:{process_id}")
+        if existing is not None:
+            if (reposition or before is not None) and cast(Widget, existing) is not before:
+                self.widgets.remove(existing)
+                if before is None:
+                    self.widgets.append(existing)
+                else:
+                    self.widgets.insert(
+                        self.widgets.index(cast(_HistoryWidget, before)),
+                        existing,
+                    )
+            return cast(Widget, existing)
+        widget = self._mount(f"process: {process_id}", before=before)
+        self.historical_cards[f"process:{process_id}"] = widget
+        return cast(Widget, widget)
+
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
+    ) -> Widget | None:
+        widget = cast(_HistoryWidget, card)
+        widget.status = presentation.display_state
+        widget.detail = presentation.full_output
+        return card
 
     def mount_tool_call(
         self,
@@ -357,6 +394,326 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert len(cards) == 1
     assert cards[0].arguments == {"command": "printf done"}
     assert cards[0].status == "cancelled"
+
+
+def test_history_controller_pairs_split_process_call_before_grouping() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    result = HistoricalToolCard(
+        card_id="history:result",
+        name="bash",
+        arguments={},
+        output="Process proc-1 completed with exit code 0\nstdout:\ndone\n",
+        is_error=False,
+        status="done",
+        tool_call_id="poll-1",
+        call_missing=True,
+    )
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:poll-1",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="poll-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((result,), session_label="First")
+    controller.prepend_entries((missing_call,))
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == "completed"
+    assert process_widgets[0].detail == "stdout:\ndone"
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
+def test_history_controller_pairs_reused_process_call_ids_by_occurrence() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    entries: list[HistoricalToolCard] = []
+    for process_id, output in (("proc-a", "output a"), ("proc-b", "output b")):
+        entries.extend(
+            (
+                HistoricalToolCard(
+                    card_id=f"history:missing:{process_id}",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": process_id},
+                    output="No persisted tool result.",
+                    is_error=True,
+                    tool_call_id="reused-call-id",
+                    status="cancelled",
+                    missing_result=True,
+                ),
+                HistoricalToolCard(
+                    card_id=f"history:result:{process_id}",
+                    name="bash",
+                    arguments={},
+                    output=(
+                        f"Process {process_id} completed with exit code 0\nstdout:\n{output}\n"
+                    ),
+                    is_error=False,
+                    tool_call_id="reused-call-id",
+                    call_missing=True,
+                ),
+            )
+        )
+
+    controller.replace_entries(tuple(entries), session_label="Session")
+
+    process_widgets = {
+        widget.label: widget for widget in surface.widgets if widget.label.startswith("process: ")
+    }
+    assert process_widgets["process: proc-a"].detail == "stdout:\noutput a"
+    assert process_widgets["process: proc-b"].detail == "stdout:\noutput b"
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [("poll", "poll_interrupted"), ("cancel", "cancel_interrupted")],
+)
+def test_history_controller_replays_missing_process_result_as_interrupted(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:process-1",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="process-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((missing_call,), session_label="Session")
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == expected_status
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [("poll", "poll_denied"), ("cancel", "cancel_denied")],
+)
+def test_history_controller_replays_denied_process_operation_with_reason(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    denied = HistoricalToolCard(
+        card_id="history:denied",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output="not now",
+        is_error=True,
+        status="denied",
+        tool_call_id="process-1",
+    )
+
+    controller.replace_entries((denied,), session_label="Denied")
+
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    assert process_widget.status == expected_status
+    assert process_widget.detail == "not now"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [("poll", "poll_interrupted"), ("cancel", "cancel_interrupted")],
+)
+def test_history_controller_replays_interrupted_process_operation(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    interrupted = HistoricalToolCard(
+        card_id="history:interrupted",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output=INTERRUPTED_TOOL_RESULT_TEXT,
+        is_error=True,
+        status="cancelled",
+        tool_call_id="process-1",
+    )
+
+    controller.replace_entries((interrupted,), session_label="Interrupted")
+
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    assert process_widget.status == expected_status
+
+
+def test_history_controller_transfer_does_not_exclude_reused_call_id_occurrence() -> None:
+    """A transferred card's entry id, not its reused card_id, gates future exclusion.
+
+    Split-page process exchanges can reuse a tool_call_id across occurrences, so the
+    synthetic ``history:missing:<call_id>`` card id is identical for both. Once the
+    newer occurrence transfers to live ownership, an older occurrence sharing that
+    same card_id must still render as its own historical process card when its page
+    is later prepended.
+    """
+
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    newer_missing = HistoricalToolCard(
+        card_id="history:missing:reused-call-id",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-newer"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="reused-call-id",
+        status="cancelled",
+        missing_result=True,
+    )
+    older_missing = HistoricalToolCard(
+        card_id="history:missing:reused-call-id",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-older"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="reused-call-id",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.render_entries((newer_missing,))
+    process_widget = next(
+        widget for widget in surface.widgets if widget.label == "process: proc-newer"
+    )
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    controller.prepend_entries((older_missing,))
+
+    assert any(widget.label == "process: proc-older" for widget in surface.widgets)
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
+def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    newer = HistoricalToolCard(
+        card_id="history:newer",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 completed with exit code 0\nstdout:\nnewer\n",
+        is_error=False,
+        status="done",
+        tool_call_id="poll-2",
+    )
+    older = HistoricalToolCard(
+        card_id="history:older",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running\nstdout:\nolder\n",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+
+    controller.render_entries((newer,))
+    controller.prepend_entries((older,))
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == "completed"
+    assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
+
+
+def test_history_controller_transfers_resumed_process_card_to_live_ownership() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    poll = HistoricalToolCard(
+        card_id="history:poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    controller.render_entries((poll,))
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    assert controller._widgets == {}
+    assert process_widget in surface.widgets
+
+
+def test_history_controller_remaps_transferred_process_entries_on_latest_reload() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    poll = HistoricalToolCard(
+        card_id="history:poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    controller.render_entries((poll,))
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    controller.replace_latest_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="new page prefix",
+                entry_id="message-prefix",
+            ),
+            poll,
+        )
+    )
+
+    assert "assistant: new page prefix" in surface.history_labels
+    assert process_widget not in controller._widgets.values()
+    assert controller._transferred_history_entry_ids[cast(Widget, process_widget)] == {1}
+
+
+def test_history_controller_repositions_process_card_when_first_poll_leaves_window() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    first_poll = HistoricalToolCard(
+        card_id="history:first-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    later_poll = HistoricalToolCard(
+        card_id="history:later-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-2",
+    )
+    entries = (
+        *_messages("assistant", "prefix", TUI_TRANSCRIPT_WINDOW_SHIFT - 1),
+        first_poll,
+        HistoricalTranscriptMessage(role="assistant", content="between polls"),
+        later_poll,
+        *_messages("assistant", "suffix", TUI_TRANSCRIPT_WINDOW_SIZE - 2),
+    )
+
+    controller.replace_entries(entries, session_label="Windowed")
+    assert controller.show_oldest()
+    labels = [widget.label for widget in surface.widgets]
+    assert labels.index("process: proc-1") < labels.index("assistant: between polls")
+
+    assert controller.show_latest()
+    labels = [widget.label for widget in surface.widgets]
+    assert labels.index("assistant: between polls") < labels.index("process: proc-1")
 
 
 def test_history_controller_replays_grep_summary_with_match_evidence() -> None:

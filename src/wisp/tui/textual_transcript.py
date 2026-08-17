@@ -20,8 +20,9 @@ from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.tool_call import ToolActionStatus
-from wisp.tui.widgets import ToolCard, WorkingIndicator
+from wisp.tui.widgets import ProcessCard, ToolCard, WorkingIndicator
 
 # Keep an evicted widget inside the next durable latest-page reload, whose first
 # entry falls immediately before this bounded visible live suffix.
@@ -47,6 +48,14 @@ class TextualTranscriptSurface(Protocol):
 
     def remove_live_transcript_widget(self, widget: Widget) -> None:
         """Remove one live widget without propagating a stale unmount failure."""
+
+    def move_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        """Move an existing lifecycle card to a newly discovered history boundary."""
 
     def transcript_is_following(self) -> bool:
         """Return whether the reader currently follows the transcript tail."""
@@ -100,9 +109,13 @@ class TextualTranscriptController:
         self._settled_durable_entry_count = 0
         self._unseen_output: set[Widget] = set()
         self._tool_cards: dict[str, ToolCard] = {}
+        self._process_cards: dict[str, ProcessCard] = {}
+        self._live_process_cards: set[ProcessCard] = set()
+        self._historical_process_cards: dict[str, ProcessCard] = {}
         self._historical_tool_cards: dict[str, ToolCard] = {}
         self._historical_widgets: set[ToolCard] = set()
         self._working_indicator: WorkingIndicator | None = None
+        self._working_indicator_generation = 0
         self._card_focus_was_following = False
 
     @property
@@ -122,6 +135,15 @@ class TextualTranscriptController:
         """Return the transient activity widget, if one is currently mounted."""
 
         return self._working_indicator
+
+    @property
+    def working_indicator_identity(self) -> tuple[WorkingIndicator, int] | None:
+        """Return the current indicator and its logical turn-ownership generation."""
+
+        indicator = self._working_indicator
+        if indicator is None:
+            return None
+        return indicator, self._working_indicator_generation
 
     @property
     def settled_widget_count(self) -> int:
@@ -167,16 +189,23 @@ class TextualTranscriptController:
         indicator.restart_working()
         self._mount_working_indicator(indicator)
 
+    def renew_working_indicator(self) -> None:
+        """Give an existing heartbeat to a newer model turn without remounting it."""
+
+        self._working_indicator_generation += 1
+        self.show_working_indicator()
+
     def show_retry_indicator(self, label: str) -> None:
         """Show or refresh the transcript's provider-retry indicator."""
 
         self.show_activity_indicator(label, show_elapsed=False)
 
     def show_activity_indicator(self, label: str, *, show_elapsed: bool = True) -> None:
-        """Show or relabel command activity without resetting its elapsed time."""
+        """Show or relabel activity and transfer heartbeat ownership to that state."""
 
         if not self._surface.transcript_available():
             return
+        self._working_indicator_generation += 1
         indicator = self._working_indicator
         if indicator is not None:
             indicator.show_activity(label, show_elapsed=show_elapsed)
@@ -191,6 +220,7 @@ class TextualTranscriptController:
         if not self._surface.transcript_available():
             return
         self.hide_working_indicator()
+        self._working_indicator_generation += 1
         indicator = WorkingIndicator()
         indicator.restart_working()
         self._mount_working_indicator(indicator)
@@ -202,10 +232,17 @@ class TextualTranscriptController:
         if indicator is not None:
             self.hide_working_indicator_if_current(indicator)
 
-    def hide_working_indicator_if_current(self, indicator: WorkingIndicator) -> None:
-        """Remove ``indicator`` only if it still belongs to the active command."""
+    def hide_working_indicator_if_current(
+        self,
+        indicator: WorkingIndicator,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Remove ``indicator`` only if it still belongs to the captured model turn."""
 
         if self._working_indicator is not indicator:
+            return
+        if generation is not None and generation != self._working_indicator_generation:
             return
         self._working_indicator = None
         self.discard_unseen_output(indicator)
@@ -238,6 +275,137 @@ class TextualTranscriptController:
         self._surface.record_live_transcript_update(card)
         self._surface.follow_transcript_tail_after_refresh()
         return card
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+        reposition: bool = False,
+    ) -> ProcessCard | None:
+        """Mount or recover one stable card for a resumable process lifecycle."""
+
+        card = self._process_cards.get(process_id)
+        if historical and card in self._live_process_cards:
+            # Older pages need their own stable replay card once the originally
+            # shared card has transferred to live ownership. This keeps paged output
+            # visible without mutating the evolving live lifecycle at the tail.
+            historical_card = self._historical_process_cards.get(process_id)
+            if historical_card is not None:
+                if (reposition or before is not None) and before is not historical_card:
+                    self._surface.move_live_transcript_widget(historical_card, before=before)
+                return historical_card
+            historical_card = ProcessCard(process_id, track_elapsed=False)
+            self._historical_process_cards[process_id] = historical_card
+            self._historical_widgets.add(historical_card)
+            self._surface.mount_live_transcript_widget(historical_card, before=before)
+            self._surface.record_live_transcript_update(historical_card)
+            self._surface.follow_transcript_tail_after_refresh()
+            return historical_card
+        if card is not None:
+            if historical:
+                self._historical_process_cards[process_id] = card
+                self._historical_widgets.add(card)
+            else:
+                self._historical_widgets.discard(card)
+                if self._historical_process_cards.get(process_id) is card:
+                    del self._historical_process_cards[process_id]
+                self._live_process_cards.add(card)
+                self._unsettle_widget(card)
+                card.start_live_updates()
+            if (reposition or before is not None) and before is not card:
+                self._surface.move_live_transcript_widget(card, before=before)
+            return card
+        if not self._surface.transcript_available():
+            return None
+        card = ProcessCard(process_id, track_elapsed=not historical)
+        self._process_cards[process_id] = card
+        if historical:
+            self._historical_process_cards[process_id] = card
+            self._historical_widgets.add(card)
+        else:
+            self._live_process_cards.add(card)
+        self._surface.mount_live_transcript_widget(card, before=before)
+        self._surface.record_live_transcript_update(card)
+        self._surface.follow_transcript_tail_after_refresh()
+        return card
+
+    def mount_process_call(self, call_id: str, process_id: str) -> ProcessCard | None:
+        """Alias one audited call ID to its process's shared live card."""
+
+        card = self.mount_process_card(process_id)
+        if card is not None:
+            self._tool_cards[call_id] = card
+        return card
+
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
+    ) -> ProcessCard | None:
+        """Update one retained replay card without touching a live card of the same process."""
+
+        if not isinstance(card, ProcessCard):
+            return None
+        card.set_lifecycle(presentation)
+        self._surface.record_live_transcript_update(card)
+        self._surface.follow_transcript_tail_after_refresh()
+        return card
+
+    def update_process_card(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+        settle_terminal: bool = False,
+    ) -> ProcessCard | None:
+        """Replace one process card snapshot and optionally settle its live lifecycle."""
+
+        card = self._process_cards.get(presentation.process_id)
+        if card is None:
+            return None
+        card.set_lifecycle(presentation, elapsed=elapsed)
+        self._surface.record_live_transcript_update(card)
+        if settle_terminal and presentation.operation_settled:
+            if card not in self._historical_widgets:
+                # Presentation retention counts widgets, while durable-entry capacity
+                # must account for every represented audited call/result pair.
+                self.settle_widget(
+                    card,
+                    durable_entry_count=min(
+                        2 * presentation.call_count,
+                        self._durable_entry_capacity,
+                    ),
+                )
+        self._surface.follow_transcript_tail_after_refresh()
+        return card
+
+    def resolve_process_call(
+        self,
+        call_id: str,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+    ) -> ProcessCard | None:
+        """Finish one poll call while preserving its process-level presentation."""
+
+        card = self._tool_cards.pop(call_id, None)
+        if not isinstance(card, ProcessCard):
+            return None
+        has_pending_alias = any(candidate is card for candidate in self._tool_cards.values())
+        updated = self.update_process_card(
+            presentation,
+            elapsed=elapsed,
+            settle_terminal=not has_pending_alias,
+        )
+        if has_pending_alias and presentation.operation_settled:
+            # The latest observation may itself be terminal, denied, or failed,
+            # while another audited call against the process is still unresolved.
+            # Keep elapsed tracking active and defer eviction eligibility until the
+            # final alias resolves.
+            card.start_live_updates()
+        return updated
 
     def enrich_historical_tool_call(
         self,
@@ -299,7 +467,11 @@ class TextualTranscriptController:
     def fail_pending_tool_calls(self, detail: str = "cancelled") -> None:
         """Cancel all unresolved cards so no timer or lookup leaks into a later turn."""
 
-        for card in self._tool_cards.values():
+        for card in set(self._tool_cards.values()):
+            if isinstance(card, ProcessCard):
+                # Losing one poll result does not establish that the underlying
+                # resumable process was cancelled or otherwise terminal.
+                continue
             card.set_state("cancelled", detail=detail)
             self._surface.record_live_transcript_update(card)
             self.settle_widget(card, durable_entry_count=2)
@@ -309,6 +481,14 @@ class TextualTranscriptController:
         """Return a mounted historical tool card for page-boundary reconciliation."""
 
         return self._historical_tool_cards.get(card_id)
+
+    def release_historical_widget(self, widget: Widget) -> bool:
+        """Release history ownership unless a resumed live process owns the card."""
+
+        if isinstance(widget, ProcessCard) and widget in self._live_process_cards:
+            return False
+        self.forget_widget(widget)
+        return True
 
     def forget_widget(self, widget: Widget) -> None:
         """Discard every controller-owned reference to an evicted transcript widget."""
@@ -320,6 +500,18 @@ class TextualTranscriptController:
         }
         if isinstance(widget, ToolCard):
             self._historical_widgets.discard(widget)
+        if isinstance(widget, ProcessCard):
+            self._live_process_cards.discard(widget)
+            self._historical_process_cards = {
+                process_id: card
+                for process_id, card in self._historical_process_cards.items()
+                if card is not widget
+            }
+            self._process_cards = {
+                process_id: card
+                for process_id, card in self._process_cards.items()
+                if card is not widget
+            }
         retained_settled = deque(
             (candidate, entry_count)
             for candidate, entry_count in self._settled_widgets
@@ -341,6 +533,9 @@ class TextualTranscriptController:
 
         self.hide_working_indicator()
         self._tool_cards.clear()
+        self._process_cards.clear()
+        self._live_process_cards.clear()
+        self._historical_process_cards.clear()
         self._historical_tool_cards.clear()
         self._historical_widgets.clear()
         self._settled_widgets.clear()
@@ -365,6 +560,19 @@ class TextualTranscriptController:
         if self._card_focus_was_following and self._surface.is_newest_transcript_widget(card):
             self._surface.return_transcript_to_latest()
 
+    def _unsettle_widget(self, widget: Widget) -> None:
+        """Remove a reused process card from settled retention while its call is active."""
+
+        retained = deque(
+            (candidate, entry_count)
+            for candidate, entry_count in self._settled_widgets
+            if candidate is not widget
+        )
+        if len(retained) == len(self._settled_widgets):
+            return
+        self._settled_widgets = retained
+        self._settled_durable_entry_count = sum(entry_count for _candidate, entry_count in retained)
+
     def settle_widget(self, widget: Widget, *, durable_entry_count: int = 0) -> None:
         """Retain a completed live widget until the bounded transcript window fills."""
 
@@ -380,7 +588,7 @@ class TextualTranscriptController:
         ):
             evicted, evicted_entry_count = self._settled_widgets.popleft()
             self._settled_durable_entry_count -= evicted_entry_count
-            self.discard_unseen_output(evicted)
+            self.forget_widget(evicted)
             self._surface.remove_live_transcript_widget(evicted)
             self._surface.live_transcript_widget_evicted(evicted)
 
