@@ -79,6 +79,8 @@ class ProcessLifecyclePresentation:
             "cancel_interrupted",
             "poll_failed",
             "cancel_failed",
+            "running",
+            "observed",
         }
 
 

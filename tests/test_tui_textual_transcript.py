@@ -8,6 +8,7 @@ import anyio
 import pytest
 from textual.widget import Widget
 
+from wisp.events import ManagedProcessState
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
 from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.textual_app import TextualTui
@@ -281,6 +282,29 @@ def test_process_card_settles_only_after_its_final_call_alias_resolves() -> None
     assert controller.pending_tool_count == 0
     assert controller.settled_widget_count == 1
     assert first not in surface.removed
+
+
+@pytest.mark.parametrize("state", ["running", None])
+def test_successful_process_poll_observation_enters_settled_retention(
+    state: ManagedProcessState | None,
+) -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    card = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(card, ProcessCard)
+
+    controller.resolve_process_call(
+        "poll-1",
+        lifecycle.observe(operation="poll", state=state),
+    )
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+
+    assert controller.mount_process_call("poll-2", "proc-1") is card
+    assert controller.settled_widget_count == 0
 
 
 def test_resolved_process_operations_are_evicted_with_bounded_retention() -> None:
