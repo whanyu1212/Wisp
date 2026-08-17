@@ -2125,6 +2125,46 @@ def test_textual_denied_process_operation_retains_reason_after_result(
     assert "Process cancelled" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_action"),
+    [
+        ("poll", "Process poll denied"),
+        ("cancel", "Process cancellation denied"),
+    ],
+)
+def test_textual_abort_preserves_resolved_process_denial(
+    operation: str,
+    expected_action: str,
+) -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="process-1",
+                    name="bash",
+                    arguments={"operation": operation, "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="process-1",
+                    name="bash",
+                    approved=False,
+                    reason="not now",
+                )
+            )
+            renderer.cancelled()
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith(f"• {expected_action} proc-1")
+    assert "not now" in rendered
+    assert "interrupted" not in rendered
+
+
 def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() -> None:
     async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()

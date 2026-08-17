@@ -254,10 +254,12 @@ class TextualTuiRenderer:
         for call_id, identity in self._process_calls.items():
             lifecycle = self._process_lifecycles.get(identity.process_id)
             if lifecycle is not None:
-                self.app.resolve_process_call(
-                    call_id,
-                    lifecycle.interrupt(identity.operation),
+                presentation = (
+                    lifecycle.presentation()
+                    if call_id in self._denied_process_calls
+                    else lifecycle.interrupt(identity.operation)
                 )
+                self.app.resolve_process_call(call_id, presentation)
         self._process_calls.clear()
         self._denied_process_calls.clear()
         self._tool_started.clear()
