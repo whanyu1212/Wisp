@@ -7,11 +7,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import anyio
 import pytest
 
 import wisp.agent.loop as agent_loop_module
+from wisp.agent.context import observe_context
 from wisp.agent.execution import (
     ContextOverflowSnapshot,
     PreparedToolExecution,
@@ -246,6 +248,74 @@ def _scripted_tool_batch_provider(calls: tuple[ToolCall, ...]) -> ScriptedProvid
                 ),
             ],
         ]
+    )
+
+
+def test_agent_loop_delegates_context_budget_to_shared_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="selected-model"),
+                ProviderResponseCompleted(content="done"),
+            ]
+        ]
+    )
+    tools = (ToolSpec(name="read", description="Read", input_schema={"type": "object"}),)
+    prefix = (Message(role="user", content="observed prefix"),)
+    observation = observe_context(
+        prefix,
+        tools,
+        provider=provider.name,
+        model="selected-model",
+        input_tokens=23,
+    )
+    messages = (
+        *prefix,
+        Message(role="assistant", content="prior reply", context_observation=observation),
+        Message(role="user", content="trailing request"),
+    )
+    original_estimate_context_budget = agent_loop_module.estimate_context_budget
+    budget_spy = Mock(wraps=original_estimate_context_budget)
+    monkeypatch.setattr(agent_loop_module, "estimate_context_budget", budget_spy)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    tools=tools,
+                    model="selected-model",
+                    context_window=1_000,
+                    context_reserve_tokens=100,
+                ),
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    budget_spy.assert_called_once_with(
+        messages,
+        tools,
+        context_window=1_000,
+        reserve_tokens=100,
+        observation=observation,
+        provider=provider.name,
+        model="selected-model",
+    )
+    estimated = next(event for event in events if isinstance(event, ContextEstimated))
+    assert estimated.budget == original_estimate_context_budget(
+        messages,
+        tools,
+        context_window=1_000,
+        reserve_tokens=100,
+        observation=observation,
+        provider=provider.name,
+        model="selected-model",
     )
 
 
@@ -2807,14 +2877,9 @@ def test_completion_and_continuation_snapshot_projection_is_single_and_isolated(
         ]
     )
 
-    estimated_messages: list[tuple[Message, ...]] = []
-    original_estimate_context = agent_loop_module.estimate_context
-
-    def capture_estimate(messages: tuple[Message, ...], tools: tuple[ToolSpec, ...]) -> object:
-        estimated_messages.append(messages)
-        return original_estimate_context(messages, tools)
-
-    monkeypatch.setattr(agent_loop_module, "estimate_context", capture_estimate)
+    original_estimate_context_budget = agent_loop_module.estimate_context_budget
+    budget_spy = Mock(wraps=original_estimate_context_budget)
+    monkeypatch.setattr(agent_loop_module, "estimate_context_budget", budget_spy)
 
     async def run() -> list[object]:
         events: list[object] = []
@@ -2833,6 +2898,7 @@ def test_completion_and_continuation_snapshot_projection_is_single_and_isolated(
     events = anyio.run(run)
 
     completed = next(event for event in events if isinstance(event, MessageCompleted))
+    estimated_messages = [tuple(call.args[0]) for call in budget_spy.call_args_list]
     expected_snapshot = ToolCallSnapshot(
         call_id="call-1",
         name="bash",
