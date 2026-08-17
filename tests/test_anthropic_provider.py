@@ -906,9 +906,17 @@ def test_anthropic_provider_serializes_active_tool_exchange_in_fresh_context() -
             content="checking",
             tool_calls=(
                 ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+                ToolCallSnapshot(call_id="call-2", name="read", arguments={"path": "README.md"}),
             ),
         ),
         WispMessage(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
+        WispMessage(
+            role="tool",
+            content="missing",
+            tool_call_id="call-2",
+            tool_name="read",
+            is_error=True,
+        ),
     ]
 
     async def run() -> None:
@@ -933,6 +941,12 @@ def test_anthropic_provider_serializes_active_tool_exchange_in_fresh_context() -
                     "name": "lookup",
                     "input": {"query": "wisp"},
                 },
+                {
+                    "type": "tool_use",
+                    "id": "call-2",
+                    "name": "read",
+                    "input": {"path": "README.md"},
+                },
             ],
         },
         {
@@ -943,7 +957,13 @@ def test_anthropic_provider_serializes_active_tool_exchange_in_fresh_context() -
                     "tool_use_id": "call-1",
                     "content": "found it",
                     "is_error": False,
-                }
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-2",
+                    "content": "missing",
+                    "is_error": True,
+                },
             ],
         },
         {"role": "user", "content": [{"type": "text", "text": "steered"}]},

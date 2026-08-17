@@ -64,10 +64,10 @@ from wisp.providers.base import (
     PromptCacheKeyProvider,
     Provider,
     ProviderProtocolError,
-    StructuredToolReplacementProvider,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    structured_tool_replacement_support,
 )
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -227,8 +227,8 @@ def _validate_replacement_messages(
         raise RequestBoundaryUnsupportedError(
             "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
         )
-    if any(_is_tool_shaped(message) for message in replacement) and not (
-        _provider_supports_structured_tool_replacement(config.provider, effort=config.effort)
+    if any(_is_tool_shaped(message) for message in replacement) and (
+        structured_tool_replacement_support(config.provider, effort=config.effort) is False
     ):
         raise RequestBoundaryUnsupportedError(
             "The provider cannot fresh-replay a structured tool exchange for this effort"
@@ -420,18 +420,6 @@ def _provider_supports_context_rebase(provider: Provider) -> bool:
 
 def _provider_supports_prompt_cache_key(provider: Provider) -> bool:
     return getattr(provider, "supports_prompt_cache_key", False) is True
-
-
-def _provider_supports_structured_tool_replacement(
-    provider: Provider, *, effort: str | None
-) -> bool:
-    """Negotiate an optional guard for opaque provider-native replay state."""
-
-    capability = getattr(provider, "supports_structured_tool_replacement", None)
-    if not callable(capability):
-        return True
-    replacement_provider = cast(StructuredToolReplacementProvider, provider)
-    return replacement_provider.supports_structured_tool_replacement(effort=effort)
 
 
 def _provider_stream(

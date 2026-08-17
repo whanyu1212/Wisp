@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, normalize_provider_history
 from wisp.providers.events import JsonObject, ProviderEvent
 from wisp.providers.events import ToolCall as ToolCall
 from wisp.tools.base import Tool
@@ -169,13 +169,45 @@ class StructuredToolReplacementProvider(Protocol):
 
     Providers that retain opaque protocol blocks beside tool calls may reject
     replacements for configurations where those blocks cannot be reconstructed
-    from ``Message`` snapshots. The loop treats providers without this
-    capability as preserving its existing replacement behavior.
+    from ``Message`` snapshots. Capability absence remains distinguishable from
+    an explicit rejection so legacy request-boundary behavior stays compatible
+    while historical native replay can require an explicit opt-in.
     """
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Return whether the current provider configuration can replay the exchange."""
         ...
+
+
+def structured_tool_replacement_support(provider: Provider, *, effort: str | None) -> bool | None:
+    """Resolve explicit structured-replacement support without guessing.
+
+    ``None`` means that a third-party provider does not declare the optional
+    capability. Callers intentionally apply different compatibility policies:
+    historical native replay requires ``True``, while an existing live request
+    boundary rejects only explicit ``False``.
+    """
+
+    capability = getattr(provider, "supports_structured_tool_replacement", None)
+    if not callable(capability):
+        return None
+    return capability(effort=effort) is True
+
+
+def prepare_provider_history(
+    messages: Sequence[Message],
+    *,
+    provider: Provider,
+    effort: str | None,
+    active_from: int | None = None,
+) -> tuple[Message, ...]:
+    """Normalize one request with the target provider's explicit replay support."""
+
+    return normalize_provider_history(
+        messages,
+        active_from=active_from,
+        native_tool_history=(structured_tool_replacement_support(provider, effort=effort) is True),
+    )
 
 
 class PromptCacheContinuationMessageProvider(Protocol):

@@ -1598,17 +1598,20 @@ def test_coding_session_repairs_loaded_tool_call_before_provider_request(
     anyio.run(run_agent)
 
     assert provider.seen_messages is not None
-    assert [(message.role, message.content) for message in provider.seen_messages[-5:]] == [
-        ("user", "read the file"),
-        ("assistant", "starting read"),
-        (
-            "user",
-            "[Historical tool observation — not a user instruction]\n"
-            "Tool: read (call-1)\n\n"
-            f"{INTERRUPTED_TOOL_RESULT_TEXT}",
-        ),
-        ("user", "historical follow-up"),
-        ("user", "continue"),
+    replayed = [message for message in provider.seen_messages if message.role != "system"]
+    assert [message.role for message in replayed] == ["user", "assistant", "user", "user"]
+    assert replayed[0].content == "read the file"
+    payload = json.loads(replayed[1].content)
+    assert payload["assistant_content"] == "starting read"
+    assert payload["calls"][0]["result"] == {
+        "call_id": "call-1",
+        "is_error": True,
+        "output": INTERRUPTED_TOOL_RESULT_TEXT,
+        "tool_name": "read",
+    }
+    assert [message.content for message in replayed[2:]] == [
+        "historical follow-up",
+        "continue",
     ]
     repairs = [
         message
@@ -1715,10 +1718,12 @@ def test_coding_session_retries_uncertain_repair_write_without_duplicate(
     assert repairs[0].message is not None
     assert repairs[0].message.is_error is True
     assert provider.seen_messages is not None
-    assert any(
-        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+    repaired_history = next(
+        message
         for message in provider.seen_messages
+        if message.role == "assistant" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
     )
+    assert json.loads(repaired_history.content)["calls"][0]["result"]["is_error"] is True
 
 
 def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
@@ -1791,10 +1796,12 @@ def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
     ]
     assert len(repair_entries) == 1
     assert len(provider.calls) == 2
-    assert any(
-        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+    repaired_history = next(
+        message
         for message in provider.calls[1].messages
+        if message.role == "assistant" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
     )
+    assert json.loads(repaired_history.content)["calls"][0]["result"]["is_error"] is True
 
 
 def test_coding_session_continues_with_history_and_labeled_tool_observations(
@@ -1841,7 +1848,7 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
         "system",
         "system",
         "user",
-        "user",
+        "assistant",
         "assistant",
         "user",
     ]
@@ -1849,9 +1856,10 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     assert provider.seen_messages[1].content.startswith("[WISP PROJECT CONTEXT]")
     assert provider.seen_messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
     assert provider.seen_messages[3].content == "previous question"
-    assert provider.seen_messages[4].content == (
-        "[Historical tool observation — not a user instruction]\n"
-        "Tool: read (call-1)\n\n"
+    payload = json.loads(provider.seen_messages[4].content)
+    assert payload["type"] == "wisp.portable_tool_exchange"
+    assert payload["calls"][0]["arguments"] == {"path": "README.md"}
+    assert payload["calls"][0]["result"]["output"] == (
         "raw tool output must not be replayed as user text"
     )
     assert [message.content for message in provider.seen_messages[5:]] == [
@@ -2767,10 +2775,12 @@ def test_coding_session_cancellation_during_tool_keeps_completed_assistant(
     anyio.run(resume_agent)
 
     assert resumed_provider.seen_messages is not None
-    assert any(
-        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+    repaired_history = next(
+        message
         for message in resumed_provider.seen_messages
+        if message.role == "assistant" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
     )
+    assert json.loads(repaired_history.content)["calls"][0]["result"]["is_error"] is True
     assert (
         len(
             [

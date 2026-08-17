@@ -67,6 +67,12 @@ class OpenAICodexProvider:
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
 
+    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+        """Declare that portable call/result pairs can be reconstructed natively."""
+
+        del effort
+        return True
+
     def __init__(
         self,
         *,
