@@ -95,15 +95,22 @@ class ProcessLifecycle:
         source_truncated: bool = False,
         source_dropped_bytes: int = 0,
         fallback_output: str = "",
+        failure_reason: str = "",
         failed: bool = False,
     ) -> ProcessLifecyclePresentation:
         output = _process_output_chunk(stdout, stderr) or fallback_output
+        if failure_reason and not (
+            output == failure_reason or output.startswith(f"{failure_reason}\n")
+        ):
+            output = f"{failure_reason}\n{output}" if output else failure_reason
         if output:
             self._append_output(output)
         self._source_truncated = (
             self._source_truncated or source_truncated or source_dropped_bytes > 0
         )
-        if state is not None:
+        if failed and state == "completed":
+            self.display_state = "failed"
+        elif state is not None:
             self.display_state = state
         elif failed:
             self.display_state = "poll_failed" if operation == "poll" else "cancel_failed"
@@ -191,7 +198,11 @@ def historical_process_observation(
         state = "failed"
     else:
         return None, normalized
-    return state, _historical_output_chunk(remainder) if separator else ""
+    output_chunk = _historical_output_chunk(remainder) if separator else ""
+    if first.startswith(f"{prefix} failed: "):
+        failure_reason = first.removeprefix(f"{prefix} failed: ")
+        output_chunk = f"{failure_reason}\n{output_chunk}" if output_chunk else failure_reason
+    return state, output_chunk
 
 
 def _historical_output_chunk(output: str) -> str:

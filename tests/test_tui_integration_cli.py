@@ -1808,6 +1808,47 @@ def test_textual_renderer_coalesces_repeated_process_polls() -> None:
     assert live_entry_count == 2
 
 
+def test_textual_renderer_preserves_process_failure_reason_with_or_without_output() -> None:
+    async def scenario(stdout: str | None) -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            body = f"\nstdout:\n{stdout}" if stdout else ""
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output=f"Process proc-1 failed: cleanup failed{body}",
+                    is_error=True,
+                    process_id="proc-1",
+                    process_state="failed",
+                    process_error="cleanup failed",
+                    stdout=stdout,
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            assert len(cards) == 1
+            return cards[0].render().plain
+
+    with_output = anyio.run(scenario, "partial output\n")
+    without_output = anyio.run(scenario, None)
+
+    assert with_output.startswith("• Process failed proc-1 · 1 poll")
+    assert "cleanup failed" in with_output
+    assert "partial output" in with_output
+    assert "no process output yet" not in with_output
+    assert without_output.startswith("• Process failed proc-1 · 1 poll")
+    assert without_output.count("cleanup failed") == 1
+    assert "no process output yet" not in without_output
+
+
 def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:
     async def scenario() -> tuple[int, str]:
         app_instance, renderer = create_textual_tui()

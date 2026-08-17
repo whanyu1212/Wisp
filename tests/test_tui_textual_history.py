@@ -390,6 +390,40 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert cards[0].status == "cancelled"
 
 
+def test_history_controller_pairs_split_process_call_before_grouping() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    result = HistoricalToolCard(
+        card_id="history:result",
+        name="bash",
+        arguments={},
+        output="Process proc-1 completed with exit code 0\nstdout:\ndone\n",
+        is_error=False,
+        status="done",
+        tool_call_id="poll-1",
+        call_missing=True,
+    )
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:poll-1",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="poll-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((result,), session_label="First")
+    controller.prepend_entries((missing_call,))
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == "completed"
+    assert process_widgets[0].detail == "done"
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
 def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

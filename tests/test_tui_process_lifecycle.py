@@ -48,6 +48,35 @@ def test_process_lifecycle_accumulates_incremental_output_and_poll_count() -> No
     assert presentation.terminal is True
 
 
+def test_failed_tool_result_overrides_nominal_completed_process_state() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+
+    presentation = lifecycle.observe(
+        operation="poll",
+        state="completed",
+        failed=True,
+    )
+
+    assert presentation.display_state == "failed"
+    assert presentation.terminal is True
+
+
+def test_process_lifecycle_does_not_duplicate_failure_reason_from_fallback() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+
+    presentation = lifecycle.observe(
+        operation="poll",
+        state="failed",
+        fallback_output="cleanup failed",
+        failure_reason="cleanup failed",
+        failed=True,
+    )
+
+    assert presentation.full_output == "cleanup failed"
+
+
 def test_process_lifecycle_bounds_accumulated_output_and_reports_omission() -> None:
     lifecycle = ProcessLifecycle("proc-1")
     lifecycle.begin("poll")
@@ -79,6 +108,26 @@ def test_historical_process_envelope_requires_the_expected_process_id() -> None:
     assert output == "progress\n"
     assert mismatched_state is None
     assert mismatched_output.startswith("Process proc-other completed")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_output"),
+    [
+        ("", "cleanup failed"),
+        ("\nstdout:\npartial output\n", "cleanup failed\npartial output\n"),
+    ],
+)
+def test_historical_failed_process_preserves_header_reason(
+    body: str,
+    expected_output: str,
+) -> None:
+    state, output = historical_process_observation(
+        "proc-1",
+        f"Process proc-1 failed: cleanup failed{body}",
+    )
+
+    assert state == "failed"
+    assert output == expected_output
 
 
 def test_denied_poll_does_not_claim_that_the_process_was_cancelled() -> None:

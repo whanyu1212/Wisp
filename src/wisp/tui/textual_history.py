@@ -615,6 +615,20 @@ class TextualHistoryController:
                     before=before,
                 )
                 self._surface.update_process_card(process_group.presentation)
+                if mounted is not None:
+                    superseded = {
+                        self._widgets[member_id]
+                        for member_id in process_group.member_entry_ids
+                        if member_id in self._widgets and self._widgets[member_id] is not mounted
+                    }
+                    for widget in superseded:
+                        self._surface.remove_historical_widget(widget)
+                    if superseded:
+                        self._widgets = {
+                            entry_id: widget
+                            for entry_id, widget in self._widgets.items()
+                            if widget not in superseded
+                        }
             if mounted is not None:
                 self._widgets[item.id] = mounted
                 if process_group is not None:
@@ -627,13 +641,43 @@ class TextualHistoryController:
     ) -> dict[int, _HistoricalProcessGroup]:
         """Project visible poll/cancel records into stable process-level groups."""
 
+        split_results: dict[str, _RetainedHistoryEntry] = {}
+        for item in visible:
+            entry = item.entry
+            if (
+                isinstance(entry, HistoricalToolCard)
+                and entry.call_missing
+                and entry.tool_call_id is not None
+            ):
+                split_results[entry.tool_call_id] = item
+        paired_result_ids: set[int] = set()
+        for item in visible:
+            entry = item.entry
+            if (
+                isinstance(entry, HistoricalToolCard)
+                and entry.missing_result
+                and entry.tool_call_id is not None
+                and (result := split_results.get(entry.tool_call_id)) is not None
+            ):
+                paired_result_ids.add(result.id)
         lifecycles: dict[str, ProcessLifecycle] = {}
         first_ids: dict[str, int] = {}
         member_ids: dict[str, set[int]] = {}
         for item in visible:
             entry = item.entry
-            if not isinstance(entry, HistoricalToolCard):
+            if not isinstance(entry, HistoricalToolCard) or item.id in paired_result_ids:
                 continue
+            observation = entry
+            observation_member_ids = {item.id}
+            if entry.missing_result and entry.tool_call_id is not None:
+                paired_result = split_results.get(entry.tool_call_id)
+                if paired_result is None or not isinstance(
+                    paired_result.entry,
+                    HistoricalToolCard,
+                ):
+                    continue
+                observation = paired_result.entry
+                observation_member_ids.add(paired_result.id)
             identity = process_call_identity(entry.name, entry.arguments)
             if identity is None:
                 continue
@@ -642,26 +686,29 @@ class TextualHistoryController:
                 ProcessLifecycle(identity.process_id),
             )
             first_ids.setdefault(identity.process_id, item.id)
-            member_ids.setdefault(identity.process_id, set()).add(item.id)
+            member_ids.setdefault(identity.process_id, set()).update(observation_member_ids)
             lifecycle.begin(identity.operation)
-            state, output = historical_process_observation(identity.process_id, entry.output)
+            state, output = historical_process_observation(
+                identity.process_id,
+                observation.output,
+            )
             lifecycle.observe(
                 operation=identity.operation,
                 state=state,
                 fallback_output=output,
-                source_truncated=entry.truncated,
-                failed=historical_tool_status(entry) == "error",
+                source_truncated=observation.truncated,
+                failed=historical_tool_status(observation) == "error",
             )
 
         by_entry_id: dict[int, _HistoricalProcessGroup] = {}
         for process_id, lifecycle in lifecycles.items():
-            members = frozenset(member_ids[process_id])
+            group_members = frozenset(member_ids[process_id])
             group = _HistoricalProcessGroup(
                 first_entry_id=first_ids[process_id],
-                member_entry_ids=members,
+                member_entry_ids=group_members,
                 presentation=lifecycle.presentation(),
             )
-            for member_id in members:
+            for member_id in group_members:
                 by_entry_id[member_id] = group
         return by_entry_id
 

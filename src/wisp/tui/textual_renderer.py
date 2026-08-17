@@ -702,6 +702,7 @@ class TextualTuiRenderer:
                             event.stdout_dropped_bytes + event.stderr_dropped_bytes
                         ),
                         fallback_output=fallback_output,
+                        failure_reason=event.process_error or "",
                         failed=status == "error",
                     )
                 started = self._process_started.get(identity.process_id)
