@@ -48,7 +48,7 @@ from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMess
 from wisp.tui.process_lifecycle import (
     ProcessCallIdentity,
     ProcessLifecycle,
-    ProcessLifecyclePresentation,
+    ProcessOperation,
     historical_process_observation,
     process_call_identity,
 )
@@ -115,7 +115,7 @@ class TextualTuiRenderer:
         self._process_calls: dict[str, ProcessCallIdentity] = {}
         self._process_lifecycles: dict[str, ProcessLifecycle] = {}
         self._process_started: dict[str, datetime] = {}
-        self._denied_process_calls: dict[str, ProcessLifecyclePresentation] = {}
+        self._denied_process_calls: dict[str, ProcessOperation] = {}
         self._history = TextualHistoryController(app)
         app.set_live_widget_evicted_hook(self._forget_live_widget)
         app.set_history_window_hooks(
@@ -255,9 +255,12 @@ class TextualTuiRenderer:
         for call_id, identity in self._process_calls.items():
             lifecycle = self._process_lifecycles.get(identity.process_id)
             if lifecycle is not None:
-                presentation = self._denied_process_calls.get(call_id)
-                if presentation is None:
-                    presentation = lifecycle.interrupt(identity.operation)
+                denied_operation = self._denied_process_calls.get(call_id)
+                presentation = (
+                    lifecycle.deny(denied_operation)
+                    if denied_operation is not None
+                    else lifecycle.interrupt(identity.operation)
+                )
                 self.app.resolve_process_call(call_id, presentation)
         self._process_calls.clear()
         self._denied_process_calls.clear()
@@ -654,7 +657,7 @@ class TextualTuiRenderer:
                         identity.operation,
                         event.reason or "denied",
                     )
-                    self._denied_process_calls[event.call_id] = presentation
+                    self._denied_process_calls[event.call_id] = identity.operation
                     self.app.update_process_card(presentation)
                     self._tool_elapsed(event.call_id, event.timestamp)
         elif isinstance(event, ToolResultReady):
@@ -703,9 +706,9 @@ class TextualTuiRenderer:
                 )
             else:
                 lifecycle = self._process_lifecycles[identity.process_id]
-                denied_presentation = self._denied_process_calls.pop(event.call_id, None)
-                if denied_presentation is not None:
-                    presentation = denied_presentation
+                denied_operation = self._denied_process_calls.pop(event.call_id, None)
+                if denied_operation is not None:
+                    presentation = lifecycle.deny(denied_operation)
                 elif (
                     event.process_id is None
                     and event.process_state == "cancelled"

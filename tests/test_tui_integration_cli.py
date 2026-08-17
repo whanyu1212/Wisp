@@ -2215,7 +2215,7 @@ def test_textual_abort_preserves_resolved_process_denial(
 
 
 def test_textual_concurrent_result_does_not_overwrite_denied_process_call() -> None:
-    async def scenario() -> str:
+    async def scenario() -> tuple[str, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(
@@ -2244,10 +2244,11 @@ def test_textual_concurrent_result_does_not_overwrite_denied_process_call() -> N
                 ToolResultReady(
                     call_id="poll-1",
                     name="bash",
-                    output="Process proc-1 is still running",
+                    output="Process proc-1 is still running\nstdout:\nfresh output\n",
                     is_error=False,
                     process_id="proc-1",
                     process_state="running",
+                    stdout="fresh output\n",
                 )
             )
             renderer.event(
@@ -2259,12 +2260,15 @@ def test_textual_concurrent_result_does_not_overwrite_denied_process_call() -> N
                 )
             )
             await pilot.pause()
-            return app_instance.query_one(ProcessCard).render().plain
+            card = app_instance.query_one(ProcessCard)
+            return card.render().plain, card.lifecycle_presentation.call_count
 
-    rendered = anyio.run(scenario)
+    rendered, call_count = anyio.run(scenario)
 
     assert rendered.startswith("• Process cancellation denied proc-1")
     assert "keep it running" in rendered
+    assert "fresh output" in rendered
+    assert call_count == 2
 
 
 def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() -> None:
