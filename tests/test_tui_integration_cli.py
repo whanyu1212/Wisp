@@ -52,6 +52,7 @@ from wisp.tui.textual_app import (
     _transcript_child_layout_pending,
     create_textual_tui,
 )
+from wisp.tui.textual_transcript import TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT
 from wisp.tui.transcript_window import (
     TUI_TRANSCRIPT_WINDOW_SHIFT,
     TUI_TRANSCRIPT_WINDOW_SIZE,
@@ -1088,6 +1089,50 @@ def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> Non
     source, child_count = anyio.run(scenario)
     assert source == restored_markdown
     assert child_count == 0
+
+
+def test_textual_resumed_tool_heavy_history_does_not_trigger_live_reload_loop() -> None:
+    async def scenario() -> tuple[int, int, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        latest_reload_requests = 0
+
+        async def request_latest() -> None:
+            nonlocal latest_reload_requests
+            latest_reload_requests += 1
+
+        app_instance.set_history_latest_request_hook(request_latest)
+        card_count = TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT // 2 + 1
+        entries = tuple(
+            HistoricalToolCard(
+                card_id=f"history:tool-{index}",
+                name="grep",
+                arguments={"pattern": str(index)},
+                output=f"match {index}",
+                is_error=False,
+                tool_call_id=f"call-{index}",
+            )
+            for index in range(card_count)
+        )
+        async with app_instance.run_test(size=(100, 30)) as pilot:
+            renderer.replace_history_entries(entries, session_label="Tool-heavy session")
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            await pilot.pause()
+            editor = app_instance.query_one("#input", Input)
+            await pilot.press("o", "k")
+            await pilot.pause()
+            cards = [
+                child
+                for child in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(child, ToolCard)
+            ]
+            return latest_reload_requests, len(cards), editor.value, editor.has_focus
+
+    reloads, cards, value, focused = anyio.run(scenario)
+    assert reloads == 0
+    assert cards == TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT // 2 + 1
+    assert value == "ok"
+    assert focused
 
 
 def test_textual_completed_message_without_deltas_renders_markdown() -> None:

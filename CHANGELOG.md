@@ -26,6 +26,8 @@ This log starts at schema v27. Earlier history is in the git log.
   work, and fixed tool working-directory behavior for selected workspaces.
 - Added richer diff layouts, transcript recovery, prompt highlighting, project-tree file selection,
   approval safety surfaces, and additional curated TUI themes.
+- Fixed tool-heavy historical session replay repeatedly reloading its latest page, flickering the
+  Textual screen and preventing normal interaction.
 
 ## 0.1.0b4 — 2026-08-12
 
