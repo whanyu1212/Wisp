@@ -861,6 +861,7 @@ def test_openai_provider_streams_refusal_deltas() -> None:
     ]
 
 
+@pytest.mark.production_fault
 def test_openai_provider_rejects_eof_without_native_completion() -> None:
     provider = StubOpenAIProvider([_created_event("response-id"), _text_delta("partial")])
 

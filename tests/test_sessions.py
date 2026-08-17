@@ -2378,6 +2378,7 @@ def test_concurrent_session_handles_append_one_record(
     )
 
 
+@pytest.mark.production_fault
 def test_conditional_append_rejects_stale_session_handle(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
@@ -2403,6 +2404,7 @@ def test_conditional_append_rejects_stale_session_handle(tmp_path: Path) -> None
     assert [message.content for message in session.read_messages()] == ["seed", "left"]
 
 
+@pytest.mark.production_fault
 def test_conditional_append_reconciles_uncertain_stable_id_retry(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
@@ -2522,6 +2524,7 @@ def test_failed_first_append_removes_empty_crash_artifact(
     assert not session.path.exists()
 
 
+@pytest.mark.production_fault
 def test_append_failure_rolls_back_partial_record(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -2553,6 +2556,7 @@ def test_append_failure_rolls_back_partial_record(
     assert session.read_entries() == (committed,)
 
 
+@pytest.mark.production_fault
 def test_append_sync_failure_rolls_back_complete_record(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

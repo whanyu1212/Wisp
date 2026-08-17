@@ -740,9 +740,28 @@ uv run pytest tests                                                  # complete 
 uv run pytest tests -m 'not (slow or tui or process or benchmark)'   # faster core checks
 ```
 
-The complete suite runs against the deterministic `fake` provider, so the agent core, CLI, and JSONL
-sessions are exercised without API keys or network access. Run the complete command before
-considering a change verified.
+The complete suite runs against deterministic fake or scripted providers, so the agent core, CLI,
+and JSONL sessions are exercised without API keys, live model calls, or provider credentials. Run
+the complete command before considering a change verified.
+
+### CI policy
+
+CI runs for pull requests targeting `main` or `develop`, for direct updates to `main`, and by manual
+dispatch. Linux is authoritative for the complete locked-environment quality and test suite: Ruff
+formatting and lint, configured `uv run mypy`, and `tests/`-only pytest partitions. The
+`production_fault` partition is a required deterministic regression contract that can be run locally
+with:
+
+```bash
+uv run pytest tests -m production_fault --durations=20
+```
+
+That contract inventories provider streams truncated before native completion, partial session and
+auth writes, stale session writers, cancellation during SDK shutdown, and bounded process-tree
+cleanup. A focused macOS job covers auth/session locking and durability, subprocess and MCP cleanup,
+RPC/stdin transport, secure filesystem operations, and a fake-provider CLI smoke test. The complete
+suite is not duplicated on macOS because the remaining tests exercise platform-neutral contracts.
+Windows remains best-effort until it has dedicated CI coverage.
 
 Changes should preserve the layer boundaries described in [Architecture](#architecture). Local
 agent instruction files remain untracked so contributors can tailor them to their own workflows.

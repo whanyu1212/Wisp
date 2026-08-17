@@ -4102,7 +4102,7 @@ def test_textual_wheel_burst_is_preserved_while_history_page_loads() -> None:
     requests, pending_rows, scroll_y, max_scroll_y = anyio.run(scenario)
 
     assert requests == 1
-    assert pending_rows == 3.0
+    assert pending_rows == 6.0
     assert 0 < scroll_y < max_scroll_y
 
 
@@ -6924,7 +6924,7 @@ def test_textual_mouse_wheel_scrolls_transcript_and_updates_follow() -> None:
     result = anyio.run(scenario)
     assert result["events_delivered"]
     assert result["scrolled_up"]
-    assert result["rows_scrolled_up"] == 3.0
+    assert result["rows_scrolled_up"] == 6.0
     assert result["follow_cleared"]
     assert result["focus_kept"]
     assert result["returned_to_bottom"]
@@ -8363,10 +8363,10 @@ def test_textual_prompt_editor_inner_click_preserves_cursor_placement() -> None:
     assert cursor_column < len("abcdef")
 
 
-def test_textual_wheel_uses_one_row_sensitivity() -> None:
+def test_textual_wheel_uses_two_row_sensitivity() -> None:
     app_instance = TextualTui()
 
-    assert app_instance.scroll_sensitivity_y == 1.0
+    assert app_instance.scroll_sensitivity_y == 2.0
 
 
 def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:

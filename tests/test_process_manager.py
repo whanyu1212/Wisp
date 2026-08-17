@@ -805,6 +805,7 @@ def test_cancel_retries_after_failed_running_cancel(
     assert attempts == 3
 
 
+@pytest.mark.production_fault
 def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
     async def hold_pipe_open() -> None:
         await asyncio.Event().wait()
@@ -1628,6 +1629,7 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
     assert retained_count == 1
 
 
+@pytest.mark.production_fault
 def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_contended(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2143,6 +2145,7 @@ def test_aclose_initializes_cleanup_after_raw_task_cancel_while_lock_is_contende
         os.kill(pid, 0)
 
 
+@pytest.mark.production_fault
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_managed_process_cancel_terminates_descendants(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
@@ -2175,6 +2178,7 @@ def test_managed_process_cancel_terminates_descendants(tmp_path: Path) -> None:
         os.kill(child_pid, 0)
 
 
+@pytest.mark.production_fault
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_supervisor_close_terminates_abandoned_processes(tmp_path: Path) -> None:
     pid_path = tmp_path / "process.pid"

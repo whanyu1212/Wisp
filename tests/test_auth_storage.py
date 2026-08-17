@@ -244,6 +244,7 @@ def test_json_auth_store_rejects_non_private_existing_file(tmp_path: Path) -> No
         JsonAuthStore(path).providers()
 
 
+@pytest.mark.production_fault
 def test_json_auth_store_write_failure_preserves_existing_credentials(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -271,6 +272,7 @@ def test_json_auth_store_write_failure_preserves_existing_credentials(
     assert tuple(tmp_path.glob(".auth.json.*.tmp")) == ()
 
 
+@pytest.mark.production_fault
 def test_json_auth_store_sync_failure_preserves_existing_credentials(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -84,6 +84,7 @@ markers = [
     "process: tests covering process-backed tools or process trees",
     "benchmark: deterministic performance and resource-bound scenarios",
     "slow: intentionally long-running tests outside the other categories",
+    "production_fault: required deterministic production fault-injection regressions",
 ]
 
 [tool.ruff]
