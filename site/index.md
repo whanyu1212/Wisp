@@ -21,19 +21,25 @@ hero:
 
 features:
   - title: Steer mid-flight
-    details: TODO — queue a correction while the agent is running. Steering redirects the current run without rewriting the transcript; follow-ups wait their turn.
+    details: Queue a correction while the agent is running. Steering redirects the current run without rewriting the transcript; follow-ups wait their turn.
   - title: Cancel without losing the thread
-    details: TODO — cooperative cancellation stops the run cleanly and leaves the session resumable, not corrupted.
+    details: Cooperative cancellation stops the run cleanly and leaves the session resumable, not corrupted.
   - title: Approvals you control
-    details: TODO — mutating and command tools stop for approval. The decision stays outside the model's reach.
+    details: Mutating and command tools stop for approval. The decision stays outside the model's reach.
   - title: Nothing happens off-screen
-    details: TODO — every action is a typed event with an enforced order, persisted to an inspectable JSONL transcript.
+    details: Every action is a typed event with an enforced order, persisted to an inspectable JSONL transcript.
 ---
 
-<!-- TODO: below-the-fold content — a short "what is Wisp" paragraph and an
-     install snippet. Keep it brief; the guide carries the detail.
+## One runtime, with you in control
 
-     Framing note: the terminal, the four interfaces, and the embeddable runtime
-     are *support* for the sync claim, not the headline. Lead with control and
-     reliability; mention surfaces second. -->
+Wisp is a coding agent for interactive work, scripts, and integrations. Its TUI, print mode, JSONL
+RPC process, and Python SDK share one typed runtime, so steering, approvals, cancellation, and
+session durability do not change when you change interfaces.
 
+```bash
+uv tool install "wisp-ai==0.1.0rc1"
+cd path/to/project
+wisp
+```
+
+[Run your first prompt](./guide/quickstart) or read [how Wisp stays in sync](./guide/staying-in-sync).

@@ -27,15 +27,24 @@ Check the installed version with `wisp --version`.
 ## Updates
 
 Installed builds check PyPI at most once every six hours after TUI startup. When a newer applicable
-release is available, Wisp prints a non-blocking update command; it never installs updates
-automatically.
+release is available, the check never blocks startup:
+
+- The Textual TUI waits until the session is safely idle and the composer is empty, then offers
+  **Update & restart** (the default), **Later**, or **Skip version**.
+- **Update & restart** is available for persistent `uv tool` installations. After installation,
+  Wisp relaunches the exact original command with its original working directory and environment.
+- Line/fullscreen renderers and installations managed by another package manager receive a passive
+  notice instead of an install prompt.
+- **Skip version** suppresses only that exact release; a newer compatible release is offered again.
 
 ```bash
 wisp update --check   # bypass the cache and check immediately
 wisp update           # check and confirm installation
+wisp update --yes     # check and install without confirmation
 ```
 
-Set `WISP_UPDATE_CHECK=0` to disable automatic checks; explicit checks still run.
+Set `WISP_UPDATE_CHECK=0` to disable background checks; explicit checks still run and ignore a
+skipped-version preference.
 
 Automatic installation is available only when Wisp is running from a persistent `uv tool`
 installation. `uvx`, local-source, and other package-manager installs are never replaced.
