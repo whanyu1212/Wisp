@@ -82,7 +82,9 @@ from wisp.tui.diff_presentation import (
     DiffPresentation,
 )
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
+from wisp.tui.file_index import ProjectSnapshot
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.prompt_highlighting import PromptHighlightKind, prompt_line_highlights
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _footer_context_text,
@@ -100,10 +102,35 @@ _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
 _MARKDOWN_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+_PROMPT_HIGHLIGHT_COMPONENTS: dict[PromptHighlightKind, str] = {
+    "command": "prompt-editor--command",
+    "resolved_path": "prompt-editor--resolved-path",
+    "unresolved_path": "prompt-editor--unresolved-path",
+}
 
 
 class PromptEditor(TextArea):
-    """Multiline prompt editor with Pi-compatible submission keys."""
+    """Multiline prompt editor with bounded, catalog-backed semantic styling."""
+
+    DEFAULT_CSS = """
+    PromptEditor {
+        & .prompt-editor--command {
+            color: $accent;
+            text-style: bold;
+        }
+        & .prompt-editor--resolved-path {
+            color: $success;
+            text-style: underline;
+        }
+        & .prompt-editor--unresolved-path {
+            color: $warning;
+            text-style: dim underline;
+        }
+    }
+    """
+    COMPONENT_CLASSES: ClassVar[set[str]] = TextArea.COMPONENT_CLASSES | set(
+        _PROMPT_HIGHLIGHT_COMPONENTS.values()
+    )
 
     BINDING_GROUP_TITLE = "Prompt editor"
     HELP = """
@@ -152,6 +179,65 @@ class PromptEditor(TextArea):
         )
         self._pending_pastes: list[tuple[str, str]] = []
         self._paste_placeholder_counter = 0
+        self._command_tokens: frozenset[str] = frozenset()
+        self._project_paths: frozenset[str] | None = None
+        self._unresolved_paths_known = False
+
+    def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
+        """Replace recognized runtime and Textual-local slash spellings."""
+
+        tokens = frozenset(
+            token
+            for descriptor in catalog.descriptors
+            for token in (descriptor.slash_command, *descriptor.slash_aliases)
+            if token.startswith("/")
+        )
+        if tokens != self._command_tokens:
+            self._command_tokens = tokens
+            self._refresh_semantic_styles()
+
+    def set_project_snapshot(self, snapshot: ProjectSnapshot | None) -> None:
+        """Replace the complete bounded path snapshot used for resolution."""
+
+        paths = frozenset(snapshot.paths) if snapshot is not None and snapshot.entries else None
+        unresolved_paths_known = (
+            snapshot is not None and bool(snapshot.entries) and not snapshot.truncated
+        )
+        if (paths, unresolved_paths_known) != (
+            self._project_paths,
+            self._unresolved_paths_known,
+        ):
+            self._project_paths = paths
+            self._unresolved_paths_known = unresolved_paths_known
+            self._refresh_semantic_styles()
+
+    def _refresh_semantic_styles(self) -> None:
+        """Invalidate TextArea caches and schedule a visible repaint."""
+
+        self.notify_style_update()
+        self.refresh()
+
+    def get_line(self, line_index: int) -> Text:
+        """Apply presentation-only spans through TextArea's public styling hook."""
+
+        rendered = super().get_line(line_index)
+        for highlight in prompt_line_highlights(
+            rendered.plain,
+            line_index=line_index,
+            line_count=self.document.line_count,
+            command_tokens=self._command_tokens,
+            project_paths=self._project_paths,
+            unresolved_paths_known=self._unresolved_paths_known,
+        ):
+            rendered.stylize(
+                self.get_component_rich_style(
+                    _PROMPT_HIGHLIGHT_COMPONENTS[highlight.kind],
+                    partial=True,
+                ),
+                highlight.start,
+                highlight.end,
+            )
+        return rendered
 
     @property
     def value(self) -> str:
