@@ -331,12 +331,22 @@ class TextualTranscriptController:
     ) -> ProcessCard | None:
         """Finish one poll call while preserving its process-level presentation."""
 
-        self._tool_cards.pop(call_id, None)
-        return self.update_process_card(
+        card = self._tool_cards.pop(call_id, None)
+        if not isinstance(card, ProcessCard):
+            return None
+        has_pending_alias = any(candidate is card for candidate in self._tool_cards.values())
+        updated = self.update_process_card(
             presentation,
             elapsed=elapsed,
-            settle_terminal=True,
+            settle_terminal=not has_pending_alias,
         )
+        if has_pending_alias and presentation.operation_settled:
+            # The latest observation may itself be terminal, denied, or failed,
+            # while another audited call against the process is still unresolved.
+            # Keep elapsed tracking active and defer eviction eligibility until the
+            # final alias resolves.
+            card.start_live_updates()
+        return updated
 
     def enrich_historical_tool_call(
         self,
@@ -513,7 +523,7 @@ class TextualTranscriptController:
         ):
             evicted, evicted_entry_count = self._settled_widgets.popleft()
             self._settled_durable_entry_count -= evicted_entry_count
-            self.discard_unseen_output(evicted)
+            self.forget_widget(evicted)
             self._surface.remove_live_transcript_widget(evicted)
             self._surface.live_transcript_widget_evicted(evicted)
 

@@ -256,6 +256,32 @@ def test_resolved_process_operation_settles_and_reuse_unsettles_card() -> None:
     assert controller.settled_widget_count == 0
 
 
+def test_process_card_settles_only_after_its_final_call_alias_resolves() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=1)
+    surface.controller = controller
+    lifecycle = ProcessLifecycle("proc-1")
+    first = controller.mount_process_call("poll-1", "proc-1")
+    second = controller.mount_process_call("poll-2", "proc-1")
+    assert isinstance(first, ProcessCard)
+    assert second is first
+    lifecycle.begin("poll")
+    lifecycle.begin("poll")
+
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+    controller.settle_widget(Widget())
+
+    assert controller.pending_tool_count == 1
+    assert controller.settled_widget_count == 1
+    assert first not in surface.removed
+
+    controller.resolve_process_call("poll-2", lifecycle.interrupt("poll"))
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+    assert first not in surface.removed
+
+
 def test_resolved_process_operations_are_evicted_with_bounded_retention() -> None:
     surface = _Surface()
     controller = TextualTranscriptController(surface, settled_capacity=1)
@@ -277,6 +303,11 @@ def test_resolved_process_operations_are_evicted_with_bounded_retention() -> Non
     assert controller.settled_widget_count == 1
     assert surface.removed == [cards[0]]
     assert surface.evicted == [cards[0]]
+
+    remounted = controller.mount_process_call("poll-retry", "proc-0")
+    assert isinstance(remounted, ProcessCard)
+    assert remounted is not cards[0]
+    assert remounted in surface.mounted
 
 
 def test_historical_card_lookup_is_evicted_with_its_widget() -> None:
