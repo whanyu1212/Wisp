@@ -18,6 +18,7 @@ from wisp.tools.paths import is_protected_path
 from wisp.tools.search import IGNORED_DIRS
 
 _BOUNDARY_CHARS = frozenset("/_-. ")
+_JSON_DECODER = json.JSONDecoder()
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,58 @@ def format_file_reference(path: str) -> str:
     )
     rendered = json.dumps(path, ensure_ascii=False) if needs_quoting else path
     return f"@{rendered}"
+
+
+def parse_file_reference(
+    text: str,
+    *,
+    start: int,
+    limit: int | None = None,
+) -> tuple[int, str | None] | None:
+    """Parse one formatter-compatible reference at ``start``.
+
+    The returned end offset uses Python codepoint indices. A ``None`` path means
+    the complete bounded token is reference-shaped but malformed; a ``None``
+    return means there is no complete reference inside the supplied bound.
+    """
+
+    scan_limit = len(text) if limit is None else min(max(0, limit), len(text))
+    if start < 0 or start >= scan_limit or text[start] != "@":
+        return None
+    value_start = start + 1
+    if value_start >= scan_limit:
+        return None
+
+    if text[value_start] != '"':
+        end = value_start
+        while end < scan_limit and not text[end].isspace():
+            end += 1
+        if end == value_start:
+            return None
+        if end == scan_limit and scan_limit < len(text) and not text[scan_limit].isspace():
+            return None
+        return end, text[value_start:end]
+
+    encoded = text[value_start:scan_limit]
+    try:
+        decoded, consumed = _JSON_DECODER.raw_decode(encoded)
+    except (json.JSONDecodeError, RecursionError):
+        if scan_limit < len(text):
+            return None
+        return scan_limit, None
+    if not isinstance(decoded, str):
+        return None
+
+    end = value_start + consumed
+    if end == scan_limit and scan_limit < len(text) and not text[scan_limit].isspace():
+        return None
+    if end < scan_limit and not text[end].isspace():
+        while end < scan_limit and not text[end].isspace():
+            end += 1
+        if end == scan_limit and scan_limit < len(text):
+            return None
+        return end, None
+    return end, decoded
 
 
 def score_path(path: str, query: str) -> ScoredPath | None:

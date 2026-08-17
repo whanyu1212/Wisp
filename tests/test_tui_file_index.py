@@ -16,6 +16,7 @@ from wisp.tui.file_index import (
     collect_project_snapshot,
     filter_paths,
     format_file_reference,
+    parse_file_reference,
     score_path,
 )
 from wisp.tui.textual_app import _build_file_index_snapshot, _file_index_context
@@ -309,6 +310,14 @@ def test_worker_snapshot_build_fails_closed_when_root_canonicalization_fails(
 )
 def test_formats_file_reference_with_json_quoting(path: str, expected: str) -> None:
     assert format_file_reference(path) == expected
+    assert parse_file_reference(expected, start=0) == (len(expected), path)
+
+
+def test_quoted_reference_cut_at_bound_does_not_validate_attached_suffix() -> None:
+    text = '@"known.py"suffix'
+    bound = len('@"known.py"')
+
+    assert parse_file_reference(text, start=0, limit=bound) is None
 
 
 # --- matching --------------------------------------------------------------

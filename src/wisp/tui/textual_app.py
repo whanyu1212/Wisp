@@ -824,13 +824,20 @@ class TextualTui(App[None]):
             self._invalidate_file_snapshot()
             self._adopted_auth_paths = (*self._adopted_auth_paths, pattern)
 
+    def _publish_file_snapshot(self, snapshot: ProjectSnapshot | None) -> None:
+        """Atomically project one accepted snapshot across composer surfaces."""
+
+        if self._file_suggest is not None:
+            self._file_suggest.set_snapshot(snapshot)
+        if self._input is not None:
+            self._input.set_project_snapshot(snapshot)
+
     def _invalidate_file_snapshot(self) -> None:
         """Synchronously hide indexed data and reject every older completion."""
 
         self._file_index_generation += 1
         self._file_index_request = None
-        if self._file_suggest is not None:
-            self._file_suggest.set_snapshot(None)
+        self._publish_file_snapshot(None)
 
     def load_file_suggestions(self, cwd: str) -> FileIndexRequest | None:
         """Capture and start one immutable off-thread snapshot request for ``cwd``."""
@@ -913,7 +920,7 @@ class TextualTui(App[None]):
             return
         if picker is not self._file_suggest:
             return
-        picker.set_snapshot(snapshot)
+        self._publish_file_snapshot(snapshot)
         editor = self._input
         if editor is None or snapshot is None or not snapshot.entries:
             return
@@ -1299,6 +1306,8 @@ class TextualTui(App[None]):
 
         self._command_catalog = catalog
         presentation_catalog = catalog.with_descriptors(*TEXTUAL_LOCAL_COMMAND_DESCRIPTORS)
+        if self._input is not None:
+            self._input.set_command_catalog(presentation_catalog)
         if self._suggest is not None:
             self._suggest.set_catalog(presentation_catalog)
             # Catalog discovery can complete just after the user starts typing at
