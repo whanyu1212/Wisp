@@ -553,6 +553,51 @@ def test_history_controller_replays_interrupted_process_operation(
     assert process_widget.status == expected_status
 
 
+def test_history_controller_transfer_does_not_exclude_reused_call_id_occurrence() -> None:
+    """A transferred card's entry id, not its reused card_id, gates future exclusion.
+
+    Split-page process exchanges can reuse a tool_call_id across occurrences, so the
+    synthetic ``history:missing:<call_id>`` card id is identical for both. Once the
+    newer occurrence transfers to live ownership, an older occurrence sharing that
+    same card_id must still render as its own historical process card when its page
+    is later prepended.
+    """
+
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    newer_missing = HistoricalToolCard(
+        card_id="history:missing:reused-call-id",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-newer"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="reused-call-id",
+        status="cancelled",
+        missing_result=True,
+    )
+    older_missing = HistoricalToolCard(
+        card_id="history:missing:reused-call-id",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-older"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="reused-call-id",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.render_entries((newer_missing,))
+    process_widget = next(
+        widget for widget in surface.widgets if widget.label == "process: proc-newer"
+    )
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    controller.prepend_entries((older_missing,))
+
+    assert any(widget.label == "process: proc-older" for widget in surface.widgets)
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
 def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
