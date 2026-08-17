@@ -403,7 +403,7 @@ class RpcHost:
         render_events: RpcEventRenderer,
         config_overrides: _ConfigOverrides | None = None,
         runtime_builder: RuntimeBuilder | None = None,
-        max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
+        max_queued_commands: int | None = None,
         on_shutdown_dispatched: Callable[[], None] | None = None,
         on_shutdown_abandoned: Callable[[], None] | None = None,
     ) -> RpcHost:
@@ -505,7 +505,9 @@ class RpcHost:
                 approval_policy.deny_pending_on_input_closed,
                 trust_gate.deny_pending_on_input_closed,
             ),
-            max_queued_commands=max_queued_commands,
+            max_queued_commands=(
+                _MAX_QUEUED_RPC_COMMANDS if max_queued_commands is None else max_queued_commands
+            ),
             input_closed_type=_RpcInputClosed,
             command_completed_type=_RpcCommandCompleted,
             completion_event_writer=publish_event,
@@ -568,7 +570,7 @@ class RpcHost:
                 defer_until_after_flush=after_flush.append,
             )
             try:
-                result = await executor.dispatch_async(command, running_command)
+                result = await executor.dispatch(command, running_command)
                 if result.should_shutdown and self._on_shutdown_dispatched is not None:
                     self._on_shutdown_dispatched()
                 shutdown_abandoned = any(
@@ -615,7 +617,7 @@ class RpcHost:
         previous_event_task_group = self._event_task_group
         self._event_task_group = task_group
         try:
-            return await self.coordinator.run_async(
+            return await self.coordinator.run(
                 receive,
                 dispatch=dispatch,
                 reject=reject,

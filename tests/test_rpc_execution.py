@@ -11,7 +11,13 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from tests.rpc_support import RpcExecutorFixture, build_rpc_executor_fixture
+from tests.rpc_support import (
+    RpcExecutorFixture,
+    build_rpc_executor_fixture,
+    preserve_running_command,
+    reject_unexpected_command,
+    rpc_command_type,
+)
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
 from wisp.coding import CodingSession
@@ -48,7 +54,6 @@ from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
-    _RpcDispatchResult,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -206,8 +211,8 @@ def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Pat
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            invalid = executor.dispatch({"id": "bad", "type": "prompt"}, None)
-            shutdown = executor.dispatch({"id": "bye", "type": "shutdown"}, None)
+            invalid = await executor.dispatch({"id": "bad", "type": "prompt"}, None)
+            shutdown = await executor.dispatch({"id": "bye", "type": "shutdown"}, None)
 
             assert invalid.running_command is None
             assert invalid.should_shutdown is False
@@ -316,7 +321,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch({"id": "init-1", "type": "init"}, None)
+            result = await executor.dispatch({"id": "init-1", "type": "init"}, None)
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -444,7 +449,7 @@ def test_init_fails_when_agent_does_not_create_guidance(
         monkeypatch.setattr(fixture.agent, "run", no_op_run)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -485,7 +490,7 @@ def test_init_does_not_accept_a_concurrently_created_file(
         monkeypatch.setattr(fixture.agent, "run", raced_run)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
-            fixture.executor(task_group=task_group, send=send).dispatch(
+            await fixture.executor(task_group=task_group, send=send).dispatch(
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -517,7 +522,7 @@ def test_init_refuses_existing_project_guidance(
         _enable_project_init(fixture, project)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -556,7 +561,7 @@ def test_init_refuses_non_file_guidance_entries(tmp_path: Path, entry_kind: str)
         _enable_project_init(fixture, project)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -580,9 +585,9 @@ def test_init_requires_build_mode_and_write_tool(tmp_path: Path) -> None:
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            plan_result = executor.dispatch({"id": "plan-init", "type": "init"}, None)
+            plan_result = await executor.dispatch({"id": "plan-init", "type": "init"}, None)
             fixture.agent.mode = "build"
-            no_write_result = executor.dispatch({"id": "no-write-init", "type": "init"}, None)
+            no_write_result = await executor.dispatch({"id": "no-write-init", "type": "init"}, None)
             task_group.cancel_scope.cancel()
 
         assert plan_result.running_command is None
@@ -610,7 +615,7 @@ def test_prompt_worker_converts_unexpected_exception_to_failed_completion(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
                 None,
             )
@@ -654,7 +659,7 @@ def test_prompt_worker_converts_unexpected_renderer_exception_to_failed_completi
                 write_event=fixture.writer,
                 render_events=fail_render,
             )
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
                 None,
             )
@@ -679,7 +684,7 @@ def test_executor_queue_state_is_idle_safe_and_mutations_fail_cleanly(tmp_path: 
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            state_result = await executor.dispatch_async(
+            state_result = await executor.dispatch(
                 {"id": "state", "type": "get_queue_state"},
                 None,
             )
@@ -695,9 +700,7 @@ def test_executor_queue_state_is_idle_safe_and_mutations_fail_cleanly(tmp_path: 
                 {"id": "pop", "type": "pop_queue", "kind": "steering"},
                 {"id": "clear", "type": "clear_queue"},
             ]
-            results = [
-                await executor.dispatch_async(command, None) for command in mutation_commands
-            ]
+            results = [await executor.dispatch(command, None) for command in mutation_commands]
             task_group.cancel_scope.cancel()
 
         assert state_result.running_command is None
@@ -736,7 +739,7 @@ def test_executor_reports_state_without_replacing_running_command(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "state-1", "type": "get_state"}, running)
+            result = await executor.dispatch({"id": "state-1", "type": "get_state"}, running)
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -774,7 +777,7 @@ def test_executor_rejects_runtime_configuration_while_busy(tmp_path: Path) -> No
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "configure-1",
                     "type": "configure",
@@ -813,11 +816,11 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
             executor = fixture.executor(task_group=task_group, send=send)
             busy = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
 
-            rejected = executor.dispatch(
+            rejected = await executor.dispatch(
                 {"id": "new-busy", "type": "new_session"},
                 busy,
             )
-            accepted = executor.dispatch(
+            accepted = await executor.dispatch(
                 {"id": "new-1", "type": "new_session"},
                 None,
             )
@@ -853,11 +856,11 @@ def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) 
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            executor.dispatch(
+            await executor.dispatch(
                 {"id": "configure-1", "type": "configure", "mode": "plan"},
                 None,
             )
-            executor.dispatch({"id": "state-1", "type": "get_state"}, None)
+            await executor.dispatch({"id": "state-1", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert fixture.agent.mode == "plan"
@@ -873,7 +876,7 @@ def test_executor_rejects_invalid_agent_mode_without_changing_state(tmp_path: Pa
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            executor.dispatch(
+            await executor.dispatch(
                 {"id": "configure-1", "type": "configure", "mode": "invalid"},
                 None,
             )
@@ -919,7 +922,7 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "state-1", "type": "get_state"}, running)
+            result = await executor.dispatch({"id": "state-1", "type": "get_state"}, running)
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -943,14 +946,14 @@ def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            idle = executor.dispatch({"id": "idle", "type": "get_state"}, None)
-            malformed = executor.dispatch({"id": [], "type": "get_state"}, None)
+            idle = await executor.dispatch({"id": "idle", "type": "get_state"}, None)
+            malformed = await executor.dispatch({"id": [], "type": "get_state"}, None)
 
             def fail_snapshot(_session: object = None) -> object:
                 raise RuntimeError("snapshot failed")
 
             monkeypatch.setattr(fixture.agent, "state_snapshot", fail_snapshot)
-            failed = executor.dispatch({"id": "failed", "type": "get_state"}, None)
+            failed = await executor.dispatch({"id": "failed", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert idle.running_command is None
@@ -1000,7 +1003,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "commands-1", "type": "get_commands"}, running)
+            result = await executor.dispatch({"id": "commands-1", "type": "get_commands"}, running)
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1081,7 +1084,7 @@ def test_executor_reports_active_skill_catalog_without_replacing_running_command
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "skills-1", "type": "get_skills"}, running)
+            result = await executor.dispatch({"id": "skills-1", "type": "get_skills"}, running)
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1110,7 +1113,7 @@ def test_executor_reports_empty_mcp_status_without_replacing_running_command(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "mcp-1", "type": "get_mcp_status"}, running)
+            result = await executor.dispatch({"id": "mcp-1", "type": "get_mcp_status"}, running)
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1136,13 +1139,13 @@ def test_executor_commands_reports_malformed_id_and_registry_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            malformed = executor.dispatch({"id": [], "type": "get_commands"}, None)
+            malformed = await executor.dispatch({"id": [], "type": "get_commands"}, None)
 
             def fail_commands() -> object:
                 raise RuntimeError("registry failed")
 
             monkeypatch.setattr(fixture.runtime.commands, "all", fail_commands)
-            failed = executor.dispatch({"id": "commands-1", "type": "get_commands"}, None)
+            failed = await executor.dispatch({"id": "commands-1", "type": "get_commands"}, None)
             task_group.cancel_scope.cancel()
 
         assert malformed.running_command is None
@@ -1163,7 +1166,7 @@ def test_executor_messages_reports_empty_without_selected_session(tmp_path: Path
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "messages", "type": "get_messages"}, None)
+            result = await executor.dispatch({"id": "messages", "type": "get_messages"}, None)
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -1200,7 +1203,7 @@ def test_executor_messages_cancelled_before_publish_reports_failed_without_paylo
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "messages", "type": "get_messages"}, None)
+            result = await executor.dispatch({"id": "messages", "type": "get_messages"}, None)
             assert result.running_command is not None
             result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
@@ -1238,12 +1241,12 @@ def test_executor_messages_reads_selected_and_explicit_sessions(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            selected_result = executor.dispatch(
+            selected_result = await executor.dispatch(
                 {"id": "selected", "type": "get_messages", "limit": 2},
                 None,
             )
             selected_completed = await receive.receive()
-            explicit_result = executor.dispatch(
+            explicit_result = await executor.dispatch(
                 {
                     "id": "explicit",
                     "type": "get_messages",
@@ -1307,7 +1310,7 @@ def test_executor_messages_historical_page_refreshes_selected_session_after_exte
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "older",
                     "type": "get_messages",
@@ -1383,13 +1386,13 @@ def test_executor_messages_reports_validation_and_read_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for command in invalid_commands:
-                assert executor.dispatch(command, None).running_command is None
-            missing = executor.dispatch(
+                assert (await executor.dispatch(command, None)).running_command is None
+            missing = await executor.dispatch(
                 {"id": "missing", "type": "get_messages", "session_id": "missing"},
                 None,
             )
             missing_completed = await receive.receive()
-            bad_cursor = executor.dispatch(
+            bad_cursor = await executor.dispatch(
                 {"id": "cursor", "type": "get_messages", "before_entry_id": "missing"},
                 None,
             )
@@ -1438,7 +1441,7 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            result = await executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -1484,7 +1487,7 @@ def test_executor_sessions_cancel_abandons_blocked_catalog_read(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            result = await executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
             assert result.running_command is not None
 
             try:
@@ -1537,7 +1540,7 @@ def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "sessions", "type": "get_sessions", "limit": 1},
                 None,
             )
@@ -1575,7 +1578,7 @@ def test_executor_sessions_reports_validation_failures(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for command in invalid_commands:
-                assert executor.dispatch(command, None).running_command is None
+                assert (await executor.dispatch(command, None)).running_command is None
             task_group.cancel_scope.cancel()
 
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
@@ -1607,18 +1610,18 @@ def test_executor_select_session_updates_coordinator_state(tmp_path: Path) -> No
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "select", "type": "select_session", "session_id": selected.session_id},
                 None,
             )
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionSelected) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -1656,20 +1659,20 @@ def test_executor_set_session_name_updates_selected_cached_state(tmp_path: Path)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "name", "type": "set_session_name", "name": "  Alpha\r\nBeta  "},
                 None,
             )
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionNameChanged) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
-            executor.dispatch({"id": "state", "type": "get_state"}, None)
+            await executor.dispatch({"id": "state", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert completed.ok is True
@@ -1711,7 +1714,7 @@ def test_executor_set_session_name_with_explicit_id_does_not_switch_selection(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "name",
                     "type": "set_session_name",
@@ -1722,11 +1725,11 @@ def test_executor_set_session_name_with_explicit_id_does_not_switch_selection(
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -1766,7 +1769,7 @@ def test_executor_set_session_name_with_explicit_path_requires_same_selected_pat
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "name",
                     "type": "set_session_name",
@@ -1777,11 +1780,11 @@ def test_executor_set_session_name_with_explicit_path_requires_same_selected_pat
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -1817,7 +1820,7 @@ def test_executor_set_session_name_matches_selected_session_by_normalized_path(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "name",
                     "type": "set_session_name",
@@ -1828,11 +1831,11 @@ def test_executor_set_session_name_matches_selected_session_by_normalized_path(
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -1886,27 +1889,25 @@ def test_executor_select_session_reports_validation_and_load_failures(
             executor = fixture.executor(task_group=task_group, send=send)
 
             assert (
-                executor.dispatch({"id": [], "type": "select_session"}, None).running_command
-                is None
-            )
+                await executor.dispatch({"id": [], "type": "select_session"}, None)
+            ).running_command is None
             assert (
-                executor.dispatch(
+                await executor.dispatch(
                     {"id": "empty", "type": "select_session", "session_id": ""},
                     None,
-                ).running_command
-                is None
-            )
-            missing = executor.dispatch(
+                )
+            ).running_command is None
+            missing = await executor.dispatch(
                 {"id": "missing", "type": "select_session", "session_id": "missing"},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = missing.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -1956,15 +1957,15 @@ def test_executor_clone_session_applies_target_before_reporting_success(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            result = await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionCloned) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2020,14 +2021,14 @@ def test_executor_clone_session_reports_name_from_inherited_clone_snapshot(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            result = await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2068,18 +2069,18 @@ def test_executor_fork_session_returns_prompt_and_selects_parent_path(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "fork", "type": "fork_session", "entry_id": selected.id},
                 None,
             )
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionForked) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2127,17 +2128,17 @@ def test_executor_fork_session_reports_source_name_from_branch_snapshot(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "fork", "type": "fork_session", "entry_id": selected.id},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2169,17 +2170,17 @@ def test_executor_first_message_fork_selects_reserved_empty_session(tmp_path: Pa
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "fork", "type": "fork_session", "entry_id": selected.id},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2206,17 +2207,17 @@ def test_executor_fork_rejects_a_reserved_empty_session(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "fork", "type": "fork_session", "entry_id": "entry"},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2237,40 +2238,37 @@ def test_executor_session_derivation_reports_validation_failures(tmp_path: Path)
             executor = fixture.executor(task_group=task_group, send=send)
 
             assert (
-                executor.dispatch({"id": [], "type": "clone_session"}, None).running_command is None
-            )
+                await executor.dispatch({"id": [], "type": "clone_session"}, None)
+            ).running_command is None
             assert (
-                executor.dispatch({"id": "clone", "type": "clone_session"}, None).running_command
-                is None
-            )
+                await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            ).running_command is None
             assert (
-                executor.dispatch(
+                await executor.dispatch(
                     {"id": "fork-empty", "type": "fork_session", "entry_id": ""},
                     None,
-                ).running_command
-                is None
-            )
+                )
+            ).running_command is None
             assert (
-                executor.dispatch(
+                await executor.dispatch(
                     {"id": "fork", "type": "fork_session", "entry_id": "entry"},
                     None,
-                ).running_command
-                is None
-            )
+                )
+            ).running_command is None
 
             empty = fixture.sessions.create()
             fixture.session_state.session = empty
-            clone_empty = executor.dispatch(
+            clone_empty = await executor.dispatch(
                 {"id": "clone-empty", "type": "clone_session"},
                 None,
             )
             clone_completed = await receive.receive()
             fixture.coordinator.running_command = clone_empty.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 clone_completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2333,14 +2331,14 @@ def test_executor_clone_rejects_concurrent_source_leaf_change(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            result = await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2371,7 +2369,7 @@ def test_executor_fork_rejects_non_user_and_missing_entries(tmp_path: Path) -> N
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for index, entry_id in enumerate((assistant.id, "missing"), start=1):
-                result = executor.dispatch(
+                result = await executor.dispatch(
                     {
                         "id": f"fork-{index}",
                         "type": "fork_session",
@@ -2382,11 +2380,11 @@ def test_executor_fork_rejects_non_user_and_missing_entries(tmp_path: Path) -> N
                 completed = await receive.receive()
                 completions.append(completed)
                 fixture.coordinator.running_command = result.running_command
-                fixture.coordinator.handle_event(
+                await fixture.coordinator.handle_event(
                     completed,
-                    dispatch=lambda _command, running: _RpcDispatchResult(running),
-                    reject=lambda _command, _message: None,
-                    command_type=lambda command: str(command.get("type")),
+                    dispatch=preserve_running_command,
+                    reject=reject_unexpected_command,
+                    command_type=rpc_command_type,
                 )
             task_group.cancel_scope.cancel()
 
@@ -2412,38 +2410,38 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            empty = executor.dispatch(
+            empty = await executor.dispatch(
                 {"id": "tree-empty", "type": "get_session_tree"},
                 None,
             )
             empty_completed = await receive.receive()
             fixture.coordinator.running_command = empty.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 empty_completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
 
             session = fixture.sessions.create()
             fixture.session_state.session = session
-            reserved = executor.dispatch(
+            reserved = await executor.dispatch(
                 {"id": "tree-reserved", "type": "get_session_tree"},
                 None,
             )
             reserved_completed = await receive.receive()
             fixture.coordinator.running_command = reserved.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 reserved_completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             first = await session.append_message(Message(role="user", content="first"))
             await session.append_message(Message(role="assistant", content="answer"))
             fixture.session_state.history = session.read_context_messages()
             fixture.session_state.entry_count = 2
-            selected = executor.dispatch(
+            selected = await executor.dispatch(
                 {"id": "tree-selected", "type": "get_session_tree", "limit": 1},
                 None,
             )
@@ -2495,7 +2493,7 @@ def test_executor_navigation_applies_history_before_reporting_success(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "navigate",
                     "type": "navigate_session_tree",
@@ -2506,11 +2504,11 @@ def test_executor_navigation_applies_history_before_reporting_success(
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionTreeNavigated) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2564,18 +2562,18 @@ def test_executor_unrevert_applies_history_before_reporting_success(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "unrevert", "type": "unrevert_session_tree"},
                 None,
             )
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionTreeUnreverted) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2608,18 +2606,17 @@ def test_executor_unrevert_requires_selected_session_and_eligible_navigation(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             assert (
-                executor.dispatch(
+                await executor.dispatch(
                     {"id": "unrevert-none", "type": "unrevert_session_tree"},
                     None,
-                ).running_command
-                is None
-            )
+                )
+            ).running_command is None
             session = fixture.sessions.create()
             await session.append_message(Message(role="user", content="first"))
             fixture.session_state.session = session
             fixture.session_state.history = session.read_context_messages()
             fixture.session_state.entry_count = 1
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "unrevert-missing", "type": "unrevert_session_tree"},
                 None,
             )
@@ -2675,17 +2672,17 @@ def test_executor_unrevert_rejects_concurrent_leaf_change(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "unrevert", "type": "unrevert_session_tree"},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2720,7 +2717,7 @@ def test_executor_unrevert_cancellation_before_commit_preserves_leaf(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             async with session._append_lock:
-                result = executor.dispatch(
+                result = await executor.dispatch(
                     {"id": "unrevert", "type": "unrevert_session_tree"},
                     None,
                 )
@@ -2730,11 +2727,11 @@ def test_executor_unrevert_cancellation_before_commit_preserves_leaf(
                 result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2782,7 +2779,7 @@ def test_executor_unrevert_cancellation_after_commit_reports_success(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "unrevert", "type": "unrevert_session_tree"},
                 None,
             )
@@ -2792,11 +2789,11 @@ def test_executor_unrevert_cancellation_after_commit_reports_success(
             release.set()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2849,17 +2846,17 @@ def test_executor_unrevert_reports_committed_leaf_after_concurrent_navigation(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "unrevert", "type": "unrevert_session_tree"},
                 None,
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2894,9 +2891,9 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for command in invalid_commands:
-                assert executor.dispatch(command, None).running_command is None
+                assert (await executor.dispatch(command, None)).running_command is None
 
-            no_session_cursor = executor.dispatch(
+            no_session_cursor = await executor.dispatch(
                 {
                     "id": "no-session-cursor",
                     "type": "get_session_tree",
@@ -2906,18 +2903,18 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
             )
             no_session_cursor_completed = await receive.receive()
             fixture.coordinator.running_command = no_session_cursor.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 no_session_cursor_completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             session = fixture.sessions.create()
             await session.append_message(Message(role="user", content="one"))
             fixture.session_state.session = session
             fixture.session_state.history = session.read_context_messages()
             fixture.session_state.entry_count = 1
-            unknown_cursor = executor.dispatch(
+            unknown_cursor = await executor.dispatch(
                 {
                     "id": "unknown-cursor",
                     "type": "get_session_tree",
@@ -2927,13 +2924,13 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
             )
             cursor_completed = await receive.receive()
             fixture.coordinator.running_command = unknown_cursor.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 cursor_completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
-            executor.dispatch(
+            await executor.dispatch(
                 {
                     "id": "missing-entry",
                     "type": "navigate_session_tree",
@@ -2999,7 +2996,7 @@ def test_executor_navigation_rejects_concurrent_leaf_change(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "navigate",
                     "type": "navigate_session_tree",
@@ -3009,11 +3006,11 @@ def test_executor_navigation_rejects_concurrent_leaf_change(
             )
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3044,7 +3041,7 @@ def test_executor_navigation_cancellation_before_commit_preserves_leaf(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             async with session._append_lock:
-                result = executor.dispatch(
+                result = await executor.dispatch(
                     {
                         "id": "navigate",
                         "type": "navigate_session_tree",
@@ -3058,11 +3055,11 @@ def test_executor_navigation_cancellation_before_commit_preserves_leaf(
                 result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3108,7 +3105,7 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "navigate",
                     "type": "navigate_session_tree",
@@ -3122,11 +3119,11 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
             release.set()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3185,7 +3182,7 @@ def test_executor_navigation_cancellation_during_no_op_reports_cancelled(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {
                     "id": "navigate",
                     "type": "navigate_session_tree",
@@ -3199,11 +3196,11 @@ def test_executor_navigation_cancellation_during_no_op_reports_cancelled(
             release.set()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3233,16 +3230,16 @@ def test_executor_clone_cancellation_before_commit_preserves_source(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            result = await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
             assert result.running_command is not None
             result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3289,18 +3286,18 @@ def test_executor_clone_cancellation_after_commit_reports_success(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            result = await executor.dispatch({"id": "clone", "type": "clone_session"}, None)
             assert result.running_command is not None
             await published.wait()
             result.running_command.cancel_scope.cancel()
             release.set()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
+            await fixture.coordinator.handle_event(
                 completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3378,7 +3375,7 @@ def test_executor_queue_commands_delegate_and_report_removed_items(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            results = [await executor.dispatch_async(command, running) for command in commands]
+            results = [await executor.dispatch(command, running) for command in commands]
             task_group.cancel_scope.cancel()
 
         assert all(result.running_command is running for result in results)
@@ -3442,8 +3439,8 @@ def test_executor_rejects_invalid_raw_queue_fields(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for command in commands:
-                await executor.dispatch_async(command, None)
-            await executor.dispatch_async({"id": "state", "type": "get_queue_state"}, None)
+                await executor.dispatch(command, None)
+            await executor.dispatch({"id": "state", "type": "get_queue_state"}, None)
             task_group.cancel_scope.cancel()
 
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
@@ -3484,11 +3481,11 @@ def test_executor_reports_empty_pop_and_clear_as_success(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch_async(
+            await executor.dispatch(
                 {"id": "pop", "type": "pop_queue", "kind": "steering"},
                 running,
             )
-            await executor.dispatch_async({"id": "clear", "type": "clear_queue"}, running)
+            await executor.dispatch({"id": "clear", "type": "clear_queue"}, running)
             task_group.cancel_scope.cancel()
 
         removed = [event for event in fixture.events if isinstance(event, QueueItemsRemoved)]
@@ -3542,7 +3539,7 @@ def test_executor_routes_queued_cancellation_through_coordinator(tmp_path: Path)
                 render_events=render_events,
             )
 
-            result = executor.dispatch(
+            result = await executor.dispatch(
                 {"id": "cancel", "type": "cancel", "target_id": "queued"},
                 None,
             )
@@ -3596,7 +3593,7 @@ def test_executor_synchronizes_running_command_before_cancellation(tmp_path: Pat
                 render_events=render_events,
             )
 
-            executor.dispatch(
+            await executor.dispatch(
                 {"id": "cancel", "type": "cancel", "target_id": "active"},
                 running,
             )

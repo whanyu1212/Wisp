@@ -49,7 +49,7 @@ def test_cli_renders_runtime_cleanup_failure(
     async def succeed(*_args: object, **_kwargs: object) -> None:
         pass
 
-    monkeypatch.setattr(cli_module, "_build_runtime_for_config", fake_build)
+    monkeypatch.setattr(cli_module, "build_runtime_for_config", fake_build)
     monkeypatch.setattr(cli_module, "_run_print_with_runtime", succeed)
 
     result = CliRunner().invoke(
@@ -91,14 +91,14 @@ def test_cli_frontends_close_runtime_when_execution_fails(
         raise _ExpectedFailure
 
     if frontend == "print":
-        monkeypatch.setattr(cli_module, "_build_runtime_for_config", fake_build)
+        monkeypatch.setattr(cli_module, "build_runtime_for_config", fake_build)
         monkeypatch.setattr(cli_module, "_run_print_with_runtime", fail)
 
         async def run() -> None:
             await cli_module._run_print("hello", config)
 
     else:
-        monkeypatch.setattr(rpc_module, "_build_runtime_for_config", fake_build)
+        monkeypatch.setattr(rpc_module, "build_runtime_for_config", fake_build)
         monkeypatch.setattr(rpc_module, "_run_rpc_with_runtime", fail)
 
         async def run() -> None:

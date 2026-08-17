@@ -13,6 +13,9 @@ from tests.cli_support import *
 from tests.cli_support import _test_model_registry
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
 from wisp.providers.fake import ScriptedProvider
+from wisp.rpc.configuration import _ConfigOverrides
+from wisp.rpc.execution import run_rpc_prompt_command
+from wisp.rpc.host import RpcTrustGate
 from wisp.skills.tool import SkillTool
 
 
@@ -108,7 +111,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
             await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
             await send.send(rpc._RpcInputClosed())
 
-    monkeypatch.setattr(rpc, "_build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
 
     async def scenario() -> None:
@@ -176,7 +179,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
             await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hi"}))
             await send.send(rpc._RpcInputClosed())
 
-    monkeypatch.setattr(rpc, "_build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
 
     async def scenario() -> list[dict[str, object]]:
@@ -304,7 +307,7 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
     # Regression test (Codex review on #125): an explicit in-session
     # "/model <id> <effort>" (or effort-only configure) run before trust
     # resolves must survive _rebuild_agent_for_trusted_project even when the
-    # model is unknown to the catalog -- _handle_rpc_configure_command already
+    # model is unknown to the catalog -- handle_rpc_configure_command already
     # accepts an explicit configure for an unknown model permissively (a
     # brand-new model ahead of a catalog update, or a custom provider), and
     # the rebuild must not silently re-drop it via startup_effort's
@@ -420,14 +423,13 @@ def test_rpc_trust_input_closed_yields_untrusted_no_hang(tmp_path: Path) -> None
 
 
 def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    from wisp.cli.rpc import _RpcTrustGate
     from wisp.trust import is_trusted
 
     project = tmp_path / "proj"
     project.mkdir()
     trust_file = tmp_path / "trust.json"
     monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
-    gate = _RpcTrustGate(project)
+    gate = RpcTrustGate(project, write_event=lambda _event: None)
 
     async def scenario() -> bool:
         decision: bool | None = None
@@ -463,14 +465,13 @@ def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: Monk
 def test_rpc_trust_transient_denial_with_reason_does_not_persist(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    from wisp.cli.rpc import _RpcTrustGate
     from wisp.trust import is_trusted
 
     project = tmp_path / "proj"
     project.mkdir()
     trust_file = tmp_path / "trust.json"
     monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
-    gate = _RpcTrustGate(project)
+    gate = RpcTrustGate(project, write_event=lambda _event: None)
 
     async def scenario() -> bool:
         decision: bool | None = None
@@ -507,9 +508,7 @@ def test_rpc_trust_transient_denial_with_reason_does_not_persist(
 def test_rpc_trust_command_round_trip(tmp_path: Path) -> None:
     # Drive the trust command directly against the gate to confirm resolve_request
     # matches on request_id and rejects unknown ids.
-    from wisp.cli.rpc import _RpcTrustGate
-
-    gate = _RpcTrustGate(Path.cwd())
+    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None)
     # No pending request yet -> unknown id rejected.
     assert gate.resolve_request(request_id="nope", trusted=True) is False
 
@@ -518,8 +517,6 @@ def test_rpc_gate_fires_on_first_trusted_callback(tmp_path: Path, monkeypatch: M
     # The rebuild hook runs exactly once when trust first resolves to True, so a
     # first-run session that approves trust can apply the project's settings before
     # the first turn.
-    from wisp.cli.rpc import _RpcTrustGate
-
     monkeypatch.setenv("WISP_TRUST", "1")
     calls = 0
 
@@ -527,7 +524,7 @@ def test_rpc_gate_fires_on_first_trusted_callback(tmp_path: Path, monkeypatch: M
         nonlocal calls
         calls += 1
 
-    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None, on_first_trusted=on_trusted)
 
     async def scenario() -> None:
         assert await gate.resolve() is True
@@ -544,7 +541,6 @@ def test_rpc_gate_propagates_rebuild_error(tmp_path: Path, monkeypatch: MonkeyPa
     # unknown provider), the error must propagate OUT of resolve() so the prompt task's
     # handler can report it as a normal rpc.command.finished failure — not escape and
     # tear down the RPC process with a silent stream end.
-    from wisp.cli.rpc import _RpcTrustGate
     from wisp.runtime.registry import UnknownProviderError
 
     monkeypatch.setenv("WISP_TRUST", "1")
@@ -552,7 +548,7 @@ def test_rpc_gate_propagates_rebuild_error(tmp_path: Path, monkeypatch: MonkeyPa
     async def on_trusted() -> None:
         raise UnknownProviderError("no-such-provider")
 
-    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None, on_first_trusted=on_trusted)
 
     async def scenario() -> None:
         with pytest.raises(UnknownProviderError):
@@ -568,7 +564,6 @@ def test_rpc_gate_does_not_cache_after_failed_rebuild(
     # prompt as failed, but the NEXT prompt returns the cached trust, skips the rebuild,
     # and silently runs the stale untrusted startup provider. Each prompt must re-attempt
     # the rebuild and fail the same way instead.
-    from wisp.cli.rpc import _RpcTrustGate
     from wisp.runtime.registry import UnknownProviderError
 
     monkeypatch.setenv("WISP_TRUST", "1")
@@ -579,7 +574,7 @@ def test_rpc_gate_does_not_cache_after_failed_rebuild(
         attempts += 1
         raise UnknownProviderError("no-such-provider")
 
-    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None, on_first_trusted=on_trusted)
 
     async def scenario() -> None:
         with pytest.raises(UnknownProviderError):
@@ -638,13 +633,12 @@ def test_trusted_provider_refresh_preserves_runtime_identities() -> None:
 def test_rpc_prompt_command_reports_rebuild_provider_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    # End-to-end through _run_rpc_prompt_command: a resolve() that raises
+    # End-to-end through run_rpc_prompt_command: a resolve() that raises
     # UnknownProviderError (the rebuild's failure mode) is caught and surfaced as an
     # rpc.command.finished with ok=false + error, never a silent process teardown.
     import io
     from contextlib import redirect_stdout
 
-    from wisp.cli.rpc import _RpcTrustGate, _run_rpc_prompt_command
     from wisp.runtime.registry import UnknownProviderError
     from wisp.sessions.jsonl import JsonlSessionStore
 
@@ -652,7 +646,11 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
         raise UnknownProviderError("no-such-provider")
 
     monkeypatch.setenv("WISP_TRUST", "1")
-    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    gate = RpcTrustGate(
+        Path.cwd(),
+        write_event=cli_module.rpc._write_json_event,
+        on_first_trusted=on_trusted,
+    )
     sessions = JsonlSessionStore(tmp_path)
     session = sessions.create()
 
@@ -668,7 +666,7 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
         with redirect_stdout(buf):
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
-                    cast(Any, _run_rpc_prompt_command),
+                    cast(Any, run_rpc_prompt_command),
                     _Agent(),
                     session,
                     (),
@@ -679,6 +677,8 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
                     anyio.CancelScope(),
                     send.clone(),
                     gate,
+                    cli_module.rpc._write_json_event,
+                    cli_module.rpc._render_json_events,
                 )
                 async with receive:
                     async for _ in receive:
@@ -697,8 +697,6 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
 def test_rpc_gate_does_not_fire_callback_when_untrusted(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    from wisp.cli.rpc import _RpcTrustGate
-
     monkeypatch.setenv("WISP_TRUST", "0")
     fired = False
 
@@ -706,7 +704,7 @@ def test_rpc_gate_does_not_fire_callback_when_untrusted(
         nonlocal fired
         fired = True
 
-    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None, on_first_trusted=on_trusted)
 
     async def scenario() -> None:
         assert await gate.resolve() is False
@@ -721,8 +719,6 @@ def test_config_overrides_gates_project_settings_on_trust(
     # _ConfigOverrides.build(trusted=...) is the rebuild's re-derivation: untrusted
     # ignores the project settings.json, trusted applies it.
     import json as _json
-
-    from wisp.cli.rpc import _ConfigOverrides
 
     monkeypatch.delenv("WISP_PROVIDER", raising=False)
     (tmp_path / ".wisp").mkdir()

@@ -5,7 +5,7 @@
 `FakeProvider` (used by the full-CLI `CliRunner` pattern in
 `test_rpc_configure.py`) has no observable trace of `effort` in its output,
 so it cannot prove the value actually reached the provider. `CapturingProvider`
-can -- these tests exercise `_handle_rpc_configure_command` directly against a
+can -- these tests exercise `_configure_rpc` directly against a
 runtime built around it, mirroring how `test_coding_session.py` already proves
 `CodingSession.effort` reaches the provider; what's missing is specifically
 whether the RPC command layer correctly sets `agent.effort`.
@@ -13,10 +13,15 @@ whether the RPC command layer correctly sets `agent.effort`.
 
 from __future__ import annotations
 
+from functools import partial
+
 from tests.cli_support import *
 from tests.cli_support import _test_model_registry
 from tests.test_coding_session import CapturingProvider
-from wisp.cli.rpc import _handle_rpc_configure_command
+from wisp.rpc.configuration import _RpcConfigureOverrides
+from wisp.rpc.execution import handle_rpc_configure_command
+
+_configure_rpc = partial(handle_rpc_configure_command, write_event=lambda _event: None)
 
 
 def _runtime_with_capturing_provider(provider: CapturingProvider) -> WispRuntime:
@@ -40,7 +45,7 @@ def test_configure_effort_sets_agent_effort(tmp_path: Path) -> None:
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"provider": "capturing", "effort": "high"},
         command_id="configure-1",
         command_type="configure",
@@ -56,7 +61,7 @@ def test_configure_auto_compaction_sets_agent_policy(tmp_path: Path) -> None:
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"auto_compaction_enabled": False},
         command_id="configure-1",
         command_type="configure",
@@ -67,7 +72,7 @@ def test_configure_auto_compaction_sets_agent_policy(tmp_path: Path) -> None:
     assert agent.auto_compaction_enabled is False
     assert agent.state_snapshot().auto_compaction_enabled is False
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"auto_compaction_enabled": True},
         command_id="configure-2",
         command_type="configure",
@@ -85,7 +90,7 @@ def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: 
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"effort": "medium"},
         command_id="configure-1",
         command_type="configure",
@@ -106,7 +111,7 @@ def test_configure_model_change_without_effort_resets_agent_effort(tmp_path: Pat
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "some-model"},
         command_id="configure-1",
         command_type="configure",
@@ -124,7 +129,7 @@ def test_configure_effort_only_command_leaves_it_alone_when_touched(tmp_path: Pa
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"effort": "high"},
         command_id="configure-1",
         command_type="configure",
@@ -140,7 +145,7 @@ def test_configure_model_change_with_explicit_effort_keeps_the_new_value(tmp_pat
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "some-model", "effort": "high"},
         command_id="configure-1",
         command_type="configure",
@@ -160,7 +165,7 @@ def test_configure_rejects_non_string_effort(tmp_path: Path) -> None:
     # the observable contract under test here is that agent.effort is left
     # untouched when validation rejects the command, not the emitted event
     # shape (already covered for provider/model by existing tests).
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"effort": 5},
         command_id="configure-1",
         command_type="configure",
@@ -172,14 +177,13 @@ def test_configure_rejects_non_string_effort(tmp_path: Path) -> None:
 
 
 def test_configure_overrides_records_effort(tmp_path: Path) -> None:
-    from wisp.cli.rpc import _RpcConfigureOverrides
 
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
     overrides = _RpcConfigureOverrides()
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"effort": "xhigh"},
         command_id="configure-1",
         command_type="configure",
@@ -194,7 +198,6 @@ def test_configure_overrides_records_effort(tmp_path: Path) -> None:
 
 
 def test_configure_overrides_effective_effort_falls_back_to_default_when_unset() -> None:
-    from wisp.cli.rpc import _RpcConfigureOverrides
 
     overrides = _RpcConfigureOverrides()
 
@@ -204,14 +207,13 @@ def test_configure_overrides_effective_effort_falls_back_to_default_when_unset()
 def test_model_only_configure_does_not_override_provider_without_auto_switch(
     tmp_path: Path,
 ) -> None:
-    from wisp.cli.rpc import _RpcConfigureOverrides
 
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
     overrides = _RpcConfigureOverrides()
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "custom-model"},
         command_id="configure-1",
         command_type="configure",
@@ -233,7 +235,7 @@ def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> N
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
         command_type="configure",
@@ -251,7 +253,7 @@ def test_configure_clear_effort_alone_is_accepted_without_model_or_provider(
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
         command_type="configure",
@@ -263,14 +265,13 @@ def test_configure_clear_effort_alone_is_accepted_without_model_or_provider(
 
 
 def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
-    from wisp.cli.rpc import _RpcConfigureOverrides
 
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
     overrides = _RpcConfigureOverrides()
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
         command_type="configure",
@@ -307,7 +308,7 @@ def test_configure_switching_provider_resets_stale_effort(tmp_path: Path) -> Non
         provider=first_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
     )
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"provider": "capturing-2"},
         command_id="configure-1",
         command_type="configure",
@@ -338,7 +339,7 @@ def test_configure_switching_provider_with_explicit_effort_keeps_the_new_value(
         provider=first_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
     )
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"provider": "capturing-2", "effort": "medium"},
         command_id="configure-1",
         command_type="configure",
@@ -359,7 +360,6 @@ class _OpenAINamedProvider(CapturingProvider):
 
 
 def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) -> None:
-    from wisp.cli.rpc import _RpcConfigureOverrides
 
     # Regression test: _auto_switch_provider_for_model changes agent.provider
     # via a separate code path from the explicit-provider branch above --
@@ -388,7 +388,7 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
     # "gpt-5.5-pro" unambiguously belongs to openai in the built-in catalog
     # (confirmed in tests/test_rpc_configure.py's auto-switch tests) -- no
     # explicit "provider" field here, only "model".
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "gpt-5.5-pro"},
         command_id="configure-1",
         command_type="configure",
@@ -421,7 +421,7 @@ def test_configure_model_only_auto_switch_with_explicit_effort_keeps_the_new_val
         provider=fake_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
     )
 
-    _handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "gpt-5.5-pro", "effort": "medium"},
         command_id="configure-1",
         command_type="configure",

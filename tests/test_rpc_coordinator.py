@@ -42,6 +42,10 @@ def _command_type(command: dict[str, object]) -> str:
     return value if isinstance(value, str) else "unknown"
 
 
+async def _ignore_reject(_command: dict[str, object], _message: str) -> None:
+    return None
+
+
 def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
     async def scenario() -> None:
         history = (Message(role="user", content="done"),)
@@ -60,7 +64,7 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
         coordinator = RpcCoordinator(state)
         dispatched: list[str] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -71,7 +75,7 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
         should_shutdown = await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -102,13 +106,16 @@ def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> Non
             ]
         )
 
+        async def dispatch(
+            _command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            return _RpcDispatchResult(running_command=running, reset_session=True)
+
         await coordinator.run(
             receiver,
-            dispatch=lambda _command, running: _RpcDispatchResult(
-                running_command=running,
-                reset_session=True,
-            ),
-            reject=lambda _command, _message: None,
+            dispatch=dispatch,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -132,12 +139,12 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
         coordinator.queued_commands.append({"id": "prompt", "type": "prompt"})
         dispatched: list[str] = []
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "new", "type": "new_session"}),
             dispatch=lambda command, running: (
                 dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
             ),
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -164,12 +171,12 @@ def test_coordinator_queues_new_session_behind_active_ordered_read(
         coordinator.running_command = background
         dispatched: list[str] = []
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "new", "type": "new_session"}),
             dispatch=lambda command, running: (
                 dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
             ),
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -198,7 +205,7 @@ def test_coordinator_queues_new_session_behind_work_waiting_on_stats_async() -> 
         async def reject(_command: dict[str, object], _message: str) -> None:
             raise AssertionError("new_session should be queued, not rejected")
 
-        await coordinator.handle_event_async(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "new", "type": "new_session"}),
             dispatch=dispatch,
             reject=reject,
@@ -256,7 +263,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[str] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -282,7 +289,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -328,7 +335,7 @@ def test_coordinator_dispatches_busy_configure_for_rejection_async() -> None:
         async def reject(_command: dict[str, object], _message: str) -> None:
             raise AssertionError("configure should reach the executor for busy rejection")
 
-        await coordinator.handle_event_async(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "configure", "type": "configure"}),
             dispatch=dispatch,
             reject=reject,
@@ -347,7 +354,7 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready(run_type: str) ->
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[str] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -357,26 +364,26 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready(run_type: str) ->
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(_RpcRunningCommand(command_id, run_type, anyio.CancelScope()))
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "run", "type": run_type}),
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "steer", "type": "steer"}),
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
         assert dispatched == ["run"]
         assert list(coordinator.pending_prompt_queue_commands) == [{"id": "steer", "type": "steer"}]
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcPromptReady("run"),
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -402,7 +409,7 @@ def test_coordinator_async_buffers_init_queue_until_ready() -> None:
         async def reject(_command: dict[str, object], _message: str) -> None:
             raise AssertionError("command unexpectedly rejected")
 
-        await coordinator.handle_event_async(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "follow-up", "type": "follow_up"}),
             dispatch=dispatch,
             reject=reject,
@@ -410,7 +417,7 @@ def test_coordinator_async_buffers_init_queue_until_ready() -> None:
         )
         assert dispatched == []
 
-        await coordinator.handle_event_async(
+        await coordinator.handle_event(
             _RpcPromptReady("init"),
             dispatch=dispatch,
             reject=reject,
@@ -427,17 +434,17 @@ def test_coordinator_dispatches_new_session_while_init_is_running() -> None:
         sync_coordinator.running_command = _RpcRunningCommand("init", "init", anyio.CancelScope())
         sync_dispatched: list[str] = []
 
-        def sync_dispatch(
+        async def sync_dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
             sync_dispatched.append(str(command["id"]))
             return _RpcDispatchResult(running)
 
-        sync_coordinator.handle_event(
+        await sync_coordinator.handle_event(
             _RpcInputCommand({"id": "new-sync", "type": "new_session"}),
             dispatch=sync_dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
         assert sync_dispatched == ["new-sync"]
@@ -457,7 +464,7 @@ def test_coordinator_dispatches_new_session_while_init_is_running() -> None:
         async def reject(_command: dict[str, object], _message: str) -> None:
             raise AssertionError("command unexpectedly rejected")
 
-        await async_coordinator.handle_event_async(
+        await async_coordinator.handle_event(
             _RpcInputCommand({"id": "new-async", "type": "new_session"}),
             dispatch=async_dispatch,
             reject=reject,
@@ -474,7 +481,7 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[tuple[str, str | None]] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -486,19 +493,19 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
                 )
             return _RpcDispatchResult(running)
 
-        def handle(command: dict[str, object]) -> None:
-            coordinator.handle_event(
+        async def handle(command: dict[str, object]) -> None:
+            await coordinator.handle_event(
                 _RpcInputCommand(command),
                 dispatch=dispatch,
-                reject=lambda _command, _message: None,
+                reject=_ignore_reject,
                 command_type=_command_type,
             )
 
-        handle({"id": "prompt", "type": "prompt"})
-        handle({"id": "steer", "type": "steer"})
-        handle({"id": "queued", "type": "compact"})
-        handle({"id": "state-before", "type": "get_state"})
-        handle({"id": "commands-before", "type": "get_commands"})
+        await handle({"id": "prompt", "type": "prompt"})
+        await handle({"id": "steer", "type": "steer"})
+        await handle({"id": "queued", "type": "compact"})
+        await handle({"id": "state-before", "type": "get_state"})
+        await handle({"id": "commands-before", "type": "get_commands"})
 
         assert dispatched == [
             ("prompt", None),
@@ -508,14 +515,14 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
         assert list(coordinator.pending_prompt_queue_commands) == [{"id": "steer", "type": "steer"}]
         assert list(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcPromptReady("prompt"),
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
-        handle({"id": "state-after", "type": "get_state"})
-        handle({"id": "commands-after", "type": "get_commands"})
+        await handle({"id": "state-after", "type": "get_state"})
+        await handle({"id": "commands-after", "type": "get_commands"})
 
         assert dispatched == [
             ("prompt", None),
@@ -559,7 +566,7 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
             coordinator.running_command = running_command
             dispatched: list[tuple[str, str | None]] = []
 
-            def dispatch(
+            async def dispatch(
                 command: dict[str, object],
                 running: _RpcRunningCommand | None,
             ) -> _RpcDispatchResult:
@@ -571,16 +578,16 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 )
                 return _RpcDispatchResult(running)
 
-            coordinator.handle_event(
+            await coordinator.handle_event(
                 _RpcInputCommand({"id": "state", "type": "get_state"}),
                 dispatch=dispatch,
-                reject=lambda _command, _message: None,
+                reject=_ignore_reject,
                 command_type=_command_type,
             )
-            coordinator.handle_event(
+            await coordinator.handle_event(
                 _RpcInputCommand({"id": "commands", "type": "get_commands"}),
                 dispatch=dispatch,
-                reject=lambda _command, _message: None,
+                reject=_ignore_reject,
                 command_type=_command_type,
             )
 
@@ -619,10 +626,10 @@ def test_coordinator_applies_derived_session_from_async_completion(tmp_path: Pat
             anyio.CancelScope(),
         )
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcCommandCompleted("clone", "clone_session", True, history, 1, session),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -656,7 +663,7 @@ def test_coordinator_emits_post_apply_events_after_selecting_session(tmp_path: P
             entry_count=0,
         )
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcCommandCompleted(
                 "select",
                 "select_session",
@@ -667,7 +674,7 @@ def test_coordinator_emits_post_apply_events_after_selecting_session(tmp_path: P
                 (selected,),
             ),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -689,10 +696,10 @@ def test_coordinator_ignores_selected_session_on_failed_completion(tmp_path: Pat
             anyio.CancelScope(),
         )
 
-        coordinator.handle_event(
+        await coordinator.handle_event(
             _RpcCommandCompleted("select", "select_session", False, (), 0, attempted),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -716,7 +723,7 @@ def test_coordinator_ignores_stale_prompt_readiness() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[tuple[str, str | None]] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -729,7 +736,7 @@ def test_coordinator_ignores_stale_prompt_readiness() -> None:
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -754,7 +761,7 @@ def test_coordinator_does_not_retarget_queue_commands_when_prompt_fails_before_r
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[tuple[str, str | None]] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -767,7 +774,7 @@ def test_coordinator_does_not_retarget_queue_commands_when_prompt_fails_before_r
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -796,7 +803,7 @@ def test_coordinator_rejects_duplicate_running_and_allows_reuse_after_completion
         dispatched: list[str] = []
         rejected: list[tuple[dict[str, object], str]] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -804,10 +811,13 @@ def test_coordinator_rejects_duplicate_running_and_allows_reuse_after_completion
             dispatched.append(command_id)
             return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda command, message: rejected.append((command, message)),
+            reject=reject,
             command_type=_command_type,
         )
 
@@ -828,11 +838,20 @@ def test_coordinator_rejects_duplicate_ids_in_both_queues() -> None:
         coordinator.queued_commands.append({"id": "queued", "type": "prompt", "prompt": "later"})
         rejected: list[tuple[dict[str, object], str]] = []
 
+        async def dispatch(
+            _command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            return _RpcDispatchResult(running)
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
         for command_id in ("pending", "queued"):
-            coordinator.handle_event(
+            await coordinator.handle_event(
                 _RpcInputCommand({"id": command_id, "type": "prompt", "prompt": "duplicate"}),
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda command, message: rejected.append((command, message)),
+                dispatch=dispatch,
+                reject=reject,
                 command_type=_command_type,
             )
 
@@ -870,7 +889,7 @@ def test_coordinator_rejects_duplicate_running_id_async() -> None:
         async def reject(command: dict[str, object], message: str) -> None:
             rejected.append((command, message))
 
-        await coordinator.handle_event_async(
+        await coordinator.handle_event(
             _RpcInputCommand({"id": "same", "type": "get_state"}),
             dispatch=dispatch,
             reject=reject,
@@ -901,17 +920,20 @@ def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
         )
         rejected: list[tuple[str, str]] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda command, message: rejected.append((str(command["id"]), message)),
+            reject=reject,
             command_type=_command_type,
         )
 
@@ -944,7 +966,7 @@ def test_coordinator_ignores_stale_completion_and_closes_decisions_once() -> Non
             input_closed_handlers=(on_closed,),
         )
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -955,7 +977,7 @@ def test_coordinator_ignores_stale_completion_and_closes_decisions_once() -> Non
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 
@@ -979,7 +1001,7 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         dispatched: list[str] = []
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -997,7 +1019,7 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown() -> None:
             await coordinator.run(
                 receiver,
                 dispatch=dispatch,
-                reject=lambda _command, _message: None,
+                reject=_ignore_reject,
                 command_type=_command_type,
             )
         ) is False
@@ -1038,7 +1060,7 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown_async() -> No
             return None
 
         assert (
-            await coordinator.run_async(
+            await coordinator.run(
                 receiver,
                 dispatch=dispatch,
                 reject=reject,
@@ -1109,7 +1131,7 @@ def test_coordinator_awaits_completion_events_before_next_async_dispatch() -> No
             return None
 
         async def run_coordinator() -> None:
-            await coordinator.run_async(
+            await coordinator.run(
                 receiver,
                 dispatch=dispatch,
                 reject=reject,
@@ -1153,7 +1175,7 @@ def test_coordinator_drains_buffered_control_before_idle_shutdown_async() -> Non
             return None
 
         assert (
-            await coordinator.run_async(
+            await coordinator.run(
                 receiver,
                 dispatch=dispatch,
                 reject=reject,
@@ -1165,7 +1187,7 @@ def test_coordinator_drains_buffered_control_before_idle_shutdown_async() -> Non
     anyio.run(scenario)
 
 
-def test_coordinator_returns_immediately_after_shutdown_dispatch() -> None:
+def test_coordinator_rejects_buffered_work_before_idle_shutdown_dispatch() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
@@ -1174,19 +1196,32 @@ def test_coordinator_returns_immediately_after_shutdown_dispatch() -> None:
             ]
         )
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def dispatch(
+            _command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            return _RpcDispatchResult(running, should_shutdown=True)
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
 
         should_shutdown = await coordinator.run(
             receiver,
-            dispatch=lambda _command, running: _RpcDispatchResult(
-                running,
-                should_shutdown=True,
-            ),
-            reject=lambda _command, _message: None,
+            dispatch=dispatch,
+            reject=reject,
             command_type=_command_type,
         )
 
         assert should_shutdown is True
-        assert len(receiver.events) == 1
+        assert not receiver.events
+        assert rejected == [
+            (
+                {"id": "unreached", "type": "prompt"},
+                "RPC command rejected because shutdown is pending",
+            )
+        ]
 
     anyio.run(scenario)
 
@@ -1218,7 +1253,7 @@ def test_coordinator_accepts_compatibility_event_types() -> None:
             command_completed_type=CompatCommandCompleted,
         )
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
@@ -1229,7 +1264,7 @@ def test_coordinator_accepts_compatibility_event_types() -> None:
         await coordinator.run(
             receiver,
             dispatch=dispatch,
-            reject=lambda _command, _message: None,
+            reject=_ignore_reject,
             command_type=_command_type,
         )
 

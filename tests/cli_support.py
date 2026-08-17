@@ -29,6 +29,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderToolCallCompleted,
 )
+from wisp.rpc import host as rpc_host_module
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
@@ -370,5 +371,6 @@ __all__ = [
     "io",
     "json",
     "os",
+    "rpc_host_module",
     "sys",
 ]

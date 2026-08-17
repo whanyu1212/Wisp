@@ -2735,7 +2735,7 @@ def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
     # Regression test (Codex review on #125): TuiShell resolves its own
     # config.effort independently, via its own WispConfig.from_env() call in
     # the same process launch as the separate RPC subprocess -- so it must
-    # apply the same provider/model effort-scoping wisp.cli.rpc's
+    # apply the same provider/model effort-scoping as the shared RPC executor's
     # startup_effort() call performs on the CodingSession side, or the picker
     # would seed a stale/incompatible tier into its "current" row (see
     # ModelPicker.show) even after the RPC side had already filtered it out.
@@ -3396,12 +3396,12 @@ def test_tui_shell_typed_model_command_effort_permissive_for_qualified_unknown_m
 
 
 def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
-    # Regression test (Codex review on #125): _handle_rpc_configure_command
+    # Regression test (Codex review on #125): handle_rpc_configure_command
     # unconditionally resets agent.effort to None whenever a configure carries
     # `model` (or `provider`) and no explicit `effort` -- via an explicit
     # provider switch, a model-triggered auto-switch, or a same-provider model
     # change (the old tier may not be valid for the new model; see
-    # wisp.cli.rpc's has_model branch). Before this fix, the shell only
+    # the shared RPC executor's has_model branch). Before this fix, the shell only
     # cleared current_effort/the persisted setting when the picker's explicit
     # clear-token was sent, leaving both stale (and the picker seeding a tier
     # the backend no longer uses) after a plain "/model <id>" with no effort
@@ -3435,7 +3435,7 @@ def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -
 
 def test_tui_shell_provider_command_clears_stale_effort() -> None:
     # Same server-side unconditional-reset rule as the /model regression above
-    # (wisp.cli.rpc's has_provider branch), exercised via /provider instead.
+    # (the shared RPC executor's has_provider branch), exercised via /provider instead.
     async def run(tmp_path: Path) -> None:
         controller = ScriptedController()
         console, output = _console()
@@ -3564,7 +3564,7 @@ def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() ->
 def test_tui_shell_adopts_server_side_auto_switched_provider(tmp_path: Path) -> None:
     # Regression test: a model-only /model <id> can resolve server-side to a
     # different provider than the one the TUI thinks is active (see
-    # _auto_switch_provider_for_model in wisp.cli.rpc). Without handling
+    # auto_switch_provider_for_model in wisp.rpc.execution). Without handling
     # ModelProviderAutoSwitched, the shell would only update current_model and
     # leave current_provider stale, so /provider, /auth, and the header would
     # keep showing the old provider even though the RPC agent had moved on.
