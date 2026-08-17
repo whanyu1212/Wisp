@@ -7,6 +7,7 @@ import pytest
 from textual.content import Content
 from textual.widget import Widget
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
 from wisp.tui.history import (
     TUI_HISTORY_PAGE_LIMIT,
@@ -449,6 +450,32 @@ def test_history_controller_replays_denied_process_operation_with_reason(
     process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
     assert process_widget.status == expected_status
     assert process_widget.detail == "not now"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [("poll", "poll_interrupted"), ("cancel", "cancel_interrupted")],
+)
+def test_history_controller_replays_interrupted_process_operation(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    interrupted = HistoricalToolCard(
+        card_id="history:interrupted",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output=INTERRUPTED_TOOL_RESULT_TEXT,
+        is_error=True,
+        status="cancelled",
+        tool_call_id="process-1",
+    )
+
+    controller.replace_entries((interrupted,), session_label="Interrupted")
+
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    assert process_widget.status == expected_status
 
 
 def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:

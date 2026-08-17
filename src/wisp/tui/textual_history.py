@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 from textual.content import Content
 from textual.widget import Widget
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
@@ -691,6 +692,11 @@ class TextualHistoryController:
             historical_status = historical_tool_status(observation)
             if historical_status == "denied":
                 lifecycle.deny(identity.operation, observation.output or "denied")
+            elif (
+                historical_status == "cancelled"
+                and observation.output == INTERRUPTED_TOOL_RESULT_TEXT
+            ):
+                lifecycle.interrupt(identity.operation)
             else:
                 state, output = historical_process_observation(
                     identity.process_id,
