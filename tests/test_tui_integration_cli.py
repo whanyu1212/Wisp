@@ -2001,10 +2001,13 @@ def test_textual_paging_older_polls_keeps_live_process_card_untouched() -> None:
     cards = anyio.run(scenario)
 
     assert len(cards) == 2
-    assert any("older output" in card for card in cards)
     live = next(card for card in cards if card.startswith("• Polling process"))
+    history = next(card for card in cards if card != live)
     assert "newer output" in live
     assert "older output" not in live
+    assert "older output" in history
+    assert "newer output" not in history
+    assert "· 1 poll" in history
 
 
 def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:

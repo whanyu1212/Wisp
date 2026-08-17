@@ -190,6 +190,7 @@ class TextualHistoryController:
         self._boundary_tool_calls: dict[str, _BoundaryToolCall] = {}
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
+        self._transferred_history_card_ids: dict[Widget, set[str]] = {}
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
         self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
@@ -285,6 +286,17 @@ class TextualHistoryController:
     def transfer_widget_to_live(self, widget: Widget) -> None:
         """Detach historical aliases when a resumed process card becomes live-owned."""
 
+        entries_by_id = {item.id: item.entry for item in self._window.visible}
+        transferred_card_ids = {
+            entry.card_id
+            for entry_id, candidate in self._widgets.items()
+            if candidate is widget
+            and isinstance((entry := entries_by_id.get(entry_id)), HistoricalToolCard)
+        }
+        if transferred_card_ids:
+            self._transferred_history_card_ids.setdefault(widget, set()).update(
+                transferred_card_ids
+            )
         self._widgets = {
             entry_id: candidate
             for entry_id, candidate in self._widgets.items()
@@ -295,6 +307,7 @@ class TextualHistoryController:
         """Allow an evicted live entry to reappear through durable history paging."""
 
         self._live_entries = [entry for entry in self._live_entries if entry.widget is not widget]
+        self._transferred_history_card_ids.pop(widget, None)
         snapshot = self._latest_reload_live_entries
         if snapshot is not None:
             self._latest_reload_live_entries = tuple(
@@ -465,6 +478,7 @@ class TextualHistoryController:
         self._next_entry_id = 0
         if clear_live:
             self._live_entries.clear()
+            self._transferred_history_card_ids.clear()
         self._latest_reload_live_entries = None
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
@@ -570,7 +584,15 @@ class TextualHistoryController:
         """Apply only the changed edges of the retained history window."""
 
         visible = self._window.visible
-        process_groups = self._historical_process_groups(visible)
+        live_owned_history_card_ids = (
+            set().union(*self._transferred_history_card_ids.values())
+            if self._transferred_history_card_ids
+            else set()
+        )
+        process_groups = self._historical_process_groups(
+            visible,
+            excluded_card_ids=live_owned_history_card_ids,
+        )
         visible_ids = {item.id for item in visible}
         reposition_widgets: set[Widget] = set()
         self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
@@ -598,6 +620,11 @@ class TextualHistoryController:
                 self._surface.remove_historical_widget(widget)
 
         for index, item in enumerate(visible):
+            if (
+                isinstance(item.entry, HistoricalToolCard)
+                and item.entry.card_id in live_owned_history_card_ids
+            ):
+                continue
             process_group = process_groups.get(item.id)
             if item.id in self._widgets:
                 if process_group is not None and item.id == process_group.first_entry_id:
@@ -677,12 +704,17 @@ class TextualHistoryController:
     @staticmethod
     def _historical_process_groups(
         visible: tuple[_RetainedHistoryEntry, ...],
+        *,
+        excluded_card_ids: set[str] | None = None,
     ) -> dict[int, _HistoricalProcessGroup]:
         """Project visible poll/cancel records into stable process-level groups."""
 
+        excluded_card_ids = excluded_card_ids or set()
         split_results: dict[str, deque[_RetainedHistoryEntry]] = {}
         for item in visible:
             entry = item.entry
+            if isinstance(entry, HistoricalToolCard) and entry.card_id in excluded_card_ids:
+                continue
             if (
                 isinstance(entry, HistoricalToolCard)
                 and entry.call_missing
@@ -693,6 +725,8 @@ class TextualHistoryController:
         paired_result_ids: set[int] = set()
         for item in visible:
             entry = item.entry
+            if isinstance(entry, HistoricalToolCard) and entry.card_id in excluded_card_ids:
+                continue
             if (
                 isinstance(entry, HistoricalToolCard)
                 and entry.missing_result
@@ -707,7 +741,11 @@ class TextualHistoryController:
         member_ids: dict[str, set[int]] = {}
         for item in visible:
             entry = item.entry
-            if not isinstance(entry, HistoricalToolCard) or item.id in paired_result_ids:
+            if (
+                not isinstance(entry, HistoricalToolCard)
+                or entry.card_id in excluded_card_ids
+                or item.id in paired_result_ids
+            ):
                 continue
             observation = entry
             observation_member_ids = {item.id}
