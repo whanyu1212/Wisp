@@ -114,6 +114,7 @@ class TextualTranscriptController:
         self._historical_tool_cards: dict[str, ToolCard] = {}
         self._historical_widgets: set[ToolCard] = set()
         self._working_indicator: WorkingIndicator | None = None
+        self._working_indicator_generation = 0
         self._card_focus_was_following = False
 
     @property
@@ -133,6 +134,15 @@ class TextualTranscriptController:
         """Return the transient activity widget, if one is currently mounted."""
 
         return self._working_indicator
+
+    @property
+    def working_indicator_identity(self) -> tuple[WorkingIndicator, int] | None:
+        """Return the current indicator and its logical turn-ownership generation."""
+
+        indicator = self._working_indicator
+        if indicator is None:
+            return None
+        return indicator, self._working_indicator_generation
 
     @property
     def settled_widget_count(self) -> int:
@@ -178,6 +188,12 @@ class TextualTranscriptController:
         indicator.restart_working()
         self._mount_working_indicator(indicator)
 
+    def renew_working_indicator(self) -> None:
+        """Give an existing heartbeat to a newer model turn without remounting it."""
+
+        self._working_indicator_generation += 1
+        self.show_working_indicator()
+
     def show_retry_indicator(self, label: str) -> None:
         """Show or refresh the transcript's provider-retry indicator."""
 
@@ -202,6 +218,7 @@ class TextualTranscriptController:
         if not self._surface.transcript_available():
             return
         self.hide_working_indicator()
+        self._working_indicator_generation += 1
         indicator = WorkingIndicator()
         indicator.restart_working()
         self._mount_working_indicator(indicator)
@@ -213,10 +230,17 @@ class TextualTranscriptController:
         if indicator is not None:
             self.hide_working_indicator_if_current(indicator)
 
-    def hide_working_indicator_if_current(self, indicator: WorkingIndicator) -> None:
-        """Remove ``indicator`` only if it still belongs to the active command."""
+    def hide_working_indicator_if_current(
+        self,
+        indicator: WorkingIndicator,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Remove ``indicator`` only if it still belongs to the captured model turn."""
 
         if self._working_indicator is not indicator:
+            return
+        if generation is not None and generation != self._working_indicator_generation:
             return
         self._working_indicator = None
         self.discard_unseen_output(indicator)

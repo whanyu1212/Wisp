@@ -4141,9 +4141,13 @@ def test_textual_first_visible_stream_frame_removes_working_indicator(
             await original_append(widget, fragment)
             ordering.append("stream visible")
 
-        def track_hide(indicator: WorkingIndicator) -> None:
+        def track_hide(
+            indicator: WorkingIndicator,
+            *,
+            generation: int | None = None,
+        ) -> None:
             ordering.append("indicator removed")
-            original_hide(indicator)
+            original_hide(indicator, generation=generation)
 
         monkeypatch.setattr(StreamMessage, "append_markdown", track_append)
         monkeypatch.setattr(
@@ -4229,6 +4233,32 @@ def test_old_stream_completion_does_not_remove_a_new_prompt_indicator() -> None:
             )
 
     assert anyio.run(scenario)
+
+
+def test_flushed_stream_does_not_retire_indicator_reused_by_a_later_turn() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            indicator = app_instance._transcript_controller.working_indicator
+            renderer.token_delta("first response")
+            renderer.end_token_stream_with_content("first response")
+
+            # TurnStarted refreshes the current object rather than remounting it.
+            # The flushed stream's deferred finalizer must respect the new logical
+            # owner even though object identity did not change.
+            renderer.event(TurnStarted(turn=2))
+            reused = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return (
+                reused is indicator,
+                app_instance._transcript_controller.working_indicator is reused,
+            )
+
+    reused_same_widget, retained_for_later_turn = anyio.run(scenario)
+
+    assert reused_same_widget
+    assert retained_for_later_turn
 
 
 def test_textual_stream_widget_is_available_before_async_finalization() -> None:

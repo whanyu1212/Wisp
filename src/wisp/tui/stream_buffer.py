@@ -38,6 +38,7 @@ class _StreamTurn:
     widget: StreamMessage
     mounted: AwaitMount
     working_indicator: WorkingIndicator | None = None
+    working_indicator_generation: int | None = None
     working_indicator_retired: bool = False
     source_fragments: list[str] = field(default_factory=list)
     completed_content: str | None = None
@@ -115,10 +116,14 @@ class MarkdownStreamController:
                 return
             widget = StreamMessage()
             mounted = self._app.mount_stream_widget(widget)
+            working_indicator = self._app.working_indicator_for_stream()
             turn = _StreamTurn(
                 widget=widget,
                 mounted=mounted,
-                working_indicator=self._app.working_indicator_for_stream(),
+                working_indicator=(working_indicator[0] if working_indicator is not None else None),
+                working_indicator_generation=(
+                    working_indicator[1] if working_indicator is not None else None
+                ),
             )
             self._turn = turn
             self._last_completed_widget = None
@@ -399,9 +404,14 @@ class MarkdownStreamController:
             return
         turn.working_indicator_retired = True
         indicator = turn.working_indicator
+        generation = turn.working_indicator_generation
         turn.working_indicator = None
-        if indicator is not None:
-            self._app.hide_working_indicator_if_current(indicator)
+        turn.working_indicator_generation = None
+        if indicator is not None and generation is not None:
+            self._app.hide_working_indicator_if_current(
+                indicator,
+                generation=generation,
+            )
 
     def _anchor_stream_tail(self, turn: _StreamTurn, transcript: Transcript) -> None:
         """Pin one followed stream inside the compositor pass that grows it."""

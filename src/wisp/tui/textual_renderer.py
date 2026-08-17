@@ -197,7 +197,7 @@ class TextualTuiRenderer:
         self._progress_turn = turn
         self._response_started = False
         self._retry_attempt = 0
-        self.app.show_working_indicator()
+        self.app.renew_working_indicator()
 
     def _provider_retrying(self, event: ProviderRetrying) -> None:
         if not self._progress_active:
@@ -223,7 +223,7 @@ class TextualTuiRenderer:
         self._progress_turn = turn
         self._response_started = True
         self._retry_attempt = 0
-        self.app.show_working_indicator()
+        self.app.renew_working_indicator()
 
     def _forget_live_widget(self, widget: Widget) -> None:
         """Release history and process lifecycle state after bounded UI eviction."""

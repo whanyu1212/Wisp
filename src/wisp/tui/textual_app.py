@@ -2444,6 +2444,11 @@ class TextualTui(App[None]):
     def show_working_indicator(self) -> None:
         self._transcript_controller.show_working_indicator()
 
+    def renew_working_indicator(self) -> None:
+        """Transfer the heartbeat to a newer model turn without remounting it."""
+
+        self._transcript_controller.renew_working_indicator()
+
     def show_retry_indicator(self, label: str) -> None:
         self._transcript_controller.show_retry_indicator(label)
 
@@ -2458,25 +2463,37 @@ class TextualTui(App[None]):
     def hide_working_indicator(self) -> None:
         self._transcript_controller.hide_working_indicator()
 
-    def working_indicator_for_stream(self) -> WorkingIndicator | None:
-        """Capture the heartbeat owned by a newly mounted assistant stream."""
+    def working_indicator_for_stream(self) -> tuple[WorkingIndicator, int] | None:
+        """Capture the heartbeat lease owned by a newly mounted assistant stream."""
 
-        return self._transcript_controller.working_indicator
+        return self._transcript_controller.working_indicator_identity
 
-    def hide_working_indicator_if_current(self, indicator: WorkingIndicator) -> None:
-        """Retire a stream's heartbeat without touching a newer command's indicator."""
+    def hide_working_indicator_if_current(
+        self,
+        indicator: WorkingIndicator,
+        *,
+        generation: int,
+    ) -> None:
+        """Retire a stream heartbeat only while its captured turn still owns it."""
 
-        self._transcript_controller.hide_working_indicator_if_current(indicator)
+        self._transcript_controller.hide_working_indicator_if_current(
+            indicator,
+            generation=generation,
+        )
 
     def hide_working_indicator_after_stream(self) -> None:
         """Remove the current heartbeat with the completed stream's final layout."""
 
-        indicator = self._transcript_controller.working_indicator
-        if indicator is None:
+        identity = self._transcript_controller.working_indicator_identity
+        if identity is None:
             return
+        indicator, generation = identity
 
         def hide_if_current() -> None:
-            self._transcript_controller.hide_working_indicator_if_current(indicator)
+            self._transcript_controller.hide_working_indicator_if_current(
+                indicator,
+                generation=generation,
+            )
 
         if not self._stream.defer_until_latest_stream_settles(hide_if_current):
             hide_if_current()
