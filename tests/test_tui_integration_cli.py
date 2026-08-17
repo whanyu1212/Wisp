@@ -19,6 +19,7 @@ from textual.widgets import Header, Label, OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
@@ -1968,8 +1969,56 @@ def test_textual_process_cancellation_settles_the_shared_card() -> None:
     assert rendered.startswith("• Process cancelled proc-1 · 1 poll")
 
 
-def test_textual_denied_process_poll_does_not_claim_process_cancellation() -> None:
+@pytest.mark.parametrize(
+    ("operation", "expected_action"),
+    [
+        ("poll", "Process poll denied"),
+        ("cancel", "Process cancellation denied"),
+    ],
+)
+def test_textual_denied_process_operation_retains_reason_after_result(
+    operation: str,
+    expected_action: str,
+) -> None:
     async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="process-1",
+                    name="bash",
+                    arguments={"operation": operation, "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="process-1",
+                    name="bash",
+                    approved=False,
+                    reason="not now",
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="process-1",
+                    name="bash",
+                    output="not now",
+                    is_error=True,
+                    process_state="cancelled",
+                )
+            )
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith(f"• {expected_action} proc-1")
+    assert "not now" in rendered
+    assert "Process cancelled" not in rendered
+
+
+def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() -> None:
+    async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(
@@ -1980,20 +2029,27 @@ def test_textual_denied_process_poll_does_not_claim_process_cancellation() -> No
                 )
             )
             renderer.event(
-                ToolApprovalResolved(
+                ToolResultReady(
                     call_id="poll-1",
                     name="bash",
-                    approved=False,
-                    reason="not now",
+                    output=INTERRUPTED_TOOL_RESULT_TEXT,
+                    is_error=True,
+                    process_state="cancelled",
+                    failure_code="internal_error",
+                    retryable=True,
+                    recovery_hint=("Retry the tool call if its effects can be safely repeated."),
                 )
             )
             await pilot.pause()
-            return app_instance.query_one(ProcessCard).render().plain
+            card = app_instance.query_one(ProcessCard)
+            return card.render().plain, card._status, card._timer is None
 
-    rendered = anyio.run(scenario)
+    rendered, status, timer_stopped = anyio.run(scenario)
 
-    assert rendered.startswith("• Process poll denied proc-1 · 1 poll")
+    assert rendered.startswith("• Process poll interrupted proc-1 · 1 poll")
     assert "Process cancelled" not in rendered
+    assert status == "cancelled"
+    assert timer_stopped
 
 
 def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:

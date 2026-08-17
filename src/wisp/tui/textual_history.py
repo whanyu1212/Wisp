@@ -688,17 +688,21 @@ class TextualHistoryController:
             first_ids.setdefault(identity.process_id, item.id)
             member_ids.setdefault(identity.process_id, set()).update(observation_member_ids)
             lifecycle.begin(identity.operation)
-            state, output = historical_process_observation(
-                identity.process_id,
-                observation.output,
-            )
-            lifecycle.observe(
-                operation=identity.operation,
-                state=state,
-                fallback_output=output,
-                source_truncated=observation.truncated,
-                failed=historical_tool_status(observation) == "error",
-            )
+            historical_status = historical_tool_status(observation)
+            if historical_status == "denied":
+                lifecycle.deny(identity.operation, observation.output or "denied")
+            else:
+                state, output = historical_process_observation(
+                    identity.process_id,
+                    observation.output,
+                )
+                lifecycle.observe(
+                    operation=identity.operation,
+                    state=state,
+                    fallback_output=output,
+                    source_truncated=observation.truncated,
+                    failed=historical_status == "error",
+                )
 
         by_entry_id: dict[int, _HistoricalProcessGroup] = {}
         for process_id, lifecycle in lifecycles.items():

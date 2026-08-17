@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     AgentCompleted,
     CompactionCompleted,
@@ -628,7 +629,9 @@ class TextualTuiRenderer:
                 else:
                     self._denied_process_calls.add(event.call_id)
                     lifecycle = self._process_lifecycles[identity.process_id]
-                    self.app.update_process_card(lifecycle.deny(identity.operation))
+                    self.app.update_process_card(
+                        lifecycle.deny(identity.operation, event.reason or "denied")
+                    )
                     self._tool_elapsed(event.call_id, event.timestamp)
         elif isinstance(event, ToolResultReady):
             # A nonzero-exit command is is_error=False on the wire (a normal
@@ -680,16 +683,23 @@ class TextualTuiRenderer:
                 self._denied_process_calls.discard(event.call_id)
                 if denied:
                     presentation = lifecycle.presentation()
+                elif (
+                    event.process_id is None
+                    and event.process_state == "cancelled"
+                    and event.output == INTERRUPTED_TOOL_RESULT_TEXT
+                ):
+                    presentation = lifecycle.interrupt(identity.operation)
                 else:
-                    _parsed_state, fallback_output = historical_process_observation(
+                    parsed_state, fallback_output = historical_process_observation(
                         identity.process_id,
                         event.output,
                     )
-                    matching_state = (
-                        event.process_state
-                        if event.process_id in {None, identity.process_id}
-                        else None
-                    )
+                    if event.process_id == identity.process_id:
+                        matching_state = event.process_state
+                    elif event.process_id is None:
+                        matching_state = parsed_state
+                    else:
+                        matching_state = None
                     presentation = lifecycle.observe(
                         operation=identity.operation,
                         state=matching_state,

@@ -103,11 +103,17 @@ def test_historical_process_envelope_requires_the_expected_process_id() -> None:
         "proc-1",
         "Process proc-other completed with exit code 0\nstdout:\ndone\n",
     )
+    malformed_state, malformed_output = historical_process_observation(
+        "proc-1",
+        "Process proc-1 completed with exit code unknown",
+    )
 
     assert state == "running"
     assert output == "progress\n"
     assert mismatched_state is None
     assert mismatched_output.startswith("Process proc-other completed")
+    assert malformed_state is None
+    assert malformed_output == "Process proc-1 completed with exit code unknown"
 
 
 @pytest.mark.parametrize(
@@ -138,3 +144,14 @@ def test_denied_poll_does_not_claim_that_the_process_was_cancelled() -> None:
 
     assert presentation.display_state == "poll_denied"
     assert presentation.terminal is False
+
+
+def test_denied_poll_preserves_reason() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+
+    presentation = lifecycle.deny("poll", "not now")
+
+    assert presentation.display_state == "poll_denied"
+    assert presentation.detail == "not now"
+    assert presentation.full_output == "not now"

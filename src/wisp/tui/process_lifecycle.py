@@ -118,7 +118,13 @@ class ProcessLifecycle:
             self.display_state = "observed"
         return self.presentation()
 
-    def deny(self, operation: ProcessOperation) -> ProcessLifecyclePresentation:
+    def deny(
+        self,
+        operation: ProcessOperation,
+        reason: str = "",
+    ) -> ProcessLifecyclePresentation:
+        if reason:
+            self._append_output(reason)
         self.display_state = "poll_denied" if operation == "poll" else "cancel_denied"
         return self.presentation()
 
@@ -189,6 +195,13 @@ def historical_process_observation(
     if first == f"{prefix} is still running":
         state: ManagedProcessState | None = "running"
     elif first.startswith(f"{prefix} completed with exit code "):
+        exit_code_text = first.removeprefix(f"{prefix} completed with exit code ")
+        try:
+            exit_code = int(exit_code_text)
+        except ValueError:
+            return None, normalized
+        if str(exit_code) != exit_code_text:
+            return None, normalized
         state = "completed"
     elif first == f"{prefix} timed out":
         state = "timed_out"

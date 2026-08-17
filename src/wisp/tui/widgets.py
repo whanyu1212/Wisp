@@ -2808,7 +2808,7 @@ class ProcessCard(ToolCard):
             status: ToolActionStatus = "done"
         elif state in {"failed", "timed_out", "poll_failed", "cancel_failed"}:
             status = "error"
-        elif state == "cancelled":
+        elif state in {"cancelled", "poll_interrupted", "cancel_interrupted"}:
             status = "cancelled"
         elif state in {"poll_denied", "cancel_denied"}:
             status = "denied"

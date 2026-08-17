@@ -424,6 +424,33 @@ def test_history_controller_pairs_split_process_call_before_grouping() -> None:
     assert not [widget for widget in surface.widgets if widget.name == "bash"]
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [("poll", "poll_denied"), ("cancel", "cancel_denied")],
+)
+def test_history_controller_replays_denied_process_operation_with_reason(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    denied = HistoricalToolCard(
+        card_id="history:denied",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output="not now",
+        is_error=True,
+        status="denied",
+        tool_call_id="process-1",
+    )
+
+    controller.replace_entries((denied,), session_label="Denied")
+
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    assert process_widget.status == expected_status
+    assert process_widget.detail == "not now"
+
+
 def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
