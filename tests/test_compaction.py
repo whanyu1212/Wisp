@@ -2670,6 +2670,75 @@ def test_overflow_retry_preserves_the_prompt_tool_iteration_limit(tmp_path: Path
     assert mutating_tool.calls == 0
 
 
+def test_coding_session_retries_overflow_after_rejected_truncated_mutating_call(
+    tmp_path: Path,
+) -> None:
+    call = ToolCall(call_id="call-1", name="mutate", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="length",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after retry"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    tool = MutatingRecoveryTool()
+    registry.register(tool)
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            tool_approval_policy=ToolApprovalPolicy.approve_all(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question three", session=session)]
+
+    events = anyio.run(run)
+
+    assert tool.calls == 0
+    assert len(provider.calls) == 4
+    assert any(
+        isinstance(event, CompactionCompleted)
+        and event.reason == "overflow"
+        and event.outcome == "completed"
+        and event.will_retry
+        for event in events
+    )
+    assert any(
+        isinstance(event, MessageCompleted) and event.content == "answer after retry"
+        for event in events
+    )
+
+
 def test_coding_session_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
     call = ToolCall(call_id="call-1", name="mutate", arguments={})
     provider = ScriptedProvider(

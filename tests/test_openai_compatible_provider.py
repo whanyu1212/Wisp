@@ -249,7 +249,7 @@ def test_serializes_tools_effort_and_fragmented_parallel_tool_calls() -> None:
     ]
 
 
-def test_length_response_does_not_surface_accumulated_tool_fragments() -> None:
+def test_length_response_surfaces_accumulated_tool_fragments_for_rejection() -> None:
     provider, _ = _provider(
         [
             [
@@ -270,11 +270,14 @@ def test_length_response_does_not_surface_accumulated_tool_fragments() -> None:
 
     events = _collect(provider)
 
-    assert not any(isinstance(event, ProviderToolCallCompleted) for event in events)
+    tool_event = next(event for event in events if isinstance(event, ProviderToolCallCompleted))
+    assert tool_event.tool_call.call_id == "call-1"
+    assert tool_event.tool_call.name == "lookup"
+    assert tool_event.tool_call.arguments == {"q": "wisp"}
     completed = events[-1]
     assert isinstance(completed, ProviderResponseCompleted)
     assert completed.finish_reason == "length"
-    assert completed.tool_calls == ()
+    assert completed.tool_calls == (tool_event.tool_call,)
 
 
 def test_replays_assistant_tool_calls_and_tool_results_on_follow_up() -> None:

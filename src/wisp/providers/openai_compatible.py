@@ -248,24 +248,26 @@ class OpenAICompatibleProvider:
             )
             return
 
+        # Preserve every observed call through normalization, including calls
+        # from truncated or inconsistent responses. The provider-neutral loop
+        # uses the terminal finish reason to decide whether they may execute.
         tool_calls: list[ToolCall] = []
-        if finish_reason == "tool_calls":
-            for index in sorted(accumulators):
-                accumulator = accumulators[index]
-                raw_arguments = "".join(accumulator.argument_chunks)
-                call_id = accumulator.call_id or f"call_{uuid4().hex}"
-                name = "".join(accumulator.name_chunks)
-                tool_call = _tool_call(
-                    call_id=call_id,
-                    name=name,
-                    raw_arguments=raw_arguments,
-                    response_id=response_id,
-                )
-                tool_calls.append(tool_call)
-                yield ProviderToolCallCompleted(
-                    tool_call=tool_call,
-                    content_index=len(tool_calls) - 1,
-                )
+        for index in sorted(accumulators):
+            accumulator = accumulators[index]
+            raw_arguments = "".join(accumulator.argument_chunks)
+            call_id = accumulator.call_id or f"call_{uuid4().hex}"
+            name = "".join(accumulator.name_chunks)
+            tool_call = _tool_call(
+                call_id=call_id,
+                name=name,
+                raw_arguments=raw_arguments,
+                response_id=response_id,
+            )
+            tool_calls.append(tool_call)
+            yield ProviderToolCallCompleted(
+                tool_call=tool_call,
+                content_index=len(tool_calls) - 1,
+            )
 
         # Chat Completions does not guarantee a response ID. Preserve its
         # established synthetic cursor only for a tool-call turn; otherwise an
@@ -296,9 +298,7 @@ class OpenAICompatibleProvider:
             # answer this tool exchange. Clean responses never receive one.
             response_id = continuation_id
 
-        normalized_reason: ProviderFinishReason = cast(
-            ProviderFinishReason, "tool_calls" if tool_calls else finish_reason
-        )
+        normalized_reason = cast(ProviderFinishReason, finish_reason)
         yield ProviderResponseCompleted(
             content="".join(chunks),
             tool_calls=tuple(tool_calls),

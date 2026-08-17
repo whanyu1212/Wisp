@@ -76,6 +76,7 @@ from wisp.events import (
     SkillInvoked,
     ToolApprovalResolved,
     ToolExecutionEnded,
+    ToolExecutionStarted,
     ToolPresentationStatus,
     TurnCompleted,
     TurnStarted,
@@ -809,6 +810,7 @@ class CodingSession:
         recovered_from_overflow = False
         overflow_recovery_failure: ContextOverflowError | None = None
         tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
+        started_tool_calls: set[str] = set()
         boundary_events: deque[WispEvent] = deque()
         active_compaction_entry_id = user_entry.id
         current_turn_had_tool_calls = False
@@ -1085,8 +1087,13 @@ class CodingSession:
                         terminal_outcome = event.outcome
                         completed_turn_had_tool_calls = current_turn_had_tool_calls
                         queue_batch_started_new_turn = False
-                    elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
-                        had_unsafe_tool_round = True
+                    elif isinstance(event, ToolExecutionStarted):
+                        started_tool_calls.add(event.call_id)
+                    elif isinstance(event, ToolExecutionEnded):
+                        was_started = event.call_id in started_tool_calls
+                        started_tool_calls.discard(event.call_id)
+                        if was_started and self._tool_is_unsafe(event.name):
+                            had_unsafe_tool_round = True
                     elif isinstance(event, ToolApprovalResolved) and not event.approved:
                         tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
