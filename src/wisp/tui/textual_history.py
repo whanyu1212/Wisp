@@ -680,7 +680,7 @@ class TextualHistoryController:
     ) -> dict[int, _HistoricalProcessGroup]:
         """Project visible poll/cancel records into stable process-level groups."""
 
-        split_results: dict[str, _RetainedHistoryEntry] = {}
+        split_results: dict[str, deque[_RetainedHistoryEntry]] = {}
         for item in visible:
             entry = item.entry
             if (
@@ -688,7 +688,8 @@ class TextualHistoryController:
                 and entry.call_missing
                 and entry.tool_call_id is not None
             ):
-                split_results[entry.tool_call_id] = item
+                split_results.setdefault(entry.tool_call_id, deque()).append(item)
+        paired_results: dict[int, _RetainedHistoryEntry] = {}
         paired_result_ids: set[int] = set()
         for item in visible:
             entry = item.entry
@@ -696,8 +697,10 @@ class TextualHistoryController:
                 isinstance(entry, HistoricalToolCard)
                 and entry.missing_result
                 and entry.tool_call_id is not None
-                and (result := split_results.get(entry.tool_call_id)) is not None
+                and (results := split_results.get(entry.tool_call_id))
             ):
+                result = results.popleft()
+                paired_results[item.id] = result
                 paired_result_ids.add(result.id)
         lifecycles: dict[str, ProcessLifecycle] = {}
         first_ids: dict[str, int] = {}
@@ -708,8 +711,8 @@ class TextualHistoryController:
                 continue
             observation = entry
             observation_member_ids = {item.id}
-            if entry.missing_result and entry.tool_call_id is not None:
-                paired_result = split_results.get(entry.tool_call_id)
+            if entry.missing_result:
+                paired_result = paired_results.get(item.id)
                 if paired_result is not None and isinstance(
                     paired_result.entry,
                     HistoricalToolCard,

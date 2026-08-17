@@ -430,6 +430,47 @@ def test_history_controller_pairs_split_process_call_before_grouping() -> None:
     assert not [widget for widget in surface.widgets if widget.name == "bash"]
 
 
+def test_history_controller_pairs_reused_process_call_ids_by_occurrence() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    entries: list[HistoricalToolCard] = []
+    for process_id, output in (("proc-a", "output a"), ("proc-b", "output b")):
+        entries.extend(
+            (
+                HistoricalToolCard(
+                    card_id=f"history:missing:{process_id}",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": process_id},
+                    output="No persisted tool result.",
+                    is_error=True,
+                    tool_call_id="reused-call-id",
+                    status="cancelled",
+                    missing_result=True,
+                ),
+                HistoricalToolCard(
+                    card_id=f"history:result:{process_id}",
+                    name="bash",
+                    arguments={},
+                    output=(
+                        f"Process {process_id} completed with exit code 0\nstdout:\n{output}\n"
+                    ),
+                    is_error=False,
+                    tool_call_id="reused-call-id",
+                    call_missing=True,
+                ),
+            )
+        )
+
+    controller.replace_entries(tuple(entries), session_label="Session")
+
+    process_widgets = {
+        widget.label: widget for widget in surface.widgets if widget.label.startswith("process: ")
+    }
+    assert process_widgets["process: proc-a"].detail == "stdout:\noutput a"
+    assert process_widgets["process: proc-b"].detail == "stdout:\noutput b"
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
 @pytest.mark.parametrize(
     ("operation", "expected_status"),
     [("poll", "poll_interrupted"), ("cancel", "cancel_interrupted")],
