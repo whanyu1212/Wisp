@@ -206,6 +206,36 @@ def test_tool_cards_resolve_by_id_and_terminal_states_do_not_leak() -> None:
     assert first._timer is None
 
 
+def test_live_process_reuse_detaches_historical_card_ownership() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    historical = controller.mount_process_card("proc-1", historical=True)
+    assert isinstance(historical, ProcessCard)
+
+    live = controller.mount_process_call("poll-1", "proc-1")
+
+    assert live is historical
+    assert controller.release_historical_widget(historical) is False
+    assert historical in surface.mounted
+
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+    assert controller.settled_widget_count == 1
+
+
+def test_historical_process_mount_does_not_overwrite_live_owned_card() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    live = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(live, ProcessCard)
+
+    historical = controller.mount_process_card("proc-1", historical=True)
+
+    assert historical is None
+    assert surface.mounted == [live]
+
+
 def test_resolved_process_operation_settles_and_reuse_unsettles_card() -> None:
     surface = _Surface()
     controller = _controller(surface)

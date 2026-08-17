@@ -284,6 +284,15 @@ class TextualHistoryController:
             )
         )
 
+    def transfer_widget_to_live(self, widget: Widget) -> None:
+        """Detach historical aliases when a resumed process card becomes live-owned."""
+
+        self._widgets = {
+            entry_id: candidate
+            for entry_id, candidate in self._widgets.items()
+            if candidate is not widget
+        }
+
     def forget_live_widget(self, widget: Widget) -> None:
         """Allow an evicted live entry to reappear through durable history paging."""
 
@@ -640,8 +649,8 @@ class TextualHistoryController:
                     historical=True,
                     before=before,
                 )
-                self._surface.update_process_card(process_group.presentation)
                 if mounted is not None:
+                    self._surface.update_process_card(process_group.presentation)
                     superseded = {
                         self._widgets[member_id]
                         for member_id in process_group.member_entry_ids

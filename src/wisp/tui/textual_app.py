@@ -2829,10 +2829,10 @@ class TextualTui(App[None]):
         )
 
     def remove_historical_widget(self, widget: Widget) -> None:
-        """Evict one retained widget and its transient live-transcript lookups."""
+        """Evict retained history without removing a card transferred to live output."""
 
-        self._transcript_controller.forget_widget(widget)
-        widget.remove()
+        if self._transcript_controller.release_historical_widget(widget):
+            widget.remove()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""

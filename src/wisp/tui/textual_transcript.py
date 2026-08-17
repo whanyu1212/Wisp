@@ -110,6 +110,7 @@ class TextualTranscriptController:
         self._unseen_output: set[Widget] = set()
         self._tool_cards: dict[str, ToolCard] = {}
         self._process_cards: dict[str, ProcessCard] = {}
+        self._live_process_cards: set[ProcessCard] = set()
         self._historical_tool_cards: dict[str, ToolCard] = {}
         self._historical_widgets: set[ToolCard] = set()
         self._working_indicator: WorkingIndicator | None = None
@@ -262,9 +263,16 @@ class TextualTranscriptController:
         card = self._process_cards.get(process_id)
         if card is not None:
             if historical:
+                # A resumed live poll owns the shared card until bounded eviction.
+                # Do not let history replay move or overwrite that evolving state.
+                if card in self._live_process_cards:
+                    return None
                 self._historical_widgets.add(card)
             else:
+                self._historical_widgets.discard(card)
+                self._live_process_cards.add(card)
                 self._unsettle_widget(card)
+                card.start_live_updates()
             if (reposition or before is not None) and before is not card:
                 self._surface.move_live_transcript_widget(card, before=before)
             return card
@@ -274,6 +282,8 @@ class TextualTranscriptController:
         self._process_cards[process_id] = card
         if historical:
             self._historical_widgets.add(card)
+        else:
+            self._live_process_cards.add(card)
         self._surface.mount_live_transcript_widget(card, before=before)
         self._surface.record_live_transcript_update(card)
         self._surface.follow_transcript_tail_after_refresh()
@@ -403,6 +413,14 @@ class TextualTranscriptController:
 
         return self._historical_tool_cards.get(card_id)
 
+    def release_historical_widget(self, widget: Widget) -> bool:
+        """Release history ownership unless a resumed live process owns the card."""
+
+        if isinstance(widget, ProcessCard) and widget in self._live_process_cards:
+            return False
+        self.forget_widget(widget)
+        return True
+
     def forget_widget(self, widget: Widget) -> None:
         """Discard every controller-owned reference to an evicted transcript widget."""
 
@@ -414,6 +432,7 @@ class TextualTranscriptController:
         if isinstance(widget, ToolCard):
             self._historical_widgets.discard(widget)
         if isinstance(widget, ProcessCard):
+            self._live_process_cards.discard(widget)
             self._process_cards = {
                 process_id: card
                 for process_id, card in self._process_cards.items()
@@ -441,6 +460,7 @@ class TextualTranscriptController:
         self.hide_working_indicator()
         self._tool_cards.clear()
         self._process_cards.clear()
+        self._live_process_cards.clear()
         self._historical_tool_cards.clear()
         self._historical_widgets.clear()
         self._settled_widgets.clear()

@@ -1851,6 +1851,58 @@ def test_textual_renderer_preserves_process_failure_reason_with_or_without_outpu
     assert "no process output yet" not in without_output
 
 
+def test_textual_live_poll_takes_ownership_of_resumed_process_card() -> None:
+    async def scenario() -> tuple[int, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-1",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nold output\n",
+                        is_error=False,
+                        tool_call_id="poll-1",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            historical_card = app_instance.query_one(ProcessCard)
+
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-2",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            # Simulate the retained history entry leaving the paging window while
+            # its shared card is now owned by the pending live poll.
+            app_instance.remove_historical_widget(historical_card)
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-2",
+                    name="bash",
+                    output="Process proc-1 completed with exit code 0\nstdout:\nnew output\n",
+                    is_error=False,
+                    exit_code=0,
+                    process_id="proc-1",
+                    process_state="completed",
+                    stdout="new output\n",
+                )
+            )
+            await pilot.pause()
+            cards = list(app_instance.query(ProcessCard))
+            return len(cards), historical_card.render().plain
+
+    card_count, rendered = anyio.run(scenario)
+
+    assert card_count == 1
+    assert rendered.startswith("• Process completed proc-1 · 1 poll")
+    assert "new output" in rendered
+
+
 def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:
     async def scenario() -> tuple[int, str]:
         app_instance, renderer = create_textual_tui()

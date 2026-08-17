@@ -518,6 +518,26 @@ def test_history_controller_coalesces_process_polls_across_a_prepended_page() ->
     assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
 
 
+def test_history_controller_transfers_resumed_process_card_to_live_ownership() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    poll = HistoricalToolCard(
+        card_id="history:poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    controller.render_entries((poll,))
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    assert controller._widgets == {}
+    assert process_widget in surface.widgets
+
+
 def test_history_controller_repositions_process_card_when_first_poll_leaves_window() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

@@ -617,6 +617,8 @@ class TextualTuiRenderer:
                 )
                 self._process_started.setdefault(identity.process_id, event.timestamp)
                 card = self.app.mount_process_call(event.call_id, identity.process_id)
+                if card is not None:
+                    self._history.transfer_widget_to_live(card)
                 self.app.update_process_card(lifecycle.begin(identity.operation))
             self._history.record_live_tool_call(event.call_id, widget=card)
         elif isinstance(event, TrustResolved):

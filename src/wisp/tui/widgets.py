@@ -2791,6 +2791,12 @@ class ProcessCard(ToolCard):
     def process_id(self) -> str:
         return self._process_id
 
+    def start_live_updates(self) -> None:
+        """Enable elapsed tracking when a resumed historical card becomes live."""
+
+        self._track_elapsed = True
+        self._start_timer()
+
     def set_lifecycle(
         self,
         presentation: ProcessLifecyclePresentation,
