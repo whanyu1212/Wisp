@@ -53,11 +53,10 @@ jobs:
           WISP_AUTO_COMPACTION: "0"
         run: uv run pytest tests
 
-  build:
-    name: Build distributions
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  verify-macos:
+    name: Verify macOS support
+    runs-on: macos-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -73,19 +72,75 @@ jobs:
         with:
           python-version-file: .python-version
 
-      # A tag can point at any commit, so the tag must be reconciled against the
-      # version actually baked into the distributions before anything is uploaded.
-      # PyPI versions are immutable; a mismatch here is unrecoverable after upload.
-      - name: Check tag matches project version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Test platform-sensitive paths
+        env:
+          WISP_TRUST: "1"
+        run: >-
+          uv run pytest
+          tests/test_cli_stdin.py
+          tests/test_mcp_runtime_process.py
+          tests/test_process_manager.py
+          tests/test_rpc_transport.py
+          tests/test_secure_tool_filesystem.py
+          --durations=20
+
+      - name: Smoke-test fake-provider CLI
+        env:
+          WISP_TRUST: "1"
+        run: uv run wisp -p "hello" --provider fake
+
+  build:
+    name: Build distributions
+    needs:
+      - verify
+      - verify-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      prerelease: ${{ steps.release-version.outputs.prerelease }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      # PyPI versions are immutable, so every dry run checks project/runtime
+      # consistency and exports PEP 440 prerelease metadata for the release job.
+      - name: Check and classify project version
+        id: release-version
         run: |
           project_version="$(uv version --short)"
           runtime_version="$(PYTHONPATH=src python -c 'import wisp; print(wisp.__version__)')"
-          tag_version="${GITHUB_REF_NAME#v}"
           if [ "$project_version" != "$runtime_version" ]; then
             echo "Project version ${project_version} does not match runtime version ${runtime_version}." >&2
             exit 1
           fi
+          prerelease="$(
+            uv run --no-project --with packaging python -c \
+              'from packaging.version import Version; import sys; print(str(Version(sys.argv[1]).is_prerelease).lower())' \
+              "$project_version"
+          )"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      # A tag can point at any commit, so reconcile it with the version baked
+      # into the distributions before anything is uploaded.
+      - name: Check tag matches project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          project_version="$(uv version --short)"
+          tag_version="${GITHUB_REF_NAME#v}"
           if [ "$project_version" != "$tag_version" ]; then
             echo "Tag ${GITHUB_REF_NAME} does not match project version ${project_version}." >&2
             exit 1
@@ -101,6 +156,7 @@ jobs:
         env:
           WISP_TRUST: "1"
         run: |
+          shopt -s nullglob
           wheels=(dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then
             echo "Expected exactly one wheel, found ${#wheels[@]}." >&2
@@ -150,7 +206,9 @@ jobs:
 
   github-release:
     name: Create GitHub release
-    needs: publish
+    needs:
+      - build
+      - publish
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -165,13 +223,17 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create prerelease
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_flags=()
+          if [ "${{ needs.build.outputs.prerelease }}" = "true" ]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --prerelease \
+            "${release_flags[@]}" \
             --generate-notes \
             --title "Wisp $GITHUB_REF_NAME"

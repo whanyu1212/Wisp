@@ -11,12 +11,21 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
-- Prevented tool calls from truncated or inconsistent provider responses from reaching execution;
-  truncated batches now return ordered retryable errors to the model.
-- Added bounded concurrent execution for explicitly parallel-safe tool batches while preserving
-  deterministic approvals, source-ordered results, sequential fallback, and complete cancellation.
-- Preserved validated historical tool call/result pairs for native provider replay, with a
-  deterministic assistant-role fallback that never promotes tool output to user instructions.
+## 0.1.0rc1 — 2026-08-17
+
+- Kept compaction, steering, follow-up, provider continuation, and overflow recovery inside one
+  long-lived agent loop with typed request-boundary transitions.
+- Separated provider thinking from assistant content, made provider failures terminal stream events,
+  and improved context-budget accounting and actionable tool-failure feedback.
+- Prevented truncated or inconsistent tool-call batches from reaching execution and added bounded
+  concurrency for explicitly parallel-safe batches while preserving deterministic approvals,
+  source-ordered results, sequential fallback, and complete cancellation.
+- Preserved validated historical tool call/result pairs for native replay, with deterministic safe
+  fallbacks for provider switches, opaque provider state, malformed history, and interrupted calls.
+- Hardened filesystem tools and skill loading against races and path escapes, bounded read/search
+  work, and fixed tool working-directory behavior for selected workspaces.
+- Added richer diff layouts, transcript recovery, prompt highlighting, project-tree file selection,
+  approval safety surfaces, and additional curated TUI themes.
 
 ## 0.1.0b4 — 2026-08-12
 

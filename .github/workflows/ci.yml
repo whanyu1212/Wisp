@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
@@ -85,3 +88,42 @@ jobs:
           WISP_CONTEXT_RESERVE_TOKENS: "4096"
           WISP_AUTO_COMPACTION: "0"
         run: uv run pytest tests -m '${{ matrix.marker }}' --durations=20
+
+  macos-smoke:
+    name: Platform smoke (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Test platform-sensitive paths
+        env:
+          WISP_TRUST: "1"
+        run: >-
+          uv run pytest
+          tests/test_cli_stdin.py
+          tests/test_mcp_runtime_process.py
+          tests/test_process_manager.py
+          tests/test_rpc_transport.py
+          tests/test_secure_tool_filesystem.py
+          --durations=20
+
+      - name: Smoke-test fake-provider CLI
+        env:
+          WISP_TRUST: "1"
+        run: uv run wisp -p "hello" --provider fake
