@@ -307,6 +307,29 @@ def test_successful_process_poll_observation_enters_settled_retention(
     assert controller.settled_widget_count == 0
 
 
+def test_long_process_lifecycle_keeps_latest_card_with_capped_retention_weight() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    card: ProcessCard | None = None
+
+    for index in range(37):
+        call_id = f"poll-{index}"
+        mounted = controller.mount_process_call(call_id, "proc-1")
+        assert isinstance(mounted, ProcessCard)
+        card = mounted
+        lifecycle.begin("poll")
+        controller.resolve_process_call(
+            call_id,
+            lifecycle.observe(operation="poll", state="running"),
+        )
+
+    assert card is not None
+    assert card not in surface.removed
+    assert card in surface.mounted
+    assert controller.settled_widget_count == 1
+
+
 def test_resolved_process_operations_are_evicted_with_bounded_retention() -> None:
     surface = _Surface()
     controller = TextualTranscriptController(surface, settled_capacity=1)

@@ -373,7 +373,10 @@ class TextualTranscriptController:
                 # must account for every represented audited call/result pair.
                 self.settle_widget(
                     card,
-                    durable_entry_count=2 * presentation.call_count,
+                    durable_entry_count=min(
+                        2 * presentation.call_count,
+                        self._durable_entry_capacity,
+                    ),
                 )
         self._surface.follow_transcript_tail_after_refresh()
         return card
