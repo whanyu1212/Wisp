@@ -211,6 +211,33 @@ def test_historical_card_lookup_is_evicted_with_its_widget() -> None:
     assert controller.pending_tool_count == 0
 
 
+def test_resolved_historical_cards_without_boundary_ids_bypass_live_eviction() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(
+        surface,
+        settled_capacity=1,
+        durable_entry_capacity=1,
+    )
+    surface.controller = controller
+
+    cards = [
+        controller.mount_tool_call(
+            f"history-{index}",
+            "grep",
+            {"pattern": str(index)},
+            historical=True,
+        )
+        for index in range(2)
+    ]
+    for index in range(2):
+        controller.resolve_tool_call(f"history-{index}", "done", detail="matched")
+
+    assert all(isinstance(card, ToolCard) for card in cards)
+    assert controller.settled_widget_count == 0
+    assert surface.removed == []
+    assert surface.evicted == []
+
+
 def test_only_newest_focused_card_repins_until_user_scrolls() -> None:
     surface = _Surface(following=True)
     controller = _controller(surface)

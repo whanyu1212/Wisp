@@ -230,6 +230,9 @@ class TextualTranscriptController:
         self._tool_cards[call_id] = card
         if historical_card_id is not None:
             self._historical_tool_cards[historical_card_id] = card
+        if historical:
+            # Persisted history owns this card's retention. Classifying it as settled
+            # live output can evict it and recursively request the same latest page.
             self._historical_widgets.add(card)
         self._surface.mount_live_transcript_widget(card, before=before)
         self._surface.record_live_transcript_update(card)
