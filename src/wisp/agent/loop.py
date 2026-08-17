@@ -1156,12 +1156,12 @@ async def _prepared_tool_batch_events(
             yield terminal
             yield result
             status.cancelled = status.cancelled or _is_cancelled(config)
-        if fatal_error is not None:
-            raise fatal_error
         if status.cancelled:
             async for interrupted_event in finalize_interrupted():
                 yield interrupted_event
             return
+        if fatal_error is not None:
+            raise fatal_error
 
 
 def _record_tool_result(

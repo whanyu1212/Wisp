@@ -19,6 +19,7 @@ from wisp.agent.execution import (
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
 from wisp.agent.messages import Message
 from wisp.events import (
+    ErrorEvent,
     MessageDelta,
     QueueMessageInjected,
     QueueMode,
@@ -68,6 +69,36 @@ class BlockingPreparedExecutor:
             self.started_call_ids.add(tool_call.call_id)
             if len(self.started_call_ids) == 2:
                 self._all_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=True,
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                yield await event.run()
+            else:
+                yield event
+
+
+class FailingAndBlockingPreparedExecutor:
+    def __init__(self, failed: anyio.Event) -> None:
+        self._failed = failed
+        self._second_started = anyio.Event()
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            if tool_call.call_id == "call-1":
+                await self._second_started.wait()
+                self._failed.set()
+                raise RuntimeError("executor failed during cancellation")
+            self._second_started.set()
             await anyio.sleep_forever()
             raise AssertionError("unreachable")
 
@@ -1010,6 +1041,57 @@ def test_harness_cancellation_drains_prepared_batch_results_in_source_order() ->
         ("tool", "call-1"),
         ("tool", "call-2"),
     ]
+
+
+def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        failed = anyio.Event()
+        harness = _harness(
+            provider,
+            executor=FailingAndBlockingPreparedExecutor(failed),
+        )
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("initial")])
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await failed.wait()
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [event.call_id for event in results] == ["call-1", "call-2"]
+    assert all(event.process_state == "cancelled" for event in results)
+    assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+        "Agent run cancelled"
+    ]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert len(completed) == 1
+    assert completed[0].outcome == "cancelled"
 
 
 def test_harness_cancel_after_prepared_terminal_finishes_batch_then_cancels_turn() -> None:
