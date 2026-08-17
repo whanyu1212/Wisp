@@ -14,7 +14,7 @@ from wisp.tui.widgets import StreamMessage
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
-    from wisp.tui.widgets import Transcript
+    from wisp.tui.widgets import Transcript, WorkingIndicator
 
 
 _MIN_DRAIN_INTERVAL_SECONDS = 1 / 15
@@ -37,6 +37,8 @@ def _next_drain_delay(render_seconds: float | None) -> float:
 class _StreamTurn:
     widget: StreamMessage
     mounted: AwaitMount
+    working_indicator: WorkingIndicator | None = None
+    working_indicator_retired: bool = False
     source_fragments: list[str] = field(default_factory=list)
     completed_content: str | None = None
     pending: list[str] = field(default_factory=list)
@@ -59,9 +61,10 @@ class MarkdownStreamController:
     """Bridge synchronous renderer calls to the async assistant message API.
 
     Provider fragments are retained in an amortized buffer until the turn settles.
-    Each paced write replaces the renderable inside one mounted ``StreamMessage``;
-    finalization replaces it from the completed message, so an interrupted
-    incremental render cannot leave a permanently partial response.
+    Each paced write replaces the renderable inside one mounted ``StreamMessage``
+    and retires that stream's captured working indicator after the first visible
+    frame. Finalization replaces the widget from the completed message, so an
+    interrupted incremental render cannot leave a permanently partial response.
     """
 
     # Paced to leave headroom for the cost of the write it schedules, rather than
@@ -112,7 +115,11 @@ class MarkdownStreamController:
                 return
             widget = StreamMessage()
             mounted = self._app.mount_stream_widget(widget)
-            turn = _StreamTurn(widget=widget, mounted=mounted)
+            turn = _StreamTurn(
+                widget=widget,
+                mounted=mounted,
+                working_indicator=self._app.working_indicator_for_stream(),
+            )
             self._turn = turn
             self._last_completed_widget = None
 
@@ -326,6 +333,7 @@ class MarkdownStreamController:
                 turn.has_written = True
                 turn.write_count += 1
                 turn.last_render_seconds = render_seconds
+                self._retire_working_indicator(turn)
                 self._app.note_transcript_update(turn.widget)
         finally:
             turn.drain_running = False
@@ -363,6 +371,11 @@ class MarkdownStreamController:
                 if turn.discarded:
                     return
                 turn.write_count += 1
+            if source:
+                # A failed or cancelled incremental write may reach completion before
+                # any visible drain. Retire the heartbeat once final reconciliation
+                # has made the authoritative response visible.
+                self._retire_working_indicator(turn)
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
@@ -378,6 +391,17 @@ class MarkdownStreamController:
             # Keep the idle barrier closed while handing off to the next flushed turn.
             self._queue_next_finalizer()
             self._finish_callback()
+
+    def _retire_working_indicator(self, turn: _StreamTurn) -> None:
+        """Remove this stream's heartbeat after its first visible response frame."""
+
+        if turn.working_indicator_retired:
+            return
+        turn.working_indicator_retired = True
+        indicator = turn.working_indicator
+        turn.working_indicator = None
+        if indicator is not None:
+            self._app.hide_working_indicator_if_current(indicator)
 
     def _anchor_stream_tail(self, turn: _StreamTurn, transcript: Transcript) -> None:
         """Pin one followed stream inside the compositor pass that grows it."""

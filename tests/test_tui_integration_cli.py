@@ -3627,25 +3627,25 @@ def test_textual_stream_completion_skips_identical_final_rerender(
     assert replacements == []
 
 
-def test_textual_completion_removes_working_indicator_after_stream_settlement(
+def test_textual_first_visible_stream_frame_removes_working_indicator(
     monkeypatch: MonkeyPatch,
 ) -> None:
     ordering: list[str] = []
 
     async def scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
-        original_settle = app_instance.settle_stream_widget
+        original_append = StreamMessage.append_markdown
         original_hide = app_instance._transcript_controller.hide_working_indicator_if_current
 
-        def track_settle(widget: Widget) -> None:
-            ordering.append("stream settled")
-            original_settle(widget)
+        async def track_append(widget: StreamMessage, fragment: str) -> None:
+            await original_append(widget, fragment)
+            ordering.append("stream visible")
 
         def track_hide(indicator: WorkingIndicator) -> None:
             ordering.append("indicator removed")
             original_hide(indicator)
 
-        monkeypatch.setattr(app_instance, "settle_stream_widget", track_settle)
+        monkeypatch.setattr(StreamMessage, "append_markdown", track_append)
         monkeypatch.setattr(
             app_instance._transcript_controller,
             "hide_working_indicator_if_current",
@@ -3653,29 +3653,63 @@ def test_textual_completion_removes_working_indicator_after_stream_settlement(
         )
         async with app_instance.run_test() as pilot:
             renderer.running()
-            renderer.token_delta("final response")
-            renderer.end_token_stream_with_content("final response")
-            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
-            renderer.event(RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True))
-            renderer.view_updated(
-                TuiViewSnapshot(
-                    status="idle",
-                    input_hint="wisp> ",
-                    input_mode="idle",
-                    queued_follow_ups=0,
-                )
-            )
-            indicator_retained = app_instance._transcript_controller.working_indicator is not None
+            indicator_started = app_instance._transcript_controller.working_indicator is not None
+            renderer.token_delta("visible response")
             await app_instance.wait_for_stream_idle()
             await pilot.pause()
             indicator_removed = app_instance._transcript_controller.working_indicator is None
-            return indicator_retained, indicator_removed
+            renderer.end_token_stream_with_content("visible response")
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            await app_instance.wait_for_stream_idle()
+            return indicator_started, indicator_removed
 
-    indicator_retained, indicator_removed = anyio.run(scenario)
+    indicator_started, indicator_removed = anyio.run(scenario)
 
-    assert indicator_retained
+    assert indicator_started
     assert indicator_removed
-    assert ordering == ["stream settled", "indicator removed"]
+    assert ordering == ["stream visible", "indicator removed"]
+
+
+def test_textual_long_markdown_completion_does_not_shift_the_visible_frame() -> None:
+    source = "".join(
+        f"## Phase {index}\n\n"
+        f"- inspect lifecycle {index}\n"
+        f"- preserve the viewport for **phase {index}**\n\n"
+        "```python\n"
+        f"def phase_{index}() -> int:\n    return {index}\n"
+        "```\n\n"
+        for index in range(24)
+    )
+
+    async def scenario() -> tuple[str, str, tuple[float, float], tuple[float, float]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            renderer.running()
+            renderer.token_delta(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert app_instance._transcript_controller.working_indicator is None
+            before = "\n".join(
+                strip.text for strip in app_instance.screen._compositor.render_strips()
+            )
+            before_scroll = (float(transcript.scroll_y), float(transcript.max_scroll_y))
+
+            renderer.end_token_stream_with_content(source)
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            after = "\n".join(
+                strip.text for strip in app_instance.screen._compositor.render_strips()
+            )
+            after_scroll = (float(transcript.scroll_y), float(transcript.max_scroll_y))
+            return before, after, before_scroll, after_scroll
+
+    before, after, before_scroll, after_scroll = anyio.run(scenario)
+
+    assert before == after
+    assert before_scroll == after_scroll
+    assert before_scroll[0] == before_scroll[1]
 
 
 def test_old_stream_completion_does_not_remove_a_new_prompt_indicator() -> None:
@@ -4964,7 +4998,7 @@ def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> N
 
 
 def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
-    async def scenario() -> tuple[str, str, bool, bool]:
+    async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
@@ -4982,16 +5016,14 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
                 recovered,
                 "\n".join(texts),
                 app_instance._transcript_controller.working_indicator is None,
-                app_instance._transcript_controller.working_indicator is not None,
             )
 
-    recovered, transcript, timer_stopped, active = anyio.run(scenario)
+    recovered, transcript, indicator_retired = anyio.run(scenario)
     assert "Working" in recovered
     assert "Retrying" not in recovered
     assert "response" in transcript
     assert "Retrying" not in transcript
-    assert not timer_stopped
-    assert active
+    assert indicator_retired
 
 
 def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
@@ -5605,29 +5637,22 @@ def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
     assert focus_ok
 
 
-def test_textual_working_status_persists_at_tail_during_stream_output() -> None:
-    async def scenario() -> tuple[str, str, list[str], bool]:
+def test_textual_working_status_retires_when_stream_output_becomes_visible() -> None:
+    async def scenario() -> tuple[str, str, list[str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
             before = _working_activity(app_instance)
             renderer.token_delta("hello")
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
-            indicator = app_instance._transcript_controller.working_indicator
-            transcript = app_instance.query_one("#transcript", Transcript)
-            return (
-                before,
-                _working_activity(app_instance),
-                _transcript_texts(app_instance),
-                indicator is not None and transcript.children[-1] is indicator,
-            )
+            return before, _working_activity(app_instance), _transcript_texts(app_instance)
 
-    before, after, transcript, indicator_is_tail = anyio.run(scenario)
+    before, after, transcript = anyio.run(scenario)
     assert "Working" in before
-    assert "Working" in after
+    assert after == ""
     assert any("hello" in text for text in transcript)
-    assert indicator_is_tail
 
 
 def test_textual_working_status_persists_after_tool_card_mount() -> None:

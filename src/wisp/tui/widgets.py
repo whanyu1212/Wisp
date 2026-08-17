@@ -2725,10 +2725,11 @@ class ToolCard(Static):
 class WorkingIndicator(Static):
     """Command-scoped heartbeat shown in the *transcript*, not the footer.
 
-    A dim ``⠋ Working… · 3s`` row remains at the live transcript tail while
-    assistant output and tool cards appear ahead of it. It may be relabeled for
-    retries, approvals, trust, or compaction, and is removed only when the command
-    settles. The footer stays stable (cwd / session / model) — quiet over noisy.
+    A dim ``⠋ Working… · 3s`` row remains at the live transcript tail while the
+    command has not produced visible assistant output. It may be relabeled for
+    retries, approvals, trust, or compaction. The first visible stream frame retires
+    it to avoid a completion-time layout jump; tool-only commands retain it until
+    settlement. The footer stays stable (cwd / session / model) — quiet over noisy.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")

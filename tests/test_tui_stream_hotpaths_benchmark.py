@@ -126,7 +126,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.event_loop_delay.sample_count >= 1
     assert sample.layout_passes.sample_count >= 1
     assert sample.compositor_renders.sample_count >= 1
-    assert sample.working_indicator_active
+    assert not sample.working_indicator_active
     assert sample.final_following
     assert sample.final_at_tail
     assert sample.source_complete

@@ -97,6 +97,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    WorkingIndicator,
 )
 
 # The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
@@ -2434,6 +2435,16 @@ class TextualTui(App[None]):
 
     def hide_working_indicator(self) -> None:
         self._transcript_controller.hide_working_indicator()
+
+    def working_indicator_for_stream(self) -> WorkingIndicator | None:
+        """Capture the heartbeat owned by a newly mounted assistant stream."""
+
+        return self._transcript_controller.working_indicator
+
+    def hide_working_indicator_if_current(self, indicator: WorkingIndicator) -> None:
+        """Retire a stream's heartbeat without touching a newer command's indicator."""
+
+        self._transcript_controller.hide_working_indicator_if_current(indicator)
 
     def hide_working_indicator_after_stream(self) -> None:
         """Remove the current heartbeat with the completed stream's final layout."""

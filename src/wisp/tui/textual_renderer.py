@@ -421,8 +421,9 @@ class TextualTuiRenderer:
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
-        # Stream live into the assistant Markdown widget. The command-scoped
-        # heartbeat remains mounted at the transcript tail until the command ends.
+        # Stream live into the assistant Markdown widget. Its first visible frame
+        # retires the command heartbeat so completion cannot shorten and jump the
+        # followed transcript after a long response.
         self.app.append_stream(delta)
 
     def end_token_stream_with_content(self, completed_content: str) -> None:
