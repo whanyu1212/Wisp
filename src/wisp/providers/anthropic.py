@@ -350,28 +350,23 @@ class AnthropicProvider:
             yield failure
             return
 
-        # Only a stop_reason of "tool_use" means Anthropic finished streaming
-        # every tool_use block's input in full. Any other terminal reason
-        # (max_tokens, model_context_window_exceeded, ...) can still leave an
-        # in-progress tool_use accumulator sitting in content_blocks -- acting
-        # on it would hand the agent loop a truncated tool call to execute
-        # instead of correctly surfacing the response as incomplete.
-        if stop_reason == "tool_use":
-            for index in sorted(content_blocks):
-                accumulator = content_blocks[index]
-                if accumulator.block_type != "tool_use":
-                    continue
-                raw_arguments = "".join(accumulator.tool_use_json_chunks)
-                tool_call = _tool_call_from_anthropic(
-                    call_id=accumulator.tool_use_id,
-                    name=accumulator.tool_use_name,
-                    raw_arguments=raw_arguments,
-                    response_id=response_id,
-                )
-                tool_calls.append(tool_call)
-                yield ProviderToolCallCompleted(
-                    tool_call=tool_call, content_index=len(tool_calls) - 1
-                )
+        # Preserve every observed tool_use block through normalization. A
+        # max_tokens response may contain incomplete JSON, but the
+        # provider-neutral loop must see both the call and the terminal reason
+        # so it can reject the batch without executing it.
+        for index in sorted(content_blocks):
+            accumulator = content_blocks[index]
+            if accumulator.block_type != "tool_use":
+                continue
+            raw_arguments = "".join(accumulator.tool_use_json_chunks)
+            tool_call = _tool_call_from_anthropic(
+                call_id=accumulator.tool_use_id,
+                name=accumulator.tool_use_name,
+                raw_arguments=raw_arguments,
+                response_id=response_id,
+            )
+            tool_calls.append(tool_call)
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=len(tool_calls) - 1)
 
         if tool_calls and response_id is None:
             failure = ProviderResponseFailed(
@@ -403,7 +398,7 @@ class AnthropicProvider:
             content="".join(chunks),
             tool_calls=tuple(tool_calls),
             response_id=response_id,
-            finish_reason="tool_calls" if tool_calls else finish_reason,
+            finish_reason=finish_reason,
             usage=usage,
         )
 

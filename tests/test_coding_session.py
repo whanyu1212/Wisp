@@ -1135,6 +1135,91 @@ def test_coding_session_persists_tool_output_before_exposing_execution_end(
     assert tool_messages[0].content != INTERRUPTED_TOOL_RESULT_TEXT
 
 
+def test_coding_session_persists_truncated_tool_errors_without_running_tools(
+    tmp_path: Path,
+) -> None:
+    calls = (
+        ToolCall(
+            call_id="call-1",
+            name="echo",
+            arguments={"text": "one"},
+            response_id="truncated-response",
+        ),
+        ToolCall(
+            call_id="call-2",
+            name="echo",
+            arguments={"text": "two"},
+            response_id="truncated-response",
+        ),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="truncated-response"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=calls,
+                    response_id="truncated-response",
+                    finish_reason="length",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="recovered-response"),
+                ProviderResponseCompleted(
+                    content="recovered",
+                    response_id="recovered-response",
+                ),
+            ],
+        ]
+    )
+    executions: list[ToolArguments] = []
+
+    class RecordingEchoTool(EchoTool):
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            executions.append(arguments)
+            return await super().run(arguments, context)
+
+    tools = ToolRegistry()
+    tools.register(RecordingEchoTool())
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run_agent() -> list[WispEvent]:
+        agent = CodingSession(provider=provider, sessions=store, tool_registry=tools)
+        return [event async for event in agent.run("echo twice", session=session)]
+
+    events = anyio.run(run_agent)
+
+    assert executions == []
+    relevant_messages = [
+        message for message in session.read_messages() if message.role in {"assistant", "tool"}
+    ]
+    assert [message.role for message in relevant_messages] == [
+        "assistant",
+        "tool",
+        "tool",
+        "assistant",
+    ]
+    truncated = relevant_messages[0]
+    assert truncated.finish_reason == "length"
+    assert truncated.response_id == "truncated-response"
+    assert truncated.tool_calls is not None
+    assert [call.call_id for call in truncated.tool_calls] == ["call-1", "call-2"]
+    tool_messages = relevant_messages[1:3]
+    assert [message.tool_call_id for message in tool_messages] == ["call-1", "call-2"]
+    assert all(message.is_error for message in tool_messages)
+    assert all(message.content != INTERRUPTED_TOOL_RESULT_TEXT for message in tool_messages)
+    ended = [event for event in events if isinstance(event, ToolExecutionEnded)]
+    assert [event.call_id for event in ended] == ["call-1", "call-2"]
+    assert all(event.failure_code == "invalid_arguments" for event in ended)
+    assert all(event.retryable for event in ended)
+    assert not any(
+        isinstance(event, ToolExecutionStarted | ToolApprovalRequested | ToolApprovalResolved)
+        for event in events
+    )
+
+
 def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [

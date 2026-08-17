@@ -534,6 +534,26 @@ def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     )
 
 
+def _truncated_tool_call_events(
+    tool_call: ToolCall,
+) -> tuple[ToolExecutionEnded, ToolResultReady]:
+    """Reject one call from an incomplete model response without invoking tools."""
+
+    terminal = ToolExecutionEnded(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        output=(
+            "Tool call was not executed because the model response was truncated. "
+            "Re-issue the call with complete arguments."
+        ),
+        is_error=True,
+        failure_code="invalid_arguments",
+        retryable=True,
+        recovery_hint="Re-issue the tool call with complete arguments.",
+    )
+    return terminal, ToolResultReady.from_execution_ended(terminal)
+
+
 def _unavailable_cost(
     provider: str,
     requested_model: str | None,
@@ -675,6 +695,13 @@ class _ProviderResponseLifecycle:
             raise ProviderProtocolError(
                 "Provider terminal tool calls do not match streamed tool calls"
             )
+        has_tool_calls = bool(self.terminal.tool_calls)
+        if self.terminal.finish_reason == "tool_calls" and not has_tool_calls:
+            raise ProviderProtocolError(
+                "Provider finish reason 'tool_calls' requires at least one tool call"
+            )
+        if self.terminal.finish_reason == "stop" and has_tool_calls:
+            raise ProviderProtocolError("Provider finish reason 'stop' cannot include tool calls")
         response_id = _resolve_provider_response_id(
             started_response_id=self.started_response_id,
             terminal_response_id=self.terminal.response_id,
@@ -1267,26 +1294,35 @@ async def run_agent_loop(
                     for event in _cancelled_turn_events(turn):
                         yield event
                     return
-                yield ToolExecutionStarted(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    arguments=arguments,
-                )
-                if _is_cancelled(config):
-                    for event in _cancelled_turn_events(turn):
-                        yield event
-                    return
                 result_event: ToolResultReady | None = None
-                async for execution_event in _execute_tool_call(config, tool_call):
-                    yield execution_event
-                    if isinstance(execution_event, ToolResultReady):
-                        result_event = execution_event
-                    if _is_cancelled(config) and not isinstance(
-                        execution_event, ToolExecutionEnded
-                    ):
+                if response.finish_reason == "length":
+                    terminal_event, result_event = _truncated_tool_call_events(tool_call)
+                    yield terminal_event
+                    yield result_event
+                    if _is_cancelled(config):
                         for event in _cancelled_turn_events(turn):
                             yield event
                         return
+                else:
+                    yield ToolExecutionStarted(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        arguments=arguments,
+                    )
+                    if _is_cancelled(config):
+                        for event in _cancelled_turn_events(turn):
+                            yield event
+                        return
+                    async for execution_event in _execute_tool_call(config, tool_call):
+                        yield execution_event
+                        if isinstance(execution_event, ToolResultReady):
+                            result_event = execution_event
+                        if _is_cancelled(config) and not isinstance(
+                            execution_event, ToolExecutionEnded
+                        ):
+                            for event in _cancelled_turn_events(turn):
+                                yield event
+                            return
                 if result_event is None:
                     raise ToolExecutionProtocolError(
                         f"Tool executor produced no provider result for {tool_call.call_id}"

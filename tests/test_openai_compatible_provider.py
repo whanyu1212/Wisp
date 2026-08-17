@@ -249,6 +249,37 @@ def test_serializes_tools_effort_and_fragmented_parallel_tool_calls() -> None:
     ]
 
 
+def test_length_response_surfaces_accumulated_tool_fragments_for_rejection() -> None:
+    provider, _ = _provider(
+        [
+            [
+                _chunk(
+                    tool_calls=[
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"q":"wisp"}'},
+                        }
+                    ]
+                ),
+                _chunk(finish_reason="length"),
+            ]
+        ]
+    )
+
+    events = _collect(provider)
+
+    tool_event = next(event for event in events if isinstance(event, ProviderToolCallCompleted))
+    assert tool_event.tool_call.call_id == "call-1"
+    assert tool_event.tool_call.name == "lookup"
+    assert tool_event.tool_call.arguments == {"q": "wisp"}
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    assert completed.finish_reason == "length"
+    assert completed.tool_calls == (tool_event.tool_call,)
+
+
 def test_replays_assistant_tool_calls_and_tool_results_on_follow_up() -> None:
     provider, completions = _provider(
         [

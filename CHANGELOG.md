@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Prevented tool calls from truncated or inconsistent provider responses from reaching execution;
+  truncated batches now return ordered retryable errors to the model.
+
 ## 0.1.0b4 — 2026-08-12
 
 - Added the package-owned `wisp-development` skill with progressively loaded architecture,

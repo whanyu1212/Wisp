@@ -309,11 +309,9 @@ def test_google_provider_generates_unique_fallback_ids_for_parallel_calls_withou
     assert len(set(call_ids)) == 2
 
 
-def test_google_provider_does_not_execute_a_tool_call_truncated_by_max_tokens() -> None:
-    # Regression test, mirroring the same fix applied to AnthropicProvider: a
-    # function_call part that arrived before Gemini hit MAX_TOKENS must never
-    # be surfaced as an executable tool call -- only finish_reason == STOP
-    # means Gemini actually finished the turn with that tool call.
+def test_google_provider_surfaces_truncated_tool_call_for_rejection() -> None:
+    # Preserve the observed call beside finish_reason="length" so the
+    # provider-neutral loop can return an in-band error without executing it.
     provider = StubGoogleProvider(
         [
             _part_chunk(
@@ -335,14 +333,17 @@ def test_google_provider_does_not_execute_a_tool_call_truncated_by_max_tokens() 
 
     events = anyio.run(run)
 
-    assert events == [
-        ProviderResponseStarted(model="default-test-model"),
-        ProviderResponseCompleted(
-            content="",
-            response_id="response-id",
-            finish_reason="length",
-        ),
-    ]
+    assert isinstance(events[0], ProviderResponseStarted)
+    tool_event = events[1]
+    assert isinstance(tool_event, ProviderToolCallCompleted)
+    assert tool_event.tool_call.call_id == "call-id"
+    assert tool_event.tool_call.name == "lookup"
+    assert tool_event.tool_call.arguments == {"query": "wisp"}
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    assert completed.tool_calls == (tool_event.tool_call,)
+    assert completed.response_id == "response-id"
+    assert completed.finish_reason == "length"
 
 
 @pytest.mark.parametrize(

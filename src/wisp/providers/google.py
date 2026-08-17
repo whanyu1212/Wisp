@@ -276,23 +276,19 @@ class GoogleProvider:
             yield failure
             return
 
-        # Only finish_reason == STOP alongside a function_call part means
-        # Gemini finished the turn with a complete, executable tool call.
-        # Any other terminal reason (MAX_TOKENS, a safety block, ...) means
-        # the turn was cut short -- acting on a function_call part that
-        # arrived before the cutoff would hand the agent loop a tool request
-        # Gemini never actually finished deciding on.
+        # Preserve every observed function_call part through normalization.
+        # The provider-neutral loop combines these calls with the terminal
+        # reason, rejecting incomplete batches without executing them.
         tool_call_provider_ids: list[str | None] = []
-        if raw_finish_reason == genai_types.FinishReason.STOP:
-            for index, part in enumerate(parts):
-                if part.function_call is None:
-                    continue
-                tool_call = _tool_call_from_google(
-                    part.function_call, index=index, response_id=response_id
-                )
-                tool_calls.append(tool_call)
-                tool_call_provider_ids.append(part.function_call.id)
-                yield ProviderToolCallCompleted(tool_call=tool_call, content_index=index)
+        for index, part in enumerate(parts):
+            if part.function_call is None:
+                continue
+            tool_call = _tool_call_from_google(
+                part.function_call, index=index, response_id=response_id
+            )
+            tool_calls.append(tool_call)
+            tool_call_provider_ids.append(part.function_call.id)
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=index)
 
         if tool_calls and response_id is None:
             failure = ProviderResponseFailed(
@@ -328,7 +324,9 @@ class GoogleProvider:
             content="".join(chunks),
             tool_calls=tuple(tool_calls),
             response_id=response_id,
-            finish_reason="tool_calls" if tool_calls else finish_reason,
+            finish_reason=(
+                "tool_calls" if tool_calls and finish_reason == "stop" else finish_reason
+            ),
             usage=usage,
         )
 

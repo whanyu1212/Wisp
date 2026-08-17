@@ -306,14 +306,9 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
     ]
 
 
-def test_anthropic_provider_does_not_execute_a_tool_call_truncated_by_max_tokens() -> None:
-    # Regression test: a tool_use block that was still streaming its input
-    # when Anthropic hit max_tokens (or model_context_window_exceeded) must
-    # never be surfaced as an executable tool call -- only stop_reason ==
-    # "tool_use" means the block's input finished streaming in full. Handing
-    # the agent loop a truncated tool call would execute a malformed or
-    # incomplete request instead of correctly reporting the turn as
-    # incomplete.
+def test_anthropic_provider_surfaces_truncated_tool_call_for_rejection() -> None:
+    # Preserve the incomplete call beside finish_reason="length" so the
+    # provider-neutral loop can return an in-band error without executing it.
     provider = StubAnthropicProvider(
         [
             _message_start("response-id"),
@@ -330,15 +325,19 @@ def test_anthropic_provider_does_not_execute_a_tool_call_truncated_by_max_tokens
 
     events = anyio.run(run)
 
-    assert events == [
-        ProviderResponseStarted(model="default-test-model"),
-        ProviderResponseCompleted(
-            content="",
-            response_id="response-id",
-            finish_reason="length",
-            usage=_EXPECTED_USAGE,
-        ),
-    ]
+    assert isinstance(events[0], ProviderResponseStarted)
+    tool_event = events[1]
+    assert isinstance(tool_event, ProviderToolCallCompleted)
+    assert tool_event.tool_call.call_id == "call-id"
+    assert tool_event.tool_call.name == "lookup"
+    assert tool_event.tool_call.raw_arguments == '{"query": "wi'
+    assert tool_event.tool_call.parse_error is not None
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    assert completed.tool_calls == (tool_event.tool_call,)
+    assert completed.response_id == "response-id"
+    assert completed.finish_reason == "length"
+    assert completed.usage == _EXPECTED_USAGE
 
 
 @pytest.mark.parametrize(

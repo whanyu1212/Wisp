@@ -86,7 +86,9 @@ def test_tool_failure_with_overflow_words_is_not_context_overflow() -> None:
             [
                 ProviderResponseStarted(model="test-model"),
                 ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(content="", tool_calls=(tool_call,)),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(tool_call,), finish_reason="tool_calls"
+                ),
             ]
         ]
     )
