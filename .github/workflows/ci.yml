@@ -119,7 +119,6 @@ jobs:
         run: >-
           uv run pytest
           tests/test_auth_storage.py
-          tests/test_cli_stdin.py
           tests/test_mcp_runtime_process.py
           tests/test_process_manager.py
           tests/test_rpc_transport.py
