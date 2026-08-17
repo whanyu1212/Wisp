@@ -432,6 +432,35 @@ def test_history_controller_pairs_split_process_call_before_grouping() -> None:
 
 @pytest.mark.parametrize(
     ("operation", "expected_status"),
+    [("poll", "poll_interrupted"), ("cancel", "cancel_interrupted")],
+)
+def test_history_controller_replays_missing_process_result_as_interrupted(
+    operation: str,
+    expected_status: str,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:process-1",
+        name="bash",
+        arguments={"operation": operation, "process_id": "proc-1"},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="process-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((missing_call,), session_label="Session")
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == expected_status
+    assert not [widget for widget in surface.widgets if widget.name == "bash"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
     [("poll", "poll_denied"), ("cancel", "cancel_denied")],
 )
 def test_history_controller_replays_denied_process_operation_with_reason(

@@ -710,13 +710,12 @@ class TextualHistoryController:
             observation_member_ids = {item.id}
             if entry.missing_result and entry.tool_call_id is not None:
                 paired_result = split_results.get(entry.tool_call_id)
-                if paired_result is None or not isinstance(
+                if paired_result is not None and isinstance(
                     paired_result.entry,
                     HistoricalToolCard,
                 ):
-                    continue
-                observation = paired_result.entry
-                observation_member_ids.add(paired_result.id)
+                    observation = paired_result.entry
+                    observation_member_ids.add(paired_result.id)
             identity = process_call_identity(entry.name, entry.arguments)
             if identity is None:
                 continue
@@ -730,9 +729,8 @@ class TextualHistoryController:
             historical_status = historical_tool_status(observation)
             if historical_status == "denied":
                 lifecycle.deny(identity.operation, observation.output or "denied")
-            elif (
-                historical_status == "cancelled"
-                and observation.output == INTERRUPTED_TOOL_RESULT_TEXT
+            elif historical_status == "cancelled" and (
+                observation.missing_result or observation.output == INTERRUPTED_TOOL_RESULT_TEXT
             ):
                 lifecycle.interrupt(identity.operation)
             else:
