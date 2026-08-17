@@ -81,6 +81,12 @@ class ToolApprovalPolicy:
             reason=None if approved else self.block_reason(tool),
         )
 
+    def cancel_approval(self, *, call_id: str, reason: str) -> bool:
+        """Cancel one pending interactive decision, if this policy owns it."""
+
+        del call_id, reason
+        return False
+
     def block_reason(self, tool: Tool) -> str:
         """Return a model-visible reason for approval denial."""
 

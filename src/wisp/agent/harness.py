@@ -528,18 +528,24 @@ class AgentHarness:
             self._messages, active_from=_active_turn_start(self._messages)
         )
         loop_events = run_agent_loop(config, messages=provider_messages)
+        draining_cancellation = False
         try:
             while True:
-                if token.is_cancelled():
+                if token.is_cancelled() and not draining_cancellation and not run.had_tool_calls:
                     for cancellation_event in run.cancelled_events():
                         yield cancellation_event
                     return
+                start_cancellation = token.is_cancelled() and not draining_cancellation
+                if start_cancellation:
+                    draining_cancellation = True
 
-                scope = anyio.CancelScope()
-                self._current_scope = scope
+                scope = anyio.CancelScope(shield=draining_cancellation and not start_cancellation)
+                self._current_scope = None if draining_cancellation else scope
                 event: AgentLoopEvent | None = None
                 stream_ended = False
                 with scope:
+                    if start_cancellation:
+                        scope.cancel()
                     try:
                         event = await anext(loop_events)
                     except StopAsyncIteration:
@@ -548,12 +554,17 @@ class AgentHarness:
                     self._current_scope = None
 
                 if scope.cancel_called:
-                    for cancellation_event in run.cancelled_events():
-                        yield cancellation_event
-                    return
+                    draining_cancellation = True
                 if stream_ended:
+                    if draining_cancellation:
+                        for cancellation_event in run.cancelled_events():
+                            yield cancellation_event
+                        return
                     break
-                assert event is not None
+                if event is None:
+                    if draining_cancellation:
+                        continue
+                    raise RuntimeError("Agent loop produced no event")
 
                 run.observe(event)
                 if isinstance(event, TurnStarted) and pending_transcript_transition is not None:
@@ -571,6 +582,8 @@ class AgentHarness:
                     self._messages.append(message_from_completion_event(event))
                 yield event
 
+                if isinstance(event, TurnCompleted) and event.outcome == "cancelled":
+                    return
                 if not isinstance(event, TurnCompleted) or event.outcome != "completed":
                     continue
 

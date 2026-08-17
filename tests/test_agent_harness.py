@@ -8,10 +8,13 @@ import pytest
 
 import wisp.agent.harness as agent_harness_module
 from wisp.agent.execution import (
+    PreparedToolExecution,
     RequestBoundaryDecision,
     RequestBoundaryUnsupportedError,
     RequestContextRebase,
     ToolExecutionEvent,
+    ToolExecutor,
+    ToolPreparationEvent,
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
 from wisp.agent.messages import Message
@@ -22,6 +25,7 @@ from wisp.events import (
     QueueUpdated,
     ToolCallSnapshot,
     ToolExecutionEnded,
+    ToolResultReady,
     TurnCompleted,
     wisp_event_from_json,
 )
@@ -52,6 +56,59 @@ class RecordingToolExecutor:
             output=self.output,
             is_error=self.is_error,
         )
+
+
+class BlockingPreparedExecutor:
+    def __init__(self, all_started: anyio.Event) -> None:
+        self._all_started = all_started
+        self.started_call_ids: set[str] = set()
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            self.started_call_ids.add(tool_call.call_id)
+            if len(self.started_call_ids) == 2:
+                self._all_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=True,
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                yield await event.run()
+            else:
+                yield event
+
+
+class ImmediatePreparedExecutor:
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            return ToolExecutionEnded(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                output=f"output-{tool_call.call_id}",
+                is_error=False,
+            )
+
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=True,
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                yield await event.run()
+            else:
+                yield event
 
 
 class BlockingProvider:
@@ -95,7 +152,7 @@ class BlockingProvider:
 def _harness(
     provider: Provider,
     *,
-    executor: RecordingToolExecutor | None = None,
+    executor: ToolExecutor | None = None,
     messages: Sequence[Message] = (),
     tools: tuple[ToolSpec, ...] = (),
 ) -> AgentHarness:
@@ -895,6 +952,113 @@ def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> Non
         ("user", "initial"),
         ("assistant", "checking"),
         ("tool", "tool output"),
+    ]
+
+
+def test_harness_cancellation_drains_prepared_batch_results_in_source_order() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    async def run() -> tuple[AgentHarness, list[object]]:
+        all_started = anyio.Event()
+        harness = _harness(
+            provider,
+            executor=BlockingPreparedExecutor(all_started),
+        )
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("initial")])
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await all_started.wait()
+                assert harness.cancel()
+        return harness, events
+
+    harness, events = anyio.run(run)
+
+    terminals = [event for event in events if isinstance(event, ToolExecutionEnded)]
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [event.call_id for event in terminals] == ["call-1", "call-2"]
+    assert [event.call_id for event in results] == ["call-1", "call-2"]
+    assert all(event.is_error and event.retryable for event in results)
+    assert all(event.process_state == "cancelled" for event in results)
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert len(completed) == 1
+    assert completed[0].outcome == "cancelled"
+    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("tool", "call-2"),
+    ]
+
+
+def test_harness_cancel_after_prepared_terminal_finishes_batch_then_cancels_turn() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+    harness = _harness(provider, executor=ImmediatePreparedExecutor())
+
+    async def run() -> list[object]:
+        emitted: list[object] = []
+        async for event in harness.prompt("initial"):
+            emitted.append(event)
+            if isinstance(event, ToolExecutionEnded) and event.call_id == "call-1":
+                assert harness.cancel()
+        return emitted
+
+    events = anyio.run(run)
+
+    assert [event.call_id for event in events if isinstance(event, ToolExecutionEnded)] == [
+        "call-1",
+        "call-2",
+    ]
+    assert [event.call_id for event in events if isinstance(event, ToolResultReady)] == [
+        "call-1",
+        "call-2",
+    ]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert len(completed) == 1
+    assert completed[0].outcome == "cancelled"
+    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("tool", "call-2"),
     ]
 
 

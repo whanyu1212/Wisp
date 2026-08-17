@@ -1803,6 +1803,7 @@ class CodingSession:
             operation_tool = SkillTool(self.skill_catalog) if type(tool) is SkillTool else tool
             registry.register(
                 operation_tool,
+                execution=self.tool_registry.execution_metadata_for(tool.name),
                 prompt=self.tool_registry.prompt_metadata_for(tool.name),
             )
         return registry

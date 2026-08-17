@@ -1,6 +1,6 @@
 """Runtime extension substrate for Wisp."""
 
-from wisp.tools.base import ToolPromptMetadata
+from wisp.tools.base import ToolExecutionMetadata, ToolPromptMetadata
 
 from .api import ExtensionAPI, WispRuntime
 from .commands import (
@@ -25,6 +25,7 @@ __all__ = [
     "EventBus",
     "ExtensionAPI",
     "ProviderRegistry",
+    "ToolExecutionMetadata",
     "ToolRegistry",
     "ToolPromptMetadata",
     "UnknownCommandError",
