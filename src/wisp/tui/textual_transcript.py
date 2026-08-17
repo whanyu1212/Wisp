@@ -201,10 +201,11 @@ class TextualTranscriptController:
         self.show_activity_indicator(label, show_elapsed=False)
 
     def show_activity_indicator(self, label: str, *, show_elapsed: bool = True) -> None:
-        """Show or relabel command activity without resetting its elapsed time."""
+        """Show or relabel activity and transfer heartbeat ownership to that state."""
 
         if not self._surface.transcript_available():
             return
+        self._working_indicator_generation += 1
         indicator = self._working_indicator
         if indicator is not None:
             indicator.show_activity(label, show_elapsed=show_elapsed)

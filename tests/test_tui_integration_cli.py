@@ -2214,6 +2214,59 @@ def test_textual_abort_preserves_resolved_process_denial(
     assert "interrupted" not in rendered
 
 
+def test_textual_concurrent_result_does_not_overwrite_denied_process_call() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="cancel-1",
+                    name="bash",
+                    arguments={"operation": "cancel", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolApprovalResolved(
+                    call_id="cancel-1",
+                    name="bash",
+                    approved=False,
+                    reason="keep it running",
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="poll-1",
+                    name="bash",
+                    output="Process proc-1 is still running",
+                    is_error=False,
+                    process_id="proc-1",
+                    process_state="running",
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="cancel-1",
+                    name="bash",
+                    output="keep it running",
+                    is_error=True,
+                )
+            )
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+
+    assert rendered.startswith("• Process cancellation denied proc-1")
+    assert "keep it running" in rendered
+
+
 def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() -> None:
     async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
@@ -4308,6 +4361,32 @@ def test_flushed_stream_does_not_retire_indicator_reused_by_a_later_turn() -> No
 
     assert reused_same_widget
     assert retained_for_later_turn
+
+
+def test_flushed_stream_does_not_retire_reused_approval_indicator() -> None:
+    async def scenario() -> tuple[bool, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            indicator = app_instance._transcript_controller.working_indicator
+            renderer.token_delta("first response")
+            renderer.end_token_stream_with_content("first response")
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="approval-1",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            reused = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return reused is indicator, _working_activity(app_instance)
+
+    reused_same_widget, activity = anyio.run(scenario)
+
+    assert reused_same_widget
+    assert "Waiting for approval" in activity
 
 
 def test_textual_stream_widget_is_available_before_async_finalization() -> None:
