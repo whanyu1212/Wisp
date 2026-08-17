@@ -941,7 +941,7 @@ class TuiShell:
             command_id=command_id,
             provider=provider,
             reset_model=True,
-            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # handle_rpc_configure_command unconditionally resets agent.effort
             # to None whenever a configure carries `provider` and no explicit
             # `effort` (see its has_provider branch) -- mirror that here so
             # current_effort/the persisted setting don't go stale relative to
@@ -1019,7 +1019,7 @@ class TuiShell:
             provider=provider,
             model=model,
             effort=effort,
-            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # handle_rpc_configure_command unconditionally resets agent.effort
             # to None whenever a configure carries `model` and no explicit
             # `effort` -- whether via an explicit provider switch, a
             # model-triggered auto-switch, or a same-provider model change (the
@@ -1709,7 +1709,7 @@ class TuiShell:
             self.current_provider = event.provider
             self.current_model = event.model
             # Adopt the RPC agent's own already-filtered, authoritative effort
-            # (see _rebuild_agent_for_trusted_project in wisp.cli.rpc) rather
+            # (see the trusted-project rebuild in wisp.rpc.host) rather
             # than re-deriving it from self.current_effort here -- that local
             # copy was itself already filtered once, against the
             # untrusted-startup provider/model, in __init__. A tier invalid
@@ -1742,7 +1742,7 @@ class TuiShell:
 
         if isinstance(event, ModelProviderAutoSwitched):
             # A model-only /model <id> resolved to a different provider server-side
-            # (see _auto_switch_provider_for_model in wisp.cli.rpc). Record the
+            # (see auto_switch_provider_for_model in wisp.rpc.execution). Record the
             # provider on the still-pending configure so _finish_pending_configure
             # adopts it exactly like an explicit /provider request would, instead of
             # only updating current_model and leaving current_provider stale.

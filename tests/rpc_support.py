@@ -11,7 +11,13 @@ from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import WispEvent
 from wisp.rpc.configuration import _RpcConfigureOverrides
-from wisp.rpc.coordinator import RpcCoordinator, _RpcControlEvent, _RpcSessionState
+from wisp.rpc.coordinator import (
+    RpcCoordinator,
+    _RpcControlEvent,
+    _RpcDispatchResult,
+    _RpcRunningCommand,
+    _RpcSessionState,
+)
 from wisp.rpc.execution import RpcCommandExecutor
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
@@ -41,6 +47,21 @@ class TrustResolver:
 
     def resolve_request(self, **_kwargs: object) -> bool:
         return False
+
+
+async def preserve_running_command(
+    _command: dict[str, object],
+    running: _RpcRunningCommand | None,
+) -> _RpcDispatchResult:
+    return _RpcDispatchResult(running)
+
+
+async def reject_unexpected_command(_command: dict[str, object], message: str) -> None:
+    raise AssertionError(message)
+
+
+def rpc_command_type(command: dict[str, object]) -> str:
+    return str(command.get("type"))
 
 
 @dataclass
