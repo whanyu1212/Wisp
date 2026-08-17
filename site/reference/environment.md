@@ -1,0 +1,40 @@
+---
+title: Environment variables
+---
+
+# Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `openai-compatible`, `anthropic`, `google`, or `fake` |
+| `WISP_MODEL` | Model override; blank uses the provider default |
+| `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
+| `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
+| `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
+| `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
+| `WISP_TRUST` | Trust the current project for one process: `1` to opt in, `0` to force untrusted |
+| `WISP_TRUST_FILE` | Relocate the global trust store; must be an absolute path outside the repository |
+| `WISP_EFFORT` | Reasoning effort override |
+| `WISP_RETRY_MAX_RETRIES` | Provider retry count; defaults to `2`, set `0` to disable |
+| `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
+| `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
+| `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
+| `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
+| `WISP_UPDATE_CHECK` | Six-hour non-blocking PyPI update notice; defaults to `true` |
+
+## Provider credentials
+
+| Variable | Provider |
+|---|---|
+| `OPENAI_API_KEY` | `openai` |
+| `ANTHROPIC_API_KEY` | `anthropic` |
+| `GOOGLE_API_KEY` · `GEMINI_API_KEY` | `google` |
+| `<CUSTOM_PROVIDER>_API_KEY` | A custom OpenAI-compatible provider; hyphens become underscores |
+| `OPENAI_COMPATIBLE_API_KEY` | Fallback for custom OpenAI-compatible providers |
+
+Each is required only for the matching provider. See [Providers & auth](../guide/providers) for
+storage and precedence details.
+
+`WISP_TRUST` and `WISP_TRUST_FILE` are read only from the real process environment, never from
+project files, and `WISP_TRUST` is never persisted — see
+[Tools & safety](../guide/tools-and-safety#project-trust).

@@ -59,3 +59,8 @@ docs/*
 # Local agent instructions
 /AGENTS.md
 /CLAUDE.md
+
+# VitePress docs site (source lives in site/ and IS tracked; build output is not)
+node_modules/
+site/.vitepress/dist/
+site/.vitepress/cache/
