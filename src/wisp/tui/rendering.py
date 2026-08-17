@@ -50,6 +50,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.skills import format_skill_invocation, skill_catalog_text, skill_invocation_text
+from wisp.update_check import UpdateAvailable
 
 
 class TuiRendererKind(StrEnum):
@@ -87,6 +88,8 @@ class TuiRenderer(Protocol):
     def help(self) -> None: ...
 
     def notice(self, message: str) -> None: ...
+
+    def update_available(self, update: UpdateAvailable, *, automatic_install: bool) -> None: ...
 
     def command_error(self, message: str) -> None: ...
 
@@ -205,6 +208,17 @@ class LineTuiRenderer:
 
     def notice(self, message: str) -> None:
         self.console.print(f"[cyan]{_markup_escape(message)}[/cyan]")
+
+    def update_available(self, update: UpdateAvailable, *, automatic_install: bool) -> None:
+        guidance = (
+            f"Update with: {update.update_command}"
+            if automatic_install
+            else "Update it with the package manager that installed Wisp."
+        )
+        self.notice(
+            f"Wisp {update.latest_version} is available (current {update.current_version}). "
+            f"{guidance}"
+        )
 
     def command_error(self, message: str) -> None:
         self.console.print(f"[red]{_markup_escape(message)}[/red]")
@@ -578,6 +592,17 @@ class FullscreenTuiRenderer:
     def notice(self, message: str) -> None:
         self._append("system", message, style="cyan")
         self._refresh()
+
+    def update_available(self, update: UpdateAvailable, *, automatic_install: bool) -> None:
+        guidance = (
+            f"Update with: {update.update_command}"
+            if automatic_install
+            else "Update it with the package manager that installed Wisp."
+        )
+        self.notice(
+            f"Wisp {update.latest_version} is available (current {update.current_version}). "
+            f"{guidance}"
+        )
 
     def command_error(self, message: str) -> None:
         self._append("error", message, style="red")

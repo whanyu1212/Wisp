@@ -25,6 +25,7 @@ from .launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
 from .live import LiveFullscreenTui
 from .rendering import TuiRendererKind, create_tui_renderer
 from .shell import PromptReader, TuiController, TuiShell, _default_prompt_reader
+from .state import TuiExitReason
 from .textual_app import create_textual_tui
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.tui.app.
@@ -90,7 +91,7 @@ async def run_tui(
     console: Console | None = None,
     prompt_reader: PromptReader | None = None,
     controller: TuiController | None = None,
-) -> None:
+) -> TuiExitReason:
     """Run the minimal Wisp TUI shell."""
 
     selected_console = console or Console()
@@ -98,6 +99,7 @@ async def run_tui(
     owns_controller = selected_controller is None
     textual_tui = None
     live_tui: LiveFullscreenTui | None = None
+    exit_reason = TuiExitReason.exited
     try:
         if selected_controller is None:
             await _preflight_tui_options(options)
@@ -164,9 +166,9 @@ async def run_tui(
             ),
         )
         if textual_tui is not None:
-            await textual_tui.run_shell(shell.run)
+            exit_reason = await textual_tui.run_shell(shell.run)
         else:
-            await shell.run()
+            exit_reason = await shell.run()
     finally:
         active_error = sys.exception()
         cleanup = asyncio.create_task(
@@ -181,3 +183,4 @@ async def run_tui(
         except BaseException:
             if active_error is None:
                 raise
+    return exit_reason
