@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 from wisp.agent.messages import Message
 from wisp.events import (
@@ -16,6 +16,37 @@ from wisp.events import (
 from wisp.providers.events import ToolCall
 
 type ToolExecutionEvent = ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolExecution:
+    """One approved call whose side effects have not started yet."""
+
+    call_id: str
+    name: str
+    parallel_safe: bool
+    runner: Callable[[], Awaitable[ToolExecutionEnded]] = field(
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if type(self.call_id) is not str or not self.call_id:
+            raise TypeError("Prepared tool call_id must be a non-empty string")
+        if type(self.name) is not str or not self.name:
+            raise TypeError("Prepared tool name must be a non-empty string")
+        if type(self.parallel_safe) is not bool:
+            raise TypeError("Prepared tool parallel_safe must be a boolean")
+        if not callable(self.runner):
+            raise TypeError("Prepared tool runner must be callable")
+
+    async def run(self) -> ToolExecutionEnded:
+        """Execute the prepared call and return its only terminal event."""
+
+        return await self.runner()
+
+
+type ToolPreparationEvent = ToolApprovalRequested | ToolApprovalResolved | PreparedToolExecution
 
 
 class ToolExecutionProtocolError(RuntimeError):
@@ -49,6 +80,15 @@ class ToolExecutor(Protocol):
         An approval request must be followed by one resolution before the result. A
         denied approval must terminate with an error result.
         """
+        ...
+
+
+@runtime_checkable
+class PreparedToolExecutor(ToolExecutor, Protocol):
+    """Optional two-phase capability for schedulers that can overlap safe calls."""
+
+    def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        """Resolve policy and approval without starting tool side effects."""
         ...
 
 

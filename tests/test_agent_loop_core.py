@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -14,6 +14,7 @@ import pytest
 import wisp.agent.loop as agent_loop_module
 from wisp.agent.execution import (
     ContextOverflowSnapshot,
+    PreparedToolExecution,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
@@ -21,6 +22,7 @@ from wisp.agent.execution import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
+    ToolPreparationEvent,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
@@ -29,6 +31,7 @@ from wisp.events import (
     BillableTokenUsage,
     ContextEstimated,
     ContextOverflow,
+    ErrorEvent,
     MessageCompleted,
     MessageStarted,
     ToolApprovalRequested,
@@ -61,12 +64,14 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.registry import ToolRegistry
+from wisp.tool_types import ToolSafety
 from wisp.tools import shell as shell_module
 from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.builtin import BashTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolError
+from wisp.tools.result import ToolError, ToolResult
 
 
 class NeverToolExecutor:
@@ -166,6 +171,437 @@ class ScriptedToolExecutor:
         del tool_call
         for event in self.events:
             yield cast(ToolExecutionEvent, event)
+
+
+class CallbackTool:
+    safety: ToolSafety = "read"
+    description = "Run a test callback."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def __init__(
+        self,
+        name: str,
+        callback: Callable[[str], Awaitable[ToolResult]],
+    ) -> None:
+        self.name = name
+        self._callback = callback
+
+    async def run(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult:
+        del arguments, context
+        return await self._callback(self.name)
+
+
+class PreparedScriptExecutor:
+    def __init__(
+        self,
+        runner: Callable[[ToolCall], Awaitable[ToolExecutionEnded]],
+        *,
+        parallel_safe: Mapping[str, bool] | None = None,
+    ) -> None:
+        self._runner = runner
+        self._parallel_safe = parallel_safe or {}
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            return await self._runner(tool_call)
+
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=self._parallel_safe.get(tool_call.call_id, True),
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                yield await event.run()
+            else:
+                yield event
+
+
+def _scripted_tool_batch_provider(calls: tuple[ToolCall, ...]) -> ScriptedProvider:
+    return ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderResponseCompleted(
+                    content="done",
+                    finish_reason="stop",
+                    response_id="response-2",
+                ),
+            ],
+        ]
+    )
+
+
+def test_prepared_tool_batch_overlaps_execution_and_publishes_source_order() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def run() -> tuple[list[object], list[str]]:
+        first_started = anyio.Event()
+        release_first = anyio.Event()
+        completion_order: list[str] = []
+
+        async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+            if tool_call.call_id == "call-1":
+                first_started.set()
+                await release_first.wait()
+            else:
+                await first_started.wait()
+                completion_order.append(tool_call.call_id)
+                release_first.set()
+            if tool_call.call_id == "call-1":
+                completion_order.append(tool_call.call_id)
+            return ToolExecutionEnded(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                output=f"output-{tool_call.call_id}",
+                is_error=False,
+            )
+
+        with anyio.fail_after(2):
+            events = [
+                event
+                async for event in run_agent_loop(
+                    AgentLoopConfig(
+                        provider=provider,
+                        tool_executor=PreparedScriptExecutor(runner),
+                    ),
+                    messages=(Message(role="user", content="hi"),),
+                )
+            ]
+        return events, completion_order
+
+    events, completion_order = anyio.run(run)
+
+    assert completion_order == ["call-2", "call-1"]
+    terminal_ids = [event.call_id for event in events if isinstance(event, ToolExecutionEnded)]
+    result_ids = [event.call_id for event in events if isinstance(event, ToolResultReady)]
+    assert terminal_ids == ["call-1", "call-2"]
+    assert result_ids == ["call-1", "call-2"]
+    assert [result.call_id for result in provider.calls[1].tool_results] == [
+        "call-1",
+        "call-2",
+    ]
+
+
+def test_configured_parallel_batch_isolates_tool_owned_failure() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="first", arguments={}),
+        ToolCall(call_id="call-2", name="second", arguments={}),
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def run() -> list[object]:
+        second_started = anyio.Event()
+
+        async def callback(name: str) -> ToolResult:
+            if name == "first":
+                await second_started.wait()
+                return ToolResult(text="first succeeded")
+            second_started.set()
+            raise ToolError("second failed")
+
+        registry = ToolRegistry()
+        execution = ToolExecutionMetadata(parallel_safe=True)
+        registry.register(CallbackTool("first", callback), execution=execution)
+        registry.register(CallbackTool("second", callback), execution=execution)
+        executor = ConfiguredToolExecutor(
+            registry=registry,
+            context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+            policy=ToolPolicy.allow_all_tools(),
+            approval_policy=ToolApprovalPolicy.approve_all(),
+        )
+        with anyio.fail_after(2):
+            return [
+                event
+                async for event in run_agent_loop(
+                    AgentLoopConfig(provider=provider, tool_executor=executor),
+                    messages=(Message(role="user", content="hi"),),
+                )
+            ]
+
+    events = anyio.run(run)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [event.call_id for event in results] == ["call-1", "call-2"]
+    assert [event.is_error for event in results] == [False, True]
+    assert results[0].output == "first succeeded"
+    assert results[1].output == "second failed"
+    assert [result.call_id for result in provider.calls[1].tool_results] == [
+        "call-1",
+        "call-2",
+    ]
+
+
+def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> None:
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+    provider = _scripted_tool_batch_provider((call,))
+
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    token = Token()
+    runner_calls = 0
+
+    class CancelDuringPreparationExecutor:
+        async def prepare(
+            self,
+            tool_call: ToolCall,
+        ) -> AsyncIterator[ToolPreparationEvent]:
+            async def run() -> ToolExecutionEnded:
+                nonlocal runner_calls
+                runner_calls += 1
+                return ToolExecutionEnded(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    output="must not run",
+                    is_error=False,
+                )
+
+            token.cancelled = True
+            yield PreparedToolExecution(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                parallel_safe=True,
+                runner=run,
+            )
+
+        async def execute(
+            self,
+            tool_call: ToolCall,
+        ) -> AsyncIterator[ToolExecutionEvent]:
+            async for event in self.prepare(tool_call):
+                if isinstance(event, PreparedToolExecution):
+                    yield await event.run()
+                else:
+                    yield event
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=CancelDuringPreparationExecutor(),
+                    cancellation_token=token,
+                ),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert runner_calls == 0
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [event.call_id for event in results] == ["call-1"]
+    assert results[0].process_state == "cancelled"
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert len(completed) == 1
+    assert completed[0].outcome == "cancelled"
+    assert len(provider.calls) == 1
+
+
+def test_prepared_tool_batch_enforces_bounded_live_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_loop_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
+    calls = tuple(
+        ToolCall(call_id=f"call-{index}", name="read", arguments={}) for index in range(1, 6)
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def run() -> tuple[int, list[object]]:
+        active = 0
+        max_active = 0
+        limit_reached = anyio.Event()
+        release = anyio.Event()
+        events: list[object] = []
+
+        async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            if active == 2:
+                limit_reached.set()
+            await release.wait()
+            active -= 1
+            return ToolExecutionEnded(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                output="done",
+                is_error=False,
+            )
+
+        async def collect() -> None:
+            events.extend(
+                [
+                    event
+                    async for event in run_agent_loop(
+                        AgentLoopConfig(
+                            provider=provider,
+                            tool_executor=PreparedScriptExecutor(runner),
+                        ),
+                        messages=(Message(role="user", content="hi"),),
+                    )
+                ]
+            )
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await limit_reached.wait()
+                await anyio.sleep(0)
+                observed_max = max_active
+                release.set()
+        return observed_max, events
+
+    max_active, events = anyio.run(run)
+
+    assert max_active == 2
+    assert len([event for event in events if isinstance(event, ToolResultReady)]) == 5
+
+
+def test_prepared_tool_batch_publishes_sibling_results_before_fatal_error() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+        if tool_call.call_id == "call-1":
+            raise RuntimeError("executor failed")
+        return ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output="completed sibling",
+            is_error=False,
+        )
+
+    async def run() -> tuple[list[object], RuntimeError]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="executor failed") as raised:
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=PreparedScriptExecutor(runner),
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events, raised.value
+
+    events, error = anyio.run(run)
+
+    assert str(error) == "executor failed"
+    assert [event.call_id for event in events if isinstance(event, ToolResultReady)] == ["call-2"]
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert [event.message for event in errors] == ["executor failed"]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert completed[-1].outcome == "failed"
+    assert len(provider.calls) == 1
+
+
+def test_prepared_tool_batch_publishes_sibling_after_malformed_terminal() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+        return ToolExecutionEnded(
+            call_id=("wrong-call" if tool_call.call_id == "call-1" else tool_call.call_id),
+            name=tool_call.name,
+            output=f"output-{tool_call.call_id}",
+            is_error=False,
+        )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(ToolExecutionProtocolError, match="does not match"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=PreparedScriptExecutor(runner),
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.call_id for event in events if isinstance(event, ToolResultReady)] == ["call-2"]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert completed[-1].outcome == "failed"
+
+
+def test_prepared_tool_batch_with_sequential_call_runs_entire_batch_serially() -> None:
+    calls = tuple(
+        ToolCall(call_id=f"call-{index}", name="tool", arguments={}) for index in range(1, 4)
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def run() -> tuple[list[str], int]:
+        active = 0
+        max_active = 0
+        started: list[str] = []
+
+        async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+            nonlocal active, max_active
+            started.append(tool_call.call_id)
+            active += 1
+            max_active = max(max_active, active)
+            await anyio.sleep(0)
+            active -= 1
+            return ToolExecutionEnded(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                output="done",
+                is_error=False,
+            )
+
+        executor = PreparedScriptExecutor(
+            runner,
+            parallel_safe={"call-2": False},
+        )
+        _ = [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+        return started, max_active
+
+    started, max_active = anyio.run(run)
+
+    assert started == ["call-1", "call-2", "call-3"]
+    assert max_active == 1
 
 
 def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:

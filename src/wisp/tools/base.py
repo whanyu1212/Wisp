@@ -15,6 +15,17 @@ ToolInputSchema = Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
+class ToolExecutionMetadata:
+    """Runtime-only scheduling constraints kept out of provider tool schemas."""
+
+    parallel_safe: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.parallel_safe) is not bool:
+            raise TypeError("Tool parallel_safe metadata must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolPromptMetadata:
     """Optional model guidance kept separate from a tool's provider schema."""
 

@@ -15,7 +15,7 @@ import anyio
 import pytest
 
 import wisp.coding.tool_execution as tool_execution
-from wisp.agent.execution import ToolResultProcessingError
+from wisp.agent.execution import PreparedToolExecution, ToolResultProcessingError
 from wisp.coding.tool_execution import (
     ConfiguredToolExecutor,
     _promote_before_text,
@@ -27,6 +27,7 @@ from wisp.events import ToolExecutionEnded, wisp_event_from_json
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
@@ -144,9 +145,35 @@ class _ResultTool:
     def __init__(self, *, name: str, result: ToolResult) -> None:
         self.name = name
         self._result = result
+        self.calls = 0
 
     async def run(self, arguments: object, context: object) -> ToolResult:
+        self.calls += 1
         return self._result
+
+
+class _PendingApprovalPolicy(ToolApprovalPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending_call_id: str | None = None
+        self.cancel_reason: str | None = None
+
+    def prepare_approval(
+        self,
+        tool: object,
+        *,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> None:
+        del tool, arguments
+        self.pending_call_id = call_id
+
+    def cancel_approval(self, *, call_id: str, reason: str) -> bool:
+        if self.pending_call_id != call_id:
+            return False
+        self.pending_call_id = None
+        self.cancel_reason = reason
+        return True
 
 
 class _NoIterMapping(Mapping[str, object]):
@@ -189,6 +216,63 @@ def _run_executor(
         return next(e for e in events if isinstance(e, ToolExecutionEnded))
 
     return anyio.run(run)
+
+
+def test_closing_preparation_cancels_pending_approval() -> None:
+    tool = _ResultTool(name="mutating", result=ToolResult(text="done"))
+    tool.safety = "mutating"  # type: ignore[assignment]
+    registry = ToolRegistry()
+    registry.register(tool)  # type: ignore[arg-type]
+    approval_policy = _PendingApprovalPolicy()
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=approval_policy,
+    )
+    call = ToolCall(call_id="c1", name=tool.name, arguments={})
+
+    async def run() -> None:
+        preparation = executor.prepare(call)
+        requested = await anext(preparation)
+        assert requested.type == "tool.approval.requested"
+        assert approval_policy.pending_call_id == call.call_id
+        await preparation.aclose()
+
+    anyio.run(run)
+
+    assert approval_policy.pending_call_id is None
+    assert approval_policy.cancel_reason == "Agent run cancelled"
+    assert tool.calls == 0
+
+
+def test_executor_prepares_parallel_safe_tool_without_starting_it() -> None:
+    tool = _ResultTool(name="parallel", result=ToolResult(text="done"))
+    registry = ToolRegistry()
+    registry.register(tool, execution=ToolExecutionMetadata(parallel_safe=True))  # type: ignore[arg-type]
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+    call = ToolCall(call_id="c1", name=tool.name, arguments={})
+
+    async def run() -> tuple[PreparedToolExecution, ToolExecutionEnded]:
+        preparation = [event async for event in executor.prepare(call)]
+        prepared = next(event for event in preparation if isinstance(event, PreparedToolExecution))
+        assert prepared.call_id == call.call_id
+        assert prepared.name == call.name
+        assert prepared.parallel_safe
+        assert tool.calls == 0
+        return prepared, await prepared.run()
+
+    _, ended = anyio.run(run)
+
+    assert tool.calls == 1
+    assert ended.call_id == call.call_id
+    assert ended.output == "done"
+    assert not ended.is_error
 
 
 def test_executor_promotes_truncated_from_tool_result() -> None:

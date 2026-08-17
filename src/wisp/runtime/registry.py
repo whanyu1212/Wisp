@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from wisp.providers.base import Provider, ToolSpec
-from wisp.tools.base import Tool, ToolPromptMetadata
+from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
 
 
 class UnknownProviderError(KeyError):
@@ -79,12 +79,14 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._execution_metadata: dict[str, ToolExecutionMetadata] = {}
         self._prompt_metadata: dict[str, ToolPromptMetadata] = {}
 
     def register(
         self,
         tool: Tool,
         *,
+        execution: ToolExecutionMetadata | None = None,
         prompt: ToolPromptMetadata | None = None,
         replace: bool = True,
     ) -> None:
@@ -94,6 +96,10 @@ class ToolRegistry:
             msg = f"Tool already registered: {tool.name}"
             raise ValueError(msg)
         self._tools[tool.name] = tool
+        if execution is None:
+            self._execution_metadata.pop(tool.name, None)
+        else:
+            self._execution_metadata[tool.name] = execution
         if prompt is None:
             self._prompt_metadata.pop(tool.name, None)
         else:
@@ -121,6 +127,11 @@ class ToolRegistry:
         """Return provider-facing specs for registered tools."""
 
         return tuple(ToolSpec.from_tool(tool) for tool in self._tools.values())
+
+    def execution_metadata_for(self, name: str) -> ToolExecutionMetadata:
+        """Return conservative execution metadata for one registered tool."""
+
+        return self._execution_metadata.get(name, ToolExecutionMetadata())
 
     def prompt_metadata(self, names: Iterable[str]) -> tuple[ToolPromptMetadata, ...]:
         """Return prompt metadata for selected tools in registration order."""

@@ -195,6 +195,13 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         pending = self._pending.get(call_id)
         return pending is not None and not pending.resolved
 
+    def cancel_approval(self, *, call_id: str, reason: str) -> bool:
+        return self.resolve_approval(
+            call_id=call_id,
+            approved=False,
+            reason=reason,
+        )
+
     def resolve_approval(
         self,
         *,

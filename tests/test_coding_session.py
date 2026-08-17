@@ -64,7 +64,12 @@ from wisp.sessions.entries import (
 from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
-from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
+from wisp.tools.base import (
+    ToolArguments,
+    ToolExecutionMetadata,
+    ToolInputSchema,
+    ToolPromptMetadata,
+)
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
@@ -2296,6 +2301,57 @@ def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) ->
 
     assert provider.seen_tools is not None
     assert [tool.name for tool in provider.seen_tools] == ["echo"]
+
+
+def test_coding_session_persists_concurrent_batch_results_in_source_order(
+    tmp_path: Path,
+) -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="echo", arguments={"text": "one"}),
+        ToolCall(call_id="call-2", name="echo", arguments={"text": "two"}),
+    )
+    provider = ToolLoopProvider([list(calls), ["done"]])
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    tools = ToolRegistry()
+    tools.register(
+        EchoTool(),
+        execution=ToolExecutionMetadata(parallel_safe=True),
+    )
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            tool_registry=tools,
+        )
+        _ = [event async for event in agent.run("hello", session=session)]
+
+    anyio.run(run_agent)
+
+    tool_messages = [message for message in session.read_messages() if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == ["call-1", "call-2"]
+    assert [message.content for message in tool_messages] == ["echo: one", "echo: two"]
+    assert [result.call_id for result in provider.calls[1][0]] == [
+        "call-1",
+        "call-2",
+    ]
+
+
+def test_coding_session_operation_registry_preserves_execution_metadata(tmp_path: Path) -> None:
+    tools = ToolRegistry()
+    execution = ToolExecutionMetadata(parallel_safe=True)
+    tools.register(EchoTool(), execution=execution)
+    agent = CodingSession(
+        provider=CapturingProvider(),
+        sessions=JsonlSessionStore(tmp_path),
+        tool_registry=tools,
+    )
+
+    operation_registry = agent._operation_tool_registry()  # noqa: SLF001
+
+    assert operation_registry is not None
+    assert operation_registry.execution_metadata_for("echo") is execution
 
 
 def test_coding_session_filters_tool_prompt_metadata_by_policy(tmp_path: Path) -> None:

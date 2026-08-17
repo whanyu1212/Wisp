@@ -15,11 +15,13 @@ from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.skills.tool import SkillTool
-from wisp.tools.base import ToolPromptMetadata
+from wisp.tools.base import ToolExecutionMetadata, ToolPromptMetadata
 from wisp.tools.builtin import builtin_tools
 from wisp.tools.process_manager import ProcessSupervisor
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
+_PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)
+_PARALLEL_SAFE_TOOL_NAMES = frozenset({"find", "grep", "ls", "read"})
 _BUILTIN_TOOL_PROMPTS = {
     "read": ToolPromptMetadata(
         prompt_snippet="Use read with offset and limit instead of loading a large file at once.",
@@ -79,7 +81,13 @@ def activate(
     api.register_provider(AnthropicProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     api.register_provider(GoogleProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     for tool in builtin_tools(process_supervisor=process_supervisor):
-        api.register_tool(tool, prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name))
-    api.register_tool(SkillTool())
+        api.register_tool(
+            tool,
+            execution=(
+                _PARALLEL_TOOL_EXECUTION if tool.name in _PARALLEL_SAFE_TOOL_NAMES else None
+            ),
+            prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name),
+        )
+    api.register_tool(SkillTool(), execution=_PARALLEL_TOOL_EXECUTION)
     for command in builtin_command_descriptors():
         api.register_command(command)

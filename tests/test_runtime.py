@@ -25,6 +25,7 @@ from wisp.runtime import (
     EventBus,
     ExtensionAPI,
     ProviderRegistry,
+    ToolExecutionMetadata,
     ToolPromptMetadata,
     ToolRegistry,
     UnknownProviderError,
@@ -75,6 +76,11 @@ def test_tool_registry_registers_and_resolves_tool() -> None:
     assert registry.all() == (tool,)
 
 
+def test_tool_execution_metadata_rejects_non_boolean_parallel_safe() -> None:
+    with pytest.raises(TypeError, match="parallel_safe metadata must be a boolean"):
+        ToolExecutionMetadata(parallel_safe=1)  # type: ignore[arg-type]
+
+
 def test_tool_prompt_metadata_rejects_non_string_guidance() -> None:
     with pytest.raises(TypeError, match="snippet must be a string"):
         ToolPromptMetadata(prompt_snippet=object())  # type: ignore[arg-type]
@@ -109,28 +115,33 @@ def test_tool_registry_keeps_prompt_metadata_separate_from_provider_specs() -> N
     assert not hasattr(registry.specs()[0], "prompt_snippet")
 
 
-def test_tool_registry_replacement_clears_stale_prompt_metadata() -> None:
+def test_tool_registry_replacement_clears_stale_metadata() -> None:
     registry = ToolRegistry()
     registry.register(
         ReadTool(),
+        execution=ToolExecutionMetadata(parallel_safe=True),
         prompt=ToolPromptMetadata(prompt_snippet="Old guidance."),
     )
 
     registry.register(ReadTool())
 
+    assert registry.execution_metadata_for("read") == ToolExecutionMetadata()
     assert registry.prompt_metadata(("read",)) == ()
 
 
 def test_tool_selection_preserves_metadata_only_for_selected_tools() -> None:
     registry = ToolRegistry()
+    read_execution = ToolExecutionMetadata(parallel_safe=True)
     read_prompt = ToolPromptMetadata(prompt_snippet="Read narrowly.")
     bash_prompt = ToolPromptMetadata(prompt_snippet="Check command status.")
-    registry.register(ReadTool(), prompt=read_prompt)
+    registry.register(ReadTool(), execution=read_execution, prompt=read_prompt)
     registry.register(BashTool(), prompt=bash_prompt)
 
     filtered = select_tools(registry, allow_read_tools=True)
 
     assert filtered.names() == ("read",)
+    assert filtered.execution_metadata_for("read") is read_execution
+    assert filtered.execution_metadata_for("bash") == ToolExecutionMetadata()
     assert filtered.prompt_metadata(("read", "bash")) == (read_prompt,)
 
 
@@ -369,6 +380,10 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
         assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
         assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
         assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        for parallel_name in ("find", "grep", "ls", "read", "skill"):
+            assert runtime.tools.execution_metadata_for(parallel_name).parallel_safe
+        for sequential_name in ("bash", "edit", "write"):
+            assert not runtime.tools.execution_metadata_for(sequential_name).parallel_safe
 
         await runtime.aclose()
         with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):

@@ -13,6 +13,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 - Prevented tool calls from truncated or inconsistent provider responses from reaching execution;
   truncated batches now return ordered retryable errors to the model.
+- Added bounded concurrent execution for explicitly parallel-safe tool batches while preserving
+  deterministic approvals, source-ordered results, sequential fallback, and complete cancellation.
 
 ## 0.1.0b4 — 2026-08-12
 

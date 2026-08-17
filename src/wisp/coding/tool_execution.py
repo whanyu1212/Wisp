@@ -6,7 +6,12 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from wisp.agent.execution import ToolExecutionEvent, ToolResultProcessingError
+from wisp.agent.execution import (
+    PreparedToolExecution,
+    ToolExecutionEvent,
+    ToolPreparationEvent,
+    ToolResultProcessingError,
+)
 from wisp.events import (
     ManagedProcessState,
     ToolApprovalRequested,
@@ -156,10 +161,20 @@ class ConfiguredToolExecutor:
         self._approval_policy = approval_policy
 
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        prepared: PreparedToolExecution | None = None
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                prepared = event
+            else:
+                yield event
+        if prepared is None:  # pragma: no cover - guarded by the implementation below
+            raise RuntimeError("Tool preparation completed without an execution")
+        yield await prepared.run()
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        """Resolve policy and approval while deferring all tool side effects."""
+
         arguments = dict(tool_call.arguments)
-        # The synthetic paths below (parse error, unconfigured, unknown tool, blocked,
-        # denied) never produce a ToolResult, so they build an outcome from just the
-        # message + is_error and leave every promoted signal at its default.
         outcome: _ToolRunOutcome
 
         if tool_call.parse_error is not None:
@@ -192,66 +207,85 @@ class ConfiguredToolExecutor:
                         call_id=tool_call.call_id,
                         arguments=arguments,
                     )
-                    yield ToolApprovalRequested(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=arguments,
-                        safety=tool.safety,
-                    )
-                    decision = await self._approval_policy.await_approval(
-                        tool,
-                        call_id=tool_call.call_id,
-                        arguments=arguments,
-                    )
-                    yield ToolApprovalResolved(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        approved=decision.approved,
-                        reason=decision.reason,
-                    )
-                    if decision.approved:
-                        outcome = await self._run_tool(
-                            tool,
-                            arguments,
+                    approval_resolved = False
+                    try:
+                        yield ToolApprovalRequested(
                             call_id=tool_call.call_id,
-                            tool_name=tool_call.name,
+                            name=tool_call.name,
+                            arguments=arguments,
+                            safety=tool.safety,
                         )
-                    else:
-                        outcome = _failure_outcome(
-                            decision.reason or "Tool execution was not approved",
-                            failure_code="approval_denied",
+                        decision = await self._approval_policy.await_approval(
+                            tool,
+                            call_id=tool_call.call_id,
+                            arguments=arguments,
                         )
-                else:
-                    outcome = await self._run_tool(
-                        tool,
-                        arguments,
-                        call_id=tool_call.call_id,
-                        tool_name=tool_call.name,
+                        approval_resolved = True
+                        yield ToolApprovalResolved(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            approved=decision.approved,
+                            reason=decision.reason,
+                        )
+                    finally:
+                        if not approval_resolved:
+                            self._approval_policy.cancel_approval(
+                                call_id=tool_call.call_id,
+                                reason="Agent run cancelled",
+                            )
+                    if decision.approved:
+                        yield self._prepare_tool(tool_call, tool, arguments)
+                        return
+                    outcome = _failure_outcome(
+                        decision.reason or "Tool execution was not approved",
+                        failure_code="approval_denied",
                     )
+                else:
+                    yield self._prepare_tool(tool_call, tool, arguments)
+                    return
 
-        yield ToolExecutionEnded(
+        yield self._prepare_outcome(tool_call, outcome)
+
+    def _prepare_tool(
+        self,
+        tool_call: ToolCall,
+        tool: Tool,
+        arguments: dict[str, object],
+    ) -> PreparedToolExecution:
+        async def run() -> ToolExecutionEnded:
+            outcome = await self._run_tool(
+                tool,
+                arguments,
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+            )
+            return _execution_ended(tool_call, outcome)
+
+        parallel_safe = (
+            self._registry.execution_metadata_for(tool_call.name).parallel_safe
+            if self._registry is not None
+            else False
+        )
+        return PreparedToolExecution(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            output=outcome.output,
-            is_error=outcome.is_error,
-            failure_code=outcome.failure_code,
-            retryable=outcome.retryable,
-            recovery_hint=outcome.recovery_hint,
-            exit_code=outcome.exit_code,
-            output_has_exit_status=outcome.output_has_exit_status,
-            before_text=outcome.before_text,
-            created=outcome.created,
-            summary=outcome.summary,
-            truncated=outcome.truncated,
-            process_id=outcome.process_id,
-            process_state=outcome.process_state,
-            process_error=outcome.process_error,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            stdout_truncated=outcome.stdout_truncated,
-            stderr_truncated=outcome.stderr_truncated,
-            stdout_dropped_bytes=outcome.stdout_dropped_bytes,
-            stderr_dropped_bytes=outcome.stderr_dropped_bytes,
+            parallel_safe=parallel_safe,
+            runner=run,
+        )
+
+    @staticmethod
+    def _prepare_outcome(
+        tool_call: ToolCall,
+        outcome: _ToolRunOutcome,
+    ) -> PreparedToolExecution:
+        async def run() -> ToolExecutionEnded:
+            return _execution_ended(tool_call, outcome)
+
+        return PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=False,
+            runner=run,
         )
 
     async def _run_tool(
@@ -331,6 +365,33 @@ class ConfiguredToolExecutor:
             )
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
+
+
+def _execution_ended(tool_call: ToolCall, outcome: _ToolRunOutcome) -> ToolExecutionEnded:
+    return ToolExecutionEnded(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        output=outcome.output,
+        is_error=outcome.is_error,
+        failure_code=outcome.failure_code,
+        retryable=outcome.retryable,
+        recovery_hint=outcome.recovery_hint,
+        exit_code=outcome.exit_code,
+        output_has_exit_status=outcome.output_has_exit_status,
+        before_text=outcome.before_text,
+        created=outcome.created,
+        summary=outcome.summary,
+        truncated=outcome.truncated,
+        process_id=outcome.process_id,
+        process_state=outcome.process_state,
+        process_error=outcome.process_error,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        stdout_truncated=outcome.stdout_truncated,
+        stderr_truncated=outcome.stderr_truncated,
+        stdout_dropped_bytes=outcome.stdout_dropped_bytes,
+        stderr_dropped_bytes=outcome.stderr_dropped_bytes,
+    )
 
 
 def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSnapshot:
