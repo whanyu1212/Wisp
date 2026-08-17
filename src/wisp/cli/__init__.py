@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -23,6 +24,8 @@ from wisp.events import (
     MessageDelta,
 )
 from wisp.providers.base import ProviderError
+from wisp.rpc.configuration import _ConfigOverrides
+from wisp.rpc.host import build_runtime_for_config
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
@@ -65,48 +68,6 @@ _writes_json_events = _cli_output._writes_json_events
 _print_mode_tool_approval_policy = _cli_tools._print_mode_tool_approval_policy
 _print_mode_tool_registry = _cli_tools._print_mode_tool_registry
 _session_for_print_run = _cli_tools._session_for_print_run
-
-# RPC output mode lives in wisp.cli.rpc; re-export its private helpers so
-# existing callers and tests keep importing them from wisp.cli.
-_RpcInputCommand = _cli_rpc._RpcInputCommand
-_RpcInputClosed = _cli_rpc._RpcInputClosed
-_RpcCommandCompleted = _cli_rpc._RpcCommandCompleted
-_RpcSessionState = _cli_rpc._RpcSessionState
-_RpcRunningCommand = _cli_rpc._RpcRunningCommand
-_RpcPendingApproval = _cli_rpc._RpcPendingApproval
-_RpcToolApprovalPolicy = _cli_rpc._RpcToolApprovalPolicy
-
-_STDIN_READ_CHUNK_SIZE = _cli_rpc._STDIN_READ_CHUNK_SIZE
-_STDIN_THREAD_POLL_INTERVAL = _cli_rpc._STDIN_THREAD_POLL_INTERVAL
-_STDIN_THREAD_QUEUE_SIZE = _cli_rpc._STDIN_THREAD_QUEUE_SIZE
-_MAX_QUEUED_RPC_COMMANDS = _cli_rpc._MAX_QUEUED_RPC_COMMANDS
-
-_build_runtime_for_config = _cli_rpc._build_runtime_for_config
-_run_rpc = _cli_rpc._run_rpc
-_dispatch_rpc_command = _cli_rpc._dispatch_rpc_command
-_rpc_session_state = _cli_rpc._rpc_session_state
-_read_rpc_stdin = _cli_rpc._read_rpc_stdin
-_rpc_stdin_needs_thread_reader = _cli_rpc._rpc_stdin_needs_thread_reader
-_read_rpc_text_stdin = _cli_rpc._read_rpc_text_stdin
-_read_rpc_thread_stdin = _cli_rpc._read_rpc_thread_stdin
-_read_rpc_fd_stdin = _cli_rpc._read_rpc_fd_stdin
-_send_rpc_input_line = _cli_rpc._send_rpc_input_line
-_decode_rpc_stdin_line = _cli_rpc._decode_rpc_stdin_line
-_start_rpc_prompt_command = _cli_rpc._start_rpc_prompt_command
-_run_rpc_prompt_command = _cli_rpc._run_rpc_prompt_command
-_start_rpc_compact_command = _cli_rpc._start_rpc_compact_command
-_run_rpc_compact_command = _cli_rpc._run_rpc_compact_command
-_updated_rpc_history = _cli_rpc._updated_rpc_history
-_reject_rpc_command = _cli_rpc._reject_rpc_command
-_handle_rpc_control_command = _cli_rpc._handle_rpc_control_command
-_handle_rpc_configure_command = _cli_rpc._handle_rpc_configure_command
-_handle_rpc_approval_command = _cli_rpc._handle_rpc_approval_command
-_handle_rpc_cancel_command = _cli_rpc._handle_rpc_cancel_command
-_write_rpc_command_error = _cli_rpc._write_rpc_command_error
-_rpc_command_identity = _cli_rpc._rpc_command_identity
-_rpc_command_type = _cli_rpc._rpc_command_type
-_rpc_command_id = _cli_rpc._rpc_command_id
-_parse_rpc_command = _cli_rpc._parse_rpc_command
 
 
 def _version_callback(value: bool) -> None:
@@ -299,7 +260,7 @@ def cli_callback(
     else:
         trusted = _resolve_cli_trust(project_context_root).trusted
 
-    config_overrides = _cli_rpc._ConfigOverrides(
+    config_overrides = _ConfigOverrides(
         provider=provider,
         model=model,
         session_dir=session_dir,
@@ -315,7 +276,7 @@ def cli_callback(
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
-                _run_rpc,
+                _cli_rpc._run_rpc,
                 config,
                 resolved_all_tools,
                 allow_read_tools,
@@ -534,9 +495,12 @@ def _run_tui_from_cli_options(
     user_session_dir: Path | None = None,
     user_auth_file: Path | None = None,
 ) -> None:
-    from wisp.tui import TuiOptions, run_tui
+    from wisp.tui import TuiExitReason, TuiOptions, run_tui
 
-    anyio.run(
+    restart_argv = tuple(sys.orig_argv)
+    restart_cwd = Path.cwd()
+    restart_environment = dict(os.environ)
+    result = anyio.run(
         run_tui,
         TuiOptions(
             config=config,
@@ -555,6 +519,30 @@ def _run_tui_from_cli_options(
             user_auth_file=user_auth_file,
         ),
     )
+    if result is TuiExitReason.restart_requested:
+        try:
+            _restart_current_process(
+                restart_argv,
+                cwd=restart_cwd,
+                environment=restart_environment,
+            )
+        except OSError as exc:
+            typer.echo(f"Wisp was updated, but restart failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
+
+def _restart_current_process(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+) -> None:
+    """Replace this process with the exact invocation captured before TUI startup."""
+
+    if not argv:
+        raise OSError("the original process invocation is unavailable")
+    os.chdir(cwd)
+    os.execvpe(argv[0], list(argv), environment)
 
 
 async def _run_print(
@@ -571,7 +559,7 @@ async def _run_print(
     trusted: bool = False,
     project_context_root: Path | None = None,
 ) -> None:
-    runtime = await _build_runtime_for_config(config)
+    runtime = await build_runtime_for_config(config)
     try:
         await _run_print_with_runtime(
             prompt,

@@ -65,7 +65,7 @@ from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
-from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
+from wisp.tui.state import TuiCancelRequested, TuiExitReason, TuiQuitRequested
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
@@ -82,6 +82,8 @@ from wisp.tui.theme import (
 from wisp.tui.theme_picker import ThemePicker
 from wisp.tui.theme_preference import ThemePreferenceState, load_theme_state, save_theme_state
 from wisp.tui.tool_call import ToolActionStatus
+from wisp.tui.update_prompt import UpdatePrompt
+from wisp.tui.update_types import UpdatePromptAction
 from wisp.tui.widgets import (
     ComposerPanel,
     DecisionPanel,
@@ -101,6 +103,7 @@ from wisp.tui.widgets import (
     Transcript,
     WorkingIndicator,
 )
+from wisp.update_check import UpdateAvailable
 
 # The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
 # BLOCK rather than box-drawing or ASCII art: a single, near-universally
@@ -512,6 +515,7 @@ class TextualTui(App[None]):
         self._context_status: ContextStatusOverlay | None = None
         self._diff_viewer: DiffViewer | None = None
         self._operation_indicator: OperationIndicator | None = None
+        self._update_prompt: UpdatePrompt | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._help_viewport_state: TranscriptViewportState | None = None
         self._help_viewport_baseline: TranscriptViewportState | None = None
@@ -524,12 +528,18 @@ class TextualTui(App[None]):
         self._skill_catalog = RpcSkillCatalogSnapshot()
         self._agent_mode = "build"
         self._current_prompt = "wisp> "
-        self._runner: Callable[[], Awaitable[None]] | None = None
+        self._runner: Callable[[], Awaitable[TuiExitReason]] | None = None
         self._runner_error: Exception | None = None
+        self._runner_result = TuiExitReason.exited
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
         self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
         self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
+        self._update_action_hook: (
+            Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]] | None
+        ) = None
+        self._pending_update: UpdateAvailable | None = None
+        self._visible_input_mode = "idle"
         self._history_window_older_hook: Callable[[], bool] | None = None
         self._history_window_oldest_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
@@ -572,6 +582,7 @@ class TextualTui(App[None]):
             # `overlay: screen` starts at the screen origin rather than below
             # transcript/composer siblings when it becomes visible.
             yield OperationIndicator(id="operation-indicator")
+            yield UpdatePrompt(id="update-prompt")
             yield ContextStatusOverlay(id="context-status")
             yield DiffViewer(id="diff-viewer")
             # Transcript takes all remaining height (1fr). ComposerPanel is explicitly
@@ -637,6 +648,7 @@ class TextualTui(App[None]):
         self._context_status = self.query_one("#context-status", ContextStatusOverlay)
         self._diff_viewer = self.query_one("#diff-viewer", DiffViewer)
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
+        self._update_prompt = self.query_one("#update-prompt", UpdatePrompt)
         self._overlay_controller = TextualOverlayController(
             composer=self._composer,
             # Both composer-anchored menus, so an overlay opening tears down each
@@ -653,10 +665,12 @@ class TextualTui(App[None]):
                 OverlayKind.theme_picker: self._theme_picker,
                 OverlayKind.context_status: self._context_status,
                 OverlayKind.diff_viewer: self._diff_viewer,
+                OverlayKind.update_prompt: self._update_prompt,
                 OverlayKind.operation_indicator: self._operation_indicator,
             },
             defer_after_refresh=self._defer_overlay_restore,
             on_overlay_displaced=self._on_overlay_displaced,
+            on_transition_finished=self._schedule_update_prompt,
         )
         self.set_command_catalog(self._command_catalog)
         self.set_skill_catalog(self._skill_catalog)
@@ -749,6 +763,7 @@ class TextualTui(App[None]):
         # behavior exactly; the file menu is offered only when no slash menu is live.
         if event.text_area is not self._input:
             return
+        self._schedule_update_prompt()
         menu_was_open = self._suggestion_menu_is_open()
         slash_matches = 0
         if self._suggest is not None:
@@ -1288,6 +1303,43 @@ class TextualTui(App[None]):
         if kind is OverlayKind.theme_picker:
             self._rollback_theme_picker_preview()
 
+    def on_update_prompt_selected(self, event: UpdatePrompt.Selected) -> None:
+        event.stop()
+        overlays = self._overlay_controller
+        if overlays is None or overlays.active_overlay is not OverlayKind.update_prompt:
+            return
+        self._pending_update = None
+        if event.action is UpdatePromptAction.update_and_restart:
+            overlays.close(OverlayKind.update_prompt, restore_composer=False)
+        else:
+            overlays.close(OverlayKind.update_prompt)
+        if event.action is UpdatePromptAction.later:
+            return
+        hook = self._update_action_hook
+        if hook is None:
+            self.write_error("The Wisp update action is unavailable.")
+            if event.action is UpdatePromptAction.update_and_restart:
+                self.update_operation_finished(installed=False, restarting=False)
+            return
+        self.run_worker(
+            self._invoke_update_action(hook, event.action, event.update),
+            exclusive=True,
+            group="wisp-update-action",
+        )
+
+    async def _invoke_update_action(
+        self,
+        hook: Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]],
+        action: UpdatePromptAction,
+        update: UpdateAvailable,
+    ) -> None:
+        try:
+            await hook(action, update)
+        except Exception as exc:  # noqa: BLE001 - restore a usable prompt on callback failure
+            self.write_error(f"Update action failed: {exc}")
+            if action is UpdatePromptAction.update_and_restart:
+                self.update_operation_finished(installed=False, restarting=False)
+
     def _flush_theme_preview(self, epoch: int) -> None:
         if epoch != self._theme_preview_epoch:
             return
@@ -1528,7 +1580,10 @@ class TextualTui(App[None]):
         self.set_input_hint(prompt)
         return await self._input_controller.receive()
 
-    async def run_shell(self, runner: Callable[[], Awaitable[None]]) -> None:
+    async def run_shell(
+        self,
+        runner: Callable[[], Awaitable[TuiExitReason]],
+    ) -> TuiExitReason:
         self._runner = runner
         # Textual must enable terminal mouse reporting for wheel/trackpad events to
         # reach the Transcript. Keep this explicit: the default is also True, but
@@ -1540,12 +1595,13 @@ class TextualTui(App[None]):
         # instead of being swallowed by the app teardown.
         if self._runner_error is not None:
             raise self._runner_error
+        return self._runner_result
 
     async def _run_and_exit(self) -> None:
         if self._runner is None:
             return
         try:
-            await self._runner()
+            self._runner_result = await self._runner()
         except Exception as exc:
             self._runner_error = exc
         finally:
@@ -1654,6 +1710,7 @@ class TextualTui(App[None]):
             self._help_viewport_baseline = None
             if should_restore and transcript is not None and viewport_state is not None:
                 self.call_after_refresh(transcript.restore_viewport_state, viewport_state)
+            self._schedule_update_prompt()
             return
 
         if self._transcript is not None:
@@ -1695,6 +1752,9 @@ class TextualTui(App[None]):
         overlays = self._overlay_controller
         if overlays is not None and overlays.active_overlay is OverlayKind.connect:
             self.workers.cancel_group(self, "connect-oauth")
+        if overlays is not None and overlays.active_operation is OverlayOperation.update:
+            self._signal_input(TuiCancelRequested(), action="cancel", clear_editor=False)
+            return
         if overlays is not None and overlays.consume_cancel():
             return
         self._signal_input(TuiCancelRequested(), action="cancel", clear_editor=False)
@@ -1916,10 +1976,12 @@ class TextualTui(App[None]):
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         self._agent_mode = snapshot.mode
+        self._visible_input_mode = snapshot.input_mode
         if self._composer is not None:
             self._composer.set_snapshot(snapshot)
         if self._status is not None:
             self._status.set_snapshot(snapshot)
+        self._schedule_update_prompt()
 
     def status_width(self) -> int | None:
         # The width the footer text actually renders into: the #status widget's
@@ -2187,6 +2249,63 @@ class TextualTui(App[None]):
         """Install the shell-owned device-authorization callback."""
 
         self._connect_oauth_hook = hook
+
+    def set_update_action_hook(
+        self,
+        hook: Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]],
+    ) -> None:
+        """Install the shell-owned update-choice callback."""
+
+        self._update_action_hook = hook
+
+    def offer_update(self, update: UpdateAvailable) -> None:
+        """Queue one release offer until the Textual surface is safely idle."""
+
+        self._pending_update = update
+        self._schedule_update_prompt()
+
+    def _schedule_update_prompt(self) -> None:
+        if self._pending_update is not None and self.is_running:
+            self.call_after_refresh(self._maybe_show_update_prompt)
+
+    def _maybe_show_update_prompt(self) -> None:
+        update = self._pending_update
+        prompt = self._update_prompt
+        overlays = self._overlay_controller
+        editor = self._input
+        if update is None or prompt is None or overlays is None or editor is None:
+            return
+        if (
+            self._visible_input_mode != "idle"
+            or editor.text != ""
+            or self._suggestion_menu_is_open()
+            or overlays.active_overlay is not None
+            or overlays.active_operation is not None
+            or bool(self.screen.query(HelpPanel))
+        ):
+            return
+        overlays.open(OverlayKind.update_prompt)
+        prompt.show_update(update)
+
+    def update_operation_started(self, update: UpdateAvailable) -> None:
+        overlays = self._overlay_controller
+        indicator = self._operation_indicator
+        if overlays is not None:
+            overlays.start_operation(OverlayOperation.update)
+        if indicator is not None:
+            indicator.show_operation(f"Updating Wisp to {update.latest_version}…")
+
+    def update_operation_finished(self, *, installed: bool, restarting: bool) -> None:
+        indicator = self._operation_indicator
+        if restarting:
+            if indicator is not None:
+                indicator.show_operation("Restarting Wisp…")
+            return
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.finish_operation(OverlayOperation.update)
+        if indicator is not None:
+            indicator.hide()
 
     def request_latest_history(self) -> bool:
         """Schedule a durable latest-page reload requested by history retention.

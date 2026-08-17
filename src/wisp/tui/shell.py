@@ -81,6 +81,7 @@ from wisp.tui.rendering import (
 )
 from wisp.tui.state import (
     TuiCancelRequested,
+    TuiExitReason,
     TuiInteractionState,
     TuiQuitRequested,
     TuiStatus,
@@ -98,10 +99,19 @@ from wisp.tui.state import (
     _RpcEvent,
     _RpcEventsClosed,
     _TuiSignal,
+    _UpdateCheckCompleted,
+    _UpdateOperationFinished,
     _view_status_for_status,
 )
 from wisp.tui.update_commands import UpdateCommands, UpdateInstaller, UpdateStatusChecker
-from wisp.update_check import UpdateAvailable, get_update_status, install_update
+from wisp.tui.update_types import UpdatePromptAction
+from wisp.update_check import (
+    UpdateAvailable,
+    can_install_update,
+    get_update_status,
+    install_update,
+    skip_update_version,
+)
 
 
 class TuiController(Protocol):
@@ -184,6 +194,8 @@ class TuiController(Protocol):
 
 PromptReader = Callable[[str], Awaitable[str]]
 UpdateChecker = Callable[[], Awaitable[UpdateAvailable | None]]
+UpdateCapabilityChecker = Callable[[], Awaitable[bool]]
+UpdateSkipWriter = Callable[..., Awaitable[bool]]
 _TRUST_ANSWERS = {"y", "yes", "n", "no"}
 
 
@@ -255,6 +267,8 @@ class TuiShell:
         openai_compatible_provider: str = "openai-compatible",
         settings_home_dir: Path | None = None,
         update_checker: UpdateChecker | None = None,
+        update_capability_checker: UpdateCapabilityChecker = can_install_update,
+        update_skip_writer: UpdateSkipWriter = skip_update_version,
         manual_update_checker: UpdateStatusChecker = get_update_status,
         update_installer: UpdateInstaller = install_update,
         quit_press_window: float = 1.5,
@@ -320,6 +334,8 @@ class TuiShell:
         # production resolves the real home directory.
         self._settings_home_dir = settings_home_dir
         self._update_checker = update_checker
+        self._update_capability_checker = update_capability_checker
+        self._update_skip_writer = update_skip_writer
         self._updates = UpdateCommands(
             self.renderer,
             checker=manual_update_checker,
@@ -328,6 +344,8 @@ class TuiShell:
         self._task_group: anyio.abc.TaskGroup | None = None
         self._connect_cancel_scope: anyio.CancelScope | None = None
         self._update_cancel_scope: anyio.CancelScope | None = None
+        self._signal_send: MemoryObjectSendStream[_TuiSignal] | None = None
+        self._exit_reason = TuiExitReason.exited
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
@@ -344,8 +362,12 @@ class TuiShell:
             "set_connect_oauth_hook",
             self._auth.connect_oauth,
         )
+        self._call_renderer_optional(
+            "set_update_action_hook",
+            self._handle_update_prompt_action,
+        )
 
-    async def run(self) -> None:
+    async def run(self) -> TuiExitReason:
         """Run the interactive prompt/event loop."""
 
         self.renderer.startup()
@@ -353,44 +375,54 @@ class TuiShell:
         send, receive = anyio.create_memory_object_stream[_TuiSignal](100)
         async with anyio.create_task_group() as task_group, send, receive:
             self._task_group = task_group
+            self._signal_send = send
             try:
                 task_group.start_soon(self._read_rpc_events, send.clone())
                 if await self._hydrate_session_history(receive):
                     task_group.cancel_scope.cancel()
-                    return
+                    return self._exit_reason
                 if await self._hydrate_command_catalog(receive):
                     task_group.cancel_scope.cancel()
-                    return
+                    return self._exit_reason
                 if await self._hydrate_skill_catalog(receive):
                     task_group.cancel_scope.cancel()
-                    return
+                    return self._exit_reason
                 await self._request_session_stats()
                 if self._update_checker is not None:
-                    task_group.start_soon(self._check_for_update)
+                    task_group.start_soon(self._check_for_update, send.clone())
                 task_group.start_soon(self._read_inputs, send.clone())
                 while True:
                     signal = await receive.receive()
                     should_exit = await self._handle_signal(signal)
                     if should_exit:
                         task_group.cancel_scope.cancel()
-                        return
+                        return self._exit_reason
             finally:
+                self._signal_send = None
                 self._task_group = None
+        return self._exit_reason
 
-    async def _check_for_update(self) -> None:
+    async def _check_for_update(
+        self,
+        send: MemoryObjectSendStream[_TuiSignal],
+    ) -> None:
         checker = self._update_checker
         if checker is None:
             return
-        try:
-            update = await checker()
-        except Exception:  # noqa: BLE001 - update checks are optional TUI chrome
-            return
-        if update is None:
-            return
-        self.renderer.notice(
-            f"Wisp {update.latest_version} is available (current {update.current_version}). "
-            f"Update with: {update.update_command}"
-        )
+        async with send:
+            try:
+                update = await checker()
+                if update is None:
+                    return
+                automatic_install = await self._update_capability_checker()
+                await send.send(
+                    _UpdateCheckCompleted(
+                        update=update,
+                        automatic_install=automatic_install,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - update checks are optional TUI chrome
+                return
 
     def _sync_view(self) -> None:
         self.view.provider = self.current_provider
@@ -633,6 +665,35 @@ class TuiShell:
         self._call_renderer_optional("history_page_loaded", has_more=False)
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
+        if isinstance(signal, _UpdateCheckCompleted):
+            present = getattr(self.renderer, "update_available", None)
+            if callable(present):
+                present(signal.update, automatic_install=signal.automatic_install)
+            else:
+                guidance = (
+                    f"Update with: {signal.update.update_command}"
+                    if signal.automatic_install
+                    else "Update it with the package manager that installed Wisp."
+                )
+                self.renderer.notice(
+                    f"Wisp {signal.update.latest_version} is available "
+                    f"(current {signal.update.current_version}). {guidance}"
+                )
+            return False
+        if isinstance(signal, _UpdateOperationFinished):
+            restarting = (
+                signal.installed and signal.restart_requested and not self.state.exit_requested
+            )
+            self._call_renderer_optional(
+                "update_operation_finished",
+                installed=signal.installed,
+                restarting=restarting,
+            )
+            if not signal.installed or not signal.restart_requested:
+                return False
+            if restarting:
+                self._exit_reason = TuiExitReason.restart_requested
+            return await self._request_shutdown()
         if isinstance(signal, _InputLine):
             return await self._handle_input_line(signal)
         if isinstance(signal, _InputClosed):
@@ -941,7 +1002,7 @@ class TuiShell:
             command_id=command_id,
             provider=provider,
             reset_model=True,
-            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # handle_rpc_configure_command unconditionally resets agent.effort
             # to None whenever a configure carries `provider` and no explicit
             # `effort` (see its has_provider branch) -- mirror that here so
             # current_effort/the persisted setting don't go stale relative to
@@ -1019,7 +1080,7 @@ class TuiShell:
             provider=provider,
             model=model,
             effort=effort,
-            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # handle_rpc_configure_command unconditionally resets agent.effort
             # to None whenever a configure carries `model` and no explicit
             # `effort` -- whether via an explicit provider switch, a
             # model-triggered auto-switch, or a same-provider model change (the
@@ -1223,7 +1284,32 @@ class TuiShell:
         self._connect_cancel_scope = cancel_scope
         task_group.start_soon(self._run_connect, args, cancel_scope)
 
-    def _start_update(self, args: tuple[str, ...]) -> None:
+    async def _handle_update_prompt_action(
+        self,
+        action: UpdatePromptAction,
+        update: UpdateAvailable,
+    ) -> None:
+        if action is UpdatePromptAction.later:
+            return
+        if action is UpdatePromptAction.skip_version:
+            persisted = await self._update_skip_writer(
+                update.latest_version,
+                home_dir=self._settings_home_dir,
+            )
+            if not persisted:
+                self.renderer.command_error(
+                    "Could not remember the skipped Wisp version; it may be offered again."
+                )
+            return
+        self._start_update((), offered_update=update, restart=True)
+
+    def _start_update(
+        self,
+        args: tuple[str, ...],
+        *,
+        offered_update: UpdateAvailable | None = None,
+        restart: bool = False,
+    ) -> None:
         if args not in {(), ("check",), ("install",)}:
             self.renderer.command_error("Usage: /update [check|install]")
             return
@@ -1240,20 +1326,50 @@ class TuiShell:
             raise RuntimeError("updates require an active TUI task group")
         cancel_scope = anyio.CancelScope()
         self._update_cancel_scope = cancel_scope
-        self.renderer.notice("Checking PyPI for Wisp updates...")
-        task_group.start_soon(self._run_update, args, cancel_scope)
+        if restart and offered_update is not None:
+            self._call_renderer_optional(
+                "update_operation_started",
+                offered_update,
+            )
+        else:
+            self.renderer.notice("Checking PyPI for Wisp updates...")
+        task_group.start_soon(
+            self._run_update,
+            args,
+            cancel_scope,
+            offered_update,
+            restart,
+        )
 
     async def _run_update(
         self,
         args: tuple[str, ...],
         cancel_scope: anyio.CancelScope,
+        offered_update: UpdateAvailable | None,
+        restart: bool,
     ) -> None:
+        installed = False
         try:
             with cancel_scope:
-                await self._updates.run(args)
+                installed = (
+                    await self._updates.install_available(offered_update, restart=True)
+                    if offered_update is not None
+                    else await self._updates.run(args)
+                )
+        except Exception as exc:  # noqa: BLE001 - keep optional update UI recoverable
+            self.renderer.command_error(f"Update failed: {exc}")
         finally:
             if self._update_cancel_scope is cancel_scope:
                 self._update_cancel_scope = None
+            if restart:
+                send = self._signal_send
+                if send is not None:
+                    await send.send(
+                        _UpdateOperationFinished(
+                            installed=installed,
+                            restart_requested=True,
+                        )
+                    )
 
     def _cancel_update(self, message: str) -> bool:
         cancel_scope = self._update_cancel_scope
@@ -1709,7 +1825,7 @@ class TuiShell:
             self.current_provider = event.provider
             self.current_model = event.model
             # Adopt the RPC agent's own already-filtered, authoritative effort
-            # (see _rebuild_agent_for_trusted_project in wisp.cli.rpc) rather
+            # (see the trusted-project rebuild in wisp.rpc.host) rather
             # than re-deriving it from self.current_effort here -- that local
             # copy was itself already filtered once, against the
             # untrusted-startup provider/model, in __init__. A tier invalid
@@ -1742,7 +1858,7 @@ class TuiShell:
 
         if isinstance(event, ModelProviderAutoSwitched):
             # A model-only /model <id> resolved to a different provider server-side
-            # (see _auto_switch_provider_for_model in wisp.cli.rpc). Record the
+            # (see auto_switch_provider_for_model in wisp.rpc.execution). Record the
             # provider on the still-pending configure so _finish_pending_configure
             # adopts it exactly like an explicit /provider request would, instead of
             # only updating current_model and leaving current_provider stale.

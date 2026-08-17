@@ -46,7 +46,15 @@ from wisp.tui.history import (
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
 )
-from wisp.tui.state import TuiCancelRequested, TuiViewState, _InputCancelled
+from wisp.tui.state import (
+    TuiCancelRequested,
+    TuiExitReason,
+    TuiViewState,
+    _InputCancelled,
+    _TuiSignal,
+    _UpdateOperationFinished,
+)
+from wisp.tui.update_types import UpdatePromptAction
 from wisp.update_check import UpdateAvailable, UpdateStatus
 
 
@@ -2735,7 +2743,7 @@ def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
     # Regression test (Codex review on #125): TuiShell resolves its own
     # config.effort independently, via its own WispConfig.from_env() call in
     # the same process launch as the separate RPC subprocess -- so it must
-    # apply the same provider/model effort-scoping wisp.cli.rpc's
+    # apply the same provider/model effort-scoping as the shared RPC executor's
     # startup_effort() call performs on the CodingSession side, or the picker
     # would seed a stale/incompatible tier into its "current" row (see
     # ModelPicker.show) even after the RPC side had already filtered it out.
@@ -3396,12 +3404,12 @@ def test_tui_shell_typed_model_command_effort_permissive_for_qualified_unknown_m
 
 
 def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
-    # Regression test (Codex review on #125): _handle_rpc_configure_command
+    # Regression test (Codex review on #125): handle_rpc_configure_command
     # unconditionally resets agent.effort to None whenever a configure carries
     # `model` (or `provider`) and no explicit `effort` -- via an explicit
     # provider switch, a model-triggered auto-switch, or a same-provider model
     # change (the old tier may not be valid for the new model; see
-    # wisp.cli.rpc's has_model branch). Before this fix, the shell only
+    # the shared RPC executor's has_model branch). Before this fix, the shell only
     # cleared current_effort/the persisted setting when the picker's explicit
     # clear-token was sent, leaving both stale (and the picker seeding a tier
     # the backend no longer uses) after a plain "/model <id>" with no effort
@@ -3435,7 +3443,7 @@ def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -
 
 def test_tui_shell_provider_command_clears_stale_effort() -> None:
     # Same server-side unconditional-reset rule as the /model regression above
-    # (wisp.cli.rpc's has_provider branch), exercised via /provider instead.
+    # (the shared RPC executor's has_provider branch), exercised via /provider instead.
     async def run(tmp_path: Path) -> None:
         controller = ScriptedController()
         console, output = _console()
@@ -3564,7 +3572,7 @@ def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() ->
 def test_tui_shell_adopts_server_side_auto_switched_provider(tmp_path: Path) -> None:
     # Regression test: a model-only /model <id> can resolve server-side to a
     # different provider than the one the TUI thinks is active (see
-    # _auto_switch_provider_for_model in wisp.cli.rpc). Without handling
+    # auto_switch_provider_for_model in wisp.rpc.execution). Without handling
     # ModelProviderAutoSwitched, the shell would only update current_model and
     # leave current_provider stale, so /provider, /auth, and the header would
     # keep showing the old provider even though the RPC agent had moved on.
@@ -4240,11 +4248,15 @@ def test_tui_shell_renders_available_update_without_blocking_input() -> None:
             await anyio.sleep(0.01)
             return "/quit"
 
+        async def can_install() -> bool:
+            return True
+
         shell = TuiShell(
             controller,
             console=console,
             prompt_reader=reader,
             update_checker=update_checker,
+            update_capability_checker=can_install,
         )
 
         await shell.run()
@@ -4254,3 +4266,94 @@ def test_tui_shell_renders_available_update_without_blocking_input() -> None:
         assert 'uv tool install --force "wisp-ai==0.1.0a2"' in rendered
 
     anyio.run(run)
+
+
+def test_successful_prompted_update_requests_graceful_restart() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+
+        should_exit = await shell._handle_signal(
+            _UpdateOperationFinished(installed=True, restart_requested=True)
+        )
+
+        assert should_exit is False
+        assert shell._exit_reason is TuiExitReason.restart_requested
+        assert shell.state.shutdown_command_id == "shutdown-1"
+        assert await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="shutdown-1",
+                command_type="shutdown",
+                ok=True,
+            )
+        )
+
+    anyio.run(run)
+
+
+def test_explicit_quit_during_update_suppresses_restart() -> None:
+    async def run() -> None:
+        shell = TuiShell(ScriptedController())
+        shell.state.exit_requested = True
+
+        await shell._handle_signal(_UpdateOperationFinished(installed=True, restart_requested=True))
+
+        assert shell._exit_reason is TuiExitReason.exited
+
+    anyio.run(run)
+
+
+def test_skipping_prompted_update_persists_exact_version(tmp_path: Path) -> None:
+    recorded: list[tuple[str, Path | None]] = []
+
+    async def persist(version: str, *, home_dir: Path | None = None) -> bool:
+        recorded.append((version, home_dir))
+        return True
+
+    async def run() -> None:
+        shell = TuiShell(
+            ScriptedController(),
+            settings_home_dir=tmp_path,
+            update_skip_writer=persist,
+        )
+        await shell._handle_update_prompt_action(
+            UpdatePromptAction.skip_version,
+            UpdateAvailable("1.0.0", "1.1.0", "wisp update"),
+        )
+
+    anyio.run(run)
+    assert recorded == [("1.1.0", tmp_path)]
+
+
+def test_prompted_update_installs_offered_release_and_emits_restart_completion() -> None:
+    update = UpdateAvailable("1.0.0", "1.1.0", "wisp update")
+    installed: list[UpdateAvailable] = []
+
+    async def install(
+        selected: UpdateAvailable,
+        *,
+        on_install_started: Callable[[], None] | None = None,
+    ) -> None:
+        if on_install_started is not None:
+            on_install_started()
+        installed.append(selected)
+
+    async def run() -> None:
+        shell = TuiShell(ScriptedController(), update_installer=install)
+        send, receive = anyio.create_memory_object_stream[_TuiSignal](10)
+        async with anyio.create_task_group() as task_group, send, receive:
+            shell._task_group = task_group
+            shell._signal_send = send
+            await shell._handle_update_prompt_action(
+                UpdatePromptAction.update_and_restart,
+                update,
+            )
+            signal = await receive.receive()
+            assert signal == _UpdateOperationFinished(
+                installed=True,
+                restart_requested=True,
+            )
+            task_group.cancel_scope.cancel()
+
+    anyio.run(run)
+    assert installed == [update]

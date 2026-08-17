@@ -735,7 +735,7 @@ class ProjectConfigApplied(WispEvent):
     compaction setting so frontends do not infer policy from their own startup state.
 
     ``effort`` carries the RPC agent's already-filtered, authoritative post-rebuild
-    value (see ``_rebuild_agent_for_trusted_project`` in ``wisp.cli.rpc``) rather than
+    value (see the trusted-project rebuild in ``wisp.rpc.host``) rather than
     leaving the TUI to re-derive it from its own locally-tracked, already-once-filtered
     value -- the TUI's own copy was filtered against the untrusted-startup
     provider/model, so a tier invalid there but valid for the trusted project's
@@ -1491,7 +1491,7 @@ class ModelProviderAutoSwitched(WispEvent):
 
     Emitted by the RPC process immediately before the ``configure`` command's
     ``RpcCommandFinished`` when the model-registry-backed auto-switch in
-    ``_handle_rpc_configure_command`` changes ``agent.provider`` as a side effect
+    ``handle_rpc_configure_command`` changes ``agent.provider`` as a side effect
     of a model-only ``/model <id>`` request. Without this, an out-of-process
     front-end (the TUI) that only tracks provider changes it explicitly
     requested would keep displaying and using its old provider while the RPC

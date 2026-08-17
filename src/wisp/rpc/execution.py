@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import stat
-from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -86,7 +85,6 @@ from wisp.tools.file_ops import CreateOnlyWriteReceipt
 from .configuration import _RpcConfigureOverrides
 from .coordinator import (
     RpcCoordinator,
-    _RpcCancelResult,
     _RpcCommandCompleted,
     _RpcControlEvent,
     _RpcDispatchResult,
@@ -177,13 +175,15 @@ class RpcCommandExecutor:
         self.command_completed_factory = command_completed_factory
         self.defer_until_after_flush = defer_until_after_flush
 
-    def dispatch(
+    async def dispatch(
         self,
         command: dict[str, object],
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         self.coordinator.running_command = running_command
         command_type = rpc_command_type(command)
+        if command_type in QUEUE_RPC_COMMAND_TYPES:
+            return await self._dispatch_queue(command, running_command)
         if command_type == "prompt":
             return self._dispatch_prompt(command)
         if command_type == "init":
@@ -220,21 +220,7 @@ class RpcCommandExecutor:
             return self._dispatch_skills(command, running_command)
         if command_type == "get_mcp_status":
             return self._dispatch_mcp_status(command, running_command)
-        if command_type in QUEUE_RPC_COMMAND_TYPES:
-            raise RuntimeError("Queue RPC commands require asynchronous dispatch")
         return self._dispatch_control(command, running_command)
-
-    async def dispatch_async(
-        self,
-        command: dict[str, object],
-        running_command: _RpcRunningCommand | None,
-    ) -> _RpcDispatchResult:
-        """Dispatch commands while allowing queue preparation to perform safe I/O."""
-
-        if rpc_command_type(command) in QUEUE_RPC_COMMAND_TYPES:
-            self.coordinator.running_command = running_command
-            return await self._dispatch_queue(command, running_command)
-        return self.dispatch(command, running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
@@ -3168,7 +3154,6 @@ def handle_rpc_control_command(
     trust_gate: RpcTrustResolver | None = None,
     configure_overrides: _RpcConfigureOverrides | None = None,
     coordinator: RpcCoordinator | None = None,
-    queued_commands: deque[dict[str, object]] | None = None,
     defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
     command_type, command_id, id_error = rpc_command_identity(command)
@@ -3191,7 +3176,6 @@ def handle_rpc_control_command(
             command_type=command_type,
             running_command=running_command,
             coordinator=coordinator,
-            queued_commands=queued_commands,
             write_event=write_event,
             defer_cancellation=defer_until_after_flush,
         )
@@ -3619,7 +3603,6 @@ def handle_rpc_cancel_command(
     running_command: _RpcRunningCommand | None,
     write_event: RpcEventWriter,
     coordinator: RpcCoordinator | None = None,
-    queued_commands: deque[dict[str, object]] | None = None,
     defer_cancellation: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     target_id = command.get("target_id")
@@ -3639,14 +3622,9 @@ def handle_rpc_cancel_command(
         write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
         defer_cancellation(running_command.cancel_scope.cancel)
         return
-    if coordinator is not None:
-        result = coordinator.cancel(target_id)
-    else:
-        result = legacy_rpc_cancel(
-            target_id,
-            running_command=running_command,
-            queued_commands=queued_commands,
-        )
+    if coordinator is None:
+        raise RuntimeError("RPC cancellation requires the shared coordinator")
+    result = coordinator.cancel(target_id)
     if result.outcome == "running":
         write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
         return
@@ -3670,26 +3648,6 @@ def handle_rpc_cancel_command(
         )
     )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
-
-
-def legacy_rpc_cancel(
-    target_id: str,
-    *,
-    running_command: _RpcRunningCommand | None,
-    queued_commands: deque[dict[str, object]] | None,
-) -> _RpcCancelResult:
-    if running_command is not None and running_command.command_id == target_id:
-        running_command.cancel_scope.cancel()
-        return _RpcCancelResult("running")
-    queued_target = next(
-        (queued for queued in queued_commands or () if queued.get("id") == target_id),
-        None,
-    )
-    if queued_target is None:
-        return _RpcCancelResult("missing")
-    assert queued_commands is not None
-    queued_commands.remove(queued_target)
-    return _RpcCancelResult("queued", command=queued_target)
 
 
 def write_rpc_command_error(

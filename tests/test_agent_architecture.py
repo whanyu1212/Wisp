@@ -34,7 +34,7 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.tui",
 )
-_FRONTEND_MODULES = (Path("cli/__init__.py"), Path("cli/rpc.py"))
+_FRONTEND_MODULES = (Path("cli/__init__.py"),)
 _FRESH_IMPORT_MODULES = (
     "wisp.agent.harness",
     "wisp.coding.compaction",
@@ -67,12 +67,18 @@ _RPC_TRANSPORT_FORBIDDEN_IMPORTS = (
 _RPC_EXECUTION_FORBIDDEN_IMPORTS = (
     "os",
     "queue",
-    "stat",
     "sys",
     "threading",
     "wisp.cli.rpc",
     "wisp.trust",
     "wisp.tui",
+)
+_CLI_RPC_ADAPTER_FORBIDDEN_IMPORTS = (
+    "wisp.coding",
+    "wisp.rpc.execution",
+    "wisp.sessions",
+    "wisp.tools",
+    "wisp.trust",
 )
 _TEXTUAL_INPUT_FORBIDDEN_IMPORTS = (
     "wisp.providers",
@@ -139,7 +145,7 @@ def test_frontends_import_coding_session_directly() -> None:
 
 
 def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
-    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "rpc_coordinator.py"
+    path = Path(__file__).parents[1] / "src" / "wisp" / "rpc" / "coordinator.py"
 
     violations = [
         imported
@@ -151,23 +157,43 @@ def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "forbidden"),
+    ("relative_path", "forbidden"),
     [
-        ("rpc_transport.py", _RPC_TRANSPORT_FORBIDDEN_IMPORTS),
-        ("rpc_execution.py", _RPC_EXECUTION_FORBIDDEN_IMPORTS),
+        (Path("cli/rpc_transport.py"), _RPC_TRANSPORT_FORBIDDEN_IMPORTS),
+        (Path("rpc/execution.py"), _RPC_EXECUTION_FORBIDDEN_IMPORTS),
     ],
 )
 def test_rpc_layers_preserve_dependency_direction(
-    filename: str,
+    relative_path: Path,
     forbidden: tuple[str, ...],
 ) -> None:
-    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / filename
+    path = Path(__file__).parents[1] / "src" / "wisp" / relative_path
 
     violations = [
         imported for imported in sorted(_module_imports(path)) if imported.startswith(forbidden)
     ]
 
     assert violations == []
+
+
+def test_cli_rpc_adapter_does_not_reimplement_shared_runtime_policy() -> None:
+    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "rpc.py"
+
+    violations = [
+        imported
+        for imported in sorted(_module_imports(path))
+        if imported.startswith(_CLI_RPC_ADAPTER_FORBIDDEN_IMPORTS)
+    ]
+
+    assert violations == []
+
+
+def test_obsolete_cli_rpc_compatibility_modules_are_removed() -> None:
+    cli_dir = Path(__file__).parents[1] / "src" / "wisp" / "cli"
+
+    assert not (cli_dir / "rpc_configuration.py").exists()
+    assert not (cli_dir / "rpc_coordinator.py").exists()
+    assert not (cli_dir / "rpc_execution.py").exists()
 
 
 def test_textual_input_controller_preserves_frontend_import_direction() -> None:

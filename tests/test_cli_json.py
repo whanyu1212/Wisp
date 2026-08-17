@@ -46,7 +46,7 @@ def test_json_mode_outputs_tool_events_as_jsonl(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -129,7 +129,7 @@ def test_json_mode_returns_nonzero_for_in_band_provider_failure(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_in_band_failing_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_in_band_failing_runtime)
 
     result = CliRunner().invoke(
         app,
@@ -155,7 +155,7 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,

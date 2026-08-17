@@ -20,6 +20,7 @@ from wisp.update_check import (
     get_update_status,
     install_update,
     is_local_install,
+    skip_update_version,
 )
 
 
@@ -100,6 +101,70 @@ def test_stable_current_version_ignores_prereleases(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.latest_version == "1.1.0"
+
+
+def test_skipped_update_is_suppressed_until_a_newer_release_appears(tmp_path: Path) -> None:
+    def first_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_pypi_response({"1.1.0": _available("1.1.0")}),
+            request=request,
+        )
+
+    first = _check(home_dir=tmp_path, transport=httpx.MockTransport(first_handler))
+    assert first is not None
+
+    async def skip() -> bool:
+        return await skip_update_version(first.latest_version, home_dir=tmp_path)
+
+    assert anyio.run(skip)
+    assert _check(home_dir=tmp_path, transport=httpx.MockTransport(first_handler)) is None
+
+    def newer_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_pypi_response(
+                {
+                    "1.1.0": _available("1.1.0"),
+                    "1.2.0": _available("1.2.0"),
+                }
+            ),
+            request=request,
+        )
+
+    newer = _check(
+        home_dir=tmp_path,
+        now=10_000.0 + update_check_module.CACHE_TTL_SECONDS,
+        transport=httpx.MockTransport(newer_handler),
+    )
+    assert newer is not None
+    assert newer.latest_version == "1.2.0"
+
+
+def test_explicit_status_ignores_skipped_update(tmp_path: Path) -> None:
+    cache_path = tmp_path / ".wisp" / "update-check.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({"skipped_version": "1.1.0"}), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_pypi_response({"1.1.0": _available("1.1.0")}),
+            request=request,
+        )
+
+    async def run() -> UpdateStatus:
+        return await get_update_status(
+            current_version="1.0.0",
+            home_dir=tmp_path,
+            python_version="3.12.0",
+            local_install_detector=lambda: False,
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert anyio.run(run).latest_version == "1.1.0"
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["skipped_version"] == "1.1.0"
 
 
 def test_update_check_ignores_releases_for_newer_python(tmp_path: Path) -> None:

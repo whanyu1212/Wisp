@@ -324,7 +324,7 @@ def test_print_mode_outputs_completion_only_response(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_completion_only_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_completion_only_runtime)
 
     result = CliRunner().invoke(
         app,
@@ -348,7 +348,7 @@ def test_print_mode_drains_failed_agent_lifecycle_before_exit(
         runtime.events.on("*", lambda event: emitted_event_types.append(event.type))
         return runtime
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
 
     result = CliRunner().invoke(
         app,
@@ -584,7 +584,7 @@ def test_print_mode_renders_denied_tool_events_to_stderr(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -607,7 +607,7 @@ def test_print_mode_skips_approval_events_for_preapproved_tools(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -671,7 +671,7 @@ def test_print_mode_enforces_explicit_tool_iteration_cap(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -711,7 +711,7 @@ def test_print_mode_keeps_event_separator_out_of_stdout(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_mixed_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_mixed_tool_runtime)
 
     result = runner.invoke(
         app,

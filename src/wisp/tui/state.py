@@ -24,6 +24,7 @@ from wisp.events import (
     UsageCost,
 )
 from wisp.tui.rendering import TuiViewSnapshot
+from wisp.update_check import UpdateAvailable
 
 
 class TuiStatus(StrEnum):
@@ -35,6 +36,13 @@ class TuiStatus(StrEnum):
     waiting_for_approval = "waiting_for_approval"
     waiting_for_trust = "waiting_for_trust"
     exiting = "exiting"
+
+
+class TuiExitReason(StrEnum):
+    """Why an interactive TUI invocation returned to its caller."""
+
+    exited = "exited"
+    restart_requested = "restart_requested"
 
 
 @dataclass
@@ -229,6 +237,18 @@ class _RpcEventsClosed:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class _UpdateCheckCompleted:
+    update: UpdateAvailable
+    automatic_install: bool
+
+
+@dataclass(frozen=True)
+class _UpdateOperationFinished:
+    installed: bool
+    restart_requested: bool
+
+
 type _TuiSignal = (
     _InputLine
     | _InputClosed
@@ -237,6 +257,8 @@ type _TuiSignal = (
     | _QuitPressed
     | _RpcEvent
     | _RpcEventsClosed
+    | _UpdateCheckCompleted
+    | _UpdateOperationFinished
 )
 
 

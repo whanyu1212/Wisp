@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Mapping
 
 import pytest
 
 import wisp.coding.tool_execution as tool_execution
+import wisp.rpc.execution as rpc_execution_module
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.cli.rpc import _RpcTrustGate
 from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
@@ -26,6 +25,13 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
+from wisp.rpc.coordinator import _RpcPromptReady
+from wisp.rpc.execution import (
+    handle_rpc_control_command,
+    rpc_has_durable_completion,
+    run_rpc_prompt_command,
+)
+from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -175,7 +181,7 @@ def test_cancelled_prompt_leaf_restore_preserves_concurrent_compaction(tmp_path:
 
     anyio.run(append_prompt_and_compaction)
 
-    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start, "prompt-1") is False
+    assert rpc_has_durable_completion(session, entry_start, "prompt-1") is False
     assert any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
 
 
@@ -220,7 +226,7 @@ def test_rpc_cancellation_restores_leaf_before_unanswered_overflow_compaction(
 
     anyio.run(append_overflow_compaction)
 
-    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start, "prompt-1") is False
+    assert rpc_has_durable_completion(session, entry_start, "prompt-1") is False
 
     async def restore() -> bool:
         return await session.restore_active_leaf_for_operation(
@@ -478,7 +484,7 @@ def test_rpc_prompt_compact_prompt_replays_summary_and_retained_history(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
@@ -551,7 +557,7 @@ def test_rpc_prompt_contains_automatic_threshold_compaction(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider, context_window=100)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         [
@@ -611,7 +617,7 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider, context_window=100)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         [
@@ -692,7 +698,7 @@ def test_rpc_resume_initial_history_uses_compaction_replay(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         [
@@ -723,7 +729,7 @@ def test_rpc_queues_compact_behind_running_prompt(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
@@ -756,7 +762,7 @@ def test_rpc_cancels_blocked_compact_then_runs_queued_prompt(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
@@ -793,14 +799,14 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    original_resolve = _RpcTrustGate.resolve
+    original_resolve = RpcTrustGate.resolve
 
-    async def delayed_resolve(self: _RpcTrustGate) -> bool:
+    async def delayed_resolve(self: RpcTrustGate) -> bool:
         await anyio.sleep(0.05)
         return await original_resolve(self)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
-    monkeypatch.setattr(_RpcTrustGate, "resolve", delayed_resolve)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
+    monkeypatch.setattr(RpcTrustGate, "resolve", delayed_resolve)
     commands = [
         {"id": "prompt-1", "type": "prompt", "prompt": "block"},
         {"id": "rpc-state-1", "type": "get_state"},
@@ -955,7 +961,7 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     commands = [{"id": "prompt", "type": "prompt", "prompt": "block"}]
     commands.extend(
         {"id": f"steer-{index}", "type": "steer", "content": str(index)} for index in range(101)
@@ -1004,7 +1010,7 @@ def test_rpc_mode_rejects_duplicate_outstanding_command_id(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
@@ -1044,7 +1050,7 @@ def test_rpc_repeat_compaction_failure_leaves_process_usable(
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
@@ -2068,7 +2074,7 @@ def test_rpc_mode_reports_internal_tool_result_failure_and_continues(
             raise RuntimeError("internal api-key=secret")
         return original_summary(name, data, truncated=truncated)
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
     monkeypatch.setattr(tool_execution, "summarize_tool_result", fail_first_summary)
 
     result = runner.invoke(
@@ -2149,7 +2155,7 @@ def test_rpc_mode_cancels_running_prompt(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -2228,7 +2234,7 @@ def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary
         async with send, receive:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(
-                    cli_module.rpc._run_rpc_prompt_command,
+                    run_rpc_prompt_command,
                     agent,
                     session,
                     (),
@@ -2239,11 +2245,13 @@ def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
+                    cli_module.rpc._write_json_event,
+                    cli_module.rpc._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
-                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                if isinstance(completed, _RpcPromptReady):
                     completed = await receive.receive()
 
         entries = session.read_entries()
@@ -2277,7 +2285,7 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
         )
         snapshot_started = anyio.Event()
         release_snapshot = anyio.Event()
-        execution = cli_module.rpc._rpc_execution
+        execution = rpc_execution_module
         original_run_sync = execution.anyio.to_thread.run_sync
 
         async def delayed_run_sync(func: object, *args: object, **kwargs: object) -> object:
@@ -2292,7 +2300,7 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
         async with send, receive:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(
-                    cli_module.rpc._run_rpc_prompt_command,
+                    run_rpc_prompt_command,
                     agent,
                     session,
                     committed_history,
@@ -2303,12 +2311,14 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
+                    cli_module.rpc._write_json_event,
+                    cli_module.rpc._render_json_events,
                 )
                 await snapshot_started.wait()
                 cancel_scope.cancel()
                 release_snapshot.set()
                 completed = await receive.receive()
-                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                if isinstance(completed, _RpcPromptReady):
                     completed = await receive.receive()
 
         assert session.read_context_messages() == committed_history
@@ -2381,7 +2391,7 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
         async with send, receive:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(
-                    cli_module.rpc._run_rpc_prompt_command,
+                    run_rpc_prompt_command,
                     agent,
                     session,
                     committed_history,
@@ -2392,11 +2402,13 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
+                    cli_module.rpc._write_json_event,
+                    cli_module.rpc._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
-                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                if isinstance(completed, _RpcPromptReady):
                     completed = await receive.receive()
 
         audit_messages = session.read_messages()
@@ -2451,7 +2463,7 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
         async with send, receive:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(
-                    cli_module.rpc._run_rpc_prompt_command,
+                    run_rpc_prompt_command,
                     agent,
                     session,
                     (),
@@ -2462,11 +2474,13 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
+                    cli_module.rpc._write_json_event,
+                    cli_module.rpc._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
-                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                if isinstance(completed, _RpcPromptReady):
                     completed = await receive.receive()
 
         retained = [
@@ -2519,31 +2533,6 @@ def test_rpc_mode_cancel_reports_unknown_target(tmp_path: Path) -> None:
     assert records[2]["error"] == "No running or queued RPC command with id: missing"
 
 
-def test_rpc_cancel_removes_a_queued_command(monkeypatch: MonkeyPatch) -> None:
-    events: list[object] = []
-    queued = deque([{"id": "prompt-1", "type": "prompt", "prompt": "hello"}])
-    monkeypatch.setattr(cli_module.rpc, "_write_json_event", events.append)
-
-    cli_module.rpc._handle_rpc_cancel_command(
-        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
-        command_id="cancel-1",
-        command_type="cancel",
-        running_command=None,
-        queued_commands=queued,
-    )
-
-    assert not queued
-    assert [event.type for event in events] == [
-        "rpc.command.started",
-        "rpc.command.finished",
-        "rpc.command.finished",
-    ]
-    assert events[1].command_id == "prompt-1"
-    assert events[1].ok is False
-    assert events[2].command_id == "cancel-1"
-    assert events[2].ok is True
-
-
 def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
     runner = CliRunner()
 
@@ -2565,7 +2554,7 @@ def test_rpc_approval_policy_approves_waiting_tool_call(tmp_path: Path) -> None:
     provider = ToolCallingProvider()
     tools = ToolRegistry()
     tools.register(DangerTool())
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
 
     async def run_agent() -> list[object]:
         agent = CodingSession(
@@ -2595,7 +2584,7 @@ def test_rpc_approval_policy_denies_waiting_tool_call(tmp_path: Path) -> None:
     provider = ToolCallingProvider()
     tools = ToolRegistry()
     tools.register(DangerTool())
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
 
     async def run_agent() -> list[object]:
         agent = CodingSession(
@@ -2630,11 +2619,11 @@ def test_rpc_approval_command_resolves_pending_approval(
 ) -> None:
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
     tool = DangerTool()
     approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
 
-    cli_module._handle_rpc_control_command(
+    handle_rpc_control_command(
         {
             "id": "approval-1",
             "type": "approval",
@@ -2644,6 +2633,7 @@ def test_rpc_approval_command_resolves_pending_approval(
         },
         running_command=None,
         approval_policy=approval_policy,
+        write_event=cli_module.rpc._write_json_event,
     )
 
     async def wait_for_decision() -> object:
@@ -2661,7 +2651,7 @@ def test_rpc_approval_command_resolves_pending_approval(
 
 
 def test_rpc_approval_policy_rejects_duplicate_decisions() -> None:
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
     tool = DangerTool()
     approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
 
@@ -2683,7 +2673,7 @@ def test_rpc_approval_policy_rejects_duplicate_decisions() -> None:
 
 
 def test_rpc_approval_policy_remembers_exact_tool_for_process() -> None:
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
     tool = DangerTool()
     other_tool = BashTool()
     approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
@@ -2695,14 +2685,11 @@ def test_rpc_approval_policy_remembers_exact_tool_for_process() -> None:
     )
     assert approval_policy.approves(tool) is True
     assert approval_policy.requires_approval(other_tool) is True
-    assert (
-        cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval()).approves(tool)
-        is False
-    )
+    assert RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval()).approves(tool) is False
 
 
 def test_rpc_approval_policy_remembers_all_unsafe_tools_for_process() -> None:
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
     tool = DangerTool()
     approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
 
@@ -2731,10 +2718,10 @@ def test_rpc_approval_command_rejects_invalid_scope(
 ) -> None:
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
     approval_policy.prepare_approval(DangerTool(), call_id="call-1", arguments={})
 
-    cli_module._handle_rpc_control_command(
+    handle_rpc_control_command(
         {
             "id": "approval-1",
             "type": "approval",
@@ -2744,6 +2731,7 @@ def test_rpc_approval_command_rejects_invalid_scope(
         },
         running_command=None,
         approval_policy=approval_policy,
+        write_event=cli_module.rpc._write_json_event,
     )
 
     records = _jsonl_records(output.getvalue())
@@ -2756,7 +2744,7 @@ def test_rpc_mode_denies_pending_approval_when_input_closes(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -2830,8 +2818,8 @@ def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
-    monkeypatch.setattr(cli_module.rpc, "_MAX_QUEUED_RPC_COMMANDS", 2)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(rpc_host_module, "_MAX_QUEUED_RPC_COMMANDS", 2)
 
     result = runner.invoke(
         app,
@@ -2870,7 +2858,7 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -2941,7 +2929,7 @@ def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_failing_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_failing_runtime)
 
     result = runner.invoke(
         app,
@@ -2971,7 +2959,7 @@ def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -3002,7 +2990,7 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,

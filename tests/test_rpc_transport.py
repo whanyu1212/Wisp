@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from collections import deque
+from pathlib import Path
+from queue import Queue
 
 import anyio
 
@@ -187,3 +190,151 @@ def test_fd_transport_flushes_unterminated_final_line_at_eof() -> None:
         assert isinstance(closed, _RpcInputClosed)
 
     anyio.run(scenario)
+
+
+def test_transport_dispatches_buffered_pipe_lines() -> None:
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "r", encoding="utf-8")
+
+    async def scenario() -> None:
+        transport = RpcStdinTransport(
+            stdin=stdin,
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream(10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(transport.read, send, stop_reader)
+                os.write(
+                    write_fd,
+                    b'{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+                    b'{"id":"shutdown-1","type":"shutdown"}\n',
+                )
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                assert isinstance(first, _RpcInputCommand)
+                assert isinstance(second, _RpcInputCommand)
+                assert first.command["id"] == "cancel-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(scenario)
+    finally:
+        os.close(write_fd)
+        stdin.close()
+
+
+def test_thread_transport_uses_configured_bounded_queue() -> None:
+    created_queue_sizes: list[int] = []
+
+    class RecordingQueue(Queue[str | Exception]):
+        def __init__(self, maxsize: int = 0) -> None:
+            created_queue_sizes.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    async def scenario() -> None:
+        stop_reader = anyio.Event()
+        stop_reader.set()
+        transport = RpcStdinTransport(
+            stdin=_Input([""]),
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            queue_factory=RecordingQueue,
+            thread_queue_size=7,
+        )
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive:
+            await transport.read_thread(send, stop_reader)
+
+    anyio.run(scenario)
+
+    assert created_queue_sizes == [7]
+
+
+def test_transport_uses_thread_reader_for_windows_pipe() -> None:
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "r", encoding="utf-8")
+
+    async def fail_wait_readable(_fd: int) -> None:
+        raise AssertionError("wait_readable should not be used for Windows pipe stdin")
+
+    async def scenario() -> None:
+        transport = RpcStdinTransport(
+            stdin=stdin,
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            needs_thread_reader=lambda _mode: True,
+            wait_readable=fail_wait_readable,
+        )
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream(10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(transport.read, send, stop_reader)
+                os.write(
+                    write_fd,
+                    b'{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+                    b'{"id":"shutdown-1","type":"shutdown"}\n',
+                )
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                assert isinstance(first, _RpcInputCommand)
+                assert isinstance(second, _RpcInputCommand)
+                assert first.command["id"] == "prompt-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(scenario)
+    finally:
+        os.close(write_fd)
+        stdin.close()
+
+
+def test_transport_handles_regular_file_stdin(tmp_path: Path) -> None:
+    input_path = tmp_path / "commands.jsonl"
+    input_path.write_text(
+        '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+        '{"id":"shutdown-1","type":"shutdown"}\n',
+        encoding="utf-8",
+    )
+    stdin = input_path.open("r", encoding="utf-8")
+
+    async def scenario() -> None:
+        transport = RpcStdinTransport(
+            stdin=stdin,
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream(10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(transport.read, send, stop_reader)
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                    closed = await receive.receive()
+                assert isinstance(first, _RpcInputCommand)
+                assert isinstance(second, _RpcInputCommand)
+                assert isinstance(closed, _RpcInputClosed)
+                assert first.command["id"] == "prompt-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(scenario)
+    finally:
+        stdin.close()

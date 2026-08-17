@@ -49,27 +49,39 @@ class UpdateCommands:
 
         return self._installing
 
-    async def run(self, args: tuple[str, ...]) -> None:
+    async def run(self, args: tuple[str, ...]) -> bool:
+        """Run a manual update command and return whether an update was installed."""
+
         if args not in {(), ("check",), ("install",)}:
             self._renderer.command_error("Usage: /update [check|install]")
-            return
+            return False
 
         try:
             status = await self._checker()
         except UpdateCheckError as exc:
             self._renderer.command_error(f"Update check failed: {exc}")
-            return
+            return False
 
         update = status.available
         if update is None:
             self._renderer.notice(f"Wisp {status.current_version} is up to date.")
-            return
+            return False
         if args != ("install",):
             self._renderer.notice(
                 f"Wisp {update.latest_version} is available (current {update.current_version}). "
                 "Run /update install to install it."
             )
-            return
+            return False
+
+        return await self.install_available(update)
+
+    async def install_available(
+        self,
+        update: UpdateAvailable,
+        *,
+        restart: bool = False,
+    ) -> bool:
+        """Install a previously offered release and report success."""
 
         try:
             await self._installer(
@@ -78,12 +90,14 @@ class UpdateCommands:
             )
         except UpdateInstallError as exc:
             self._renderer.command_error(f"Update failed: {exc}")
-            return
+            return False
         finally:
             self._installing = False
-        self._renderer.notice(
-            f"Updated Wisp to {update.latest_version}. Restart Wisp to use the new version."
-        )
+        if not restart:
+            self._renderer.notice(
+                f"Updated Wisp to {update.latest_version}. Restart Wisp to use the new version."
+            )
+        return True
 
     def _mark_installing(self) -> None:
         self._installing = True

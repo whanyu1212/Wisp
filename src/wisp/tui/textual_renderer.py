@@ -60,6 +60,8 @@ from wisp.tui.rendering import (
 )
 from wisp.tui.textual_history import TextualHistoryController
 from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
+from wisp.tui.update_types import UpdatePromptAction
+from wisp.update_check import UpdateAvailable
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -158,6 +160,27 @@ class TextualTuiRenderer:
         self.app.set_picker_auth_path(auth_path)
         if self._visible_cwd:
             self.app.load_file_suggestions(self._visible_cwd)
+
+    def set_update_action_hook(
+        self,
+        hook: Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]],
+    ) -> None:
+        self.app.set_update_action_hook(hook)
+
+    def update_available(self, update: UpdateAvailable, *, automatic_install: bool) -> None:
+        if automatic_install:
+            self.app.offer_update(update)
+            return
+        self.notice(
+            f"Wisp {update.latest_version} is available (current {update.current_version}). "
+            "Update it with the package manager that installed Wisp."
+        )
+
+    def update_operation_started(self, update: UpdateAvailable) -> None:
+        self.app.update_operation_started(update)
+
+    def update_operation_finished(self, *, installed: bool, restarting: bool) -> None:
+        self.app.update_operation_finished(installed=installed, restarting=restarting)
 
     def _begin_progress(self) -> None:
         self._stream_completion_pending = False
