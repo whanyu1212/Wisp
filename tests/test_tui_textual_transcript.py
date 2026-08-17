@@ -49,6 +49,20 @@ class _Surface:
         if isinstance(widget, WorkingIndicator):
             widget.on_unmount()
 
+    def move_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        if widget not in self.mounted:
+            return
+        self.mounted.remove(widget)
+        if before is None:
+            self.mounted.append(widget)
+        else:
+            self.mounted.insert(self.mounted.index(before), widget)
+
     def transcript_is_following(self) -> bool:
         return self.following
 

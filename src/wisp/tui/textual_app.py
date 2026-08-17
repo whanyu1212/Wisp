@@ -61,6 +61,7 @@ from wisp.tui.overlay import (
     TextualOverlayController,
     TranscriptViewportState,
 )
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
@@ -90,6 +91,7 @@ from wisp.tui.widgets import (
     LineMessage,
     ModelPicker,
     OperationIndicator,
+    ProcessCard,
     PromptEditor,
     SessionPicker,
     SlashSuggest,
@@ -2239,6 +2241,26 @@ class TextualTui(App[None]):
         with suppress(Exception):
             widget.remove()
 
+    def move_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        """Move an existing lifecycle card without remounting or losing focus state."""
+
+        transcript = self._transcript
+        if transcript is None or widget.parent is not transcript:
+            return
+        if before is not None and before.parent is transcript and before is not widget:
+            transcript.move_child(widget, before=before)
+            return
+        indicator = self._transcript_controller.working_indicator
+        if indicator is not None and indicator.parent is transcript and indicator is not widget:
+            transcript.move_child(widget, before=indicator)
+        elif transcript.children and transcript.children[-1] is not widget:
+            transcript.move_child(widget, after=transcript.children[-1])
+
     def live_transcript_widget_evicted(self, widget: Widget) -> None:
         """Let the renderer release live de-duplication after bounded eviction."""
 
@@ -2458,6 +2480,56 @@ class TextualTui(App[None]):
 
         if not self._stream.defer_until_latest_stream_settles(hide_if_current):
             hide_if_current()
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+    ) -> ProcessCard | None:
+        """Mount or recover one process-level presentation card."""
+
+        return self._transcript_controller.mount_process_card(
+            process_id,
+            historical=historical,
+            before=before,
+        )
+
+    def mount_process_call(self, call_id: str, process_id: str) -> ProcessCard | None:
+        """Alias one live poll/cancel call to its process-level card."""
+
+        return self._transcript_controller.mount_process_call(call_id, process_id)
+
+    def update_process_card(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+        settle_terminal: bool = False,
+    ) -> ProcessCard | None:
+        """Apply one bounded lifecycle snapshot to a process card."""
+
+        return self._transcript_controller.update_process_card(
+            presentation,
+            elapsed=elapsed,
+            settle_terminal=settle_terminal,
+        )
+
+    def resolve_process_call(
+        self,
+        call_id: str,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+    ) -> ProcessCard | None:
+        """Finish one call alias and update its stable process card."""
+
+        return self._transcript_controller.resolve_process_call(
+            call_id,
+            presentation,
+            elapsed=elapsed,
+        )
 
     def mount_tool_call(
         self,

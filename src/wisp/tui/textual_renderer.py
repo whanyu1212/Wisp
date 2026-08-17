@@ -42,6 +42,12 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMessage
+from wisp.tui.process_lifecycle import (
+    ProcessCallIdentity,
+    ProcessLifecycle,
+    historical_process_observation,
+    process_call_identity,
+)
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _compaction_completed_text,
@@ -102,6 +108,10 @@ class TextualTuiRenderer:
         # Popped when the call resolves, mirroring _tool_started's lifecycle so
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
+        self._process_calls: dict[str, ProcessCallIdentity] = {}
+        self._process_lifecycles: dict[str, ProcessLifecycle] = {}
+        self._process_started: dict[str, datetime] = {}
+        self._denied_process_calls: set[str] = set()
         self._history = TextualHistoryController(app)
         app.set_live_widget_evicted_hook(self._history.forget_live_widget)
         app.set_history_window_hooks(
@@ -227,7 +237,13 @@ class TextualTuiRenderer:
         # A turn ended without results (cancel / failure / stream death): drain any
         # still-pending tool cards and forget their request timestamps and retained
         # arguments so neither a spinning card nor stale per-call state leaks into
-        # the next turn.
+        # the next turn. A missing poll result does not establish process termination.
+        for identity in self._process_calls.values():
+            lifecycle = self._process_lifecycles.get(identity.process_id)
+            if lifecycle is not None:
+                self.app.update_process_card(lifecycle.interrupt(identity.operation))
+        self._process_calls.clear()
+        self._denied_process_calls.clear()
         self._tool_started.clear()
         self._tool_arguments.clear()
         self.app.fail_pending_tool_calls(detail)
@@ -325,8 +341,7 @@ class TextualTuiRenderer:
         self._history.render_entries(entries)
 
     def clear_session(self) -> None:
-        self._tool_started.clear()
-        self._tool_arguments.clear()
+        self._clear_tool_presentation_state()
         self._history.clear_entries()
 
     def replace_history_entries(
@@ -335,8 +350,7 @@ class TextualTuiRenderer:
         *,
         session_label: str,
     ) -> None:
-        self._tool_started.clear()
-        self._tool_arguments.clear()
+        self._clear_tool_presentation_state()
         self._history.replace_entries(entries, session_label=session_label)
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
@@ -367,6 +381,14 @@ class TextualTuiRenderer:
     def capture_latest_history_reload(self) -> None:
         self.app.capture_live_history_reload()
         self._history.capture_latest_reload_live_entries()
+
+    def _clear_tool_presentation_state(self) -> None:
+        self._tool_started.clear()
+        self._tool_arguments.clear()
+        self._process_calls.clear()
+        self._process_lifecycles.clear()
+        self._process_started.clear()
+        self._denied_process_calls.clear()
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
@@ -571,7 +593,18 @@ class TextualTuiRenderer:
             # detail (they don't travel on the result event).
             self._tool_started[event.call_id] = event.timestamp
             self._tool_arguments[event.call_id] = event.arguments
-            card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
+            identity = process_call_identity(event.name, event.arguments)
+            if identity is None:
+                card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
+            else:
+                self._process_calls[event.call_id] = identity
+                lifecycle = self._process_lifecycles.setdefault(
+                    identity.process_id,
+                    ProcessLifecycle(identity.process_id),
+                )
+                self._process_started.setdefault(identity.process_id, event.timestamp)
+                card = self.app.mount_process_call(event.call_id, identity.process_id)
+                self.app.update_process_card(lifecycle.begin(identity.operation))
             self._history.record_live_tool_call(event.call_id, widget=card)
         elif isinstance(event, TrustResolved):
             if self._progress_active:
@@ -584,12 +617,19 @@ class TextualTuiRenderer:
             # circuits to an error result, but flip the card to "denied" now so the
             # reason shows immediately rather than as a generic error line.
             if not event.approved:
-                self.app.resolve_tool_call(
-                    event.call_id,
-                    "denied",
-                    detail=event.reason or "denied",
-                    elapsed=self._tool_elapsed(event.call_id, event.timestamp),
-                )
+                identity = self._process_calls.get(event.call_id)
+                if identity is None:
+                    self.app.resolve_tool_call(
+                        event.call_id,
+                        "denied",
+                        detail=event.reason or "denied",
+                        elapsed=self._tool_elapsed(event.call_id, event.timestamp),
+                    )
+                else:
+                    self._denied_process_calls.add(event.call_id)
+                    lifecycle = self._process_lifecycles[identity.process_id]
+                    self.app.update_process_card(lifecycle.deny(identity.operation))
+                    self._tool_elapsed(event.call_id, event.timestamp)
         elif isinstance(event, ToolResultReady):
             # A nonzero-exit command is is_error=False on the wire (a normal
             # model-visible result) but should still present as a failure; drive
@@ -603,35 +643,81 @@ class TextualTuiRenderer:
             # was never seen, e.g. a resumed session) so tool-aware renderers can
             # use them; pop so the map doesn't grow across the session.
             arguments = self._tool_arguments.pop(event.call_id, {})
-            card = self.app.resolve_tool_call(
-                event.call_id,
-                status,
-                detail=render_tool_result(
-                    event.name,
-                    arguments,
-                    event.output,
-                    is_error=event.is_error,
-                    exit_code=event.exit_code,
-                    output_has_exit_status=event.output_has_exit_status,
-                    before_text=event.before_text,
-                    created=event.created,
-                    summary=event.summary,
-                    process_state=event.process_state,
-                ),
-                elapsed=self._tool_elapsed(event.call_id, event.timestamp),
-                # Retain the full (tool-bounded) output so the card can expand past
-                # the collapsed detail; the card only offers expansion when this adds
-                # something. `truncated` flags that even the full output was capped by
-                # the tool itself.
-                full_output=full_tool_result_for_display(
-                    event.name,
-                    event.output,
-                    event.exit_code,
-                    output_has_exit_status=event.output_has_exit_status,
-                    summary=event.summary if status == "done" else None,
-                ),
-                truncated=event.truncated,
-            )
+            identity = self._process_calls.pop(event.call_id, None)
+            if identity is None:
+                card = self.app.resolve_tool_call(
+                    event.call_id,
+                    status,
+                    detail=render_tool_result(
+                        event.name,
+                        arguments,
+                        event.output,
+                        is_error=event.is_error,
+                        exit_code=event.exit_code,
+                        output_has_exit_status=event.output_has_exit_status,
+                        before_text=event.before_text,
+                        created=event.created,
+                        summary=event.summary,
+                        process_state=event.process_state,
+                    ),
+                    elapsed=self._tool_elapsed(event.call_id, event.timestamp),
+                    # Retain the full (tool-bounded) output so the card can expand past
+                    # the collapsed detail; the card only offers expansion when this adds
+                    # something. `truncated` flags that even the full output was capped by
+                    # the tool itself.
+                    full_output=full_tool_result_for_display(
+                        event.name,
+                        event.output,
+                        event.exit_code,
+                        output_has_exit_status=event.output_has_exit_status,
+                        summary=event.summary if status == "done" else None,
+                    ),
+                    truncated=event.truncated,
+                )
+            else:
+                lifecycle = self._process_lifecycles[identity.process_id]
+                denied = event.call_id in self._denied_process_calls
+                self._denied_process_calls.discard(event.call_id)
+                if denied:
+                    presentation = lifecycle.presentation()
+                else:
+                    _parsed_state, fallback_output = historical_process_observation(
+                        identity.process_id,
+                        event.output,
+                    )
+                    matching_state = (
+                        event.process_state
+                        if event.process_id in {None, identity.process_id}
+                        else None
+                    )
+                    presentation = lifecycle.observe(
+                        operation=identity.operation,
+                        state=matching_state,
+                        stdout=event.stdout or "",
+                        stderr=event.stderr or "",
+                        source_truncated=(
+                            event.truncated or event.stdout_truncated or event.stderr_truncated
+                        ),
+                        source_dropped_bytes=(
+                            event.stdout_dropped_bytes + event.stderr_dropped_bytes
+                        ),
+                        fallback_output=fallback_output,
+                        failed=status == "error",
+                    )
+                started = self._process_started.get(identity.process_id)
+                elapsed = (
+                    (event.timestamp - started).total_seconds()
+                    if presentation.terminal and started is not None
+                    else None
+                )
+                card = self.app.resolve_process_call(
+                    event.call_id,
+                    presentation,
+                    elapsed=elapsed,
+                )
+                if presentation.terminal:
+                    self._process_started.pop(identity.process_id, None)
+                self._tool_elapsed(event.call_id, event.timestamp)
             self._history.record_live_tool_result(event.call_id, widget=card)
         elif isinstance(event, AgentCompleted):
             self._finish_progress(

@@ -29,6 +29,12 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     historical_tool_status,
 )
+from wisp.tui.process_lifecycle import (
+    ProcessLifecycle,
+    ProcessLifecyclePresentation,
+    historical_process_observation,
+    process_call_identity,
+)
 from wisp.tui.skills import format_skill_invocation
 from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
@@ -70,6 +76,22 @@ class TextualHistorySurface(Protocol):
         message: str,
         *,
         before: Widget | None = None,
+    ) -> Widget | None: ...
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+    ) -> Widget | None: ...
+
+    def update_process_card(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+        settle_terminal: bool = False,
     ) -> Widget | None: ...
 
     def mount_tool_call(
@@ -123,6 +145,15 @@ class _BoundaryToolCall:
 
     name: str
     arguments: JsonObject
+
+
+@dataclass(frozen=True)
+class _HistoricalProcessGroup:
+    """One process lifecycle projected from visible audited history entries."""
+
+    first_entry_id: int
+    member_entry_ids: frozenset[int]
+    presentation: ProcessLifecyclePresentation
 
 
 @dataclass(frozen=True)
@@ -530,6 +561,7 @@ class TextualHistoryController:
         """Apply only the changed edges of the retained history window."""
 
         visible = self._window.visible
+        process_groups = self._historical_process_groups(visible)
         visible_ids = {item.id for item in visible}
         self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
         for item_id, widget in tuple(self._widgets.items()):
@@ -554,7 +586,15 @@ class TextualHistoryController:
                 self._surface.remove_historical_widget(widget)
 
         for index, item in enumerate(visible):
+            process_group = process_groups.get(item.id)
             if item.id in self._widgets:
+                if process_group is not None and item.id == process_group.first_entry_id:
+                    self._surface.update_process_card(process_group.presentation)
+                continue
+            if process_group is not None and item.id != process_group.first_entry_id:
+                first_widget = self._widgets.get(process_group.first_entry_id)
+                if first_widget is not None:
+                    self._widgets[item.id] = first_widget
                 continue
             before = next(
                 (
@@ -566,9 +606,64 @@ class TextualHistoryController:
             )
             if before is None:
                 before = self._surface.history_insertion_boundary(set(self._widgets.values()))
-            mounted = self._mount_entry(item.entry, before=before)
+            if process_group is None:
+                mounted = self._mount_entry(item.entry, before=before)
+            else:
+                mounted = self._surface.mount_process_card(
+                    process_group.presentation.process_id,
+                    historical=True,
+                    before=before,
+                )
+                self._surface.update_process_card(process_group.presentation)
             if mounted is not None:
                 self._widgets[item.id] = mounted
+                if process_group is not None:
+                    for member_id in process_group.member_entry_ids:
+                        self._widgets[member_id] = mounted
+
+    @staticmethod
+    def _historical_process_groups(
+        visible: tuple[_RetainedHistoryEntry, ...],
+    ) -> dict[int, _HistoricalProcessGroup]:
+        """Project visible poll/cancel records into stable process-level groups."""
+
+        lifecycles: dict[str, ProcessLifecycle] = {}
+        first_ids: dict[str, int] = {}
+        member_ids: dict[str, set[int]] = {}
+        for item in visible:
+            entry = item.entry
+            if not isinstance(entry, HistoricalToolCard):
+                continue
+            identity = process_call_identity(entry.name, entry.arguments)
+            if identity is None:
+                continue
+            lifecycle = lifecycles.setdefault(
+                identity.process_id,
+                ProcessLifecycle(identity.process_id),
+            )
+            first_ids.setdefault(identity.process_id, item.id)
+            member_ids.setdefault(identity.process_id, set()).add(item.id)
+            lifecycle.begin(identity.operation)
+            state, output = historical_process_observation(identity.process_id, entry.output)
+            lifecycle.observe(
+                operation=identity.operation,
+                state=state,
+                fallback_output=output,
+                source_truncated=entry.truncated,
+                failed=historical_tool_status(entry) == "error",
+            )
+
+        by_entry_id: dict[int, _HistoricalProcessGroup] = {}
+        for process_id, lifecycle in lifecycles.items():
+            members = frozenset(member_ids[process_id])
+            group = _HistoricalProcessGroup(
+                first_entry_id=first_ids[process_id],
+                member_entry_ids=members,
+                presentation=lifecycle.presentation(),
+            )
+            for member_id in members:
+                by_entry_id[member_id] = group
+        return by_entry_id
 
     def _mount_entry(
         self,

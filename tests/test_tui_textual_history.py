@@ -14,6 +14,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptMessage,
 )
+from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.textual_history import TextualHistoryController
 from wisp.tui.transcript_window import (
     TUI_TRANSCRIPT_WINDOW_SHIFT,
@@ -117,6 +118,36 @@ class _HistorySurface:
         if self.fail_line_mount:
             raise RuntimeError("mount failed")
         return cast(Widget, self._mount(f"{role}: {message}", before=before))
+
+    def mount_process_card(
+        self,
+        process_id: str,
+        *,
+        historical: bool = False,
+        before: Widget | None = None,
+    ) -> Widget:
+        del historical
+        existing = self.historical_cards.get(f"process:{process_id}")
+        if existing is not None:
+            return cast(Widget, existing)
+        widget = self._mount(f"process: {process_id}", before=before)
+        self.historical_cards[f"process:{process_id}"] = widget
+        return cast(Widget, widget)
+
+    def update_process_card(
+        self,
+        presentation: ProcessLifecyclePresentation,
+        *,
+        elapsed: float | None = None,
+        settle_terminal: bool = False,
+    ) -> Widget | None:
+        del elapsed, settle_terminal
+        widget = self.historical_cards.get(f"process:{presentation.process_id}")
+        if widget is None:
+            return None
+        widget.status = presentation.display_state
+        widget.detail = presentation.full_output
+        return cast(Widget, widget)
 
     def mount_tool_call(
         self,
@@ -357,6 +388,36 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert len(cards) == 1
     assert cards[0].arguments == {"command": "printf done"}
     assert cards[0].status == "cancelled"
+
+
+def test_history_controller_coalesces_process_polls_across_a_prepended_page() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    newer = HistoricalToolCard(
+        card_id="history:newer",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 completed with exit code 0\nstdout:\nnewer\n",
+        is_error=False,
+        status="done",
+        tool_call_id="poll-2",
+    )
+    older = HistoricalToolCard(
+        card_id="history:older",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running\nstdout:\nolder\n",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+
+    controller.render_entries((newer,))
+    controller.prepend_entries((older,))
+
+    process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
+    assert len(process_widgets) == 1
+    assert process_widgets[0].status == "completed"
+    assert process_widgets[0].detail == "older\nnewer"
 
 
 def test_history_controller_replays_grep_summary_with_match_evidence() -> None:
