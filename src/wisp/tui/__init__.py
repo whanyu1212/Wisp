@@ -25,7 +25,7 @@ from wisp.tui.rendering import (
     format_tui_footer_text,
 )
 from wisp.tui.shell import TuiShell
-from wisp.tui.state import TuiInteractionState, TuiStatus, TuiViewState
+from wisp.tui.state import TuiExitReason, TuiInteractionState, TuiStatus, TuiViewState
 
 __all__ = [
     "FullscreenTuiRenderer",
@@ -39,6 +39,7 @@ __all__ = [
     "LiveFullscreenTui",
     "TUI_HISTORY_MESSAGE_LIMIT",
     "TuiInteractionState",
+    "TuiExitReason",
     "TuiOptions",
     "TuiRenderer",
     "TuiRendererKind",

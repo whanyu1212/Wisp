@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -494,9 +495,12 @@ def _run_tui_from_cli_options(
     user_session_dir: Path | None = None,
     user_auth_file: Path | None = None,
 ) -> None:
-    from wisp.tui import TuiOptions, run_tui
+    from wisp.tui import TuiExitReason, TuiOptions, run_tui
 
-    anyio.run(
+    restart_argv = tuple(sys.orig_argv)
+    restart_cwd = Path.cwd()
+    restart_environment = dict(os.environ)
+    result = anyio.run(
         run_tui,
         TuiOptions(
             config=config,
@@ -515,6 +519,30 @@ def _run_tui_from_cli_options(
             user_auth_file=user_auth_file,
         ),
     )
+    if result is TuiExitReason.restart_requested:
+        try:
+            _restart_current_process(
+                restart_argv,
+                cwd=restart_cwd,
+                environment=restart_environment,
+            )
+        except OSError as exc:
+            typer.echo(f"Wisp was updated, but restart failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
+
+def _restart_current_process(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+) -> None:
+    """Replace this process with the exact invocation captured before TUI startup."""
+
+    if not argv:
+        raise OSError("the original process invocation is unavailable")
+    os.chdir(cwd)
+    os.execvpe(argv[0], list(argv), environment)
 
 
 async def _run_print(

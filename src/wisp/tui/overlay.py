@@ -28,6 +28,7 @@ class OverlayKind(StrEnum):
     theme_picker = "theme_picker"
     context_status = "context_status"
     diff_viewer = "diff_viewer"
+    update_prompt = "update_prompt"
     operation_indicator = "operation_indicator"
 
 
@@ -36,6 +37,7 @@ class OverlayOperation(StrEnum):
 
     session_catalog = "session_catalog"
     session_switch = "session_switch"
+    update = "update"
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ class TextualOverlayController:
         overlays: Mapping[OverlayKind, OverlaySurface],
         defer_after_refresh: Callable[[Callable[[], None]], None],
         on_overlay_displaced: Callable[[OverlayKind], None] | None = None,
+        on_transition_finished: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._composer = composer
@@ -107,6 +110,7 @@ class TextualOverlayController:
         self._overlays = dict(overlays)
         self._defer_after_refresh = defer_after_refresh
         self._on_overlay_displaced = on_overlay_displaced
+        self._on_transition_finished = on_transition_finished
         self._clock = clock
         self._active_overlay: OverlayKind | None = None
         self._active_operation: OverlayOperation | None = None
@@ -167,6 +171,8 @@ class TextualOverlayController:
         if restore_composer and self._active_operation is None:
             self._restore_composer()
         self._restore_viewport_for(kind)
+        if self._on_transition_finished is not None:
+            self._on_transition_finished()
         return True
 
     def start_operation(self, operation: OverlayOperation) -> None:
@@ -188,6 +194,8 @@ class TextualOverlayController:
         self._active_operation = None
         if self._active_overlay is None:
             self._restore_composer()
+        if self._on_transition_finished is not None:
+            self._on_transition_finished()
         return True
 
     def consume_cancel(self) -> bool:

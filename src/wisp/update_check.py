@@ -103,7 +103,16 @@ async def check_for_update(
             transport=transport,
             use_cache=True,
         )
-        return status.available
+        update = status.available
+        if update is None:
+            return None
+        skipped_version = await anyio.to_thread.run_sync(
+            _read_skipped_version,
+            _cache_path(home_dir=home_dir),
+        )
+        if skipped_version == update.latest_version:
+            return None
+        return update
     except Exception:
         return None
 
@@ -205,6 +214,34 @@ async def install_update(
         on_install_started()
     with anyio.CancelScope(shield=True):
         await (runner or _run_update_command)(command)
+
+
+async def can_install_update() -> bool:
+    """Return whether this process is a persistent ``uv tool`` installation."""
+
+    try:
+        await _require_uv_tool_install()
+    except UpdateInstallError:
+        return False
+    return True
+
+
+async def skip_update_version(
+    version: str,
+    *,
+    home_dir: Path | None = None,
+) -> bool:
+    """Best-effort persistence for one explicitly skipped release."""
+
+    try:
+        normalized = str(Version(version))
+        return await anyio.to_thread.run_sync(
+            _write_skipped_version,
+            _cache_path(home_dir=home_dir),
+            normalized,
+        )
+    except Exception:
+        return False
 
 
 async def _require_uv_tool_install() -> None:
@@ -341,6 +378,23 @@ def _read_cache(path: Path, now: float, python_version: Version) -> tuple[str, .
     return tuple(releases)
 
 
+def _read_skipped_version(path: Path) -> str | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get("skipped_version")
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(Version(value))
+    except InvalidVersion:
+        return None
+
+
 async def _fetch_releases(
     *,
     transport: httpx.AsyncBaseTransport | None,
@@ -391,16 +445,43 @@ def _write_cache(
     python_version: Version,
     releases: tuple[str, ...],
 ) -> None:
+    document: dict[str, object] = {
+        "checked_at": checked_at,
+        "python_version": str(python_version),
+        "releases": list(releases),
+    }
+    skipped_version = _read_skipped_version(path)
+    if skipped_version is not None:
+        document["skipped_version"] = skipped_version
+    _write_cache_document(path, document)
+
+
+def _write_skipped_version(path: Path, version: str) -> bool:
+    document: dict[str, object] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeDecodeError):
+        return False
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, Mapping):
+            document.update(payload)
+    document["skipped_version"] = version
+    try:
+        _write_cache_document(path, document)
+    except OSError:
+        return False
+    return True
+
+
+def _write_cache_document(path: Path, document: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {
-            "checked_at": checked_at,
-            "python_version": str(python_version),
-            "releases": list(releases),
-        },
-        indent=2,
-        sort_keys=True,
-    )
+    payload = json.dumps(document, indent=2, sort_keys=True)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
