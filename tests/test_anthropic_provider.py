@@ -392,6 +392,7 @@ def test_anthropic_provider_emits_failed_terminal_on_stream_error() -> None:
     assert provider._replays.get("previous-response") is None  # noqa: SLF001
 
 
+@pytest.mark.production_fault
 def test_anthropic_provider_emits_failed_terminal_when_stream_ends_without_stop_reason() -> None:
     # Regression test: distinct from the exception-raising failure case above
     # -- here the async iterator ends *normally* (no exception), but a

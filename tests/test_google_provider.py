@@ -414,6 +414,7 @@ def test_google_provider_preserves_replay_after_context_overflow() -> None:
     assert provider._replays.get("previous-response") == ()  # noqa: SLF001
 
 
+@pytest.mark.production_fault
 def test_google_provider_emits_failed_terminal_when_stream_ends_without_finish_reason() -> None:
     # Regression guard, mirroring AnthropicProvider's equivalent: the stream
     # ended (cleanly or not) without Gemini ever reporting a finish_reason.

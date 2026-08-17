@@ -659,6 +659,7 @@ def test_in_process_sdk_surfaces_and_resolves_project_trust(
     anyio.run(scenario)
 
 
+@pytest.mark.production_fault
 def test_in_process_sdk_close_denies_pending_trust_without_hanging(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -715,6 +716,7 @@ def test_in_process_sdk_close_abandons_blocked_trust_store_read(
         release_read.set()
 
 
+@pytest.mark.production_fault
 def test_in_process_sdk_close_reports_owner_that_resists_cancellation(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -1681,6 +1683,7 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
     anyio.run(scenario)
 
 
+@pytest.mark.production_fault
 def test_in_process_sdk_shutdown_cancels_backpressured_stream(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

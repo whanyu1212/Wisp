@@ -58,11 +58,13 @@ jobs:
       matrix:
         include:
           - suite: core
-            marker: not (slow or tui or process or benchmark)
+            marker: not (slow or tui or process or benchmark or production_fault)
           - suite: tui
-            marker: tui
+            marker: tui and not production_fault
           - suite: system-and-slow
-            marker: (slow or process or benchmark) and not tui
+            marker: (slow or process or benchmark) and not (tui or production_fault)
+          - suite: production-fault
+            marker: production_fault
 
     steps:
       - name: Check out repository
@@ -116,11 +118,13 @@ jobs:
           WISP_TRUST: "1"
         run: >-
           uv run pytest
+          tests/test_auth_storage.py
           tests/test_cli_stdin.py
           tests/test_mcp_runtime_process.py
           tests/test_process_manager.py
           tests/test_rpc_transport.py
           tests/test_secure_tool_filesystem.py
+          tests/test_sessions.py
           --durations=20
 
       - name: Smoke-test fake-provider CLI

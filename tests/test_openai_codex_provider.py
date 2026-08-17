@@ -767,6 +767,7 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
     ]
 
 
+@pytest.mark.production_fault
 def test_openai_codex_provider_rejects_eof_without_native_completion(tmp_path: Path) -> None:
     provider = StubOpenAICodexProvider(
         [
@@ -822,6 +823,7 @@ def test_openai_codex_provider_does_not_expose_tool_calls_before_completion(
     ]
 
 
+@pytest.mark.production_fault
 def test_openai_codex_provider_rejects_done_without_native_completion(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
 
