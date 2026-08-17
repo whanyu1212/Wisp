@@ -648,6 +648,37 @@ def test_history_controller_transfers_resumed_process_card_to_live_ownership() -
     assert process_widget in surface.widgets
 
 
+def test_history_controller_remaps_transferred_process_entries_on_latest_reload() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    poll = HistoricalToolCard(
+        card_id="history:poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    controller.render_entries((poll,))
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    controller.transfer_widget_to_live(cast(Widget, process_widget))
+
+    controller.replace_latest_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="new page prefix",
+                entry_id="message-prefix",
+            ),
+            poll,
+        )
+    )
+
+    assert "assistant: new page prefix" in surface.history_labels
+    assert process_widget not in controller._widgets.values()
+    assert controller._transferred_history_entry_ids[cast(Widget, process_widget)] == {1}
+
+
 def test_history_controller_repositions_process_card_when_first_poll_leaves_window() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

@@ -191,6 +191,7 @@ class TextualHistoryController:
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
         self._transferred_history_entry_ids: dict[Widget, set[int]] = {}
+        self._transferred_history_entries: dict[Widget, list[HistoricalTranscriptEntry]] = {}
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
         self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
@@ -293,6 +294,13 @@ class TextualHistoryController:
             self._transferred_history_entry_ids.setdefault(widget, set()).update(
                 transferred_entry_ids
             )
+            retained_by_id = {item.id: item.entry for item in self._window.entries}
+            transferred_entries = self._transferred_history_entries.setdefault(widget, [])
+            transferred_entries.extend(
+                retained_by_id[entry_id]
+                for entry_id in sorted(transferred_entry_ids)
+                if entry_id in retained_by_id
+            )
         self._widgets = {
             entry_id: candidate
             for entry_id, candidate in self._widgets.items()
@@ -304,6 +312,7 @@ class TextualHistoryController:
 
         self._live_entries = [entry for entry in self._live_entries if entry.widget is not widget]
         self._transferred_history_entry_ids.pop(widget, None)
+        self._transferred_history_entries.pop(widget, None)
         snapshot = self._latest_reload_live_entries
         if snapshot is not None:
             self._latest_reload_live_entries = tuple(
@@ -413,7 +422,9 @@ class TextualHistoryController:
         try:
             self._remove_historical_widgets()
             self._clear(clear_live=False)
-            self._window.replace(self._retain(reloaded_entries))
+            retained = self._retain(reloaded_entries)
+            self._remap_transferred_history_entry_ids(retained)
+            self._window.replace(retained)
             self._reconcile()
             self._surface.follow_transcript_tail_after_refresh()
         finally:
@@ -475,6 +486,9 @@ class TextualHistoryController:
         if clear_live:
             self._live_entries.clear()
             self._transferred_history_entry_ids.clear()
+            self._transferred_history_entries.clear()
+        else:
+            self._transferred_history_entry_ids.clear()
         self._latest_reload_live_entries = None
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
@@ -497,6 +511,26 @@ class TextualHistoryController:
         )
         self._next_entry_id += len(retained)
         return retained
+
+    def _remap_transferred_history_entry_ids(
+        self,
+        retained: tuple[_RetainedHistoryEntry, ...],
+    ) -> None:
+        """Remap live-owned records after a latest-page rebuild resets local ids."""
+
+        for widget, transferred_entries in self._transferred_history_entries.items():
+            available = list(retained)
+            remapped: set[int] = set()
+            for transferred in reversed(transferred_entries):
+                for index in range(len(available) - 1, -1, -1):
+                    candidate = available[index]
+                    if not _same_durable_history_entry(candidate.entry, transferred):
+                        continue
+                    remapped.add(candidate.id)
+                    del available[index]
+                    break
+            if remapped:
+                self._transferred_history_entry_ids[widget] = remapped
 
     def _remove_historical_widgets(self) -> None:
         for widget in set(self._widgets.values()):
@@ -1015,6 +1049,29 @@ def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
     if isinstance(entry, HistoricalSkillInvocation):
         return entry.entry_id
     return entry.card_id
+
+
+def _same_durable_history_entry(
+    left: HistoricalTranscriptEntry,
+    right: HistoricalTranscriptEntry,
+) -> bool:
+    """Match one persisted projection across destructive latest-page reloads."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, HistoricalTranscriptMessage) and isinstance(
+        right, HistoricalTranscriptMessage
+    ):
+        if left.entry_id is not None or right.entry_id is not None:
+            return left.entry_id == right.entry_id
+        return left == right
+    if isinstance(left, HistoricalSkillInvocation) and isinstance(right, HistoricalSkillInvocation):
+        return left.entry_id == right.entry_id
+    if isinstance(left, HistoricalToolCard) and isinstance(right, HistoricalToolCard):
+        if left.missing_result or right.missing_result:
+            return left == right and left.tool_call_id == right.tool_call_id
+        return left.card_id == right.card_id
+    return False
 
 
 def _history_entry_matches_live(
