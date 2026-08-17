@@ -88,12 +88,10 @@ class TextualHistorySurface(Protocol):
         reposition: bool = False,
     ) -> Widget | None: ...
 
-    def update_process_card(
+    def update_historical_process_card(
         self,
+        card: Widget,
         presentation: ProcessLifecyclePresentation,
-        *,
-        elapsed: float | None = None,
-        settle_terminal: bool = False,
     ) -> Widget | None: ...
 
     def mount_tool_call(
@@ -624,7 +622,10 @@ class TextualHistoryController:
                             before=before,
                             reposition=True,
                         )
-                    self._surface.update_process_card(process_group.presentation)
+                    self._surface.update_historical_process_card(
+                        widget,
+                        process_group.presentation,
+                    )
                 continue
             if process_group is not None and item.id != process_group.first_entry_id:
                 first_widget = self._widgets.get(process_group.first_entry_id)
@@ -650,7 +651,10 @@ class TextualHistoryController:
                     before=before,
                 )
                 if mounted is not None:
-                    self._surface.update_process_card(process_group.presentation)
+                    self._surface.update_historical_process_card(
+                        mounted,
+                        process_group.presentation,
+                    )
                     superseded = {
                         self._widgets[member_id]
                         for member_id in process_group.member_entry_ids

@@ -2520,6 +2520,18 @@ class TextualTui(App[None]):
 
         return self._transcript_controller.mount_process_call(call_id, process_id)
 
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
+    ) -> ProcessCard | None:
+        """Update one retained process replay card independently of live output."""
+
+        return self._transcript_controller.update_historical_process_card(
+            card,
+            presentation,
+        )
+
     def update_process_card(
         self,
         presentation: ProcessLifecyclePresentation,

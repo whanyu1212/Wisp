@@ -111,6 +111,7 @@ class TextualTranscriptController:
         self._tool_cards: dict[str, ToolCard] = {}
         self._process_cards: dict[str, ProcessCard] = {}
         self._live_process_cards: set[ProcessCard] = set()
+        self._historical_process_cards: dict[str, ProcessCard] = {}
         self._historical_tool_cards: dict[str, ToolCard] = {}
         self._historical_widgets: set[ToolCard] = set()
         self._working_indicator: WorkingIndicator | None = None
@@ -285,15 +286,30 @@ class TextualTranscriptController:
         """Mount or recover one stable card for a resumable process lifecycle."""
 
         card = self._process_cards.get(process_id)
+        if historical and card in self._live_process_cards:
+            # Older pages need their own stable replay card once the originally
+            # shared card has transferred to live ownership. This keeps paged output
+            # visible without mutating the evolving live lifecycle at the tail.
+            historical_card = self._historical_process_cards.get(process_id)
+            if historical_card is not None:
+                if (reposition or before is not None) and before is not historical_card:
+                    self._surface.move_live_transcript_widget(historical_card, before=before)
+                return historical_card
+            historical_card = ProcessCard(process_id, track_elapsed=False)
+            self._historical_process_cards[process_id] = historical_card
+            self._historical_widgets.add(historical_card)
+            self._surface.mount_live_transcript_widget(historical_card, before=before)
+            self._surface.record_live_transcript_update(historical_card)
+            self._surface.follow_transcript_tail_after_refresh()
+            return historical_card
         if card is not None:
             if historical:
-                # A resumed live poll owns the shared card until bounded eviction.
-                # Do not let history replay move or overwrite that evolving state.
-                if card in self._live_process_cards:
-                    return None
+                self._historical_process_cards[process_id] = card
                 self._historical_widgets.add(card)
             else:
                 self._historical_widgets.discard(card)
+                if self._historical_process_cards.get(process_id) is card:
+                    del self._historical_process_cards[process_id]
                 self._live_process_cards.add(card)
                 self._unsettle_widget(card)
                 card.start_live_updates()
@@ -305,6 +321,7 @@ class TextualTranscriptController:
         card = ProcessCard(process_id, track_elapsed=not historical)
         self._process_cards[process_id] = card
         if historical:
+            self._historical_process_cards[process_id] = card
             self._historical_widgets.add(card)
         else:
             self._live_process_cards.add(card)
@@ -319,6 +336,20 @@ class TextualTranscriptController:
         card = self.mount_process_card(process_id)
         if card is not None:
             self._tool_cards[call_id] = card
+        return card
+
+    def update_historical_process_card(
+        self,
+        card: Widget,
+        presentation: ProcessLifecyclePresentation,
+    ) -> ProcessCard | None:
+        """Update one retained replay card without touching a live card of the same process."""
+
+        if not isinstance(card, ProcessCard):
+            return None
+        card.set_lifecycle(presentation)
+        self._surface.record_live_transcript_update(card)
+        self._surface.follow_transcript_tail_after_refresh()
         return card
 
     def update_process_card(
@@ -467,6 +498,11 @@ class TextualTranscriptController:
             self._historical_widgets.discard(widget)
         if isinstance(widget, ProcessCard):
             self._live_process_cards.discard(widget)
+            self._historical_process_cards = {
+                process_id: card
+                for process_id, card in self._historical_process_cards.items()
+                if card is not widget
+            }
             self._process_cards = {
                 process_id: card
                 for process_id, card in self._process_cards.items()
@@ -495,6 +531,7 @@ class TextualTranscriptController:
         self._tool_cards.clear()
         self._process_cards.clear()
         self._live_process_cards.clear()
+        self._historical_process_cards.clear()
         self._historical_tool_cards.clear()
         self._historical_widgets.clear()
         self._settled_widgets.clear()

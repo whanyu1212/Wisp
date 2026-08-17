@@ -224,7 +224,7 @@ def test_live_process_reuse_detaches_historical_card_ownership() -> None:
     assert controller.settled_widget_count == 1
 
 
-def test_historical_process_mount_does_not_overwrite_live_owned_card() -> None:
+def test_historical_process_mount_stays_separate_from_live_owned_card() -> None:
     surface = _Surface()
     controller = _controller(surface)
     live = controller.mount_process_call("poll-1", "proc-1")
@@ -232,8 +232,9 @@ def test_historical_process_mount_does_not_overwrite_live_owned_card() -> None:
 
     historical = controller.mount_process_card("proc-1", historical=True)
 
-    assert historical is None
-    assert surface.mounted == [live]
+    assert isinstance(historical, ProcessCard)
+    assert historical is not live
+    assert surface.mounted == [live, historical]
 
 
 def test_resolved_process_operation_settles_and_reuse_unsettles_card() -> None:

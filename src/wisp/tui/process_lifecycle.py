@@ -192,10 +192,15 @@ class ProcessLifecycle:
             max_bytes=PROCESS_OUTPUT_MAX_BYTES,
             max_lines=PROCESS_OUTPUT_MAX_LINES,
         )
-        retained_bytes = len(bounded.text.encode("utf-8"))
+        retained_text = bounded.text
         if bounded.truncated:
+            # `truncate_text_tail` prefixes a synthetic marker. Account and retain
+            # only source bytes; this lifecycle supplies its own cumulative omission
+            # notice and must not let the helper marker hide short line drops.
+            retained_text = retained_text.removeprefix("[truncated]").removeprefix(" ")
+            retained_bytes = len(retained_text.encode("utf-8"))
             self._ui_dropped_bytes += max(0, before_bytes - retained_bytes)
-        self._output = bounded.text.strip("\n")
+        self._output = retained_text.strip("\n")
 
     def _display_output(self) -> str:
         if self._ui_dropped_bytes <= 0:

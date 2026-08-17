@@ -145,20 +145,15 @@ class _HistorySurface:
         self.historical_cards[f"process:{process_id}"] = widget
         return cast(Widget, widget)
 
-    def update_process_card(
+    def update_historical_process_card(
         self,
+        card: Widget,
         presentation: ProcessLifecyclePresentation,
-        *,
-        elapsed: float | None = None,
-        settle_terminal: bool = False,
     ) -> Widget | None:
-        del elapsed, settle_terminal
-        widget = self.historical_cards.get(f"process:{presentation.process_id}")
-        if widget is None:
-            return None
+        widget = cast(_HistoryWidget, card)
         widget.status = presentation.display_state
         widget.detail = presentation.full_output
-        return cast(Widget, widget)
+        return card
 
     def mount_tool_call(
         self,

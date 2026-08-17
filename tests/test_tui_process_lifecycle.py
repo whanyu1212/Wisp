@@ -116,6 +116,23 @@ def test_process_lifecycle_bounds_accumulated_output_and_reports_omission() -> N
     assert presentation.full_output.endswith("diagnostic tail")
 
 
+def test_process_lifecycle_counts_short_line_drops_without_helper_marker() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    source = "\n".join("x" for _ in range(501))
+
+    presentation = lifecycle.observe(
+        operation="poll",
+        state="running",
+        fallback_output=source,
+    )
+
+    assert presentation.ui_dropped_bytes == 2
+    assert presentation.retained_output == "\n".join("x" for _ in range(500))
+    assert "[truncated]" not in presentation.full_output
+    assert "2 earlier process-output bytes omitted by TUI" in presentation.full_output
+
+
 def test_historical_process_envelope_requires_the_expected_process_id() -> None:
     state, output = historical_process_observation(
         "proc-1",

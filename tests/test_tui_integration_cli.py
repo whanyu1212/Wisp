@@ -1958,6 +1958,55 @@ def test_textual_process_card_bounds_malformed_process_id_display() -> None:
     assert "x" * 100 not in rendered
 
 
+def test_textual_paging_older_polls_keeps_live_process_card_untouched() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-1",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nnewer output\n",
+                        is_error=False,
+                        tool_call_id="poll-1",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-2",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.prepend_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:poll-0",
+                        name="bash",
+                        arguments={"operation": "poll", "process_id": "proc-1"},
+                        output="Process proc-1 is still running\nstdout:\nolder output\n",
+                        is_error=False,
+                        tool_call_id="poll-0",
+                    ),
+                )
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            return [card.render().plain for card in app_instance.query(ProcessCard)]
+
+    cards = anyio.run(scenario)
+
+    assert len(cards) == 2
+    assert any("older output" in card for card in cards)
+    live = next(card for card in cards if card.startswith("• Polling process"))
+    assert "newer output" in live
+    assert "older output" not in live
+
+
 def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:
     async def scenario() -> tuple[int, str]:
         app_instance, renderer = create_textual_tui()
