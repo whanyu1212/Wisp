@@ -15,10 +15,8 @@ from wisp.agent.configuration import (
     validate_non_negative_integer,
 )
 from wisp.agent.context import (
-    build_context_budget,
-    estimate_context,
+    estimate_context_budget,
     observe_context,
-    trailing_context_estimate,
 )
 from wisp.agent.execution import (
     ContextOverflowHook,
@@ -1221,25 +1219,14 @@ async def run_agent_loop(
                 ),
                 None,
             )
-            estimate = estimate_context(request_messages, config.tools)
-            trailing_estimate = (
-                trailing_context_estimate(request_messages, config.tools, previous_observation)
-                if previous_observation is not None
-                and previous_observation.provider == config.provider.name
-                and previous_observation.model == selected_model
-                else None
-            )
-            context_budget = build_context_budget(
-                estimate,
+            context_budget = estimate_context_budget(
+                request_messages,
+                config.tools,
                 context_window=config.context_window,
                 reserve_tokens=config.context_reserve_tokens,
-                observed_tokens=(
-                    previous_observation.input_tokens if previous_observation is not None else None
-                ),
-                observed_is_current=trailing_estimate is not None,
-                trailing_estimated_tokens=(
-                    trailing_estimate.total_tokens if trailing_estimate is not None else None
-                ),
+                observation=previous_observation,
+                provider=config.provider.name,
+                model=selected_model,
             )
             yield ContextEstimated(
                 turn=turn,
