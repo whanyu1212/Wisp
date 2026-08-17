@@ -183,10 +183,32 @@ def active_turn_start(messages: Sequence[Message]) -> int | None:
     return None
 
 
+def surrogate_safe_text(text: str) -> str:
+    """Preserve valid Unicode while escaping malformed UTF-16 surrogates."""
+
+    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def _surrogate_safe_json_value(value: object) -> object:
+    if isinstance(value, str):
+        return surrogate_safe_text(value)
+    if isinstance(value, dict):
+        return {
+            surrogate_safe_text(str(key)): _surrogate_safe_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_surrogate_safe_json_value(item) for item in value]
+    return value
+
+
 def _canonical_history_json(payload: object) -> str:
-    # ASCII escaping also makes malformed legacy strings containing lone UTF-16
-    # surrogates safe to pass through an eventual UTF-8 HTTP encoder.
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        _surrogate_safe_json_value(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _tool_result_payload(message: Message) -> dict[str, object]:

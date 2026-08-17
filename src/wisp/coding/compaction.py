@@ -10,7 +10,7 @@ from typing import cast
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, surrogate_safe_text
 from wisp.events import (
     BillableTokenUsage,
     ContextBudget,
@@ -283,7 +283,7 @@ def truncate_active_turn_tool_results(
         if reclaimed_bytes >= target_bytes:
             break
         message = truncated[index]
-        safe_content = _surrogate_safe_text(message.content)
+        safe_content = surrogate_safe_text(message.content)
         content_bytes = _utf8_size(safe_content)
         remaining_target = target_bytes - reclaimed_bytes
         minimum_bytes = _utf8_size(message.content[-_MIN_TRUNCATED_TOOL_RESULT_CHARS:])
@@ -298,12 +298,6 @@ def truncate_active_turn_tool_results(
     if not changed:
         return None
     return tuple(truncated)
-
-
-def _surrogate_safe_text(text: str) -> str:
-    """Preserve malformed Unicode scalar values as deterministic escapes."""
-
-    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
 
 
 def _utf8_size(text: str) -> int:

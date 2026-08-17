@@ -238,6 +238,20 @@ def test_malicious_marker_text_remains_a_json_result_value() -> None:
     assert payload["calls"][0]["result"]["output"] == injected
 
 
+def test_fallback_preserves_valid_unicode_without_ascii_expansion() -> None:
+    output = "工具结果：你好 🌍"
+    transcript = (
+        Message(role="assistant", content="", tool_calls=(_call(),)),
+        _result(output=output),
+    )
+
+    normalized = normalize_provider_history(transcript)
+
+    assert output in normalized[0].content
+    payload = json.loads(normalized[0].content)
+    assert payload["calls"][0]["result"]["output"] == output
+
+
 def test_fallback_escapes_lone_surrogates_from_legacy_rows() -> None:
     transcript = (
         Message(role="assistant", content="", tool_calls=(_call(),)),
@@ -248,3 +262,5 @@ def test_fallback_escapes_lone_surrogates_from_legacy_rows() -> None:
 
     assert "\\ud800" in normalized[0].content
     normalized[0].content.encode("utf-8")
+    payload = json.loads(normalized[0].content)
+    assert payload["calls"][0]["result"]["output"] == r"legacy surrogate: \ud800"
