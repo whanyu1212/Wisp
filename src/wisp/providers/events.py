@@ -65,7 +65,7 @@ class ProviderThinkingDelta:
 
 @dataclass(frozen=True, slots=True)
 class ProviderToolCallCompleted:
-    """A complete tool call parsed from the provider stream."""
+    """A complete observed call; the terminal finish reason controls execution eligibility."""
 
     tool_call: ToolCall
     content_index: int = 0
@@ -86,7 +86,12 @@ class ProviderUsage:
 
 @dataclass(frozen=True, slots=True)
 class ProviderResponseCompleted:
-    """The terminal successful response, including its complete assistant state."""
+    """The terminal successful response, including its complete assistant state.
+
+    ``length`` may retain observed tool calls so the agent loop can reject each call
+    in-band without executing it. The loop validates every finish-reason/tool-call
+    combination before entering the executor or approval policy.
+    """
 
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
