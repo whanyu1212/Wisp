@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from textual.widget import Widget
+
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     AgentCompleted,
@@ -114,7 +116,7 @@ class TextualTuiRenderer:
         self._process_started: dict[str, datetime] = {}
         self._denied_process_calls: set[str] = set()
         self._history = TextualHistoryController(app)
-        app.set_live_widget_evicted_hook(self._history.forget_live_widget)
+        app.set_live_widget_evicted_hook(self._forget_live_widget)
         app.set_history_window_hooks(
             shift_older=self._history.shift_older,
             show_oldest=self._history.show_oldest,
@@ -222,6 +224,16 @@ class TextualTuiRenderer:
         self._response_started = True
         self._retry_attempt = 0
         self.app.show_working_indicator()
+
+    def _forget_live_widget(self, widget: Widget) -> None:
+        """Release history and process lifecycle state after bounded UI eviction."""
+
+        self._history.forget_live_widget(widget)
+        process_id = getattr(widget, "process_id", None)
+        if not isinstance(process_id, str):
+            return
+        self._process_lifecycles.pop(process_id, None)
+        self._process_started.pop(process_id, None)
 
     def _tool_elapsed(self, call_id: str, finished: datetime) -> float | None:
         # True wall-clock duration for a resolving tool call: result timestamp −

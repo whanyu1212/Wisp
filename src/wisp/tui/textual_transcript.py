@@ -255,6 +255,7 @@ class TextualTranscriptController:
         *,
         historical: bool = False,
         before: Widget | None = None,
+        reposition: bool = False,
     ) -> ProcessCard | None:
         """Mount or recover one stable card for a resumable process lifecycle."""
 
@@ -262,7 +263,9 @@ class TextualTranscriptController:
         if card is not None:
             if historical:
                 self._historical_widgets.add(card)
-            if before is not None and before is not card:
+            else:
+                self._unsettle_widget(card)
+            if (reposition or before is not None) and before is not card:
                 self._surface.move_live_transcript_widget(card, before=before)
             return card
         if not self._surface.transcript_available():
@@ -298,7 +301,7 @@ class TextualTranscriptController:
             return None
         card.set_lifecycle(presentation, elapsed=elapsed)
         self._surface.record_live_transcript_update(card)
-        if settle_terminal and presentation.terminal:
+        if settle_terminal and presentation.operation_settled:
             if card not in self._historical_widgets:
                 # Presentation retention counts widgets, while durable-entry capacity
                 # must account for every represented audited call/result pair.
@@ -461,6 +464,19 @@ class TextualTranscriptController:
 
         if self._card_focus_was_following and self._surface.is_newest_transcript_widget(card):
             self._surface.return_transcript_to_latest()
+
+    def _unsettle_widget(self, widget: Widget) -> None:
+        """Remove a reused process card from settled retention while its call is active."""
+
+        retained = deque(
+            (candidate, entry_count)
+            for candidate, entry_count in self._settled_widgets
+            if candidate is not widget
+        )
+        if len(retained) == len(self._settled_widgets):
+            return
+        self._settled_widgets = retained
+        self._settled_durable_entry_count = sum(entry_count for _candidate, entry_count in retained)
 
     def settle_widget(self, widget: Widget, *, durable_entry_count: int = 0) -> None:
         """Retain a completed live widget until the bounded transcript window fills."""

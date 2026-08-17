@@ -63,6 +63,23 @@ class ProcessLifecyclePresentation:
     def terminal(self) -> bool:
         return self.display_state in {"completed", "failed", "timed_out", "cancelled"}
 
+    @property
+    def operation_settled(self) -> bool:
+        """Whether the audited poll/cancel call has reached a resolved UI state."""
+
+        return self.display_state in {
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled",
+            "poll_denied",
+            "cancel_denied",
+            "poll_interrupted",
+            "cancel_interrupted",
+            "poll_failed",
+            "cancel_failed",
+        }
+
 
 @dataclass(slots=True)
 class ProcessLifecycle:
@@ -219,28 +236,19 @@ def historical_process_observation(
 
 
 def _historical_output_chunk(output: str) -> str:
-    """Normalize Wisp's labeled managed-output body like the live typed chunks."""
+    """Preserve Wisp's stream labels so accumulated chunks remain unambiguous."""
 
-    if not output.startswith("stdout:\n"):
-        if output.startswith("stderr:\n"):
-            return output[len("stderr:\n") :]
+    if output.startswith(("stdout:\n", "stderr:\n")):
         return output
-    body = output[len("stdout:\n") :]
-    stdout, separator, stderr = body.partition("\nstderr:\n")
-    if not separator:
-        return stdout
-    return f"{stdout.rstrip(chr(10))}\nstderr:\n{stderr}"
+    return output
 
 
 def _process_output_chunk(stdout: str, stderr: str) -> str:
     parts: list[str] = []
     if stdout:
-        parts.append(stdout.rstrip("\n"))
+        parts.append(f"stdout:\n{stdout.rstrip(chr(10))}")
     if stderr:
-        if stdout:
-            parts.append(f"stderr:\n{stderr.rstrip(chr(10))}")
-        else:
-            parts.append(stderr.rstrip("\n"))
+        parts.append(f"stderr:\n{stderr.rstrip(chr(10))}")
     return "\n".join(part for part in parts if part)
 
 

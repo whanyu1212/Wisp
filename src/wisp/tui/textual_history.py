@@ -85,6 +85,7 @@ class TextualHistorySurface(Protocol):
         *,
         historical: bool = False,
         before: Widget | None = None,
+        reposition: bool = False,
     ) -> Widget | None: ...
 
     def update_process_card(
@@ -564,6 +565,7 @@ class TextualHistoryController:
         visible = self._window.visible
         process_groups = self._historical_process_groups(visible)
         visible_ids = {item.id for item in visible}
+        reposition_widgets: set[Widget] = set()
         self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
         for item_id, widget in tuple(self._widgets.items()):
             if item_id not in self._widgets:
@@ -575,6 +577,8 @@ class TextualHistoryController:
                     if other_widget is widget
                 ]
                 if any(other_id in visible_ids for other_id in aliases):
+                    del self._widgets[item_id]
+                    reposition_widgets.add(widget)
                     continue
                 if len(aliases) > 1:
                     if item_id != min(aliases):
@@ -590,6 +594,27 @@ class TextualHistoryController:
             process_group = process_groups.get(item.id)
             if item.id in self._widgets:
                 if process_group is not None and item.id == process_group.first_entry_id:
+                    widget = self._widgets[item.id]
+                    if widget in reposition_widgets:
+                        before = next(
+                            (
+                                self._widgets[later.id]
+                                for later in visible[index + 1 :]
+                                if later.id in self._widgets
+                                and self._widgets[later.id] is not widget
+                            ),
+                            None,
+                        )
+                        if before is None:
+                            before = self._surface.history_insertion_boundary(
+                                set(self._widgets.values())
+                            )
+                        self._surface.mount_process_card(
+                            process_group.presentation.process_id,
+                            historical=True,
+                            before=before,
+                            reposition=True,
+                        )
                     self._surface.update_process_card(process_group.presentation)
                 continue
             if process_group is not None and item.id != process_group.first_entry_id:

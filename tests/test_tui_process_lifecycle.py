@@ -42,7 +42,7 @@ def test_process_lifecycle_accumulates_incremental_output_and_poll_count() -> No
 
     assert presentation.poll_count == 2
     assert presentation.display_state == "completed"
-    assert presentation.full_output == "first chunk\nsecond chunk"
+    assert presentation.full_output == "stdout:\nfirst chunk\nstdout:\nsecond chunk"
     assert "first chunk" in presentation.detail
     assert "second chunk" in presentation.detail
     assert presentation.terminal is True
@@ -60,6 +60,28 @@ def test_failed_tool_result_overrides_nominal_completed_process_state() -> None:
 
     assert presentation.display_state == "failed"
     assert presentation.terminal is True
+
+
+def test_process_lifecycle_preserves_stream_labels_across_polls() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    lifecycle.observe(
+        operation="poll",
+        state="running",
+        stdout="first stdout\n",
+        stderr="first stderr\n",
+    )
+    lifecycle.begin("poll")
+
+    presentation = lifecycle.observe(
+        operation="poll",
+        state="running",
+        stdout="second stdout\n",
+    )
+
+    assert presentation.full_output == (
+        "stdout:\nfirst stdout\nstderr:\nfirst stderr\nstdout:\nsecond stdout"
+    )
 
 
 def test_process_lifecycle_does_not_duplicate_failure_reason_from_fallback() -> None:
@@ -109,7 +131,7 @@ def test_historical_process_envelope_requires_the_expected_process_id() -> None:
     )
 
     assert state == "running"
-    assert output == "progress\n"
+    assert output == "stdout:\nprogress\n"
     assert mismatched_state is None
     assert mismatched_output.startswith("Process proc-other completed")
     assert malformed_state is None
@@ -120,7 +142,10 @@ def test_historical_process_envelope_requires_the_expected_process_id() -> None:
     ("body", "expected_output"),
     [
         ("", "cleanup failed"),
-        ("\nstdout:\npartial output\n", "cleanup failed\npartial output\n"),
+        (
+            "\nstdout:\npartial output\n",
+            "cleanup failed\nstdout:\npartial output\n",
+        ),
     ],
 )
 def test_historical_failed_process_preserves_header_reason(

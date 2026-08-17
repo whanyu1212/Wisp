@@ -126,10 +126,20 @@ class _HistorySurface:
         *,
         historical: bool = False,
         before: Widget | None = None,
+        reposition: bool = False,
     ) -> Widget:
         del historical
         existing = self.historical_cards.get(f"process:{process_id}")
         if existing is not None:
+            if (reposition or before is not None) and cast(Widget, existing) is not before:
+                self.widgets.remove(existing)
+                if before is None:
+                    self.widgets.append(existing)
+                else:
+                    self.widgets.insert(
+                        self.widgets.index(cast(_HistoryWidget, before)),
+                        existing,
+                    )
             return cast(Widget, existing)
         widget = self._mount(f"process: {process_id}", before=before)
         self.historical_cards[f"process:{process_id}"] = widget
@@ -421,7 +431,7 @@ def test_history_controller_pairs_split_process_call_before_grouping() -> None:
     process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
     assert len(process_widgets) == 1
     assert process_widgets[0].status == "completed"
-    assert process_widgets[0].detail == "done"
+    assert process_widgets[0].detail == "stdout:\ndone"
     assert not [widget for widget in surface.widgets if widget.name == "bash"]
 
 
@@ -505,7 +515,44 @@ def test_history_controller_coalesces_process_polls_across_a_prepended_page() ->
     process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
     assert len(process_widgets) == 1
     assert process_widgets[0].status == "completed"
-    assert process_widgets[0].detail == "older\nnewer"
+    assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
+
+
+def test_history_controller_repositions_process_card_when_first_poll_leaves_window() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    first_poll = HistoricalToolCard(
+        card_id="history:first-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    later_poll = HistoricalToolCard(
+        card_id="history:later-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running",
+        is_error=False,
+        tool_call_id="poll-2",
+    )
+    entries = (
+        *_messages("assistant", "prefix", TUI_TRANSCRIPT_WINDOW_SHIFT - 1),
+        first_poll,
+        HistoricalTranscriptMessage(role="assistant", content="between polls"),
+        later_poll,
+        *_messages("assistant", "suffix", TUI_TRANSCRIPT_WINDOW_SIZE - 2),
+    )
+
+    controller.replace_entries(entries, session_label="Windowed")
+    assert controller.show_oldest()
+    labels = [widget.label for widget in surface.widgets]
+    assert labels.index("process: proc-1") < labels.index("assistant: between polls")
+
+    assert controller.show_latest()
+    labels = [widget.label for widget in surface.widgets]
+    assert labels.index("assistant: between polls") < labels.index("process: proc-1")
 
 
 def test_history_controller_replays_grep_summary_with_match_evidence() -> None:

@@ -9,13 +9,14 @@ import pytest
 from textual.widget import Widget
 
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_transcript import (
     TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
     TextualTranscriptController,
 )
-from wisp.tui.widgets import LineMessage, StreamMessage, ToolCard, WorkingIndicator
+from wisp.tui.widgets import LineMessage, ProcessCard, StreamMessage, ToolCard, WorkingIndicator
 
 pytestmark = pytest.mark.tui
 
@@ -203,6 +204,49 @@ def test_tool_cards_resolve_by_id_and_terminal_states_do_not_leak() -> None:
     assert controller.pending_tool_count == 0
     assert first._status == "cancelled"
     assert first._timer is None
+
+
+def test_resolved_process_operation_settles_and_reuse_unsettles_card() -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    lifecycle = ProcessLifecycle("proc-1")
+    card = controller.mount_process_call("poll-1", "proc-1")
+    assert isinstance(card, ProcessCard)
+    lifecycle.begin("poll")
+
+    controller.resolve_process_call("poll-1", lifecycle.deny("poll", "not now"))
+
+    assert controller.pending_tool_count == 0
+    assert controller.settled_widget_count == 1
+
+    reused = controller.mount_process_call("poll-2", "proc-1")
+
+    assert reused is card
+    assert controller.pending_tool_count == 1
+    assert controller.settled_widget_count == 0
+
+
+def test_resolved_process_operations_are_evicted_with_bounded_retention() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=1)
+    surface.controller = controller
+
+    cards: list[ProcessCard] = []
+    for index in range(2):
+        process_id = f"proc-{index}"
+        lifecycle = ProcessLifecycle(process_id)
+        card = controller.mount_process_call(f"poll-{index}", process_id)
+        assert isinstance(card, ProcessCard)
+        cards.append(card)
+        lifecycle.begin("poll")
+        controller.resolve_process_call(
+            f"poll-{index}",
+            lifecycle.interrupt("poll"),
+        )
+
+    assert controller.settled_widget_count == 1
+    assert surface.removed == [cards[0]]
+    assert surface.evicted == [cards[0]]
 
 
 def test_historical_card_lookup_is_evicted_with_its_widget() -> None:

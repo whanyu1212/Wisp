@@ -45,6 +45,7 @@ from wisp.tui.history import (
     history_entries_from_rpc_messages,
 )
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
     _EMPTY_TRANSCRIPT_TAGLINE,
@@ -2050,6 +2051,17 @@ def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() 
     assert "Process cancelled" not in rendered
     assert status == "cancelled"
     assert timer_stopped
+
+
+def test_textual_renderer_forgets_evicted_process_lifecycle_state() -> None:
+    _app_instance, renderer = create_textual_tui()
+    renderer._process_lifecycles["proc-1"] = ProcessLifecycle("proc-1")
+    renderer._process_started["proc-1"] = datetime.now(UTC)
+
+    renderer._forget_live_widget(ProcessCard("proc-1"))
+
+    assert "proc-1" not in renderer._process_lifecycles
+    assert "proc-1" not in renderer._process_started
 
 
 def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:

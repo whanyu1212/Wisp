@@ -2487,6 +2487,7 @@ class TextualTui(App[None]):
         *,
         historical: bool = False,
         before: Widget | None = None,
+        reposition: bool = False,
     ) -> ProcessCard | None:
         """Mount or recover one process-level presentation card."""
 
@@ -2494,6 +2495,7 @@ class TextualTui(App[None]):
             process_id,
             historical=historical,
             before=before,
+            reposition=reposition,
         )
 
     def mount_process_call(self, call_id: str, process_id: str) -> ProcessCard | None:
