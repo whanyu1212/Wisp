@@ -56,6 +56,7 @@ class ProcessLifecyclePresentation:
     call_count: int
     detail: str
     full_output: str
+    retained_output: str
     source_truncated: bool
     ui_dropped_bytes: int
 
@@ -92,6 +93,23 @@ class ProcessLifecycle:
     _output: str = ""
     _source_truncated: bool = False
     _ui_dropped_bytes: int = 0
+
+    @classmethod
+    def from_presentation(
+        cls,
+        presentation: ProcessLifecyclePresentation,
+    ) -> ProcessLifecycle:
+        """Restore retained presentation state when history transfers to live output."""
+
+        return cls(
+            process_id=presentation.process_id,
+            poll_count=presentation.poll_count,
+            call_count=presentation.call_count,
+            display_state=presentation.display_state,
+            _output=presentation.retained_output,
+            _source_truncated=presentation.source_truncated,
+            _ui_dropped_bytes=presentation.ui_dropped_bytes,
+        )
 
     def begin(self, operation: ProcessOperation) -> ProcessLifecyclePresentation:
         self.call_count += 1
@@ -158,6 +176,7 @@ class ProcessLifecycle:
             call_count=self.call_count,
             detail=_tail_preview(full_output) if full_output else "(no process output yet)",
             full_output=full_output,
+            retained_output=self._output,
             source_truncated=self._source_truncated,
             ui_dropped_bytes=self._ui_dropped_bytes,
         )

@@ -251,10 +251,13 @@ class TextualTuiRenderer:
         # still-pending tool cards and forget their request timestamps and retained
         # arguments so neither a spinning card nor stale per-call state leaks into
         # the next turn. A missing poll result does not establish process termination.
-        for identity in self._process_calls.values():
+        for call_id, identity in self._process_calls.items():
             lifecycle = self._process_lifecycles.get(identity.process_id)
             if lifecycle is not None:
-                self.app.update_process_card(lifecycle.interrupt(identity.operation))
+                self.app.resolve_process_call(
+                    call_id,
+                    lifecycle.interrupt(identity.operation),
+                )
         self._process_calls.clear()
         self._denied_process_calls.clear()
         self._tool_started.clear()
@@ -611,14 +614,18 @@ class TextualTuiRenderer:
                 card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
             else:
                 self._process_calls[event.call_id] = identity
-                lifecycle = self._process_lifecycles.setdefault(
-                    identity.process_id,
-                    ProcessLifecycle(identity.process_id),
-                )
                 self._process_started.setdefault(identity.process_id, event.timestamp)
                 card = self.app.mount_process_call(event.call_id, identity.process_id)
                 if card is not None:
                     self._history.transfer_widget_to_live(card)
+                lifecycle = self._process_lifecycles.get(identity.process_id)
+                if lifecycle is None:
+                    lifecycle = (
+                        ProcessLifecycle.from_presentation(card.lifecycle_presentation)
+                        if card is not None
+                        else ProcessLifecycle(identity.process_id)
+                    )
+                    self._process_lifecycles[identity.process_id] = lifecycle
                 self.app.update_process_card(lifecycle.begin(identity.operation))
             self._history.record_live_tool_call(event.call_id, widget=card)
         elif isinstance(event, TrustResolved):

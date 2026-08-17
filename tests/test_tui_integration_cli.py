@@ -1899,8 +1899,63 @@ def test_textual_live_poll_takes_ownership_of_resumed_process_card() -> None:
     card_count, rendered = anyio.run(scenario)
 
     assert card_count == 1
-    assert rendered.startswith("• Process completed proc-1 · 1 poll")
+    assert rendered.startswith("• Process completed proc-1 · 2 polls")
+    assert "old output" in rendered
     assert "new output" in rendered
+
+
+def test_textual_aborted_pending_process_poll_enters_settled_retention() -> None:
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": "proc-1"},
+                )
+            )
+            renderer.cancelled()
+            await pilot.pause()
+            card = app_instance.query_one(ProcessCard)
+            return (
+                card.render().plain,
+                any(
+                    candidate is card
+                    for candidate, _entry_count in (
+                        app_instance._transcript_controller._settled_widgets
+                    )
+                ),
+            )
+
+    rendered, card_settled = anyio.run(scenario)
+
+    assert rendered.startswith("• Process poll interrupted proc-1 · 1 poll")
+    assert card_settled
+
+
+def test_textual_process_card_bounds_malformed_process_id_display() -> None:
+    malformed_id = "first line\n" + "x" * 10_000
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="poll-1",
+                    name="bash",
+                    arguments={"operation": "poll", "process_id": malformed_id},
+                )
+            )
+            await pilot.pause()
+            return app_instance.query_one(ProcessCard).render().plain
+
+    rendered = anyio.run(scenario)
+    header = rendered.splitlines()[0]
+
+    assert len(header) < 100
+    assert "first line x" in header
+    assert "x" * 100 not in rendered
 
 
 def test_textual_renderer_reuses_process_card_after_terminal_observation() -> None:

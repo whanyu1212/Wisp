@@ -102,6 +102,7 @@ from wisp.tui.tool_call import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
+_PROCESS_ID_DISPLAY_CELLS = 40
 _MARKDOWN_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _PROMPT_HIGHLIGHT_COMPONENTS: dict[PromptHighlightKind, str] = {
     "command": "prompt-editor--command",
@@ -2742,6 +2743,15 @@ class ToolCard(Static):
         )
 
 
+def _process_id_for_display(process_id: str) -> str:
+    """Bound and flatten an untrusted process ID before building Textual content."""
+
+    # Slice before normalization so even a malformed multi-megabyte argument has
+    # constant presentation cost. Managed IDs are 32 lowercase hexadecimal chars.
+    single_line = " ".join(process_id[:64].split()) or "(invalid process id)"
+    return _truncate_to_cell_width(single_line, _PROCESS_ID_DISPLAY_CELLS)
+
+
 class ProcessCard(ToolCard):
     """One bounded presentation card spanning repeated polls for a process ID."""
 
@@ -2778,6 +2788,7 @@ class ProcessCard(ToolCard):
             call_count=0,
             detail="(no process output yet)",
             full_output="",
+            retained_output="",
             source_truncated=False,
             ui_dropped_bytes=0,
         )
@@ -2790,6 +2801,12 @@ class ProcessCard(ToolCard):
     @property
     def process_id(self) -> str:
         return self._process_id
+
+    @property
+    def lifecycle_presentation(self) -> ProcessLifecyclePresentation:
+        """Return the latest bounded snapshot for history-to-live transfer."""
+
+        return self._process_presentation
 
     def start_live_updates(self) -> None:
         """Enable elapsed tracking when a resumed historical card becomes live."""
@@ -2830,7 +2847,10 @@ class ProcessCard(ToolCard):
         presentation = self._process_presentation
         words = self._STATE_WORDS[presentation.display_state]
         content = Content.styled(words, self._STATUS_STYLE[self._status])
-        content += Content(" ") + Content.styled(self._process_id, "$secondary")
+        content += Content(" ") + Content.styled(
+            _process_id_for_display(self._process_id),
+            "$secondary",
+        )
         if presentation.poll_count:
             unit = "poll" if presentation.poll_count == 1 else "polls"
             content += Content.styled(
