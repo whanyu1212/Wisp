@@ -22,7 +22,6 @@ from wisp.agent.messages import (
     Message,
     completion_event_has_history,
     message_from_completion_event,
-    normalize_provider_history,
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
@@ -36,7 +35,7 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
 )
-from wisp.providers.base import Provider, ToolSpec
+from wisp.providers.base import Provider, ToolSpec, prepare_provider_history
 
 _MAX_PENDING_QUEUE_MESSAGES = 100
 
@@ -80,22 +79,6 @@ type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 def _require_queue_mode(mode: object) -> None:
     if not isinstance(mode, str) or mode not in {"one_at_a_time", "all"}:
         raise ValueError(f"Unsupported queue mode: {mode!r}")
-
-
-def _active_turn_start(messages: Sequence[Message]) -> int | None:
-    """Return the index of the still-running turn's user message, if any.
-
-    The most recent ``user``-role message starts the turn currently in progress —
-    every assistant/tool row after it is this turn's own in-flight work, not
-    replayed prior-turn history. A transcript rebuild mid-turn (e.g. after
-    auto-compaction replaces ``self._messages``) must keep those rows structured so
-    the model retains a record of tool calls it just made in this same turn.
-    """
-
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role == "user":
-            return index
-    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +157,7 @@ class HarnessBoundaryContext:
 
     snapshot: RequestBoundarySnapshot
     messages: tuple[Message, ...]
+    active_from: int
     injected_messages: tuple[Message, ...]
     stop_by_default: bool
 
@@ -433,6 +417,10 @@ class AgentHarness:
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         self.repair_interrupted_tool_calls()
+        # Every row already present when a run begins is durable history. New
+        # assistant/tool rows appended during this invocation form the only live
+        # tail that may need native reconstruction at an internal request boundary.
+        active_from = len(self._messages)
         self._running = True
         token = SimpleCancellationToken()
         self._current_token = token
@@ -468,6 +456,7 @@ class AgentHarness:
                             messages=tuple(
                                 message.model_copy(deep=True) for message in self._messages
                             ),
+                            active_from=active_from,
                             injected_messages=boundary.injected_messages,
                             stop_by_default=boundary.stop_by_default,
                         )
@@ -486,8 +475,11 @@ class AgentHarness:
                     # extras. Replace from the complete normalized transcript,
                     # retaining assistant/tool pairs atomically.
                     return RequestBoundaryDecision(
-                        messages=normalize_provider_history(
-                            self._messages, active_from=_active_turn_start(self._messages)
+                        messages=prepare_provider_history(
+                            self._messages,
+                            provider=self._config.provider,
+                            effort=self._config.effort,
+                            active_from=active_from,
                         )
                     )
                 return RequestBoundaryDecision(stop=boundary.stop_by_default)
@@ -524,8 +516,11 @@ class AgentHarness:
             request_boundary_hook=_BoundaryHook(),
             context_overflow_hook=_OverflowHook() if context_overflow_hook is not None else None,
         )
-        provider_messages = normalize_provider_history(
-            self._messages, active_from=_active_turn_start(self._messages)
+        provider_messages = prepare_provider_history(
+            self._messages,
+            provider=self._config.provider,
+            effort=self._config.effort,
+            active_from=active_from,
         )
         loop_events = run_agent_loop(config, messages=provider_messages)
         draining_cancellation = False
@@ -572,6 +567,10 @@ class AgentHarness:
                     self._apply_transcript_transition(
                         decision, continuation_messages=continuation_messages
                     )
+                    # The applied request consumes every row now in the rebuilt
+                    # transcript. Only rows emitted by this and later samples are
+                    # active at a subsequent internal request boundary.
+                    active_from = len(self._messages)
                     pending_transcript_transition = None
                 if isinstance(
                     event, MessageCompleted | ToolExecutionEnded

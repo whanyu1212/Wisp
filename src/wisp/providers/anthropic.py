@@ -608,21 +608,27 @@ def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
     """Encode fresh base context without flattening an active tool exchange."""
 
     anthropic_messages: list[MessageParam] = []
-    for message in messages:
+    index = 0
+    while index < len(messages):
+        message = messages[index]
         if message.role == "system":
+            index += 1
             continue
         if message.role == "tool" and message.tool_call_id:
-            anthropic_messages.append(
-                _tool_results_to_message(
-                    (
-                        ToolCallResult(
-                            call_id=message.tool_call_id,
-                            output=message.content,
-                            is_error=message.is_error is True,
-                        ),
+            results: list[ToolCallResult] = []
+            while index < len(messages):
+                result = messages[index]
+                if result.role != "tool" or not result.tool_call_id:
+                    break
+                results.append(
+                    ToolCallResult(
+                        call_id=result.tool_call_id,
+                        output=result.content,
+                        is_error=result.is_error is True,
                     )
                 )
-            )
+                index += 1
+            anthropic_messages.append(_tool_results_to_message(results))
             continue
         if message.role == "assistant" and message.tool_calls:
             blocks: list[_ReplayBlockParam] = []
@@ -638,10 +644,12 @@ def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
                 for tool_call in message.tool_calls
             )
             anthropic_messages.append(cast(MessageParam, {"role": "assistant", "content": blocks}))
+            index += 1
             continue
         role = "user" if message.role == "tool" else message.role
         content: TextBlockParam = {"type": "text", "text": message.content}
         anthropic_messages.append(cast(MessageParam, {"role": role, "content": [content]}))
+        index += 1
     return anthropic_messages
 
 

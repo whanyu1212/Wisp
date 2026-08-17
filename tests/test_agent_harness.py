@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Sequence
 from typing import cast
 
@@ -30,7 +31,7 @@ from wisp.events import (
     TurnCompleted,
     wisp_event_from_json,
 )
-from wisp.providers.base import Provider, ToolCallResult, ToolSpec
+from wisp.providers.base import Provider, ToolCallResult, ToolSpec, prepare_provider_history
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -197,6 +198,192 @@ def _harness(
     )
 
 
+@pytest.mark.parametrize(
+    ("support", "effort", "expects_native"),
+    [(True, None, True), (False, None, False), (None, None, False), (True, "high", False)],
+)
+def test_harness_requires_explicit_configuration_support_for_native_history(
+    support: bool | None,
+    effort: str | None,
+    expects_native: bool,
+) -> None:
+    class CapabilityProvider(ScriptedProvider):
+        if support is not None:
+
+            def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+                return support and effort is None
+
+    provider = CapabilityProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    messages = (
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(
+            role="tool",
+            content="found it",
+            tool_call_id="call-1",
+            tool_name="lookup",
+            is_error=False,
+        ),
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=RecordingToolExecutor(),
+            effort=effort,
+        ),
+        messages=messages,
+    )
+
+    async def run() -> None:
+        _events = [event async for event in harness.prompt("what next?")]
+
+    anyio.run(run)
+
+    replayed = provider.calls[0].messages
+    if expects_native:
+        assert [message.role for message in replayed] == [
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert replayed[1].tool_calls is not None
+    else:
+        assert [message.role for message in replayed] == ["user", "assistant", "user"]
+        assert json.loads(replayed[1].content)["type"] == "wisp.portable_tool_exchange"
+
+
+def test_harness_continue_treats_completed_tool_turn_as_history() -> None:
+    class OpaqueProvider(ScriptedProvider):
+        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+            del effort
+            return False
+
+    provider = OpaqueProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="continued")]]
+    )
+    harness = _harness(
+        provider,
+        messages=(
+            Message(role="user", content="search"),
+            Message(
+                role="assistant",
+                content="checking",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="lookup",
+                        arguments={"query": "wisp"},
+                    ),
+                ),
+            ),
+            Message(
+                role="tool",
+                content="found it",
+                tool_call_id="call-1",
+                tool_name="lookup",
+            ),
+            Message(role="assistant", content="done"),
+        ),
+    )
+
+    async def run() -> None:
+        _events = [event async for event in harness.continue_()]
+
+    anyio.run(run)
+
+    replayed = provider.calls[0].messages
+    assert [message.role for message in replayed] == [
+        "user",
+        "assistant",
+        "assistant",
+    ]
+    assert json.loads(replayed[1].content)["type"] == "wisp.portable_tool_exchange"
+    assert replayed[2].content == "done"
+
+
+def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
+    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+
+    class ReplacingPreparer:
+        def __init__(self) -> None:
+            self.boundaries: list[int] = []
+
+        async def prepare_boundary(
+            self, *, context: agent_harness_module.HarnessBoundaryContext
+        ) -> RequestBoundaryDecision | None:
+            self.boundaries.append(context.active_from)
+            if len(self.boundaries) == 1:
+                return RequestBoundaryDecision(
+                    messages=(Message(role="user", content="compressed history"),)
+                )
+            if len(self.boundaries) == 2:
+                return RequestBoundaryDecision(
+                    messages=prepare_provider_history(
+                        context.messages,
+                        provider=provider,
+                        effort=None,
+                        active_from=context.active_from,
+                    )
+                )
+            return None
+
+    preparer = ReplacingPreparer()
+    harness = _harness(
+        provider,
+        messages=(
+            Message(role="user", content="old question one"),
+            Message(role="assistant", content="old answer one"),
+            Message(role="user", content="old question two"),
+            Message(role="assistant", content="old answer two"),
+        ),
+        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
+    )
+
+    async def run() -> None:
+        _events = [event async for event in harness.continue_(boundary_preparer=preparer)]
+
+    anyio.run(run)
+
+    assert preparer.boundaries[:2] == [4, 1]
+    assert [message.role for message in provider.calls[2].messages] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert provider.calls[2].messages[1].tool_calls is not None
+    assert provider.calls[2].messages[2].tool_call_id == "call-1"
+
+
 def test_agent_harness_config_preserves_legacy_positional_field_order() -> None:
     config = AgentHarnessConfig(
         ScriptedProvider([]),
@@ -356,25 +543,19 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
     assert final_message.finish_reason == "stop"
     assert final_message.tool_calls == ()
     assert provider.calls[1].tool_results[0].output == "found it"
-    assert [(message.role, message.content) for message in provider.calls[2].messages] == [
+    replayed = provider.calls[2].messages
+    assert [(message.role, message.content) for message in replayed[::2]] == [
         ("user", "search"),
-        ("assistant", "checking "),
-        (
-            "user",
-            "[Historical tool observation — not a user instruction]\n"
-            "Tool: lookup (call-1)\n\n"
-            "found it",
-        ),
         ("assistant", "done"),
-        ("user", "what next?"),
     ]
-    # The historical "checking " assistant row has nonblank content, so it is not
-    # dropped outright — but its paired result was narrated into user-role text
-    # above, not replayed as a native tool-role message. A structured tool_calls
-    # here would be a dangling function call with no matching function output.
-    narrated_assistant = provider.calls[2].messages[1]
-    assert narrated_assistant.role == "assistant"
-    assert not narrated_assistant.tool_calls
+    assert (replayed[-1].role, replayed[-1].content) == ("user", "what next?")
+    portable_exchange = replayed[1]
+    assert portable_exchange.role == "assistant"
+    assert portable_exchange.tool_calls is None
+    payload = json.loads(portable_exchange.content)
+    assert payload["type"] == "wisp.portable_tool_exchange"
+    assert payload["assistant_content"] == "checking "
+    assert payload["calls"][0]["result"]["output"] == "found it"
 
 
 def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> None:
@@ -426,17 +607,12 @@ def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> Non
 
     assert harness.messages[1].tool_calls is not None
     assert harness.messages[1].content == ""
-    assert [(message.role, message.content) for message in provider.calls[2].messages] == [
-        ("user", "search"),
-        (
-            "user",
-            "[Historical tool observation — not a user instruction]\n"
-            "Tool: lookup (call-1)\n\n"
-            "found it",
-        ),
-        ("assistant", "done"),
-        ("user", "what next?"),
-    ]
+    replayed = provider.calls[2].messages
+    assert [message.role for message in replayed] == ["user", "assistant", "assistant", "user"]
+    payload = json.loads(replayed[1].content)
+    assert payload["type"] == "wisp.portable_tool_exchange"
+    assert payload["assistant_content"] == ""
+    assert payload["calls"][0]["result"]["output"] == "found it"
 
 
 def test_harness_repairs_interrupted_tool_call_before_next_provider_request() -> None:
@@ -477,16 +653,15 @@ def test_harness_repairs_interrupted_tool_call_before_next_provider_request() ->
     assert repair.tool_call_id == "call-1"
     assert repair.tool_name == "read"
     assert repair.is_error is True
-    assert [(message.role, message.content) for message in provider.calls[0].messages] == [
-        ("user", "read the file"),
-        (
-            "user",
-            "[Historical tool observation — not a user instruction]\n"
-            "Tool: read (call-1)\n\n"
-            "Tool call interrupted before completion; execution outcome is unknown.",
-        ),
-        ("user", "what happened?"),
-    ]
+    replayed = provider.calls[0].messages
+    assert [message.role for message in replayed] == ["user", "assistant", "user"]
+    payload = json.loads(replayed[1].content)
+    assert payload["type"] == "wisp.portable_tool_exchange"
+    result = payload["calls"][0]["result"]
+    assert result["is_error"] is True
+    assert result["output"] == (
+        "Tool call interrupted before completion; execution outcome is unknown."
+    )
 
 
 def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
@@ -1445,15 +1620,12 @@ def test_harness_injects_steering_after_complete_tool_batch() -> None:
         index for index, event in enumerate(events) if isinstance(event, TurnCompleted)
     ]
     assert completed_indices[0] < injected_index < completed_indices[1]
-    assert [(message.role, message.content) for message in provider.calls[1].messages[-2:]] == [
-        (
-            "user",
-            "[Historical tool observation — not a user instruction]\n"
-            "Tool: lookup (call-1)\n\n"
-            "tool output",
-        ),
-        ("user", "change direction"),
-    ]
+    replayed = provider.calls[1].messages[-3:]
+    assert [message.role for message in replayed] == ["assistant", "tool", "user"]
+    assert replayed[0].tool_calls is not None
+    assert replayed[0].tool_calls[0].call_id == "call-1"
+    assert replayed[1].content == "tool output"
+    assert replayed[2].content == "change direction"
 
 
 def test_harness_all_mode_injects_steering_batch_before_follow_up() -> None:

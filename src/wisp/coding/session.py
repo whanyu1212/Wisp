@@ -32,9 +32,9 @@ from wisp.agent.harness import (
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
+    active_turn_start,
     completion_event_has_history,
     message_from_completion_event,
-    provider_history_message,
 )
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
@@ -82,7 +82,7 @@ from wisp.events import (
     TurnStarted,
     WispEvent,
 )
-from wisp.providers.base import ContextOverflowError, Provider, ToolSpec
+from wisp.providers.base import ContextOverflowError, Provider, ToolSpec, prepare_provider_history
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
@@ -883,17 +883,31 @@ class CodingSession:
             portable_base = replacement
             if injected and matches_provider_suffix(replacement, injected):
                 portable_base = replacement[: -len(injected)]
-            if has_native_continuation and tail and matches_provider_suffix(portable_base, tail):
+            tail_matches = bool(tail) and matches_provider_suffix(portable_base, tail)
+            if has_native_continuation and tail_matches:
                 supports_rebase = getattr(self.provider, "supports_context_rebase", False) is True
                 if supports_rebase:
                     return RequestBoundaryDecision(
                         context_rebase=RequestContextRebase(
-                            base_messages=portable_base[: -len(tail)],
+                            base_messages=self._normalize_provider_messages(
+                                portable_base[: -len(tail)]
+                            ),
                             expected_continuation_messages=tail,
                         ),
                         extra_messages=injected,
                     )
-            return RequestBoundaryDecision(messages=replacement)
+            # The loop-owned continuation is the authoritative active boundary.
+            # A later injected user row must not make that same-run tool exchange
+            # look historical during a fresh replacement.
+            replacement_active_from = (
+                len(portable_base) - len(tail) if tail_matches else active_turn_start(replacement)
+            )
+            return RequestBoundaryDecision(
+                messages=self._normalize_provider_messages(
+                    replacement,
+                    active_from=replacement_active_from,
+                )
+            )
 
         class _SessionBoundaryPreparer:
             async def prepare_boundary(
@@ -909,6 +923,7 @@ class CodingSession:
                     status=auto_compaction_status,
                     operation_id=operation_id,
                     preflight_active_entry_id=active_compaction_entry_id,
+                    active_from=context.active_from,
                 ):
                     boundary_events.append(compaction_event)
                     if (
@@ -927,7 +942,10 @@ class CodingSession:
                 # the only remaining source of excess. This replacement is
                 # intentionally fresh: truncating a loop-owned tail is not an
                 # additive rebase.
-                remaining_budget = self._harness_context_budget(harness)
+                remaining_budget = self._harness_context_budget(
+                    harness,
+                    active_from=context.active_from,
+                )
                 if self._exceeds_provider_auto_compaction_limit(remaining_budget):
                     excess_tokens = self._provider_auto_compaction_excess_tokens(remaining_budget)
                     truncated = (
@@ -939,7 +957,12 @@ class CodingSession:
                         else None
                     )
                     if truncated is not None:
-                        return RequestBoundaryDecision(messages=truncated)
+                        return RequestBoundaryDecision(
+                            messages=self._normalize_provider_messages(
+                                truncated,
+                                active_from=context.active_from,
+                            )
+                        )
                     raise ContextOverflowError(
                         "Active tool result exceeds the provider auto-compaction limit "
                         "after compacting all eligible history"
@@ -1303,10 +1326,21 @@ class CodingSession:
         harness.replace_messages(truncated)
         return True
 
-    def _harness_context_budget(self, harness: AgentHarness) -> ContextBudget:
+    def _harness_context_budget(
+        self,
+        harness: AgentHarness,
+        *,
+        active_from: int | None = None,
+    ) -> ContextBudget:
+        provider_active_from = (
+            active_from if active_from is not None else active_turn_start(harness.messages)
+        )
         return build_context_budget(
             estimate_context(
-                self._normalize_provider_messages(harness.messages),
+                self._normalize_provider_messages(
+                    harness.messages,
+                    active_from=provider_active_from,
+                ),
                 tuple(harness.config.tools),
             ),
             context_window=self._context_window(),
@@ -1321,8 +1355,15 @@ class CodingSession:
         status: _AutoCompactionStatus,
         operation_id: str | None = None,
         preflight_active_entry_id: str | None = None,
+        active_from: int | None = None,
     ) -> AsyncIterator[WispEvent]:
-        provider_messages = self._normalize_provider_messages(harness.messages)
+        provider_active_from = (
+            active_from if active_from is not None else active_turn_start(harness.messages)
+        )
+        provider_messages = self._normalize_provider_messages(
+            harness.messages,
+            active_from=provider_active_from,
+        )
         tools = tuple(harness.config.tools)
         observation = self._context_observations.get(session.session_id)
         budget = estimate_context_budget(
@@ -1813,11 +1854,17 @@ class CodingSession:
 
         return tuple(message for message in history if message.role != "system")
 
-    def _normalize_provider_messages(self, messages: Sequence[Message]) -> tuple[Message, ...]:
-        return tuple(
-            normalized
-            for message in messages
-            if (normalized := provider_history_message(message)) is not None
+    def _normalize_provider_messages(
+        self,
+        messages: Sequence[Message],
+        *,
+        active_from: int | None = None,
+    ) -> tuple[Message, ...]:
+        return prepare_provider_history(
+            messages,
+            provider=self.provider,
+            effort=self.effort,
+            active_from=active_from,
         )
 
     def _context_window(self) -> int | None:

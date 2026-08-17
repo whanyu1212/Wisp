@@ -3297,7 +3297,9 @@ def test_coding_session_auto_compaction_uses_estimate_after_tool_round(
             provider=provider,
             sessions=store,
             model="model",
-            models=_model_registry(context_window=1_000),
+            # The estimate now mirrors the actual structured active exchange,
+            # including call arguments, rather than the old lossy narration.
+            models=_model_registry(context_window=1_200),
             tool_registry=registry,
             tool_context=ToolContext(cwd=tmp_path),
             prompt_messages=(Message(role="system", content="system"),),

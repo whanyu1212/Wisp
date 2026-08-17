@@ -831,11 +831,24 @@ def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> N
                     call_id="call-1",
                     name="lookup",
                     arguments={"query": "wisp"},
-                    provider_call_id="call-1",
+                    provider_call_id="provider-1",
+                ),
+                ToolCallSnapshot(
+                    call_id="call-2",
+                    name="read",
+                    arguments={"path": "README.md"},
+                    provider_call_id="provider-2",
                 ),
             ),
         ),
         WispMessage(role="tool", content="found it", tool_call_id="call-1", tool_name="lookup"),
+        WispMessage(
+            role="tool",
+            content="missing",
+            tool_call_id="call-2",
+            tool_name="read",
+            is_error=True,
+        ),
     ]
 
     async def run() -> None:
@@ -853,12 +866,67 @@ def test_google_provider_serializes_active_tool_exchange_in_fresh_context() -> N
     assert contents[1].role == "model"
     assert contents[1].parts[0].text == "checking"
     assert contents[1].parts[1].function_call == genai_types.FunctionCall(
-        id="call-1", name="lookup", args={"query": "wisp"}
+        id="provider-1", name="lookup", args={"query": "wisp"}
     )
+    assert contents[1].parts[2].function_call == genai_types.FunctionCall(
+        id="provider-2", name="read", args={"path": "README.md"}
+    )
+    assert len(contents[2].parts) == 2
     assert contents[2].parts[0].function_response == genai_types.FunctionResponse(
-        id="call-1", name="lookup", response={"output": "found it"}
+        id="provider-1", name="lookup", response={"output": "found it"}
+    )
+    assert contents[2].parts[1].function_response == genai_types.FunctionResponse(
+        id="provider-2", name="read", response={"error": "missing"}
     )
     assert contents[3] == genai_types.Content(role="user", parts=[genai_types.Part(text="steered")])
+
+
+def test_google_provider_scopes_reused_call_ids_to_each_fresh_batch() -> None:
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [
+        WispMessage(
+            role="assistant",
+            content="",
+            tool_calls=(
+                ToolCallSnapshot(
+                    call_id="reused",
+                    name="lookup",
+                    arguments={},
+                    provider_call_id="provider-old",
+                ),
+            ),
+        ),
+        WispMessage(role="tool", content="first", tool_call_id="reused", tool_name=None),
+        WispMessage(
+            role="assistant",
+            content="",
+            tool_calls=(
+                ToolCallSnapshot(
+                    call_id="reused",
+                    name="read",
+                    arguments={},
+                    provider_call_id="provider-new",
+                ),
+            ),
+        ),
+        WispMessage(role="tool", content="second", tool_call_id="reused", tool_name=None),
+    ]
+
+    async def run() -> None:
+        stream = await provider._create_stream(messages, model="gemini-test")  # noqa: SLF001
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    contents = stub_models.calls[0]["contents"]
+    first = contents[1].parts[0].function_response
+    second = contents[3].parts[0].function_response
+    assert (first.id, first.name) == ("provider-old", "lookup")
+    assert (second.id, second.name) == ("provider-new", "read")
 
 
 def test_google_provider_omits_synthetic_ids_in_fresh_tool_exchange() -> None:
