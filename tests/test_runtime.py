@@ -18,6 +18,7 @@ from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.providers.openai_compatible import OpenAICompatibleProvider
+from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime import (
     CommandDescriptor,
@@ -261,7 +262,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
         return runtime.providers.names(), runtime.tools.names(), runtime.commands.names()
 
     assert anyio.run(run) == (
-        ("fake", "openai", "openai-codex", "anthropic", "google"),
+        ("fake", "openai", "xai", "openai-codex", "anthropic", "google"),
         ("read", "write", "edit", "bash", "grep", "find", "ls", "skill"),
         (
             "help",
@@ -441,6 +442,7 @@ def test_build_runtime_passes_stored_auth_resolver_to_builtin_providers(
         providers = (
             (runtime.providers.get("openai"), OpenAIProvider),
             (runtime.providers.get("openai-codex"), OpenAICodexProvider),
+            (runtime.providers.get("xai"), XAIProvider),
             (runtime.providers.get("anthropic"), AnthropicProvider),
             (runtime.providers.get("google"), GoogleProvider),
         )

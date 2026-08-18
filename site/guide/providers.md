@@ -8,6 +8,7 @@ title: Providers & auth
 |---|---|
 | `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
 | `openai` | Stored API key or `OPENAI_API_KEY` |
+| `xai` | Stored API key or `XAI_API_KEY` |
 | Custom OpenAI-compatible name | Stored API key, `<PROVIDER_NAME>_API_KEY`, or fallback `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings or `WISP_OPENAI_COMPATIBLE_CONFIG` |
 | `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
 | `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
@@ -15,7 +16,20 @@ title: Providers & auth
 
 ```bash
 wisp -p "hello" --provider anthropic --model claude-sonnet-5
+wisp -p "explain this repository" --provider xai --model grok-4.6
 ```
+
+## xAI Responses API
+
+The built-in `xai` provider uses xAI's stateful Responses API at `https://api.x.ai/v1`, not the
+legacy Chat Completions endpoint. Set `XAI_API_KEY` or store a key with `/connect xai`. Wisp streams
+text and summarized reasoning, supports parallel client-defined function tools, and continues tool
+rounds with xAI response IDs.
+
+Native HTTP continuation stores response state on xAI's servers. xAI documents a 30-day retention
+period for stored responses; Wisp explicitly enables storage to preserve reasoning and tool state
+across continued requests. Stateless/ZDR continuation over xAI's WebSocket transport and xAI-hosted
+web, X, code-execution, file-search, and MCP tools are not currently enabled by Wisp.
 
 ## OpenAI-compatible endpoints
 

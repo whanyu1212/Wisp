@@ -347,6 +347,125 @@ models = [
 "gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
+name = "xai"
+display_name = "xAI"
+default_model = "grok-4.6"
+docs_url = "https://docs.x.ai/developers/models"
+# Text/tool-capable models and pricing verified against xAI's model catalog on
+# 2026-08-17. Image, video, and voice models are intentionally excluded.
+models = [
+    "grok-4.6",
+    "grok-4.5",
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-build-0.1",
+]
+
+[providers.context_windows]
+"grok-4.6" = 500000
+"grok-4.5" = 500000
+"grok-4.3" = 1000000
+"grok-4.20-0309-reasoning" = 1000000
+"grok-4.20-0309-non-reasoning" = 1000000
+"grok-4.20-multi-agent-0309" = 1000000
+"grok-build-0.1" = 256000
+
+[providers.model_lifecycle]
+"grok-4.6" = "stable"
+"grok-4.5" = "stable"
+"grok-4.3" = "stable"
+"grok-4.20-0309-reasoning" = "stable"
+"grok-4.20-0309-non-reasoning" = "stable"
+"grok-4.20-multi-agent-0309" = "stable"
+"grok-build-0.1" = "stable"
+
+[providers.effort_levels]
+"grok-4.6" = ["low", "medium", "high", "xhigh"]
+"grok-4.5" = ["low", "medium", "high"]
+# For the multi-agent model, effort controls agent count rather than ordinary
+# reasoning depth; Wisp forwards the provider-native value unchanged.
+"grok-4.20-multi-agent-0309" = ["low", "medium", "high", "xhigh"]
+
+[[providers.pricing."grok-4.6"]]
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.5"
+output_usd_per_million = "6"
+
+[[providers.pricing."grok-4.6"]]
+input_token_threshold = 200000
+input_usd_per_million = "4"
+cache_read_usd_per_million = "1"
+output_usd_per_million = "12"
+
+[[providers.pricing."grok-4.5"]]
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.3"
+output_usd_per_million = "6"
+
+[[providers.pricing."grok-4.5"]]
+input_token_threshold = 200000
+input_usd_per_million = "4"
+cache_read_usd_per_million = "0.6"
+output_usd_per_million = "12"
+
+[[providers.pricing."grok-4.3"]]
+input_usd_per_million = "1.25"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "2.5"
+
+[[providers.pricing."grok-4.3"]]
+input_token_threshold = 200000
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.4"
+output_usd_per_million = "5"
+
+[[providers.pricing."grok-4.20-0309-reasoning"]]
+input_usd_per_million = "1.25"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "2.5"
+
+[[providers.pricing."grok-4.20-0309-reasoning"]]
+input_token_threshold = 200000
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.4"
+output_usd_per_million = "5"
+
+[[providers.pricing."grok-4.20-0309-non-reasoning"]]
+input_usd_per_million = "1.25"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "2.5"
+
+[[providers.pricing."grok-4.20-0309-non-reasoning"]]
+input_token_threshold = 200000
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.4"
+output_usd_per_million = "5"
+
+[[providers.pricing."grok-4.20-multi-agent-0309"]]
+input_usd_per_million = "1.25"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "2.5"
+
+[[providers.pricing."grok-4.20-multi-agent-0309"]]
+input_token_threshold = 200000
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.4"
+output_usd_per_million = "5"
+
+[[providers.pricing."grok-build-0.1"]]
+input_usd_per_million = "1"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "2"
+
+[[providers.pricing."grok-build-0.1"]]
+input_token_threshold = 200000
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.4"
+output_usd_per_million = "4"
+
+[[providers]]
 name = "fake"
 display_name = "Fake (offline testing)"
 default_model = "fake"

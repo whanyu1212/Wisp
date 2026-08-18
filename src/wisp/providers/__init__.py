@@ -22,6 +22,7 @@ from .google import GoogleProvider
 from .openai import OpenAIProvider
 from .openai_codex import OpenAICodexProvider
 from .openai_compatible import OpenAICompatibleProvider
+from .xai import XAIProvider
 
 __all__ = [
     "AnthropicProvider",
@@ -31,6 +32,7 @@ __all__ = [
     "OpenAICodexProvider",
     "OpenAIProvider",
     "OpenAICompatibleProvider",
+    "XAIProvider",
     "ProviderEvent",
     "ProviderFailureKind",
     "ProviderFinishReason",

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, field_validator
 
 _RESERVED_PROVIDER_NAMES = frozenset(
-    {"anthropic", "fake", "gemini", "google", "openai", "openai-codex"}
+    {"anthropic", "fake", "gemini", "google", "openai", "openai-codex", "xai"}
 )
 _PROVIDER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _PROVIDER_NAME_MAX_LENGTH = 64
