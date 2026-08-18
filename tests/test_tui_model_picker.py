@@ -19,6 +19,7 @@ pytestmark = pytest.mark.tui
 def _entry(
     name: str,
     *,
+    display_name: str | None = None,
     default_model: str,
     models: tuple[str, ...],
     effort_levels: dict[str, tuple[str, ...]] | None = None,
@@ -27,7 +28,7 @@ def _entry(
 ) -> ModelCatalogProviderEntry:
     return ModelCatalogProviderEntry(
         name=name,
-        display_name=name.title(),
+        display_name=display_name or name.title(),
         default_model=default_model,
         docs_url=f"https://example.test/{name}",
         models=models,
@@ -45,6 +46,7 @@ _ANTHROPIC = _entry(
 )
 _OPENAI = _entry(
     "openai",
+    display_name="OpenAI",
     default_model="gpt-5.5",
     models=("gpt-5.5",),
 )
@@ -73,14 +75,42 @@ def test_model_picker_lists_providers_and_models_with_current_marked() -> None:
 
     labels, disabled, highlighted = anyio.run(scenario)
     assert labels == [
-        "anthropic",
+        "Anthropic",
         "  claude-opus-4-8",
         "  claude-haiku-4-5 (current)",
-        "openai",
+        "OpenAI",
         "  gpt-5.5",
     ]
     assert disabled == [True, False, False, True, False]
     assert highlighted == 2
+
+
+def test_model_picker_distinguishes_openai_api_and_codex_subscription() -> None:
+    entries = tuple(
+        entry for entry in builtin_catalog().providers if entry.name in {"openai", "openai-codex"}
+    )
+
+    async def scenario() -> list[str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 30)) as pilot:
+            renderer.model_picker_request(
+                entries,
+                current_provider="openai",
+                current_model=None,
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            return [
+                str(options.get_option_at_index(index).prompt)
+                for index in range(options.option_count)
+                if options.get_option_at_index(index).disabled
+            ]
+
+    assert anyio.run(scenario) == [
+        "OpenAI API",
+        "OpenAI Codex (ChatGPT subscription)",
+    ]
 
 
 def test_model_picker_marks_provider_default_current_when_model_unset() -> None:
@@ -156,7 +186,7 @@ def test_model_picker_marks_an_alias_current_and_labels_nonstable_models() -> No
             return [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
 
     assert anyio.run(scenario) == [
-        "acme",
+        "Acme",
         "  acme-1 (current)",
         "  acme-preview (preview)",
     ]

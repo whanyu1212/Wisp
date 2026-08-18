@@ -41,7 +41,7 @@ from wisp.providers.events import (
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
-DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
+DEFAULT_GOOGLE_MODEL = "gemini-3.6-flash"
 
 # Gemini's API is stateless per call, like Anthropic's -- but unlike Anthropic,
 # a streamed tool call arrives as one fully-formed function_call part (args is

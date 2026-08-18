@@ -13,7 +13,7 @@ schema_version = 2
 
 [[providers]]
 name = "openai"
-display_name = "OpenAI"
+display_name = "OpenAI API"
 default_model = "gpt-5.6-sol"
 docs_url = "https://platform.openai.com/docs"
 # Current Responses-API text/tool models verified against OpenAI's model
@@ -141,7 +141,7 @@ output_usd_per_million = "4.5"
 
 [[providers]]
 name = "openai-codex"
-display_name = "OpenAI (Codex subscription)"
+display_name = "OpenAI Codex (ChatGPT subscription)"
 default_model = "gpt-5.6-sol"
 docs_url = "https://developers.openai.com/codex/models"
 # Current Codex CLI subscription models verified against the Codex model guide
@@ -303,13 +303,15 @@ output_usd_per_million = "15"
 [[providers]]
 name = "google"
 display_name = "Google"
-default_model = "gemini-3.5-flash"
+default_model = "gemini-3.6-flash"
 docs_url = "https://ai.google.dev/gemini-api/docs"
-# The Google provider uses the Gemini Developer API. These IDs are sourced from
-# Google's current model documentation; account availability still varies by API
-# key and should be checked with the Models API before changing this list.
+# The Google provider uses the Gemini Developer API. These text-output model IDs
+# and capabilities were verified against Google's model and thinking docs on
+# 2026-08-18; account availability can still vary by API key.
 models = [
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
@@ -319,10 +321,12 @@ models = [
 ]
 
 [providers.model_aliases]
-"gemini-flash-latest" = "gemini-3.5-flash"
+"gemini-flash-latest" = "gemini-3.6-flash"
 
 [providers.context_windows]
+"gemini-3.6-flash" = 1048576
 "gemini-3.5-flash" = 1048576
+"gemini-3.5-flash-lite" = 1048576
 "gemini-3.1-flash-lite" = 1048576
 "gemini-2.5-pro" = 1048576
 "gemini-2.5-flash" = 1048576
@@ -331,7 +335,9 @@ models = [
 "gemini-3-flash-preview" = 1048576
 
 [providers.model_lifecycle]
+"gemini-3.6-flash" = "stable"
 "gemini-3.5-flash" = "stable"
+"gemini-3.5-flash-lite" = "stable"
 "gemini-3.1-flash-lite" = "stable"
 "gemini-2.5-pro" = "legacy"
 "gemini-2.5-flash" = "legacy"
@@ -339,12 +345,15 @@ models = [
 "gemini-3.1-pro-preview" = "preview"
 "gemini-3-flash-preview" = "preview"
 
-# Gemini 3.5 Flash and 3.1 Flash-Lite support named thinking levels. Gemini 2.5
-# models use numeric thinking budgets, which this provider intentionally does
-# not map from named tiers. Other models stay unset until API validation.
+# Gemini 3 models support named thinking levels. Gemini 2.5 models use numeric
+# thinking budgets, which this provider intentionally does not map from named tiers.
 [providers.effort_levels]
+"gemini-3.6-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.5-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+"gemini-3.5-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+"gemini-3.1-pro-preview" = ["LOW", "MEDIUM", "HIGH"]
+"gemini-3-flash-preview" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
 name = "deepseek"

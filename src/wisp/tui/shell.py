@@ -197,6 +197,7 @@ UpdateChecker = Callable[[], Awaitable[UpdateAvailable | None]]
 UpdateCapabilityChecker = Callable[[], Awaitable[bool]]
 UpdateSkipWriter = Callable[..., Awaitable[bool]]
 _TRUST_ANSWERS = {"y", "yes", "n", "no"}
+_MODEL_PICKER_HIDDEN_PROVIDERS = frozenset({"fake"})
 
 
 @dataclass(frozen=True)
@@ -1048,7 +1049,11 @@ class TuiShell:
             return
         if not args:
             self.renderer.model_picker_request(
-                self.models.providers(),
+                tuple(
+                    entry
+                    for entry in self.models.providers()
+                    if entry.name not in _MODEL_PICKER_HIDDEN_PROVIDERS
+                ),
                 current_provider=self.current_provider,
                 current_model=self.current_model,
                 current_effort=self.current_effort,
