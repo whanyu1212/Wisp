@@ -400,7 +400,9 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "deepseek-v4-flash",
         ),
         "google": (
+            "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
@@ -424,7 +426,8 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
         assert set(entry.model_lifecycle) == set(entry.models)
     assert providers["openai"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
     assert providers["openai-codex"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
-    assert providers["google"].model_aliases == {"gemini-flash-latest": "gemini-3.5-flash"}
+    assert providers["google"].default_model == "gemini-3.6-flash"
+    assert providers["google"].model_aliases == {"gemini-flash-latest": "gemini-3.6-flash"}
     assert providers["openai"].context_windows["gpt-5.6-sol"] == 1_050_000
     assert set(providers["openai"].auto_compact_token_limits) == set()
     assert set(providers["openai-codex"].context_windows.values()) == {272_000}
@@ -507,8 +510,10 @@ def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels()
 
     assert registry.supports_effort("anthropic", "claude-fable-5", "xhigh") is True
     assert registry.supports_effort("anthropic", "claude-fable-5", "max") is True
-    assert registry.supports_effort("google", "gemini-3.5-flash", "MINIMAL") is True
-    assert registry.supports_effort("google", "gemini-3.5-flash", "HIGH") is True
+    assert registry.supports_effort("google", "gemini-3.6-flash", "MINIMAL") is True
+    assert registry.supports_effort("google", "gemini-3.5-flash-lite", "HIGH") is True
+    assert registry.supports_effort("google", "gemini-3.1-pro-preview", "MINIMAL") is False
+    assert registry.supports_effort("google", "gemini-3.1-pro-preview", "HIGH") is True
 
 
 def test_overlay_adds_a_new_provider(tmp_path: Path) -> None:
