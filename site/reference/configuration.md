@@ -39,8 +39,15 @@ Some fields are **user-only** and a project file can never set them:
 `protected_paths` · `retry` · `effort` · `context_reserve_tokens` · `auto_compaction_enabled` ·
 `update_check_enabled` · `mcp_servers` · `openai_compatible`
 
-A repository cannot increase your API spending, prolong waits, trigger network update checks, launch
-an MCP command, receive forwarded credentials, or weaken the secret guard.
+A repository cannot increase your API spending, prolong waits, trigger network update checks,
+launch an MCP command, configure a credential-receiving provider endpoint, or weaken the secret
+guard.
+
+Project settings may set `provider`, `model`, `session_dir`, and `auth_path` after you trust the
+project. In particular, `auth_path` can redirect credentials entered through `/connect` to a path
+inside the working tree. Inspect trusted project settings before authenticating, pass `--auth-file`
+or set `WISP_AUTH_FILE` for a deliberate higher-precedence override, and never commit the selected
+auth file.
 
 ## Remembered preferences
 

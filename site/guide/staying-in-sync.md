@@ -47,7 +47,8 @@ The active provider/tool path unwinds, lifecycle events record the cancelled out
 JSONL entries already committed remain valid. You can resume the session instead of reconstructing
 state from a half-written transcript.
 
-- In the TUI, dismiss any open overlay first, then press `Escape` to cancel the active prompt.
+- In the fullscreen TUI, dismiss any open overlay first, then press `Escape` to cancel the active
+  prompt. In `wisp tui --line`, press `Ctrl-C`.
 - In RPC, send `{"type":"cancel","target_id":"<running-command-id>"}`.
 - In the SDK, call `InProcessWisp.cancel(target_id)` for the active command.
 

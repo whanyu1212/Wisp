@@ -6,7 +6,7 @@ title: Testing
 
 ```bash
 uv run pytest tests                                                  # complete suite
-uv run pytest tests -m 'not (slow or tui or process or benchmark)'   # faster core checks
+uv run pytest tests -m 'not (slow or tui or process or benchmark or production_fault)'  # core
 ```
 
 The complete suite runs against deterministic fake or scripted providers, so the agent core, CLI, and
@@ -15,16 +15,19 @@ complete command before considering a change verified.
 
 ## Test selection
 
-CI splits the suite into three marker-based jobs; mirror them locally when triaging:
+CI splits the suite into four marker-based jobs; mirror the matrix predicates exactly when
+triaging:
 
 ```bash
-uv run pytest tests -m 'not (slow or tui or process or benchmark)'   # core
-uv run pytest tests -m 'tui'                                         # headless Textual
-uv run pytest tests -m '(slow or process or benchmark) and not tui'  # system + slow
+uv run pytest tests -m 'not (slow or tui or process or benchmark or production_fault)'
+uv run pytest tests -m 'tui and not production_fault'
+uv run pytest tests -m '(slow or process or benchmark) and not (tui or production_fault)'
+uv run pytest tests -m 'production_fault'
 ```
 
-Markers are declared in `pyproject.toml`: `tui`, `process`, `benchmark`, `slow`. TUI, process, and
-benchmark files declare them file-wide via `pytestmark`.
+Markers are declared in `pyproject.toml`: `tui`, `process`, `benchmark`, `slow`, and
+`production_fault`. TUI, process, benchmark, and production-fault files declare their relevant
+markers via `pytestmark`.
 
 ## Isolation
 

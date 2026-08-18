@@ -65,10 +65,15 @@ model-picker metadata, context limits, effort tiers, or pricing are desired. The
 
 ## Credential storage
 
-Credentials entered through `/connect` are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`)
-with private permissions. Updates are serialized across cooperating Wisp processes and atomically
-publish a synchronized, uniquely staged replacement; unsafe symlink, hard-link, ownership, or
-permission state is rejected rather than read.
+Credentials entered through `/connect` are stored in `WISP_AUTH_FILE` when set, otherwise the
+resolved `auth_path` (default `~/.wisp/auth.json`), with private permissions. A trusted project's
+`.wisp/settings.json` may override `auth_path`, including with a relative path inside the working
+tree, so inspect that file before connecting and never commit the selected auth file. An explicit
+`WISP_AUTH_FILE` takes precedence.
+
+Updates are serialized across cooperating Wisp processes and atomically publish a synchronized,
+uniquely staged replacement; unsafe symlink, hard-link, ownership, or permission state is rejected
+rather than read.
 
 Precedence: explicit provider constructor keys, then environment variables, then stored keys.
 
