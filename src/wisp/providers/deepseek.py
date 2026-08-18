@@ -69,7 +69,7 @@ class DeepSeekProvider(OpenAICompatibleProvider):
             reasoning_content=reasoning_content,
             tool_calls=tool_calls,
         )
-        if reasoning_content:
+        if reasoning_content and tool_calls:
             message["reasoning_content"] = reasoning_content
         return message
 

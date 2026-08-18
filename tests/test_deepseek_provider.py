@@ -217,6 +217,35 @@ def test_replays_reasoning_content_with_tool_call_and_result() -> None:
     ]
 
 
+def test_omits_reasoning_content_from_clean_follow_up_replay() -> None:
+    provider, completions = _provider(
+        [
+            [
+                _chunk(
+                    reasoning_content="private completed-turn thought",
+                    content="first answer",
+                    finish_reason="stop",
+                    response_id="first",
+                )
+            ],
+            [_chunk(content="second answer", finish_reason="stop", response_id="second")],
+        ]
+    )
+
+    first = cast(ProviderResponseCompleted, _collect(provider)[-1])
+    _collect(
+        provider,
+        previous_response_id=first.response_id,
+        extra_messages=(Message(role="user", content="follow up"),),
+    )
+
+    assert completions.calls[1]["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+
 def test_preserves_reasoning_across_multiple_tool_rounds() -> None:
     provider, completions = _provider(
         [
