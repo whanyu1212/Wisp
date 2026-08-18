@@ -13,6 +13,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 - Added first-class xAI Grok support through the stateful Responses API, including streamed
   reasoning, native tool-call continuation, API-key authentication, and model catalog metadata.
+- Preserved RPC command ordering when changing providers or models so configuration waits for
+  active session work and takes effect before later prompts.
 
 ## 0.1.0rc2 — 2026-08-18
 

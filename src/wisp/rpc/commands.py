@@ -233,7 +233,7 @@ class ShutdownCommand(RpcCommandModel):
 
 
 class ConfigureCommand(RpcCommandModel):
-    """Update RPC process configuration for future prompt commands."""
+    """Update configuration in sequence before later RPC prompt commands."""
 
     type: Literal["configure"] = "configure"
     provider: str | None = None

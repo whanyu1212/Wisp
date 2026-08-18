@@ -374,6 +374,9 @@ class RpcController:
     ) -> str:
         """Update runtime settings for future prompt commands.
 
+        The RPC host preserves sequential command order: configuration waits
+        behind active sequential work and is applied before later prompts.
+
         ``effort=None`` (the default) leaves any previously configured effort
         tier untouched -- the command's JSON serialization omits unset fields,
         so there is no wire difference between "not specified" and "None."
