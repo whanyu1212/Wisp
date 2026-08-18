@@ -114,11 +114,10 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
 
 
 def _bypasses_active_command(command_type: str) -> bool:
-    # Configuration and session reset must reach the executor to report a busy
-    # error immediately instead of being queued and applied later.
-    return command_type in {"configure", "new_session"} or command_type in (
-        _ACTIVE_COMMAND_BYPASS_COMMANDS
-    )
+    # Session reset reaches the executor during prompt runs so it can preserve
+    # its existing busy behavior. Configuration is intentionally ordered behind
+    # active sequential work and ahead of later sequential commands.
+    return command_type == "new_session" or command_type in _ACTIVE_COMMAND_BYPASS_COMMANDS
 
 
 class RpcControlReceiver(Protocol):

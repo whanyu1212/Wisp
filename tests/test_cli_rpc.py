@@ -1932,6 +1932,49 @@ def test_rpc_mode_configures_model_for_future_prompts(tmp_path: Path) -> None:
     assert any(record.get("content") == "fake response to: hello" for record in records)
 
 
+def test_rpc_mode_orders_provider_switch_between_prompts_in_same_session(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path / "sessions")],
+        input=(
+            '{"id":"prompt-1","type":"prompt","prompt":"first"}\n'
+            '{"id":"configure-1","type":"configure","provider":"openai"}\n'
+            '{"id":"prompt-2","type":"prompt","prompt":"second"}\n'
+        ),
+        env={
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+            "WISP_AUTH_FILE": str(tmp_path / "auth.json"),
+            "OPENAI_API_KEY": "",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    started = [record for record in records if record["type"] == "rpc.command.started"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [record["command_id"] for record in started] == [
+        "prompt-1",
+        "configure-1",
+        "prompt-2",
+    ]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("prompt-1", True),
+        ("configure-1", True),
+        ("prompt-2", False),
+    ]
+    estimates = [record for record in records if record["type"] == "context.estimated"]
+    assert [record["provider"] for record in estimates] == ["fake", "openai"]
+    agent_starts = [record for record in records if record["type"] == "agent.started"]
+    assert len(agent_starts) == 2
+    assert agent_starts[0]["session_id"] == agent_starts[1]["session_id"]
+    assert any(record.get("content") == "fake response to: first" for record in records)
+    assert any(
+        record["type"] == "error" and "openai credentials are required" in record["message"]
+        for record in records
+    )
+
+
 def test_rpc_mode_configure_rejects_unknown_provider(tmp_path: Path) -> None:
     runner = CliRunner()
 

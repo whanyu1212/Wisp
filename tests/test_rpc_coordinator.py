@@ -317,32 +317,57 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
     anyio.run(scenario)
 
 
-def test_coordinator_dispatches_busy_configure_for_rejection_async() -> None:
+@pytest.mark.parametrize(
+    ("active_type", "completed_ok"),
+    [
+        ("prompt", True),
+        ("get_session_stats", True),
+        ("prompt", False),
+    ],
+)
+def test_coordinator_orders_configure_between_active_work_and_later_prompt(
+    active_type: Literal["prompt", "get_session_stats"],
+    completed_ok: bool,
+) -> None:
     async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "active", "type": active_type}),
+                _RpcInputCommand({"id": "configure", "type": "configure"}),
+                _RpcInputCommand({"id": "prompt-after", "type": "prompt"}),
+                _RpcCommandCompleted("active", active_type, completed_ok, (), 0),
+                _RpcCommandCompleted("prompt-after", "prompt", True, (), 1),
+                _RpcInputClosed(),
+            ]
+        )
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
-        running = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
-        coordinator.running_command = running
-        dispatched: list[dict[str, object]] = []
+        dispatched: list[str] = []
 
         async def dispatch(
             command: dict[str, object],
-            active: _RpcRunningCommand | None,
+            running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
-            assert active is running
-            dispatched.append(command)
-            return _RpcDispatchResult(active)
+            command_id = str(command["id"])
+            command_type = str(command["type"])
+            dispatched.append(command_id)
+            if command_type == "configure":
+                assert running is None
+                return _RpcDispatchResult(None)
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, command_type, anyio.CancelScope())
+            )
 
         async def reject(_command: dict[str, object], _message: str) -> None:
-            raise AssertionError("configure should reach the executor for busy rejection")
+            raise AssertionError("ordered configure should be queued, not rejected")
 
-        await coordinator.handle_event(
-            _RpcInputCommand({"id": "configure", "type": "configure"}),
+        await coordinator.run(
+            receiver,
             dispatch=dispatch,
             reject=reject,
             command_type=_command_type,
         )
 
-        assert dispatched == [{"id": "configure", "type": "configure"}]
+        assert dispatched == ["active", "configure", "prompt-after"]
         assert not coordinator.queued_commands
 
     anyio.run(scenario)
