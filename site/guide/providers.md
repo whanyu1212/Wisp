@@ -8,7 +8,7 @@ title: Providers & auth
 |---|---|
 | `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
 | `openai` | Stored API key or `OPENAI_API_KEY` |
-| Custom OpenAI-compatible name | Stored API key, `<PROVIDER_NAME>_API_KEY`, or fallback `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings |
+| Custom OpenAI-compatible name | Stored API key, `<PROVIDER_NAME>_API_KEY`, or fallback `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings or `WISP_OPENAI_COMPATIBLE_CONFIG` |
 | `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
 | `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
 | `fake` | None — deterministic offline provider for tests and smoke runs |
@@ -19,8 +19,9 @@ wisp -p "hello" --provider anthropic --model claude-sonnet-5
 
 ## OpenAI-compatible endpoints
 
-OpenAI-compatible Chat Completions endpoints are configured **only in the user settings file** —
-project settings cannot redirect requests carrying your credentials. For example, OpenRouter:
+OpenAI-compatible Chat Completions endpoints can be configured in the user settings file or with
+the `WISP_OPENAI_COMPATIBLE_CONFIG` environment variable. Project settings cannot redirect requests
+carrying your credentials. For example, OpenRouter in `~/.wisp/settings.json`:
 
 ```json
 {
@@ -33,6 +34,16 @@ project settings cannot redirect requests carrying your credentials. For example
   }
 }
 ```
+
+For an environment-only deployment, set the same inner object as JSON. It overrides the
+`openai_compatible` object from the user settings file:
+
+```bash
+export WISP_OPENAI_COMPATIBLE_CONFIG='{"provider_name":"openrouter","base_url":"https://openrouter.ai/api/v1","default_model":"anthropic/claude-sonnet-4"}'
+```
+
+An explicit `OpenAICompatibleSettings` value supplied by an SDK embedder has precedence over the
+environment variable, which in turn has precedence over user settings.
 
 Set `OPENROUTER_API_KEY`, use the optional `OPENAI_COMPATIBLE_API_KEY` fallback, or enter the key
 with `/connect openrouter`. Provider names must start with a lowercase letter. Hyphens become

@@ -12,6 +12,7 @@ title: Environment variables
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
+| `WISP_OPENAI_COMPATIBLE_CONFIG` | JSON object configuring one OpenAI-compatible endpoint; overrides the user-settings `openai_compatible` object |
 | `WISP_TRUST` | Trust the current project for one process: `1` to opt in, `0` to force untrusted |
 | `WISP_TRUST_FILE` | Relocate the global trust store; must be an absolute path outside the repository |
 | `WISP_EFFORT` | Reasoning effort override |
@@ -34,6 +35,12 @@ title: Environment variables
 
 Each is required only for the matching provider. See [Providers & auth](../guide/providers) for
 storage and precedence details.
+
+`WISP_OPENAI_COMPATIBLE_CONFIG` accepts `provider_name`, `base_url`, `default_model`, optional
+`requires_api_key`, and optional absolute `ca_bundle` fields. The value must be a JSON object; invalid
+JSON or unknown fields fail configuration instead of being ignored. It overrides the structured
+endpoint in `~/.wisp/settings.json`, while an explicit SDK configuration value overrides the
+environment.
 
 `WISP_TRUST` and `WISP_TRUST_FILE` are read only from the real process environment, never from
 project files, and `WISP_TRUST` is never persisted — see
