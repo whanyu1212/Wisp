@@ -23,6 +23,8 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningTextDeltaEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -45,6 +47,7 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderRetrying,
     ProviderTextDelta,
+    ProviderThinkingDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
     ToolCall,
@@ -64,7 +67,11 @@ class OpenAIProvider:
     """Provider backed by OpenAI's Responses API."""
 
     name = "openai"
-    supports_prompt_cache_key: Literal[True] = True
+    _display_name = "OpenAI"
+    _api_key_environment = "OPENAI_API_KEY"
+    _connect_command = "/connect"
+    _base_url: str | None = None
+    supports_prompt_cache_key = True
     supports_continuation_messages: Literal[True] = True
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
@@ -182,7 +189,9 @@ class OpenAIProvider:
                 )
                 await anyio.sleep(delay)
         if stream is None:
-            raise AssertionError("OpenAI retry loop completed without a stream or error")
+            raise AssertionError(
+                f"{self._display_name} retry loop completed without a stream or error"
+            )
         # A completion ID identifies this upstream response only. Do not
         # expose the prior continuation cursor when an unusual stream omits a
         # current response ID.
@@ -212,6 +221,14 @@ class OpenAIProvider:
                     yield ProviderTextDelta(
                         delta=event.delta,
                         content_index=event.content_index,
+                    )
+                elif isinstance(
+                    event,
+                    ResponseReasoningTextDeltaEvent | ResponseReasoningSummaryTextDeltaEvent,
+                ):
+                    yield ProviderThinkingDelta(
+                        delta=event.delta,
+                        content_index=event.output_index,
                     )
                 elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
                     completed_tool_arguments[event.item_id] = event.arguments
@@ -248,28 +265,32 @@ class OpenAIProvider:
                                 emitted_tool_item_ids.add(item_id)
                 elif isinstance(event, ResponseErrorEvent):
                     failure = ProviderResponseFailed(
-                        message=f"OpenAI API error: {event.message}",
+                        message=f"{self._display_name} API error: {event.message}",
                         partial_content="".join(chunks),
                         response_id=response_id,
                     )
                     break
                 elif isinstance(event, ResponseFailedEvent):
                     failure = ProviderResponseFailed(
-                        message=_failed_response_message(event.response),
+                        message=_failed_response_message(
+                            event.response, display_name=self._display_name
+                        ),
                         partial_content="".join(chunks),
                         response_id=response_id,
                     )
                     break
                 elif isinstance(event, ResponseIncompleteEvent):
                     failure = ProviderResponseFailed(
-                        message=_incomplete_response_message(event.response),
+                        message=_incomplete_response_message(
+                            event.response, display_name=self._display_name
+                        ),
                         partial_content="".join(chunks),
                         response_id=response_id,
                     )
                     break
         except OpenAIError as exc:
             failure = failure or ProviderResponseFailed(
-                message=f"OpenAI stream error: {exc}",
+                message=f"{self._display_name} stream error: {exc}",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
@@ -279,7 +300,9 @@ class OpenAIProvider:
 
         if failure is None and not stream_completed:
             failure = ProviderResponseFailed(
-                message="OpenAI stream ended before response.completed was received",
+                message=(
+                    f"{self._display_name} stream ended before response.completed was received"
+                ),
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
@@ -293,7 +316,9 @@ class OpenAIProvider:
             # response that just completed, so fail rather than corrupt a
             # later continuation.
             yield ProviderResponseFailed(
-                message="OpenAI continuation response did not include a response id",
+                message=(
+                    f"{self._display_name} continuation response did not include a response id"
+                ),
                 partial_content="".join(chunks),
             )
             return
@@ -356,6 +381,7 @@ class OpenAIProvider:
             "model": model,
             "input": response_input,
             "stream": True,
+            **self._request_options(),
         }
         if openai_tools:
             kwargs["tools"] = openai_tools
@@ -374,17 +400,23 @@ class OpenAIProvider:
         stream = await create(**kwargs)
         return cast(AsyncIterator[ResponseStreamEvent], stream)
 
+    def _request_options(self) -> dict[str, object]:
+        """Return provider-specific Responses request fields."""
+
+        return {}
+
     async def _client_or_create(self) -> AsyncOpenAI:
         if self._client_is_injected:
             assert self._client is not None
             return self._client
 
-        api_key = self._api_key or _normalize_optional(os.environ.get("OPENAI_API_KEY"))
+        api_key = self._api_key or _normalize_optional(os.environ.get(self._api_key_environment))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
             raise ProviderConfigurationError(
-                "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
+                f"{self.name} credentials are required; run `{self._connect_command}` in the TUI "
+                f"or set {self._api_key_environment}"
             )
         if self._client is not None and self._client_api_key == api_key:
             return self._client
@@ -392,9 +424,23 @@ class OpenAIProvider:
         # Wisp emits retry progress itself. Key changes replace only Wisp-owned clients.
         if self._client is not None:
             await self._client.close()
-        self._client = AsyncOpenAI(api_key=api_key, max_retries=0)
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=self._base_url,
+            max_retries=0,
+        )
         self._client_api_key = api_key
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the Wisp-owned OpenAI-compatible client and transport."""
+
+        if self._client_is_injected or self._client is None:
+            return
+        client = self._client
+        self._client = None
+        self._client_api_key = None
+        await client.close()
 
 
 def _openai_retry_decision(exc: OpenAIError) -> RetryDecision | None:
@@ -439,20 +485,20 @@ def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject,
     return cast(JsonObject, parsed), None
 
 
-def _failed_response_message(response: Response) -> str:
+def _failed_response_message(response: Response, *, display_name: str = "OpenAI") -> str:
     if response.error is not None:
-        return f"OpenAI response failed: {response.error.message}"
+        return f"{display_name} response failed: {response.error.message}"
     if response.status:
-        return f"OpenAI response failed with status: {response.status}"
-    return "OpenAI response failed"
+        return f"{display_name} response failed with status: {response.status}"
+    return f"{display_name} response failed"
 
 
-def _incomplete_response_message(response: Response) -> str:
+def _incomplete_response_message(response: Response, *, display_name: str = "OpenAI") -> str:
     if response.incomplete_details is not None and response.incomplete_details.reason:
-        return f"OpenAI response incomplete: {response.incomplete_details.reason}"
+        return f"{display_name} response incomplete: {response.incomplete_details.reason}"
     if response.status:
-        return f"OpenAI response incomplete with status: {response.status}"
-    return "OpenAI response incomplete"
+        return f"{display_name} response incomplete with status: {response.status}"
+    return f"{display_name} response incomplete"
 
 
 def _messages_to_response_input(

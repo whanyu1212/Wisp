@@ -103,7 +103,7 @@ def test_connect_rejects_unknown_providers() -> None:
     anyio.run(run)
     assert renderer.errors == [
         "Unknown provider. Choose one of: openai-codex, openai, openai-compatible, "
-        "anthropic, google."
+        "xai, anthropic, google."
     ]
 
 
@@ -173,6 +173,23 @@ def test_disconnect_cannot_remove_environment_only_credentials(monkeypatch: Monk
     assert renderer.errors == [
         "openai is connected through OPENAI_API_KEY; unset it in your shell."
     ]
+
+
+def test_xai_auth_status_recognizes_xai_api_key(monkeypatch: MonkeyPatch) -> None:
+    commands, renderer = _commands(_FakeStore(), default="xai")
+    monkeypatch.setenv("XAI_API_KEY", "environment")
+
+    commands.status(())
+
+    assert renderer.notices == ["xai: api key configured via XAI_API_KEY"]
+    xai = next(
+        family
+        for family in commands._connection_catalog()
+        if family.id == "xai"  # noqa: SLF001
+    )
+    assert xai.label == "xAI"
+    assert xai.methods[0].label == "xAI API key"
+    assert xai.methods[0].source == "environment"
 
 
 def test_google_auth_status_recognizes_gemini_api_key(monkeypatch: MonkeyPatch) -> None:

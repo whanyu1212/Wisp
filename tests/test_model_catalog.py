@@ -21,6 +21,7 @@ from wisp.providers.catalog import (
 from wisp.providers.google import DEFAULT_GOOGLE_MODEL
 from wisp.providers.openai import DEFAULT_OPENAI_MODEL
 from wisp.providers.openai_codex import DEFAULT_OPENAI_CODEX_MODEL
+from wisp.providers.xai import DEFAULT_XAI_MODEL
 
 _MINIMAL_TOML = """
 schema_version = 1
@@ -402,6 +403,15 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
         ),
+        "xai": (
+            "grok-4.6",
+            "grok-4.5",
+            "grok-4.3",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+            "grok-build-0.1",
+        ),
         "fake": ("fake",),
     }
     for entry in providers.values():
@@ -458,6 +468,7 @@ def test_builtin_catalog_defaults_match_provider_implementations() -> None:
         "openai-codex": DEFAULT_OPENAI_CODEX_MODEL,
         "anthropic": DEFAULT_ANTHROPIC_MODEL,
         "google": DEFAULT_GOOGLE_MODEL,
+        "xai": DEFAULT_XAI_MODEL,
     }
 
     for entry in builtin_catalog().providers:

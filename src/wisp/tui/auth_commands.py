@@ -228,6 +228,11 @@ class AuthCommands:
                 ),
             ),
             ConnectionProviderStatus(
+                id="xai",
+                label="xAI",
+                methods=(self._api_key_method("xai", "xAI API key", store.get("xai")),),
+            ),
+            ConnectionProviderStatus(
                 id="anthropic",
                 label="Anthropic",
                 methods=(

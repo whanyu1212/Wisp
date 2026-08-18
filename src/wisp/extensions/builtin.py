@@ -11,6 +11,7 @@ from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.providers.openai_compatible import OpenAICompatibleProvider
+from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
@@ -60,6 +61,7 @@ def activate(
     auth_resolver = StoredProviderAuthResolver(auth_store) if auth_store is not None else None
     api.register_provider(FakeProvider())
     api.register_provider(OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+    api.register_provider(XAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     if openai_compatible is not None:
         api.register_provider(
             OpenAICompatibleProvider(

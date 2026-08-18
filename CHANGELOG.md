@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Added first-class xAI Grok support through the stateful Responses API, including streamed
+  reasoning, native tool-call continuation, API-key authentication, and model catalog metadata.
+
 ## 0.1.0rc2 — 2026-08-18
 
 - Stabilized streamed TUI output and resumable process-card lifecycles across polling, replay,
