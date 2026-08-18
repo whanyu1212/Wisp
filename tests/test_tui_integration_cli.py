@@ -14,6 +14,7 @@ from pytest import MonkeyPatch
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
+from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Header, Label, OptionList, Static
 
@@ -4235,6 +4236,216 @@ def test_textual_stream_completion_skips_identical_final_rerender(
     assert source == "same final content"
     assert write_count == 1
     assert replacements == []
+
+
+def test_textual_identical_stream_completion_does_not_relayout_mounted_transcript(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Settling an unchanged response must not await the completed mount twice.
+
+    Textual's ``AwaitMount`` refreshes the parent with ``layout=True`` every time it
+    is awaited, even after the widget is mounted. Re-awaiting it during finalization
+    repaints the complete visible transcript at the end of an otherwise unchanged
+    long response, which terminals can expose as a brief flash.
+    """
+
+    source = "".join(
+        f"## Phase {index}\n\n- completed stream block {index}\n\n" for index in range(60)
+    )
+
+    async def scenario() -> tuple[int, str, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            renderer.token_delta(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            layout_refreshes = 0
+            original_refresh = Transcript.refresh
+
+            def track_refresh(
+                widget: Transcript,
+                *regions: object,
+                repaint: bool = True,
+                layout: bool = False,
+                recompose: bool = False,
+            ) -> Transcript:
+                nonlocal layout_refreshes
+                if layout:
+                    layout_refreshes += 1
+                return original_refresh(
+                    widget,
+                    *regions,
+                    repaint=repaint,
+                    layout=layout,
+                    recompose=recompose,
+                )
+
+            monkeypatch.setattr(Transcript, "refresh", track_refresh)
+            renderer.end_token_stream_with_content(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+            stream = transcript.query_one(StreamMessage)
+            return (
+                layout_refreshes,
+                stream.source,
+                float(transcript.scroll_y),
+                float(transcript.max_scroll_y),
+            )
+
+    layout_refreshes, rendered, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert rendered == source
+    assert layout_refreshes == 0
+    assert scroll_y == max_scroll_y
+
+
+def test_textual_pending_final_delta_completes_in_one_layout_frame(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A terminal event may overtake the paced drain for the final provider delta."""
+
+    prefix = "".join(f"## Phase {index}\n\n- streamed block {index}\n\n" for index in range(60))
+    suffix = "## Final phase\n\nThe final provider delta.\n"
+    completed = prefix + suffix
+
+    async def scenario() -> tuple[int, list[str], str, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            renderer.token_delta(prefix)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+
+            layout_passes = 0
+            replacements: list[str] = []
+            original_layout = Screen._refresh_layout
+            original_replace = StreamMessage.replace_markdown
+
+            def track_layout(
+                screen: Screen[object],
+                size: object = None,
+                scroll: bool = False,
+            ) -> None:
+                nonlocal layout_passes
+                if screen is app_instance.screen:
+                    layout_passes += 1
+                original_layout(screen, size, scroll)
+
+            async def track_replace(stream: StreamMessage, content: str) -> None:
+                replacements.append(content)
+                await original_replace(stream, content)
+
+            monkeypatch.setattr(Screen, "_refresh_layout", track_layout)
+            monkeypatch.setattr(StreamMessage, "replace_markdown", track_replace)
+
+            renderer.token_delta(suffix)
+            turn = app_instance._stream._turn
+            assert turn is not None
+            assert turn.drain_scheduled
+            assert turn.drain_timer is not None
+
+            renderer.end_token_stream_with_content(completed)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            stream = transcript.query_one(StreamMessage)
+            return (
+                layout_passes,
+                replacements,
+                stream.source,
+                float(transcript.scroll_y),
+                float(transcript.max_scroll_y),
+            )
+
+    layout_passes, replacements, rendered, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert replacements == [completed]
+    assert layout_passes == 1
+    assert rendered == completed
+    assert scroll_y == max_scroll_y
+
+
+@pytest.mark.parametrize(
+    ("prior_messages", "expected_evictions", "expected_layouts"),
+    [(2, 0, 0), (3, 1, 1)],
+)
+def test_textual_stream_settlement_relayouts_only_at_live_retention_boundary(
+    monkeypatch: MonkeyPatch,
+    prior_messages: int,
+    expected_evictions: int,
+    expected_layouts: int,
+) -> None:
+    """Separate ordinary stream settlement from the layout required by eviction."""
+
+    source = "".join(f"## Result {index}\n\nsettled block\n\n" for index in range(30))
+
+    async def scenario() -> tuple[int, int, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            controller = app_instance._transcript_controller
+            controller._settled_capacity = 3
+            controller._durable_entry_capacity = 3
+            for index in range(prior_messages):
+                renderer.prompt_submitted(f"prior message {index}")
+            await pilot.pause()
+            await pilot.pause()
+
+            renderer.token_delta(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+
+            layout_passes = 0
+            evictions = 0
+            original_layout = Screen._refresh_layout
+            original_evicted = app_instance.live_transcript_widget_evicted
+
+            def track_layout(
+                screen: Screen[object],
+                size: object = None,
+                scroll: bool = False,
+            ) -> None:
+                nonlocal layout_passes
+                if screen is app_instance.screen:
+                    layout_passes += 1
+                original_layout(screen, size, scroll)
+
+            def track_evicted(widget: Widget) -> None:
+                nonlocal evictions
+                evictions += 1
+                original_evicted(widget)
+
+            monkeypatch.setattr(Screen, "_refresh_layout", track_layout)
+            monkeypatch.setattr(
+                app_instance,
+                "live_transcript_widget_evicted",
+                track_evicted,
+            )
+
+            renderer.end_token_stream_with_content(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return (
+                evictions,
+                layout_passes,
+                float(transcript.scroll_y),
+                float(transcript.max_scroll_y),
+            )
+
+    evictions, layout_passes, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert evictions == expected_evictions
+    assert layout_passes == expected_layouts
+    assert scroll_y == max_scroll_y
 
 
 def test_textual_first_visible_stream_frame_removes_working_indicator(
