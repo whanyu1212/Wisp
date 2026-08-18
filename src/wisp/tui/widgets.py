@@ -85,7 +85,11 @@ from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visi
 from wisp.tui.file_index import ProjectSnapshot
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
-from wisp.tui.prompt_highlighting import PromptHighlightKind, prompt_line_highlights
+from wisp.tui.prompt_highlighting import (
+    PromptHighlight,
+    PromptHighlightKind,
+    prompt_document_highlights,
+)
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _footer_context_text,
@@ -108,6 +112,13 @@ _PROMPT_HIGHLIGHT_COMPONENTS: dict[PromptHighlightKind, str] = {
     "command": "prompt-editor--command",
     "resolved_path": "prompt-editor--resolved-path",
     "unresolved_path": "prompt-editor--unresolved-path",
+    "markdown_heading": "prompt-editor--markdown-heading",
+    "markdown_list_marker": "prompt-editor--markdown-list-marker",
+    "markdown_inline_code_delimiter": "prompt-editor--markdown-inline-code-delimiter",
+    "markdown_inline_code": "prompt-editor--markdown-inline-code",
+    "markdown_fence_delimiter": "prompt-editor--markdown-fence-delimiter",
+    "markdown_fence_info": "prompt-editor--markdown-fence-info",
+    "markdown_fence_body": "prompt-editor--markdown-fence-body",
 }
 
 
@@ -127,6 +138,32 @@ class PromptEditor(TextArea):
         & .prompt-editor--unresolved-path {
             color: $warning;
             text-style: dim underline;
+        }
+        & .prompt-editor--markdown-heading {
+            color: $warning;
+            text-style: bold;
+        }
+        & .prompt-editor--markdown-list-marker {
+            color: $accent;
+            text-style: bold;
+        }
+        & .prompt-editor--markdown-inline-code-delimiter {
+            color: $secondary;
+            text-style: dim;
+        }
+        & .prompt-editor--markdown-inline-code {
+            color: $accent;
+        }
+        & .prompt-editor--markdown-fence-delimiter {
+            color: $secondary;
+            text-style: bold;
+        }
+        & .prompt-editor--markdown-fence-info {
+            color: $accent;
+            text-style: italic;
+        }
+        & .prompt-editor--markdown-fence-body {
+            color: $secondary;
         }
     }
     """
@@ -184,6 +221,9 @@ class PromptEditor(TextArea):
         self._command_tokens: frozenset[str] = frozenset()
         self._project_paths: frozenset[str] | None = None
         self._unresolved_paths_known = False
+        self._semantic_highlight_revision = 0
+        self._cached_semantic_highlight_revision = -1
+        self._semantic_highlights: tuple[tuple[PromptHighlight, ...], ...] = ()
 
     def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
         """Replace recognized runtime and Textual-local slash spellings."""
@@ -213,24 +253,41 @@ class PromptEditor(TextArea):
             self._unresolved_paths_known = unresolved_paths_known
             self._refresh_semantic_styles()
 
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Invalidate document-level Markdown state after every editor mutation."""
+
+        if event.text_area is self:
+            self._semantic_highlight_revision += 1
+            # One fence edit can restyle every later visible line. TextArea has
+            # already updated layout and its changed rows, so request only a
+            # repaint rather than another global style-cache invalidation.
+            self.refresh()
+
     def _refresh_semantic_styles(self) -> None:
         """Invalidate TextArea caches and schedule a visible repaint."""
 
+        self._semantic_highlight_revision += 1
         self.notify_style_update()
         self.refresh()
+
+    def _highlights_for_line(self, line_index: int) -> tuple[PromptHighlight, ...]:
+        if self._cached_semantic_highlight_revision != self._semantic_highlight_revision:
+            self._semantic_highlights = prompt_document_highlights(
+                self.document.lines,
+                command_tokens=self._command_tokens,
+                project_paths=self._project_paths,
+                unresolved_paths_known=self._unresolved_paths_known,
+            )
+            self._cached_semantic_highlight_revision = self._semantic_highlight_revision
+        if line_index >= len(self._semantic_highlights):
+            return ()
+        return self._semantic_highlights[line_index]
 
     def get_line(self, line_index: int) -> Text:
         """Apply presentation-only spans through TextArea's public styling hook."""
 
         rendered = super().get_line(line_index)
-        for highlight in prompt_line_highlights(
-            rendered.plain,
-            line_index=line_index,
-            line_count=self.document.line_count,
-            command_tokens=self._command_tokens,
-            project_paths=self._project_paths,
-            unresolved_paths_known=self._unresolved_paths_known,
-        ):
+        for highlight in self._highlights_for_line(line_index):
             rendered.stylize(
                 self.get_component_rich_style(
                     _PROMPT_HIGHLIGHT_COMPONENTS[highlight.kind],
