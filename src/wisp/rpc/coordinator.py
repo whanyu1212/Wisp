@@ -370,12 +370,15 @@ class RpcCoordinator:
             if auxiliary is not None and auxiliary is not previous_running:
                 self.auxiliary_commands[auxiliary.command_id] = auxiliary
             return result.should_shutdown
-        new_session_waits_for_ordered_operation = (
-            selected_type == "new_session"
-            and running is not None
-            and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
+        auxiliary_read_pending = bool(self.auxiliary_commands)
+        new_session_waits_for_ordered_operation = selected_type == "new_session" and (
+            auxiliary_read_pending
+            or (
+                running is not None
+                and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
+            )
         )
-        if running is not None and (
+        if (running is not None or auxiliary_read_pending) and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
         ):
             await self._enqueue_command(command, queue=self.queued_commands, reject=reject)

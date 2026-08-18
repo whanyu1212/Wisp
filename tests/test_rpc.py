@@ -748,6 +748,38 @@ def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
         wisp_event_from_json(event.model_copy(update={"schema_version": 23}).model_dump_json())
 
 
+def test_rpc_message_forward_cursor_round_trips_only_at_schema_v34() -> None:
+    report = RpcMessagesReported(
+        command_id="messages-1",
+        truncated=True,
+        next_after_entry_id="entry-1",
+    )
+
+    assert report.schema_version == 34
+    assert wisp_event_from_json(report.model_dump_json()) == report
+
+    legacy_without_cursor = RpcMessagesReported(
+        command_id="messages-legacy",
+        schema_version=33,
+    )
+    legacy_payload = json.loads(legacy_without_cursor.model_dump_json())
+    assert "next_after_entry_id" not in legacy_payload
+    assert wisp_event_from_json(json.dumps(legacy_payload)) == legacy_without_cursor
+
+    legacy_payload["next_after_entry_id"] = "entry-1"
+    legacy_payload["truncated"] = True
+    with pytest.raises(ValueError, match="forward cursors require schema_version 34"):
+        wisp_event_from_json(json.dumps(legacy_payload))
+
+    with pytest.raises(ValidationError, match="forward cursors require schema_version 34"):
+        RpcMessagesReported(
+            command_id="messages-invalid",
+            schema_version=33,
+            truncated=True,
+            next_after_entry_id="entry-1",
+        )
+
+
 def test_tool_failure_metadata_round_trips_only_at_schema_v33() -> None:
     event = ToolResultReady(
         call_id="call-1",
