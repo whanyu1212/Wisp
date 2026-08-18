@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from textual.theme import Theme
 
 from tests.tui_support import *
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -29,6 +30,7 @@ from wisp.tui.history import (
     history_entries_from_rpc_messages,
     history_from_rpc_messages,
 )
+from wisp.tui.theme import WISP_THEMES
 
 pytestmark = pytest.mark.tui
 
@@ -1180,12 +1182,15 @@ def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
     assert "color: $accent" in TextualTui.CSS
 
 
-def test_denied_role_uses_warning_instead_of_execution_error_color() -> None:
+@pytest.mark.parametrize("role", ["approved", "denied", "error"])
+def test_semantic_surface_roles_use_contrast_adjusted_text(role: str) -> None:
     from wisp.tui.textual_app import TextualTui
 
-    denied_rule = TextualTui.CSS.split(".message--denied", 1)[1].split("}", 1)[0]
-    assert "$warning" in denied_rule
-    assert "$error" not in denied_rule
+    semantic_role = {"approved": "success", "denied": "warning", "error": "error"}[role]
+    rule = TextualTui.CSS.split(f".message--{role}", 1)[1].split("}", 1)[0]
+
+    assert f"background: ${semantic_role}-muted;" in rule
+    assert f"color: $text-{semantic_role};" in rule
 
 
 def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
@@ -1301,33 +1306,29 @@ def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr:
     assert contrast_ratio(getattr(WISP_THEME_DARK, color_attr), WISP_THEME_DARK.background) >= 4.5
 
 
-def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() -> None:
-    # Textual's auto-derived success/error pairs back general UI chrome. Diffs
-    # no longer use them — see the dedicated diff-color test below — but any
-    # widget pairing text-* on *-muted still depends on this holding.
+@pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])
+@pytest.mark.parametrize("role", ["success", "warning", "error"])
+def test_derived_semantic_muted_pairs_meet_text_contrast_target(theme_name: str, role: str) -> None:
+    # Textual auto-derives the muted surfaces used by approved, denied, and error
+    # transcript rows. Resolve every registered theme through a live app so these
+    # assertions cover the actual text/background pairs handed to the painter.
     from wisp.tui.textual_app import TextualTui
     from wisp.tui.theme import contrast_ratio
 
-    async def scenario() -> dict[str, str]:
+    async def scenario() -> tuple[str, str]:
         app = TextualTui()
         async with app.run_test() as pilot:
-            app.theme = "wisp-light"
+            app.theme = theme_name
             await pilot.pause()
             variables = app.get_css_variables()
-            return {
-                key: variables[key]
-                for key in ("text-success", "success-muted", "text-error", "error-muted")
-            }
+            return variables[f"text-{role}"], variables[f"{role}-muted"]
 
-    variables = anyio.run(scenario)
+    text, background = anyio.run(scenario)
 
-    assert contrast_ratio(variables["text-success"], variables["success-muted"]) >= 4.5
-    assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
+    assert contrast_ratio(text, background) >= 4.5
 
 
-@pytest.mark.parametrize(
-    "theme_name", ["wisp", "wisp-orchid", "wisp-ember", "wisp-storm", "wisp-light"]
-)
+@pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])
 @pytest.mark.parametrize(
     ("foreground", "background"),
     [
@@ -1368,7 +1369,7 @@ def test_diff_theme_colors_clear_contrast_thresholds(
     assert contrast_ratio(variables[foreground], variables[background]) >= 4.5
 
 
-def test_issue_118_does_not_change_dark_or_neutral_palette_values() -> None:
+def test_refined_vapor_and_paper_palette_values_are_stable() -> None:
     from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
 
     assert (
@@ -1383,16 +1384,16 @@ def test_issue_118_does_not_change_dark_or_neutral_palette_values() -> None:
         WISP_THEME_DARK.surface,
         WISP_THEME_DARK.panel,
     ) == (
-        "#4aa3c7",
-        "#7c8b99",
-        "#3fb8b8",
-        "#d3a25a",
-        "#d16a7c",
-        "#5cc9a7",
-        "#dfe6ec",
-        "#0e1216",
-        "#151b21",
-        "#1b232b",
+        "#81a2be",
+        "#a7adb3",
+        "#8abeb7",
+        "#f0c674",
+        "#d97979",
+        "#c5cd78",
+        "#d4d4d4",
+        "#18181e",
+        "#1e1e24",
+        "#2d2d38",
     )
     assert (
         WISP_THEME_LIGHT.secondary,
@@ -1400,7 +1401,7 @@ def test_issue_118_does_not_change_dark_or_neutral_palette_values() -> None:
         WISP_THEME_LIGHT.background,
         WISP_THEME_LIGHT.surface,
         WISP_THEME_LIGHT.panel,
-    ) == ("#55636d", "#12171c", "#fbfcfd", "#ffffff", "#eef3f5")
+    ) == ("#5e409d", "#100f0f", "#fffcf0", "#f2f0e5", "#e6e4d9")
 
 
 def test_muted_text_role_meets_contrast_target() -> None:
@@ -1438,6 +1439,36 @@ def test_primary_on_panel_meets_contrast_target_in_every_theme() -> None:
 
     for theme in WISP_THEMES:
         assert contrast_ratio(theme.primary, theme.panel) >= 4.5, theme.name
+
+
+@pytest.mark.parametrize("theme", WISP_THEMES, ids=lambda theme: theme.name)
+@pytest.mark.parametrize(
+    ("color_attr", "background_attr"),
+    [
+        ("foreground", "background"),
+        ("primary", "background"),
+        ("primary", "panel"),
+        ("secondary", "background"),
+        ("accent", "background"),
+        ("accent", "surface"),
+        ("accent", "panel"),
+        ("warning", "background"),
+        ("warning", "surface"),
+        ("error", "background"),
+        ("success", "background"),
+    ],
+)
+def test_every_theme_semantic_text_pair_meets_contrast_target(
+    theme: Theme, color_attr: str, background_attr: str
+) -> None:
+    from wisp.tui.theme import contrast_ratio
+
+    color = getattr(theme, color_attr)
+    background = getattr(theme, background_attr)
+
+    assert contrast_ratio(color, background) >= 4.5, (
+        f"{theme.name}: {color_attr} on {background_attr}"
+    )
 
 
 def test_line_messages_keep_literal_content_without_baked_rich_styles() -> None:

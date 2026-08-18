@@ -3774,8 +3774,9 @@ def test_textual_tui_registers_and_activates_wisp_theme() -> None:
 
     active, registered = anyio.run(scenario)
     assert active == "wisp"
-    assert "wisp" in registered
-    assert "wisp-light" in registered
+    from wisp.tui.theme import WISP_THEME_NAMES
+
+    assert set(registered) == WISP_THEME_NAMES
 
 
 def test_textual_transcript_uses_theme_colors() -> None:
@@ -3792,9 +3793,9 @@ def test_textual_transcript_uses_theme_colors() -> None:
                 error.styles.border_left[1].hex.lower(),
             )
 
-    # Textual's CSS color conversion rounds the configured #d16a7c error rail
-    # to #d06a7c; assert the resolved widget colors rather than Rich span colors.
-    assert anyio.run(scenario) == ("#5cc9a7", "#d06a7c")
+    # Assert the resolved widget colors; Textual's color round-trip can shift a
+    # source channel by one step.
+    assert anyio.run(scenario) == ("#c4cd78", "#d87979")
 
 
 def test_textual_tool_card_carries_role_class_for_lifecycle_styling() -> None:
@@ -3816,7 +3817,7 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
             return assistant.styles.border_left[1].hex.lower()
 
     # The post-switch rail uses the light theme's success color, not dark's.
-    assert anyio.run(scenario) == "#2b8164"
+    assert anyio.run(scenario) == "#526b09"
 
 
 def test_textual_theme_switch_atomically_recolors_mounted_muted_text() -> None:
@@ -3834,8 +3835,8 @@ def test_textual_theme_switch_atomically_recolors_mounted_muted_text() -> None:
             return before, line.styles.color.hex.lower()
 
     before, after = anyio.run(scenario)
-    assert before == "#92989e"
-    assert after == "#5e6367"
+    assert before == "#a0a0a8"
+    assert after == "#575653"
 
 
 def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
@@ -5152,11 +5153,15 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
 @pytest.mark.parametrize(
     ("theme", "foreground", "primary"),
     [
-        ("wisp", "#dfe6ec", "#4aa3c7"),
-        ("wisp-orchid", "#e8e5ef", "#9b8af2"),
-        ("wisp-ember", "#eee7e2", "#d59a62"),
+        ("wisp", "#d4d4d4", "#81a2be"),
+        ("wisp-orchid", "#cad3f5", "#c6a0f6"),
+        # Textual's color round-trip resolves source #fab283 to #f9b283.
+        ("wisp-ember", "#eeeeee", "#f9b283"),
         ("wisp-storm", "#c0caf5", "#8db0ff"),
-        ("wisp-light", "#12171c", "#277795"),
+        ("wisp-grove", "#d3c6aa", "#8fc9bd"),
+        ("wisp-wave", "#dcd7ba", "#98b4e6"),
+        ("wisp-light", "#100f0f", "#205ea6"),
+        ("wisp-dawn", "#575279", "#286983"),
     ],
 )
 def test_textual_user_messages_use_neutral_text_with_a_primary_rail(
@@ -5324,7 +5329,7 @@ def test_textual_focused_tool_card_uses_only_a_left_outline() -> None:
     background, outlines, outline_color, keeps_role = anyio.run(scenario)
     assert background == "#00000000"
     assert outlines == ("", "", "", "heavy")
-    assert outline_color == "#3fb8b8"
+    assert outline_color == "#8abeb7"
     assert keeps_role
 
 
@@ -8795,8 +8800,15 @@ def test_textual_composer_surface_styles_resolve_for_both_themes() -> None:
 
     styles = anyio.run(scenario)
     expected = {
-        "wisp": ("#151B21", "#00000000", "#0E1216", "#3FB8B8", "#DFE6EC", "#8e949a"),
-        "wisp-light": ("#FFFFFF", "#00000000", "#FBFCFD", "#2E7676", "#12171C", "#707376"),
+        "wisp": ("#1E1E24", "#00000000", "#18181E", "#8ABEB7", "#D4D4D4", "#8b8b8d"),
+        "wisp-light": (
+            "#F2F0E5",
+            "#00000000",
+            "#FFFCF0",
+            "#9E4510",
+            "#100F0F",
+            "#6a6964",
+        ),
     }
     assert styles == expected
 
@@ -9016,9 +9028,9 @@ def test_textual_composer_uses_filled_left_rail_panel() -> None:
     assert not composer_border.top[0]
     assert not composer_border.bottom[0]
     assert not composer_border.right[0]
-    assert composer_background == "#151B21"
+    assert composer_background == "#1E1E24"
     assert input_background == "#00000000"
-    assert footer_background == "#0E1216"
+    assert footer_background == "#18181E"
     assert composer_count == 1
 
 

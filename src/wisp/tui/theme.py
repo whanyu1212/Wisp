@@ -34,13 +34,15 @@ _LIGHT_DIFF_VARIABLES = {
     # Pi green needs a minimal darker tonal step on light surfaces to meet 4.5:1.
     # Pi red already clears the target and remains exact.
     "diff-add-fg": "#4d754d",
-    "diff-add-count-fg": "#4d754d",
+    # Header counts sit on each light theme's panel. These darker tonal steps
+    # preserve the Pi hues while clearing warm Paper and Dawn surfaces too.
+    "diff-add-count-fg": "#426742",
     "diff-add-bg": "#f5faf5",
     "diff-add-token-bg": "#e5f0e5",
     "diff-add-gutter-bg": "#edf5ed",
     "diff-add-sign-fg": "#4d754d",
     "diff-del-fg": "#aa5555",
-    "diff-del-count-fg": "#aa5555",
+    "diff-del-count-fg": "#964747",
     "diff-del-bg": "#fff8f8",
     "diff-del-token-bg": "#fff0f0",
     "diff-del-gutter-bg": "#fff4f4",
@@ -77,50 +79,53 @@ class WispThemeSpec:
 
 WISP_THEME_DARK = Theme(
     name="wisp",
-    primary="#4aa3c7",
-    secondary="#7c8b99",
-    accent="#3fb8b8",
-    warning="#d3a25a",
-    error="#d16a7c",
-    success="#5cc9a7",
-    foreground="#dfe6ec",
-    background="#0e1216",
-    surface="#151b21",
-    panel="#1b232b",
+    # Pi's restrained blue/teal roles on a more deliberate neutral ladder.
+    primary="#81a2be",
+    secondary="#a7adb3",
+    accent="#8abeb7",
+    warning="#f0c674",
+    error="#d97979",
+    success="#c5cd78",
+    foreground="#d4d4d4",
+    background="#18181e",
+    surface="#1e1e24",
+    panel="#2d2d38",
     dark=True,
-    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#92989e"),
+    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a0a0a8"),
 )
 
 WISP_THEME_ORCHID = Theme(
     name="wisp-orchid",
-    primary="#9b8af2",
-    secondary="#9a93a8",
-    accent="#c184f4",
-    warning="#d3a25a",
-    error="#d16a7c",
-    success="#5cc9a7",
-    foreground="#e8e5ef",
-    background="#100f16",
-    surface="#181721",
-    panel="#232031",
+    # Catppuccin Macchiato's mauve family, rearranged onto Wisp's elevation order.
+    primary="#c6a0f6",
+    secondary="#8aadf4",
+    accent="#f5bde6",
+    warning="#eed49f",
+    error="#ed8796",
+    success="#86bd79",
+    foreground="#cad3f5",
+    background="#181926",
+    surface="#1e2030",
+    panel="#363a4f",
     dark=True,
-    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#9c98a8"),
+    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a5adcb"),
 )
 
 WISP_THEME_EMBER = Theme(
     name="wisp-ember",
-    primary="#d69a62",
-    secondary="#a29389",
-    accent="#e4775d",
-    warning="#e0ad5e",
-    error="#dc7482",
-    success="#68c7a5",
-    foreground="#eee7e2",
-    background="#15110f",
-    surface="#1e1815",
-    panel="#2a211c",
+    # OpenCode peach and Flexoki warmth, with brighter semantic text roles.
+    primary="#fab283",
+    secondary="#8bb7d8",
+    accent="#f58b6b",
+    warning="#e5c07b",
+    error="#e06c75",
+    success="#8fce9b",
+    foreground="#eeeeee",
+    background="#100f0f",
+    surface="#1c1b1a",
+    panel="#282726",
     dark=True,
-    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a29a95"),
+    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a7a29c"),
 )
 
 WISP_THEME_STORM = Theme(
@@ -142,28 +147,89 @@ WISP_THEME_STORM = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a9b1d6"),
 )
 
+WISP_THEME_GROVE = Theme(
+    name="wisp-grove",
+    # Everforest's green-gray atmosphere with a darker panel for diff readability.
+    primary="#8fc9bd",
+    secondary="#a7c080",
+    accent="#e3a8c3",
+    warning="#e0bc7f",
+    error="#ef8e90",
+    success="#b6d18f",
+    foreground="#d3c6aa",
+    background="#2d353b",
+    surface="#333c43",
+    panel="#374149",
+    dark=True,
+    variables={
+        **_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aab3aa"),
+        # Textual's default contrast tints narrowly miss AA on Grove's muted
+        # semantic surfaces, so keep the hues and lift only the text roles.
+        "text-warning": "#ebd4ad",
+        "text-error": "#f5bdbe",
+    },
+)
+
+WISP_THEME_WAVE = Theme(
+    name="wisp-wave",
+    # Kanagawa-inspired ink, crystal blue, violet, and sakura.
+    primary="#98b4e6",
+    secondary="#b5a0d2",
+    accent="#e79ab1",
+    warning="#e0b56b",
+    error="#f07575",
+    success="#a9c982",
+    foreground="#dcd7ba",
+    background="#1f1f28",
+    surface="#2a2a37",
+    panel="#363646",
+    dark=True,
+    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aaa89c"),
+)
+
 WISP_THEME_LIGHT = Theme(
     name="wisp-light",
-    primary="#277795",
-    secondary="#55636d",
-    accent="#2e7676",
-    warning="#9c671a",
-    error="#b64a5e",
-    success="#2b8164",
-    foreground="#12171c",
-    background="#fbfcfd",
-    surface="#ffffff",
-    panel="#eef3f5",
+    # Flexoki's warm paper and ink replace the previous cool near-white palette.
+    primary="#205ea6",
+    secondary="#5e409d",
+    accent="#9f4510",
+    warning="#815f00",
+    error="#af3029",
+    success="#536b09",
+    foreground="#100f0f",
+    background="#fffcf0",
+    surface="#f2f0e5",
+    panel="#e6e4d9",
     dark=False,
-    variables=_theme_variables(_LIGHT_DIFF_VARIABLES, transcript_muted="#5e6367"),
+    variables=_theme_variables(_LIGHT_DIFF_VARIABLES, transcript_muted="#575653"),
+)
+
+WISP_THEME_DAWN = Theme(
+    name="wisp-dawn",
+    # Rosé Pine Dawn's blush neutrals with strengthened semantic contrast.
+    primary="#286983",
+    secondary="#6f5b80",
+    accent="#9d5353",
+    warning="#815b00",
+    error="#a95570",
+    success="#3f6645",
+    foreground="#575279",
+    background="#faf4ed",
+    surface="#fffaf3",
+    panel="#f2e9e1",
+    dark=False,
+    variables=_theme_variables(_LIGHT_DIFF_VARIABLES, transcript_muted="#646072"),
 )
 
 WISP_THEME_SPECS = (
-    WispThemeSpec("vapor", "Vapor", "Cool cyan and vapor teal", WISP_THEME_DARK),
-    WispThemeSpec("orchid", "Orchid", "Indigo and muted violet", WISP_THEME_ORCHID),
-    WispThemeSpec("ember", "Ember", "Warm amber and restrained coral", WISP_THEME_EMBER),
+    WispThemeSpec("vapor", "Vapor", "Quiet blue and spectral teal", WISP_THEME_DARK),
+    WispThemeSpec("orchid", "Orchid", "Mauve, periwinkle, and soft pink", WISP_THEME_ORCHID),
+    WispThemeSpec("ember", "Ember", "Peach and coral on warm charcoal", WISP_THEME_EMBER),
     WispThemeSpec("storm", "Storm", "Tokyo Night blues and violet", WISP_THEME_STORM),
-    WispThemeSpec("paper", "Paper", "Clean light neutrals", WISP_THEME_LIGHT),
+    WispThemeSpec("grove", "Grove", "Forest green and warm parchment", WISP_THEME_GROVE),
+    WispThemeSpec("wave", "Wave", "Ink blue, violet, and sakura", WISP_THEME_WAVE),
+    WispThemeSpec("paper", "Paper", "Warm paper and crisp blue ink", WISP_THEME_LIGHT),
+    WispThemeSpec("dawn", "Dawn", "Blush canvas and muted berry", WISP_THEME_DAWN),
 )
 WISP_THEMES = tuple(spec.theme for spec in WISP_THEME_SPECS)
 WISP_THEME_NAMES = frozenset(spec.name for spec in WISP_THEME_SPECS)
@@ -204,13 +270,16 @@ __all__ = [
     "WISP_DARK_THEME_NAMES",
     "WISP_THEME_BY_NAME",
     "WISP_THEME_BY_SLUG",
+    "WISP_THEME_DAWN",
     "WISP_THEME_DARK",
     "WISP_THEME_EMBER",
+    "WISP_THEME_GROVE",
     "WISP_THEME_LIGHT",
     "WISP_THEME_NAMES",
     "WISP_THEME_ORCHID",
     "WISP_THEME_SPECS",
     "WISP_THEME_STORM",
+    "WISP_THEME_WAVE",
     "WISP_THEMES",
     "WispThemeSpec",
     "contrast_ratio",
