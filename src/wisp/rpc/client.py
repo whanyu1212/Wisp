@@ -377,6 +377,12 @@ class RpcController:
         The RPC host preserves sequential command order: configuration waits
         behind active sequential work and is applied before later prompts.
 
+        A model-only update keeps the current provider when it offers that
+        model, otherwise it auto-switches to a unique catalog owner. If multiple
+        providers claim the model and the current provider is not one of them,
+        the command fails and the provider must be specified explicitly.
+        Catalog-unknown model strings remain permissive for custom providers.
+
         ``effort=None`` (the default) leaves any previously configured effort
         tier untouched -- the command's JSON serialization omits unset fields,
         so there is no wire difference between "not specified" and "None."

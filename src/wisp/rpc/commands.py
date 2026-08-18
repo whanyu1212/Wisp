@@ -233,7 +233,7 @@ class ShutdownCommand(RpcCommandModel):
 
 
 class ConfigureCommand(RpcCommandModel):
-    """Update configuration in sequence before later RPC prompt commands."""
+    """Update configuration in sequence, rejecting unresolved model-provider ambiguity."""
 
     type: Literal["configure"] = "configure"
     provider: str | None = None

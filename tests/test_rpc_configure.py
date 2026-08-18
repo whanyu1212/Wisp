@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.cli_support import *
 
 
@@ -167,17 +169,25 @@ def test_configure_unknown_model_falls_through_without_error(tmp_path: Path) -> 
     assert any(record.get("content") == "fake response to: hello" for record in records)
 
 
-def test_configure_ambiguous_model_falls_through_without_error(tmp_path: Path) -> None:
-    # ``gpt-5.6`` is an alias claimed by both openai and openai-codex, and
-    # "fake" (the active provider) doesn't match either -- this must not raise
-    # or silently guess a winner.
+@pytest.mark.parametrize("provider_fragment", ["", '"provider":null,'])
+def test_configure_ambiguous_model_rejects_without_mutating_configuration(
+    tmp_path: Path,
+    provider_fragment: str,
+) -> None:
+    # ``gpt-5.6`` is an alias claimed by both openai and openai-codex. The active
+    # fake provider cannot disambiguate it, so accepting the model would create
+    # a catalog-known invalid pairing. Omitted and explicit-null provider values
+    # have the same model-only semantics.
     runner = CliRunner()
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
-            '{"id":"configure-1","type":"configure","model":"gpt-5.6"}\n'
+            f'{{"id":"configure-1","type":"configure",{provider_fragment}'
+            '"model":"gpt-5.6","effort":"high",'
+            '"auto_compaction_enabled":false,"mode":"plan"}\n'
+            '{"id":"state-1","type":"get_state"}\n'
             '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
@@ -186,25 +196,69 @@ def test_configure_ambiguous_model_falls_through_without_error(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assert not any(r["type"] == "model.provider_auto_switched" for r in records)
-    assert records[1]["ok"] is True
+    message = (
+        "Model 'gpt-5.6' is available from multiple providers: openai, openai-codex; "
+        "specify provider explicitly"
+    )
+    error = next(record for record in records if record["type"] == "error")
+    assert error["message"] == message
+    configure_finished = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
+    )
+    assert configure_finished["ok"] is False
+    assert configure_finished["error"] == message
+    state = next(record["state"] for record in records if record["type"] == "rpc.state")
+    assert state["provider"] == "fake"
+    assert state["model"] == "fake"
+    assert state["effort"] is None
+    assert state["auto_compaction_enabled"] is True
+    assert state["mode"] == "build"
+    estimate = next(record for record in records if record["type"] == "context.estimated")
+    assert estimate["provider"] == "fake"
+    assert estimate["model"] == "fake"
     assert any(record.get("content") == "fake response to: hello" for record in records)
+
+
+def test_configure_ambiguous_model_prefers_current_candidate_provider(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"configure-1","type":"configure","model":"gpt-5.6"}\n'
+            '{"id":"state-1","type":"get_state"}\n'
+        ),
+        env={"WISP_PROVIDER": "openai", "WISP_MODEL": "", "OPENAI_API_KEY": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert not any(record["type"] == "model.provider_auto_switched" for record in records)
+    configure_finished = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
+    )
+    assert configure_finished["ok"] is True
+    state = next(record["state"] for record in records if record["type"] == "rpc.state")
+    assert state["provider"] == "openai"
+    assert state["model"] == "gpt-5.6"
 
 
 def test_configure_explicit_provider_and_model_together_is_unaffected_by_auto_switch(
     tmp_path: Path,
 ) -> None:
-    # "gpt-5.5-pro" would auto-switch to openai if provider were omitted (see
-    # test_configure_model_auto_switches_provider_when_unambiguous above), but
-    # here provider is given explicitly as "fake" in the same command -- that
-    # explicit choice must win, proven by the prompt succeeding with the fake
-    # provider's response instead of failing on a missing OpenAI key.
+    # ``gpt-5.6`` is ambiguous without a matching current provider, but here an
+    # explicit provider is given in the same command. That choice must win,
+    # preserving support for custom providers that accept cataloged model ids.
     runner = CliRunner()
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
-            '{"id":"configure-1","type":"configure","provider":"fake","model":"gpt-5.5-pro"}\n'
+            '{"id":"configure-1","type":"configure","provider":"fake","model":"gpt-5.6"}\n'
             '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
         ),
         env={"WISP_PROVIDER": "openai", "WISP_MODEL": "", "OPENAI_API_KEY": ""},

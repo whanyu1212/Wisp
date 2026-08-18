@@ -1838,7 +1838,7 @@ def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
             '{"id":"state-1","type":"get_state"}\n'
-            '{"id":"configure-1","type":"configure","model":"gpt-5.5","effort":"high"}\n'
+            '{"id":"configure-1","type":"configure","model":"fake-custom-model","effort":"high"}\n'
             '{"id":"state-2","type":"get_state"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
@@ -1867,7 +1867,7 @@ def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
     }
     assert reports[1]["state"] == {
         **reports[0]["state"],
-        "model": "gpt-5.5",
+        "model": "fake-custom-model",
         "effort": "high",
     }
     assert [record["type"] for record in records] == [
@@ -1915,7 +1915,7 @@ def test_rpc_mode_configures_model_for_future_prompts(tmp_path: Path) -> None:
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
-            '{"id":"configure-1","type":"configure","model":"gpt-5.5"}\n'
+            '{"id":"configure-1","type":"configure","model":"fake-custom-model"}\n'
             '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
