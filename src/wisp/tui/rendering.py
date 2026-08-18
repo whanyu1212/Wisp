@@ -1663,7 +1663,7 @@ def _render_model_listing_text(
                 " (current)" if is_current_provider and model_id == effective_model else ""
             )
             names.append(f"{model_id}{lifecycle_label}{current_label}")
-        lines.append(f"  {entry.name}: {', '.join(names)}")
+        lines.append(f"  {entry.display_name}: {', '.join(names)}")
     lines.append(f"Current model: {current_model or 'provider default'}")
     lines.append(f"Current provider: {current_provider}")
     lines.append(f"Current effort: {current_effort or 'provider default'}")

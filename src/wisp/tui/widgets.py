@@ -958,7 +958,7 @@ class ModelPicker(Vertical):
         first_selectable_index: int | None = None
         row_index = 0
         for entry in entries:
-            self._options.add_option(Option(entry.name, disabled=True))
+            self._options.add_option(Option(entry.display_name, disabled=True))
             self._rows.append(None)
             row_index += 1
             is_current_provider = entry.name == current_provider

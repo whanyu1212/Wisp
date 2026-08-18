@@ -13,7 +13,7 @@ schema_version = 2
 
 [[providers]]
 name = "openai"
-display_name = "OpenAI"
+display_name = "OpenAI API"
 default_model = "gpt-5.6-sol"
 docs_url = "https://platform.openai.com/docs"
 # Current Responses-API text/tool models verified against OpenAI's model
@@ -141,7 +141,7 @@ output_usd_per_million = "4.5"
 
 [[providers]]
 name = "openai-codex"
-display_name = "OpenAI (Codex subscription)"
+display_name = "OpenAI Codex (ChatGPT subscription)"
 default_model = "gpt-5.6-sol"
 docs_url = "https://developers.openai.com/codex/models"
 # Current Codex CLI subscription models verified against the Codex model guide
