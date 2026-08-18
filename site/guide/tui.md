@@ -73,6 +73,11 @@ Only the path is inserted; Wisp does not inline file contents, and the shared sn
 `protected_paths` policy, so secrets are never offered. A visible limit cue means the indexed snapshot
 omitted paths rather than proving a directory is empty.
 
+The prompt editor highlights recognized commands and project paths alongside common Markdown
+structure: headings, list markers, inline code, and fenced code blocks. Highlighting is a bounded,
+presentation-only aid rather than a Markdown preview; the exact editable source remains the prompt
+submitted to the agent, and incomplete Markdown stays editable.
+
 ## Keybindings
 
 | Key | Action |
