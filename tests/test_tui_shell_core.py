@@ -3163,7 +3163,7 @@ def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider()
         assert "Available models:" in rendered
         assert "openai:" in rendered
         assert "openai-codex:" in rendered
-        assert "fake:" in rendered
+        assert "fake:" not in rendered
         assert "gpt-5.5 (legacy) (current)" in rendered
         assert "Current model: gpt-5.5" in rendered
         assert "Current provider: openai" in rendered
