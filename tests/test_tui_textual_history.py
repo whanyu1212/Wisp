@@ -47,6 +47,7 @@ class _HistorySurface:
     prepend_finishes: int = 0
     follow_requests: int = 0
     latest_history_requests: int = 0
+    newer_history_requests: list[str] = field(default_factory=list)
     fail_line_mount: bool = False
     marker_boundaries: list[Widget | None] = field(default_factory=list)
 
@@ -84,7 +85,12 @@ class _HistorySurface:
         self.latest_history_requests += 1
         return True
 
-    def set_history_window_available(self, *, has_older: bool) -> None:
+    def request_newer_history(self, after_entry_id: str) -> bool:
+        self.newer_history_requests.append(after_entry_id)
+        return True
+
+    def set_history_window_available(self, *, has_older: bool, has_newer: bool) -> None:
+        del has_newer
         self.window_availability.append(has_older)
 
     def history_insertion_boundary(self, history_widgets: set[Widget]) -> Widget | None:
@@ -325,6 +331,43 @@ def test_history_controller_reaches_oldest_entries_beyond_retention_limit() -> N
     assert surface.history_labels[0] == "assistant: older 0"
     assert controller.retained_entry_count == 1_200
     assert not controller.show_oldest()
+
+
+def test_history_controller_pages_forward_after_newer_retention_was_evicted() -> None:
+    surface = _HistorySurface(at_top=True, following=False)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    latest = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"message {index}",
+            entry_id=f"entry-{index}",
+        )
+        for index in range(120, 180)
+    )
+    older = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"message {index}",
+            entry_id=f"entry-{index}",
+        )
+        for index in range(60, 120)
+    )
+
+    controller.replace_entries(latest, session_label="Windowed")
+    controller.prepend_entries(older)
+    assert surface.history_labels[0] == "assistant: message 60"
+
+    assert controller.shift_newer()
+    assert surface.newer_history_requests == ["entry-119"]
+
+    controller.append_newer_entries(latest, has_more=False)
+
+    assert surface.history_labels[0] == "assistant: message 120"
+    assert surface.history_labels[-1] == "assistant: message 179"
+    assert not controller.shift_newer()
 
 
 def test_history_controller_mounts_session_marker_before_restored_history() -> None:

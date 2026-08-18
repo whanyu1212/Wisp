@@ -280,6 +280,30 @@ def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
     assert rpc_command_from_json(command.to_json_line()) == command
 
 
+def test_get_messages_command_serializes_forward_cursor() -> None:
+    command = GetMessagesCommand(id="messages-2", after_entry_id="entry-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-2",
+        "type": "get_messages",
+        "limit": 200,
+        "after_entry_id": "entry-1",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_messages_command_serializes_active_prompt_read_opt_in() -> None:
+    command = GetMessagesCommand(id="messages-live", allow_during_prompt=True)
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-live",
+        "type": "get_messages",
+        "limit": 200,
+        "allow_during_prompt": True,
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
 def test_get_messages_command_rejects_invalid_bounds() -> None:
     with pytest.raises(ValidationError):
         GetMessagesCommand(limit=True)
@@ -293,6 +317,10 @@ def test_get_messages_command_rejects_invalid_bounds() -> None:
         GetMessagesCommand(session_id="")
     with pytest.raises(ValidationError):
         GetMessagesCommand(before_entry_id="")
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(after_entry_id="")
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        GetMessagesCommand(before_entry_id="before", after_entry_id="after")
 
 
 def test_get_sessions_command_serializes_as_jsonl_and_parses() -> None:

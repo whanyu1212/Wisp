@@ -1117,6 +1117,7 @@ class RpcMessagesReported(WispEvent):
     messages: tuple[RpcMessageSnapshot, ...] = ()
     truncated: bool = False
     next_before_entry_id: str | None = None
+    next_after_entry_id: str | None = None
 
     @model_validator(mode="after")
     def _validate_schema_version(self) -> Self:
@@ -1138,10 +1139,12 @@ class RpcMessagesReported(WispEvent):
                 "RPC message skill-invocation metadata requires schema_version "
                 f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
             )
-        if self.next_before_entry_id is not None and not self.truncated:
-            raise ValueError(
-                "RPC message reports cannot include next_before_entry_id unless truncated"
-            )
+        if (
+            self.next_before_entry_id is not None or self.next_after_entry_id is not None
+        ) and not self.truncated:
+            raise ValueError("RPC message reports cannot include a cursor unless truncated")
+        if self.next_before_entry_id is not None and self.next_after_entry_id is not None:
+            raise ValueError("RPC message report cursors are mutually exclusive")
         return self
 
     @model_serializer(mode="wrap")

@@ -1282,6 +1282,45 @@ def test_executor_messages_reads_selected_and_explicit_sessions(
     anyio.run(scenario)
 
 
+def test_executor_messages_reads_forward_after_cursor(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        entries = []
+        for index in range(5):
+            entries.append(
+                await selected.append_message(Message(role="user", content=f"message-{index}"))
+            )
+        fixture.session_state.session = selected
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            await executor.dispatch(
+                {
+                    "id": "newer",
+                    "type": "get_messages",
+                    "limit": 2,
+                    "after_entry_id": entries[1].id,
+                },
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok
+        report = next(
+            event
+            for event in fixture.events
+            if isinstance(event, RpcMessagesReported) and event.command_id == "newer"
+        )
+        assert [message.content for message in report.messages] == ["message-2", "message-3"]
+        assert report.next_before_entry_id is None
+        assert report.next_after_entry_id == entries[3].id
+
+    anyio.run(scenario)
+
+
 def test_executor_messages_historical_page_refreshes_selected_session_after_external_append(
     tmp_path: Path,
 ) -> None:

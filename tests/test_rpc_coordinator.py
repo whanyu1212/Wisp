@@ -228,7 +228,13 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             [
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
-                _RpcInputCommand({"id": "messages", "type": "get_messages"}),
+                _RpcInputCommand(
+                    {
+                        "id": "messages",
+                        "type": "get_messages",
+                        "allow_during_prompt": True,
+                    }
+                ),
                 _RpcInputCommand({"id": "sessions", "type": "get_sessions"}),
                 _RpcInputCommand({"id": "select", "type": "select_session"}),
                 _RpcInputCommand({"id": "clone", "type": "clone_session"}),
@@ -247,9 +253,9 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "pop", "type": "pop_queue"}),
                 _RpcInputCommand({"id": "clear", "type": "clear_queue"}),
                 _RpcPromptReady("prompt"),
+                _RpcCommandCompleted("messages", "get_messages", True, (), 1),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
-                _RpcCommandCompleted("messages", "get_messages", True, (), 2),
                 _RpcCommandCompleted("sessions", "get_sessions", True, (), 2),
                 _RpcCommandCompleted("select", "select_session", True, (), 2),
                 _RpcCommandCompleted("clone", "clone_session", True, (), 2),
@@ -295,6 +301,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
 
         assert dispatched == [
             "prompt",
+            "messages",
             "commands",
             "approval",
             "steer",
@@ -304,7 +311,6 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "pop",
             "clear",
             "queued",
-            "messages",
             "sessions",
             "select",
             "clone",
@@ -635,6 +641,50 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("navigate_session_tree")
         await assert_bypasses("unrevert_session_tree")
         await assert_bypasses("set_session_name")
+
+    anyio.run(scenario)
+
+
+def test_coordinator_runs_message_read_alongside_active_prompt() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        message_read = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert command["type"] == "get_messages"
+            assert running is prompt
+            return _RpcDispatchResult(message_read)
+
+        await coordinator.handle_event(
+            _RpcInputCommand(
+                {
+                    "id": "messages",
+                    "type": "get_messages",
+                    "allow_during_prompt": True,
+                }
+            ),
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is prompt
+        assert coordinator.auxiliary_commands == {"messages": message_read}
+
+        await coordinator.handle_event(
+            _RpcCommandCompleted("messages", "get_messages", True, (), 0),
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is prompt
+        assert coordinator.auxiliary_commands == {}
 
     anyio.run(scenario)
 

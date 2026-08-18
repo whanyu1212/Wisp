@@ -125,6 +125,11 @@ class TranscriptWindow[Entry]:
             self.show_latest()
         return evicted
 
+    def mark_latest_retained(self) -> None:
+        """Record that retained entries now include the durable transcript tail."""
+
+        self._latest_is_retained = True
+
     def show_latest(self) -> bool:
         target = max(0, len(self._entries) - self.capacity)
         changed = target != self._start

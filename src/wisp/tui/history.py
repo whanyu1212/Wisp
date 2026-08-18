@@ -47,6 +47,7 @@ class HistoricalToolCard:
     missing_result: bool = False
     tool_call_id: str | None = field(default=None, compare=False)
     call_missing: bool = field(default=False, compare=False)
+    entry_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def history_entries_from_rpc_messages(
     """
 
     rendered: list[HistoricalTranscriptEntry] = []
-    pending_tool_calls: dict[str, RpcMessageToolCallSnapshot] = {}
+    pending_tool_calls: dict[str, tuple[RpcMessageToolCallSnapshot, str]] = {}
     for message in messages:
         if message.role == "user":
             invocation = message.skill_invocation
@@ -137,7 +138,8 @@ def history_entries_from_rpc_messages(
                     )
                 )
             pending_tool_calls.update(
-                (tool_call.call_id, tool_call) for tool_call in message.tool_calls
+                (tool_call.call_id, (tool_call, message.entry_id))
+                for tool_call in message.tool_calls
             )
         elif message.role == "tool":
             rendered.append(_historical_tool_card(message, pending_tool_calls))
@@ -155,13 +157,14 @@ def _content_for_history(message: RpcMessageSnapshot) -> str:
 
 def _historical_tool_card(
     message: RpcMessageSnapshot,
-    pending_tool_calls: dict[str, RpcMessageToolCallSnapshot],
+    pending_tool_calls: dict[str, tuple[RpcMessageToolCallSnapshot, str]],
 ) -> HistoricalToolCard:
-    tool_call = (
+    pending_call = (
         pending_tool_calls.pop(message.tool_call_id, None)
         if message.tool_call_id is not None
         else None
     )
+    tool_call = pending_call[0] if pending_call is not None else None
     tool_result = message.tool_result
     output = _content_for_history(message)
     status = tool_result.status if tool_result is not None else None
@@ -169,6 +172,7 @@ def _historical_tool_card(
         status = "cancelled"
     return HistoricalToolCard(
         card_id=f"history:{message.entry_id}",
+        entry_id=message.entry_id,
         name=message.tool_name or (tool_call.name if tool_call is not None else "unknown"),
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,
@@ -192,11 +196,12 @@ def _historical_tool_card(
 
 
 def _missing_tool_cards(
-    pending_tool_calls: dict[str, RpcMessageToolCallSnapshot],
+    pending_tool_calls: dict[str, tuple[RpcMessageToolCallSnapshot, str]],
 ) -> tuple[HistoricalToolCard, ...]:
     return tuple(
         HistoricalToolCard(
             card_id=f"history:missing:{call_id}",
+            entry_id=entry_id,
             name=tool_call.name,
             arguments=tool_call.arguments,
             output="No persisted tool result.",
@@ -205,7 +210,7 @@ def _missing_tool_cards(
             status="cancelled",
             missing_result=True,
         )
-        for call_id, tool_call in pending_tool_calls.items()
+        for call_id, (tool_call, entry_id) in pending_tool_calls.items()
     )
 
 

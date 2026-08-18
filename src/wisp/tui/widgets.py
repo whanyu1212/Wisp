@@ -1928,6 +1928,7 @@ class Transcript(VerticalScroll):
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
         self._has_retained_history = False
+        self._has_newer_history = False
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
@@ -1982,6 +1983,7 @@ class Transcript(VerticalScroll):
         self._follow = True
         self._has_more_history = False
         self._has_retained_history = False
+        self._has_newer_history = False
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
@@ -2001,7 +2003,7 @@ class Transcript(VerticalScroll):
         previous = self._follow
         super().watch_scroll_y(old_value, new_value)
         if not self._content_driven_scroll_update:
-            self._follow = self.is_vertical_scroll_end
+            self._follow = self.is_vertical_scroll_end and not self._has_newer_history
             if self._follow != previous:
                 if not self._follow:
                     self._follow_generation += 1
@@ -2034,10 +2036,11 @@ class Transcript(VerticalScroll):
         ):
             self._request_more_history_if_needed()
 
-    def history_window_available(self, *, has_older: bool) -> None:
-        """Record whether the UI can shift to already retained history."""
+    def history_window_available(self, *, has_older: bool, has_newer: bool) -> None:
+        """Record whether retained entries exist beyond either mounted edge."""
 
         self._has_retained_history = has_older
+        self._has_newer_history = has_newer
         if has_older:
             self._history_request_armed = True
 

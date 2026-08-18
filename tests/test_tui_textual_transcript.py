@@ -444,6 +444,22 @@ def test_settled_live_widgets_are_bounded_and_released_for_durable_history() -> 
     assert surface.evicted == [first]
 
 
+def test_settled_live_overflow_preserves_the_oldest_edge_while_browsing() -> None:
+    surface = _Surface(following=False)
+    controller = TextualTranscriptController(surface, settled_capacity=2)
+    first = Widget()
+    second = Widget()
+    third = Widget()
+
+    controller.settle_widget(first)
+    controller.settle_widget(second)
+    controller.settle_widget(third)
+
+    assert controller.settled_widget_count == 2
+    assert surface.removed == [second]
+    assert surface.evicted == [second]
+
+
 def test_settled_live_limit_keeps_the_first_eviction_in_one_history_page() -> None:
     assert TUI_SETTLED_LIVE_WIDGET_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
     assert TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT == TUI_HISTORY_PAGE_LIMIT - 2

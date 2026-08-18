@@ -65,7 +65,9 @@ class TextualHistorySurface(Protocol):
 
     def request_latest_history(self) -> bool: ...
 
-    def set_history_window_available(self, *, has_older: bool) -> None: ...
+    def request_newer_history(self, after_entry_id: str) -> bool: ...
+
+    def set_history_window_available(self, *, has_older: bool, has_newer: bool) -> None: ...
 
     def history_insertion_boundary(self, history_widgets: set[Widget]) -> Widget | None: ...
 
@@ -352,7 +354,7 @@ class TextualHistoryController:
             # A durable page arrived because the reader is already at the top.
             # Reveal its leading slice now so an exhausted page cursor never hides
             # fetched entries behind Transcript's durable-page request gate.
-            if self._surface.history_is_at_top():
+            if self._surface.history_is_at_top() and not self._surface.history_is_following():
                 self._window.shift_older()
             self._reconcile()
         finally:
@@ -372,6 +374,40 @@ class TextualHistoryController:
             self._surface.finish_history_render()
             self._surface.finish_history_prepend()
         return True
+
+    def shift_newer(self) -> bool:
+        """Move toward newer retained history, paging after the local edge."""
+
+        if not self._window.shift_newer():
+            if self._window.latest_is_retained or not self._window.entries:
+                return False
+            cursor = _history_entry_cursor(self._window.entries[-1].entry)
+            return cursor is not None and self._surface.request_newer_history(cursor)
+        self._surface.begin_history_render()
+        try:
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+        return True
+
+    def append_newer_entries(
+        self,
+        entries: Iterable[HistoricalTranscriptEntry],
+        *,
+        has_more: bool,
+    ) -> None:
+        """Append one adjacent newer durable page and reveal its leading slice."""
+
+        retained = self._retain(entries)
+        self._surface.begin_history_render()
+        try:
+            self._discard_entries(self._window.append(retained, follow_tail=False))
+            if not has_more:
+                self._window.mark_latest_retained()
+            self._window.shift_newer()
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
 
     def show_oldest(self) -> bool:
         """Move the mounted window to the oldest retained history."""
@@ -625,7 +661,10 @@ class TextualHistoryController:
         )
         visible_ids = {item.id for item in visible}
         reposition_widgets: set[Widget] = set()
-        self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
+        self._surface.set_history_window_available(
+            has_older=not self._window.is_at_oldest,
+            has_newer=not self._window.is_at_latest or not self._window.latest_is_retained,
+        )
         for item_id, widget in tuple(self._widgets.items()):
             if item_id not in self._widgets:
                 continue
@@ -1048,7 +1087,13 @@ def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
         return entry.entry_id
     if isinstance(entry, HistoricalSkillInvocation):
         return entry.entry_id
-    return entry.card_id
+    return entry.entry_id or entry.card_id
+
+
+def _history_entry_cursor(entry: HistoricalTranscriptEntry) -> str | None:
+    """Return the persisted message id used by directional RPC paging."""
+
+    return _history_entry_id(entry)
 
 
 def _same_durable_history_entry(
