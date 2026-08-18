@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: Steer mid-flight
-    details: Queue a correction while the agent is running. Steering redirects the current run without rewriting the transcript; follow-ups wait their turn.
+    details: RPC and SDK clients can queue a correction while the agent is running. Steering redirects the active run without rewriting the transcript; follow-ups wait their turn.
   - title: Cancel without losing the thread
     details: Cooperative cancellation stops the run cleanly and leaves the session resumable, not corrupted.
   - title: Approvals you control

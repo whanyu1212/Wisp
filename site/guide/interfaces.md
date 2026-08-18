@@ -4,16 +4,32 @@ title: Interfaces
 
 # Interfaces
 
-TODO — adapt from `README.md` § "Interfaces".
+Every interface drives the same RPC command host, `CodingSession`, `AgentHarness`, and
+provider-neutral loop. Choose a surface based on who supplies input and how output needs to be
+consumed—not because it has a different agent implementation.
 
-Cover the four frontends and when to reach for each:
+| Interface | Start it | Output | Best for |
+|---|---|---|---|
+| Textual TUI | `wisp` or `wisp tui` | Fullscreen terminal UI | Interactive repository work |
+| Line TUI | `wisp tui --line` | Incremental terminal text | Simple terminals and debugging |
+| Print | `wisp -p "PROMPT"` | Assistant text on stdout; events on stderr | One-shot prompts and scripts |
+| JSON | `wisp -p "PROMPT" --mode json` | One `WispEvent` JSON object per line | Typed one-shot automation |
+| JSONL RPC | `wisp --mode rpc` | Commands on stdin; typed events/results on stdout | Long-lived clients and custom UIs |
+| Python SDK | Import `WispRuntime` | Typed async Python API | In-process applications and tests |
 
-- CLI (print mode and interactive).
-- TUI (`wisp tui`).
-- JSONL RPC (`wisp --mode rpc`).
-- In-process SDK.
+## Shared semantics, different controls
 
-Emphasise that all four drive the same command host — see
-[Layer stack](../architecture/layers). The practical payoff to lead with: steering,
-approvals, and cancellation behave identically on every surface, because none of
-them reimplements that logic. See [Staying in sync](./staying-in-sync).
+Session persistence, tool safety, approval decisions, cancellation, provider behavior, and event
+ordering are shared. Input capabilities depend on the transport:
+
+- RPC and SDK clients can steer an active run, queue follow-ups, edit queue state, cancel commands,
+  and answer approvals.
+- The TUI can queue follow-up prompts, cancel the active command, and answer approvals, but it does
+  not currently expose the steering queue as a separate user action.
+- Print and JSON modes execute one prompt and exit. They cannot accept steering, follow-up, or an
+  approval response after the run starts; pass `--yes` only when unattended unsafe execution is
+  intentional.
+
+Use [Staying in sync](./staying-in-sync) for queue and cancellation behavior, [CLI](../reference/cli)
+for flags and stream contracts, [RPC](../reference/rpc) for JSONL commands, and
+[Layer stack](../architecture/layers) for the shared architecture.

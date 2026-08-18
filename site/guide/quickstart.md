@@ -22,9 +22,9 @@ wisp
 ```
 
 A first run asks whether you trust the project. Trusting allows Wisp to load project-controlled
-configuration, context and instruction files, skills, and extensions. If you decline—or if a
-non-interactive invocation cannot ask—Wisp still runs, but those project-local resources stay
-disabled. You can manage the persisted decision explicitly:
+configuration, context and instruction files, and skills. If you decline—or if a non-interactive
+invocation cannot ask—Wisp still runs, but those project-local resources stay disabled. Executable
+project extensions are not currently discovered. You can manage the persisted decision explicitly:
 
 ```bash
 wisp trust status .

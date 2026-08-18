@@ -41,8 +41,10 @@ you approve anything that touches your machine, and every action it takes is a t
 inspectable transcript.
 
 Underneath is a single event-driven runtime. The CLI, the fullscreen TUI, the JSONL RPC process, and
-the in-process SDK all drive the same command host and agent loop rather than reimplementing it, so
-steering, approvals, and cancellation behave identically wherever you use it.
+the in-process SDK all drive the same command host and agent loop rather than reimplementing it.
+They share session, tool, approval, and cancellation semantics, while each frontend exposes the
+controls its input model supports: RPC and SDK clients have live steering and queue APIs, the TUI
+accepts interactive follow-ups, and print/JSON modes run one prompt without a mid-run input channel.
 
 ## Install
 
@@ -88,10 +90,10 @@ wisp -p "hello" --provider fake
 
 This is the part worth knowing before anything else.
 
-**Steer without starting over.** Type while the agent is working and your message joins the current
-run as a course correction — it does not cancel the turn, discard completed tool work, or rewrite
-the transcript. A follow-up, by contrast, waits for the run to finish and starts the next one. Both
-are queued explicitly, so you always know which one you are getting.
+**Steer without starting over.** RPC and SDK clients can queue a course correction for the active
+run. Wisp injects it at the next safe request boundary without discarding completed tool work or
+rewriting the transcript. A follow-up waits until the run would otherwise finish. The TUI queues
+text entered during a run as follow-up work; print and JSON invocations are intentionally one-shot.
 
 **Cancel cleanly.** Cancellation is cooperative and leaves the session resumable rather than
 half-written. In-flight tool work is unwound, the JSONL record stays valid, and `--continue` picks
