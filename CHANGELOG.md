@@ -11,6 +11,21 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0rc2 — 2026-08-18
+
+- Stabilized streamed TUI output and resumable process-card lifecycles across polling, replay,
+  denial, interruption, concurrent calls, pagination, reload, and bounded retention.
+- Added an asynchronous TUI update prompt that defaults to updating and restarting supported
+  persistent installs while preserving explicit checks, skip/later choices, and safe relaunch state.
+- Removed obsolete synchronous and CLI-owned RPC compatibility paths so queueing, cancellation,
+  trust, approvals, and shutdown consistently use the shared async command host.
+- Centralized context-budget construction in the shared accounting policy and strengthened CI with
+  a required production fault-injection partition plus broader platform-sensitive coverage.
+- Added a VitePress documentation site, reduced the README to a focused entry point, and added
+  release, safety, provider, session, interface, and contributor references.
+- Refined Vapor, Orchid, Ember, and Paper; added Grove, Wave, and Dawn; and made semantic transcript
+  surfaces meet normal-text contrast requirements across every curated theme.
+
 ## 0.1.0rc1 — 2026-08-17
 
 - Kept compaction, steering, follow-up, provider continuation, and overflow recovery inside one
