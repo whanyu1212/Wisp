@@ -299,6 +299,17 @@ class MarkdownStreamController:
         if self._pending_callbacks == 0:
             self._idle.set()
 
+    @staticmethod
+    async def _ensure_mounted(turn: _StreamTurn) -> None:
+        """Wait for first attachment without re-triggering the parent's layout."""
+
+        if turn.widget.is_mounted:
+            return
+        # Textual's AwaitMount refreshes its parent with layout=True after every
+        # await, even once its mounted event is already set. Guarding on the widget
+        # state avoids a redundant full transcript repaint during finalization.
+        await turn.mounted
+
     async def _drain(self, turn: _StreamTurn) -> None:
         if not turn.drain_scheduled:
             return
@@ -321,7 +332,7 @@ class MarkdownStreamController:
                 # The first provider fragment can arrive in the same event-loop
                 # tick as the StreamMessage mount. Wait until its app/theme context
                 # exists before building the Rich Markdown renderable.
-                await turn.mounted
+                await self._ensure_mounted(turn)
                 render_started = time.perf_counter()
                 await turn.widget.append_markdown(text)
                 render_seconds = time.perf_counter() - render_started
@@ -365,7 +376,7 @@ class MarkdownStreamController:
             # Some providers stream the full response but leave the terminal
             # completion payload empty. Do not let that erase visible output.
             source = turn.completed_content or streamed_source
-            await turn.mounted
+            await self._ensure_mounted(turn)
             if turn.discarded:
                 return
             transcript = self._app.transcript
