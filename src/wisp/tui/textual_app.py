@@ -1173,7 +1173,8 @@ class TextualTui(App[None]):
             self.show_theme_picker()
             return True
         if len(parts) != 2:
-            self.write_error("Usage: /theme [vapor|orchid|ember|storm|paper]")
+            choices = "|".join(WISP_THEME_BY_SLUG)
+            self.write_error(f"Usage: /theme [{choices}]")
             return True
         spec = WISP_THEME_BY_SLUG.get(parts[1].casefold())
         if spec is None:
@@ -1780,7 +1781,10 @@ class TextualTui(App[None]):
 
         if self._theme_picker_original is not None:
             return
-        next_name = self._last_dark_theme if self.theme == PAPER_THEME_NAME else PAPER_THEME_NAME
+        current = WISP_THEME_BY_NAME.get(self.theme)
+        next_name = (
+            self._last_dark_theme if current is not None and not current.dark else PAPER_THEME_NAME
+        )
         self._commit_theme(next_name, announce=True)
 
     def _commit_theme(self, theme_name: str, *, announce: bool) -> None:

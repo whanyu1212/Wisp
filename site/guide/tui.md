@@ -47,6 +47,7 @@ persisted), or deny.
 /plan                       switch to read-only planning mode
 /build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run
+/theme [name]               preview or select a curated color theme
 /update [check|install]     check immediately or explicitly install an update
 /skills                     inspect loaded skills and discovery diagnostics
 /mcp                        show configured MCP servers and registered tools
@@ -96,10 +97,12 @@ The Textual transcript has no visible scrollbar, but all transcript scrolling re
 through the controls above. When new output arrives while you are reading earlier content, select the
 `↓ new` indicator to return to the live tail.
 
-`Ctrl+T` switches between Wisp's dark and light palettes. The choice is written to `~/.wisp/tui.json`
-and restored on the next run. It is presentation state owned by the TUI client, so it is kept out of
+Run `/theme` to preview Vapor, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one of
+those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
+from Dawn it returns to that dark palette too. The choice is written to `~/.wisp/tui.json` and
+restored on the next run. It is presentation state owned by the TUI client, so it is kept out of
 `settings.json` and never reaches the agent subprocess; an unreadable or unrecognized value falls
-back to the dark theme rather than failing to start.
+back to Vapor rather than failing to start.
 
 `Ctrl+G` and `/help` open the same native contextual guide. It follows focus across the editor, tool
 cards, pickers, context reports, and safety decisions; its key reference is derived from live

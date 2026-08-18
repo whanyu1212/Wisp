@@ -17,7 +17,7 @@ from wisp.tui.theme import WISP_THEME_SPECS, WispThemeSpec
 
 
 class ThemePicker(Vertical):
-    """Choose among Wisp's four themes while previewing the highlighted row."""
+    """Choose among Wisp's curated themes while previewing the highlighted row."""
 
     BINDING_GROUP_TITLE = "Theme picker"
     HELP = """
