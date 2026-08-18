@@ -59,7 +59,8 @@ wisp --version
 To run it without installing: `uvx --from "wisp-ai==0.1.0rc1" wisp`. If `wisp` is not on your
 `PATH`, run `uv tool update-shell` once and restart your shell.
 
-See [Installation](site/guide/installation.md) for the update policy and troubleshooting.
+See [Installation](https://whanyu1212.github.io/Wisp/guide/installation) for the update policy and
+troubleshooting.
 
 ## Quickstart
 
@@ -107,7 +108,7 @@ unless you pass `--yes`.
 **Nothing happens off-screen.** Every action is a typed `WispEvent` in an enforced order, persisted
 to an append-only JSONL session you can read, resume, branch, or audit long after the run.
 
-→ [How it stays in sync](site/guide/staying-in-sync.md)
+→ [How it stays in sync](https://whanyu1212.github.io/Wisp/guide/staying-in-sync)
 
 ## Interfaces
 
@@ -119,7 +120,8 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
 RPC mode and the in-process SDK expose the same command, event, session, trust, and approval
-contracts the built-in interfaces use. See [Interfaces](site/guide/interfaces.md).
+contracts the built-in interfaces use. See
+[Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces).
 
 ## Architecture
 
@@ -134,17 +136,17 @@ frontends; the harness owns in-memory conversation state; the coding session add
 safety policy; interfaces consume typed events. The TUI is an RPC client, not a second agent loop —
 which is why it cannot drift from the guarantees above.
 
-→ [Architecture](site/architecture/) · [Layer stack](site/architecture/layers.md)
+→ [Architecture](https://whanyu1212.github.io/Wisp/architecture/)
 
 ## Documentation
 
 | | |
 |---|---|
-| [Guide](site/guide/) | Installation, quickstart, providers, tools, sessions, skills, TUI |
-| [Staying in sync](site/guide/staying-in-sync.md) | Steering, cancellation, approvals, transcripts |
-| [Reference](site/reference/) | CLI flags, configuration, environment variables, events, RPC, SDK |
-| [Architecture](site/architecture/) | Layer stack, event model, safety model, extensions |
-| [Contributing](site/contributing/) | Development setup, testing, releasing |
+| [Guide](https://whanyu1212.github.io/Wisp/guide/) | Installation, quickstart, providers, tools, sessions, skills, TUI |
+| [Staying in sync](https://whanyu1212.github.io/Wisp/guide/staying-in-sync) | Steering, cancellation, approvals, transcripts |
+| [Reference](https://whanyu1212.github.io/Wisp/reference/) | CLI flags, configuration, and environment variables |
+| [Architecture](https://whanyu1212.github.io/Wisp/architecture/) | Runtime layers and ownership boundaries |
+| [Contributing](https://whanyu1212.github.io/Wisp/contributing/) | Development setup and testing |
 
 ## Contributing
 
@@ -158,8 +160,9 @@ The suite runs entirely against deterministic fake and scripted providers, so th
 and JSONL sessions are exercised without API keys or network calls. Run the complete command before
 considering a change verified, and preserve the layer boundaries described above.
 
-See [Contributing](site/contributing/) for CI policy and release process. Issues and pull requests
-are welcome at [github.com/whanyu1212/Wisp/issues](https://github.com/whanyu1212/Wisp/issues).
+See [Contributing](https://whanyu1212.github.io/Wisp/contributing/) for development setup and CI
+policy. Issues and pull requests are welcome at
+[github.com/whanyu1212/Wisp/issues](https://github.com/whanyu1212/Wisp/issues).
 
 ## License
 

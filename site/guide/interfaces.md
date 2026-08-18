@@ -15,7 +15,7 @@ consumed—not because it has a different agent implementation.
 | Print | `wisp -p "PROMPT"` | Assistant text on stdout; events on stderr | One-shot prompts and scripts |
 | JSON | `wisp -p "PROMPT" --mode json` | One `WispEvent` JSON object per line | Typed one-shot automation |
 | JSONL RPC | `wisp --mode rpc` | Commands on stdin; typed events/results on stdout | Long-lived clients and custom UIs |
-| Python SDK | Import `WispRuntime` | Typed async Python API | In-process applications and tests |
+| Python SDK | Import `InProcessWisp` | Typed async Python API | In-process applications and tests |
 
 ## Shared semantics, different controls
 
@@ -30,6 +30,6 @@ ordering are shared. Input capabilities depend on the transport:
   approval response after the run starts; pass `--yes` only when unattended unsafe execution is
   intentional.
 
-Use [Staying in sync](./staying-in-sync) for queue and cancellation behavior, [CLI](../reference/cli)
-for flags and stream contracts, [RPC](../reference/rpc) for JSONL commands, and
-[Layer stack](../architecture/layers) for the shared architecture.
+Use [Staying in sync](./staying-in-sync) for queue and cancellation behavior,
+[CLI](../reference/cli) for flags and stream contracts, and
+[Architecture](../architecture/) for the shared runtime boundaries.

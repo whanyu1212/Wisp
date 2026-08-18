@@ -4,9 +4,16 @@ title: Development setup
 
 # Development setup
 
-TODO — adapt from `CLAUDE.md` § "Commands".
+Wisp targets Python 3.12 or newer and uses `uv` for its locked development environment. Clone the
+repository, then install the package and development dependencies:
 
-Cover the four gates that must pass before work is complete:
+```bash
+git clone https://github.com/whanyu1212/Wisp.git
+cd Wisp
+uv sync --locked
+```
+
+Run the four quality and test gates before considering a change complete:
 
 ```bash
 uv sync                        # install (use `uv sync --locked` to match CI)
@@ -16,11 +23,9 @@ uv run mypy                    # types — no path argument
 uv run pytest tests            # full suite
 ```
 
-Also cover:
-
-- Conventions: Python 3.12+, `mypy --strict`, ruff line-length 100, rules `E,F,I,UP,B`.
-- Async-first with `anyio`.
-- Frozen dataclasses for value objects, pydantic for anything serialized.
+The project uses strict mypy checking and Ruff with a 100-character line length and the
+`E`, `F`, `I`, `UP`, and `B` rule sets. Prefer async-first APIs with `anyio`, frozen dataclasses for
+internal value objects, and Pydantic models for serialized boundaries.
 
 ## Working on these docs
 

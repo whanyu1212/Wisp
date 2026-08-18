@@ -38,7 +38,7 @@ also inspect queue counts, remove the newest item, or clear one or both queues b
 
 The in-process `InProcessWisp` controller exposes these as `steer()`, `follow_up()`,
 `get_queue_state()`, `set_queue_mode()`, `pop_queue()`, and `clear_queue()`. Raw JSONL clients use
-commands with the same names. See the [RPC reference](../reference/rpc) for the wire contract.
+commands with the same names over newline-delimited JSON.
 
 ## Cancelling cleanly
 
@@ -75,8 +75,8 @@ events differently, but they do not invent a second lifecycle.
 
 Durable sessions append JSONL entries in order. That record supports resume, branching, audit, and
 recovery from an interrupted process without silently rewriting earlier history. Read
-[Sessions](./sessions) for persistence behavior and [Event model](../architecture/events) for the
-ordering contract.
+[Sessions](./sessions) for persistence behavior and [Architecture](../architecture/) for the event
+contract's place in the runtime.
 
 ::: tip Where this is enforced
 Steering, follow-up queues, and cooperative cancellation live in `AgentHarness`, one layer below

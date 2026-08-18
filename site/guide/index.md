@@ -4,20 +4,18 @@ title: Introduction
 
 # Introduction
 
-TODO — adapt from `README.md` § "What is Wisp?", but **re-framed**. The README
-currently leads with "a coding agent that runs in your terminal"; that is the
-delivery mechanism, not the point.
+Wisp is a coding agent that **stays in sync with you**. Its interactive interfaces let you add
+follow-up work while it runs, its RPC and SDK surfaces can steer an active run, and every interface
+uses the same typed runtime rather than a separate implementation.
 
-Lead instead with: Wisp is a coding agent that **stays in sync with you** — you can
-redirect it mid-run, you approve what it changes, and you can inspect everything it
-did. The terminal, the four interfaces, and the embeddable runtime are what make
-that possible, not the headline.
+The harness makes its work observable and recoverable: tool calls pass through explicit safety
+gates, lifecycle events arrive in an enforced order, and sessions are append-only JSONL records
+that can be inspected and resumed. These guarantees make Wisp useful both at a terminal and inside
+long-lived integrations.
 
-Cover:
+Wisp is currently a `0.1.0` release candidate, so public interfaces may still change while the
+first stable release is validated.
 
-- The sync claim, in two or three sentences — see [Staying in sync](./staying-in-sync).
-- What the harness guarantees: typed events in an enforced order, explicit approval
-  gates, resumable sessions, no silent failures.
-- Who it is for and what problem it solves.
-- The release-candidate status note currently at the top of the README.
-- Where to go next: [Installation](./installation), [Quickstart](./quickstart).
+Start with [Installation](./installation) and the [Quickstart](./quickstart). Then read
+[Staying in sync](./staying-in-sync) for the exact steering, follow-up, cancellation, and approval
+behavior available through each interface.

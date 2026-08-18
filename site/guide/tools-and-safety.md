@@ -14,7 +14,7 @@ shell commands. File tools are sandboxed to the tool context's working directory
 | **Command** | `bash` | Required |
 
 Approval decisions stay outside the model's control — see [Staying in sync](./staying-in-sync) for
-why that boundary matters, and the [safety model](../architecture/safety) for how it is enforced.
+why that boundary matters and how the shared runtime enforces it.
 
 `bash` defaults to one-shot execution and reports stdout, stderr, truncation state, and exit code.
 It also accepts `operation=start|poll|cancel` for commands needing a retained process handle; those

@@ -33,8 +33,10 @@ features:
 ## One runtime, with you in control
 
 Wisp is a coding agent for interactive work, scripts, and integrations. Its TUI, print mode, JSONL
-RPC process, and Python SDK share one typed runtime, so steering, approvals, cancellation, and
-session durability do not change when you change interfaces.
+RPC process, and Python SDK share one typed runtime, including the same session, approval,
+cancellation, and event contracts. Each interface exposes the controls its input model can support:
+RPC and SDK clients can steer live runs, the TUI queues interactive follow-ups, and print/JSON modes
+are one-shot.
 
 ```bash
 uv tool install "wisp-ai==0.1.0rc1"
