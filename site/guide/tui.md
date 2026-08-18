@@ -107,8 +107,10 @@ bindings. The panel moves below the conversation on narrow terminals and never r
 the session, or resolves an approval. Line and fallback fullscreen modes keep their textual `/help`
 summary.
 
-Prompt history holds up to 100 unique prompts and is **memory-only** — never written to session
-JSONL, configuration, or a cache, so prompts containing secrets are not silently persisted.
+The searchable prompt-history index holds up to 100 unique prompts and is memory-only; `/history`
+does not create a separate on-disk cache. Submitted user messages still become part of the active
+session's persistent JSONL transcript under the configured session directory. Do not put secrets in
+prompts, and delete or protect session files according to their contents.
 
 ## Modes
 

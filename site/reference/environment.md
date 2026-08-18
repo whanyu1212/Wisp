@@ -8,13 +8,13 @@ title: Environment variables
 |----------|---------|
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
-| `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
+| `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
 | `WISP_OPENAI_COMPATIBLE_CONFIG` | JSON object configuring one OpenAI-compatible endpoint; overrides the user-settings `openai_compatible` object |
 | `WISP_TRUST` | Trust the current project for one process: `1` to opt in, `0` to force untrusted |
-| `WISP_TRUST_FILE` | Relocate the global trust store; must be an absolute path outside the repository |
+| `WISP_TRUST_FILE` | Relocate the global trust store; must be absolute, but is otherwise accepted as supplied |
 | `WISP_EFFORT` | Reasoning effort override |
 | `WISP_RETRY_MAX_RETRIES` | Provider retry count; defaults to `2`, set `0` to disable |
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
@@ -45,3 +45,7 @@ environment.
 `WISP_TRUST` and `WISP_TRUST_FILE` are read only from the real process environment, never from
 project files, and `WISP_TRUST` is never persisted — see
 [Tools & safety](../guide/tools-and-safety#project-trust).
+
+`WISP_MODE` applies only when neither a mode nor a prompt is supplied on the command line. For
+example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
+`wisp -p "hello" --mode json` for a machine-readable prompt run.

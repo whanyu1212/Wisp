@@ -65,8 +65,9 @@ wisp trust forget [path]   # remove the decision so Wisp can prompt again
   to force untrusted mode.
 - `WISP_TRUST` is read only from the real process environment, never from project files, and is never
   persisted.
-- `WISP_TRUST_FILE` may relocate the global trust store, but only to an absolute path outside the
-  repository. A relative value is rejected.
+- `WISP_TRUST_FILE` may relocate the global trust store only to an absolute path. Relative values
+  are rejected in favor of `~/.wisp/trust.json`; an absolute path is otherwise accepted even when
+  it points inside the repository, so choose a user-controlled location.
 
 ## MCP tools
 

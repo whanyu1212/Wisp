@@ -35,7 +35,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--model NAME` | Override the selected provider's model | `WISP_MODEL` |
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
-| `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` |
+| `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
 | `--tui-renderer line\|fullscreen\|textual` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
@@ -45,6 +45,10 @@ the dedicated `wisp tui` command are listed separately below.
 | `--yes`, `--allow-unsafe-tool-execution` | Pre-approve mutating and command tools | — |
 | `--max-tool-iterations N` | Cap model/tool rounds; omitted means uncapped | — |
 | `--help` | Show generated help and exit | — |
+
+`WISP_MODE` supplies a default only when the invocation has neither an explicit `--mode` nor
+`-p`/`--prompt`. Prompt invocations keep text mode unless `--mode json` is passed explicitly; for
+example, `WISP_MODE=json wisp -p "hello"` does not select JSON output.
 
 Explicit command-line values override their environment and settings-file equivalents. `--resume`
 and `--continue` are mutually exclusive, and `--max-tool-iterations` must be zero or greater.
