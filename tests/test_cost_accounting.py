@@ -146,6 +146,27 @@ def test_estimator_normalizes_codex_cache_buckets_before_pricing_lookup() -> Non
     assert estimate.unavailable_reason == "pricing_unavailable"
 
 
+def test_estimator_normalizes_deepseek_cache_hits_before_pricing_lookup() -> None:
+    estimate = CostEstimator(ModelRegistry(builtin_catalog()))(
+        "deepseek",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        TokenUsage(
+            input_tokens=1_000,
+            output_tokens=500,
+            total_tokens=1_500,
+            cache_read_input_tokens=400,
+        ),
+    )
+
+    assert estimate.billable is not None
+    assert estimate.billable.input_tokens == 600
+    assert estimate.billable.cache_read_input_tokens == 400
+    assert estimate.billable.cache_write_input_tokens == 0
+    assert estimate.estimated_usd is None
+    assert estimate.unavailable_reason == "pricing_unavailable"
+
+
 def test_estimator_prices_xai_like_openai_responses_usage() -> None:
     estimate = CostEstimator(ModelRegistry(builtin_catalog()))(
         "xai",

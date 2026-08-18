@@ -4,6 +4,7 @@ from wisp.retry import RetryPolicy, RetrySettings
 
 from .anthropic import AnthropicProvider
 from .base import ContextOverflowError, ToolCallResult, ToolSpec
+from .deepseek import DeepSeekProvider
 from .events import (
     ProviderEvent,
     ProviderFailureKind,
@@ -27,6 +28,7 @@ from .xai import XAIProvider
 __all__ = [
     "AnthropicProvider",
     "ContextOverflowError",
+    "DeepSeekProvider",
     "FakeProvider",
     "GoogleProvider",
     "OpenAICodexProvider",

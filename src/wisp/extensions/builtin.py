@@ -6,6 +6,7 @@ from wisp.auth.storage import JsonAuthStore
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
+from wisp.providers.deepseek import DeepSeekProvider
 from wisp.providers.fake import FakeProvider
 from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
@@ -62,6 +63,7 @@ def activate(
     api.register_provider(FakeProvider())
     api.register_provider(OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     api.register_provider(XAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+    api.register_provider(DeepSeekProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     if openai_compatible is not None:
         api.register_provider(
             OpenAICompatibleProvider(

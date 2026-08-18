@@ -13,6 +13,7 @@ from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.catalog import ModelRegistry, effective_catalog
+from wisp.providers.deepseek import DeepSeekProvider
 from wisp.providers.fake import FakeProvider
 from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
@@ -262,7 +263,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
         return runtime.providers.names(), runtime.tools.names(), runtime.commands.names()
 
     assert anyio.run(run) == (
-        ("fake", "openai", "xai", "openai-codex", "anthropic", "google"),
+        ("fake", "openai", "xai", "deepseek", "openai-codex", "anthropic", "google"),
         ("read", "write", "edit", "bash", "grep", "find", "ls", "skill"),
         (
             "help",
@@ -443,6 +444,7 @@ def test_build_runtime_passes_stored_auth_resolver_to_builtin_providers(
             (runtime.providers.get("openai"), OpenAIProvider),
             (runtime.providers.get("openai-codex"), OpenAICodexProvider),
             (runtime.providers.get("xai"), XAIProvider),
+            (runtime.providers.get("deepseek"), DeepSeekProvider),
             (runtime.providers.get("anthropic"), AnthropicProvider),
             (runtime.providers.get("google"), GoogleProvider),
         )

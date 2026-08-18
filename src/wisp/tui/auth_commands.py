@@ -233,6 +233,13 @@ class AuthCommands:
                 methods=(self._api_key_method("xai", "xAI API key", store.get("xai")),),
             ),
             ConnectionProviderStatus(
+                id="deepseek",
+                label="DeepSeek",
+                methods=(
+                    self._api_key_method("deepseek", "DeepSeek API key", store.get("deepseek")),
+                ),
+            ),
+            ConnectionProviderStatus(
                 id="anthropic",
                 label="Anthropic",
                 methods=(

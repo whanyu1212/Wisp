@@ -138,7 +138,7 @@ def format_usd(amount: Decimal) -> str:
 def _billable_usage(provider: str, usage: TokenUsage) -> BillableTokenUsage | None:
     cache_read = usage.cache_read_input_tokens or 0
     cache_write = usage.cache_write_input_tokens or 0
-    if provider in {"openai", "openai-codex", "xai"}:
+    if provider in {"deepseek", "openai", "openai-codex", "xai"}:
         if cache_read + cache_write > usage.input_tokens:
             return None
         input_tokens = usage.input_tokens - cache_read - cache_write

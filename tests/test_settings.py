@@ -354,7 +354,7 @@ def test_openai_compatible_endpoint_validation(tmp_path: Path) -> None:
                 }
             }
         )
-    for reserved_name in ("openai", "gemini", "xai"):
+    for reserved_name in ("openai", "gemini", "xai", "deepseek"):
         with pytest.raises(
             ValidationError,
             match="conflicts with built-in provider or credential namespace",

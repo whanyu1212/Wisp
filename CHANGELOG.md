@@ -11,6 +11,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Added first-class DeepSeek support with streamed thinking, reasoning-preserving tool
+  continuations, API-key authentication, automatic cache telemetry, and model catalog metadata.
 - Added first-class xAI Grok support through the stateful Responses API, including streamed
   reasoning, native tool-call continuation, API-key authentication, and model catalog metadata.
 - Preserved RPC command ordering when changing providers or models so configuration waits for

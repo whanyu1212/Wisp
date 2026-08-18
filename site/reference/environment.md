@@ -6,7 +6,7 @@ title: Environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `openai-compatible`, `anthropic`, `google`, or `fake` |
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
@@ -29,6 +29,7 @@ title: Environment variables
 |---|---|
 | `OPENAI_API_KEY` | `openai` |
 | `XAI_API_KEY` | `xai` |
+| `DEEPSEEK_API_KEY` | `deepseek` |
 | `ANTHROPIC_API_KEY` | `anthropic` |
 | `GOOGLE_API_KEY` · `GEMINI_API_KEY` | `google` |
 | `<CUSTOM_PROVIDER>_API_KEY` | A custom OpenAI-compatible provider; hyphens become underscores |

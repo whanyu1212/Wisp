@@ -73,7 +73,7 @@ wisp
 
 Wisp defaults to OpenAI Codex subscription access. Type `/connect` to open the provider panel, pick
 **OpenAI → ChatGPT Plus/Pro**, and complete the device-code flow. The same panel accepts masked API
-keys for OpenAI, xAI, Anthropic, and Google. Then ask for something:
+keys for OpenAI, xAI, DeepSeek, Anthropic, and Google. Then ask for something:
 
 ```text
 explain the architecture of this repository

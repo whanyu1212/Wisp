@@ -44,6 +44,7 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderRetrying,
     ProviderTextDelta,
+    ProviderThinkingDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
     ToolCall,
@@ -97,7 +98,11 @@ class OpenAICompatibleProvider:
         auth_resolver: ProviderAuthResolver | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
-        self.name = validate_openai_compatible_provider_name(provider_name)
+        self.name = (
+            type(self).name
+            if provider_name == OPENAI_COMPATIBLE_PROVIDER_NAME
+            else validate_openai_compatible_provider_name(provider_name)
+        )
         self.default_model: str | None = default_model
         self._base_url = base_url
         self._requires_api_key = requires_api_key
@@ -182,6 +187,7 @@ class OpenAICompatibleProvider:
         yield ProviderResponseStarted(model=selected_model)
         response_id: str | None = None
         chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         accumulators: dict[int, _ToolCallAccumulator] = {}
         finish_reason: str | None = None
         usage: ProviderUsage | None = None
@@ -191,11 +197,15 @@ class OpenAICompatibleProvider:
             async for chunk in native_stream:
                 response_id = chunk.id or response_id
                 if chunk.usage is not None:
-                    usage = _usage_from_chat(chunk)
+                    usage = self._usage_from_chat(chunk)
                 for choice in chunk.choices:
                     if choice.index != 0:
                         continue
                     delta = choice.delta
+                    reasoning = self._reasoning_delta(delta)
+                    if reasoning:
+                        reasoning_chunks.append(reasoning)
+                        yield ProviderThinkingDelta(delta=reasoning)
                     text = delta.content or delta.refusal
                     if text:
                         chunks.append(text)
@@ -284,10 +294,10 @@ class OpenAICompatibleProvider:
         )
         if continuation_id is not None:
             previous = self._require_continuation(previous_response_id)
-            assistant: ChatPayload = (
-                _assistant_tool_message("".join(chunks), tool_calls)
-                if tool_calls
-                else {"role": "assistant", "content": "".join(chunks) or None}
+            assistant = self._assistant_replay_message(
+                content="".join(chunks),
+                reasoning_content="".join(reasoning_chunks),
+                tool_calls=tool_calls,
             )
             replay = (
                 *previous,
@@ -339,28 +349,69 @@ class OpenAICompatibleProvider:
         }
         if tools:
             kwargs["tools"] = [_tool_spec_to_chat(tool) for tool in tools]
-        if effort is not None:
-            kwargs["reasoning_effort"] = effort
+        kwargs.update(self._request_options(effort=effort))
         create = cast(Callable[..., Awaitable[object]], client.chat.completions.create)
         stream = await create(**kwargs)
         return cast(AsyncIterator[ChatCompletionChunk], stream)
+
+    def _request_options(self, *, effort: str | None) -> dict[str, object]:
+        """Return endpoint-specific Chat Completions request fields."""
+
+        return {"reasoning_effort": effort} if effort is not None else {}
+
+    def _reasoning_delta(self, delta: object) -> str | None:
+        """Extract an optional provider-specific streamed reasoning fragment."""
+
+        del delta
+        return None
+
+    def _assistant_replay_message(
+        self,
+        *,
+        content: str,
+        reasoning_content: str,
+        tool_calls: Sequence[ToolCall],
+    ) -> ChatPayload:
+        """Build the assistant row retained in provider-local continuation state."""
+
+        del reasoning_content
+        if tool_calls:
+            return _assistant_tool_message(content, tool_calls)
+        return {"role": "assistant", "content": content or None}
+
+    def _usage_from_chat(self, chunk: ChatCompletionChunk) -> ProviderUsage | None:
+        """Normalize endpoint usage fields."""
+
+        return _usage_from_chat(chunk)
+
+    def _provider_api_key_environment(self) -> str:
+        return openai_compatible_api_key_environment(self.name)
+
+    def _fallback_api_key_environment(self) -> str | None:
+        return OPENAI_COMPATIBLE_API_KEY_ENV
 
     async def _client_or_create(self) -> AsyncOpenAI:
         if self._client_is_injected:
             assert self._client is not None
             return self._client
 
-        provider_api_key_env = openai_compatible_api_key_environment(self.name)
+        provider_api_key_env = self._provider_api_key_environment()
+        fallback_api_key_env = self._fallback_api_key_environment()
         api_key = self._api_key or _normalize_optional(os.environ.get(provider_api_key_env))
-        if api_key is None:
-            api_key = _normalize_optional(os.environ.get(OPENAI_COMPATIBLE_API_KEY_ENV))
+        if api_key is None and fallback_api_key_env is not None:
+            api_key = _normalize_optional(os.environ.get(fallback_api_key_env))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
             if self._requires_api_key:
+                fallback_hint = (
+                    f" (fallback: {fallback_api_key_env})"
+                    if fallback_api_key_env is not None
+                    else ""
+                )
                 raise ProviderConfigurationError(
                     f"{self.name} credentials are required; run `/connect {self.name}` in the TUI "
-                    f"or set {provider_api_key_env} (fallback: {OPENAI_COMPATIBLE_API_KEY_ENV})"
+                    f"or set {provider_api_key_env}{fallback_hint}"
                 )
             api_key = "not-required"
         if self._client is not None and self._client_api_key == api_key:
