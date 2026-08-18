@@ -18,6 +18,7 @@ from wisp.providers.catalog import (
     effective_catalog,
     user_catalog_path,
 )
+from wisp.providers.deepseek import DEFAULT_DEEPSEEK_MODEL
 from wisp.providers.google import DEFAULT_GOOGLE_MODEL
 from wisp.providers.openai import DEFAULT_OPENAI_MODEL
 from wisp.providers.openai_codex import DEFAULT_OPENAI_CODEX_MODEL
@@ -394,6 +395,10 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "claude-opus-4-6",
             "claude-sonnet-4-6",
         ),
+        "deepseek": (
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        ),
         "google": (
             "gemini-3.5-flash",
             "gemini-3.1-flash-lite",
@@ -469,6 +474,7 @@ def test_builtin_catalog_defaults_match_provider_implementations() -> None:
         "anthropic": DEFAULT_ANTHROPIC_MODEL,
         "google": DEFAULT_GOOGLE_MODEL,
         "xai": DEFAULT_XAI_MODEL,
+        "deepseek": DEFAULT_DEEPSEEK_MODEL,
     }
 
     for entry in builtin_catalog().providers:

@@ -9,6 +9,7 @@ title: Providers & auth
 | `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
 | `openai` | Stored API key or `OPENAI_API_KEY` |
 | `xai` | Stored API key or `XAI_API_KEY` |
+| `deepseek` | Stored API key or `DEEPSEEK_API_KEY` |
 | Custom OpenAI-compatible name | Stored API key, `<PROVIDER_NAME>_API_KEY`, or fallback `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings or `WISP_OPENAI_COMPATIBLE_CONFIG` |
 | `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
 | `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
@@ -17,7 +18,20 @@ title: Providers & auth
 ```bash
 wisp -p "hello" --provider anthropic --model claude-sonnet-5
 wisp -p "explain this repository" --provider xai --model grok-4.6
+wisp -p "review this change" --provider deepseek --model deepseek-v4-pro
 ```
+
+## DeepSeek Chat Completions
+
+The built-in `deepseek` provider uses DeepSeek's OpenAI-format Chat Completions API at
+`https://api.deepseek.com`. Set `DEEPSEEK_API_KEY` or store a key with `/connect deepseek`.
+Wisp enables thinking mode, streams reasoning separately from final text, and preserves DeepSeek's
+native `reasoning_content` inside provider-local continuation state so thinking-mode tool rounds can
+be continued correctly. Context caching is automatic on DeepSeek's service.
+
+The model catalog lists `deepseek-v4-pro` and `deepseek-v4-flash`, each with `low`, `high`, and
+`max` effort. DeepSeek's peak/off-peak prices are not currently estimated because Wisp's catalog
+does not yet represent time-of-day rates.
 
 ## xAI Responses API
 

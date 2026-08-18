@@ -347,6 +347,31 @@ models = [
 "gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
+name = "deepseek"
+display_name = "DeepSeek"
+default_model = "deepseek-v4-pro"
+docs_url = "https://api-docs.deepseek.com/"
+# DeepSeek's current OpenAI-format text models support streamed thinking and
+# client-defined function tools. Pricing is intentionally omitted because its
+# peak/off-peak schedule cannot be represented by the catalog's date bands.
+models = [
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+]
+
+[providers.context_windows]
+"deepseek-v4-pro" = 1000000
+"deepseek-v4-flash" = 1000000
+
+[providers.model_lifecycle]
+"deepseek-v4-pro" = "stable"
+"deepseek-v4-flash" = "stable"
+
+[providers.effort_levels]
+"deepseek-v4-pro" = ["low", "high", "max"]
+"deepseek-v4-flash" = ["low", "high", "max"]
+
+[[providers]]
 name = "xai"
 display_name = "xAI"
 default_model = "grok-4.6"

@@ -31,7 +31,7 @@ the dedicated `wisp tui` command are listed separately below.
 |---|---|---|
 | `--version` | Print `wisp VERSION` and exit | — |
 | `-p`, `--prompt TEXT` | Run one prompt and exit | — |
-| `--provider NAME` | Select a provider such as `openai-codex`, `anthropic`, or `fake` | `WISP_PROVIDER` |
+| `--provider NAME` | Select a provider such as `openai-codex`, `deepseek`, `anthropic`, or `fake` | `WISP_PROVIDER` |
 | `--model NAME` | Override the selected provider's model | `WISP_MODEL` |
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |

@@ -237,6 +237,7 @@ def test_serializes_tools_effort_and_fragmented_parallel_tool_calls() -> None:
     assert completed.finish_reason == "tool_calls"
     request = completions.calls[0]
     assert request["reasoning_effort"] == "high"
+    assert "extra_body" not in request
     assert request["tools"] == [
         {
             "type": "function",
