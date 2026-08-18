@@ -1182,12 +1182,15 @@ def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
     assert "color: $accent" in TextualTui.CSS
 
 
-def test_denied_role_uses_warning_instead_of_execution_error_color() -> None:
+@pytest.mark.parametrize("role", ["approved", "denied", "error"])
+def test_semantic_surface_roles_use_contrast_adjusted_text(role: str) -> None:
     from wisp.tui.textual_app import TextualTui
 
-    denied_rule = TextualTui.CSS.split(".message--denied", 1)[1].split("}", 1)[0]
-    assert "$warning" in denied_rule
-    assert "$error" not in denied_rule
+    semantic_role = {"approved": "success", "denied": "warning", "error": "error"}[role]
+    rule = TextualTui.CSS.split(f".message--{role}", 1)[1].split("}", 1)[0]
+
+    assert f"background: ${semantic_role}-muted;" in rule
+    assert f"color: $text-{semantic_role};" in rule
 
 
 def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
@@ -1303,28 +1306,26 @@ def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr:
     assert contrast_ratio(getattr(WISP_THEME_DARK, color_attr), WISP_THEME_DARK.background) >= 4.5
 
 
-def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() -> None:
-    # Textual's auto-derived success/error pairs back general UI chrome. Diffs
-    # no longer use them — see the dedicated diff-color test below — but any
-    # widget pairing text-* on *-muted still depends on this holding.
+@pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])
+@pytest.mark.parametrize("role", ["success", "warning", "error"])
+def test_derived_semantic_muted_pairs_meet_text_contrast_target(theme_name: str, role: str) -> None:
+    # Textual auto-derives the muted surfaces used by approved, denied, and error
+    # transcript rows. Resolve every registered theme through a live app so these
+    # assertions cover the actual text/background pairs handed to the painter.
     from wisp.tui.textual_app import TextualTui
     from wisp.tui.theme import contrast_ratio
 
-    async def scenario() -> dict[str, str]:
+    async def scenario() -> tuple[str, str]:
         app = TextualTui()
         async with app.run_test() as pilot:
-            app.theme = "wisp-light"
+            app.theme = theme_name
             await pilot.pause()
             variables = app.get_css_variables()
-            return {
-                key: variables[key]
-                for key in ("text-success", "success-muted", "text-error", "error-muted")
-            }
+            return variables[f"text-{role}"], variables[f"{role}-muted"]
 
-    variables = anyio.run(scenario)
+    text, background = anyio.run(scenario)
 
-    assert contrast_ratio(variables["text-success"], variables["success-muted"]) >= 4.5
-    assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
+    assert contrast_ratio(text, background) >= 4.5
 
 
 @pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])

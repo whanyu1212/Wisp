@@ -161,7 +161,13 @@ WISP_THEME_GROVE = Theme(
     surface="#333c43",
     panel="#374149",
     dark=True,
-    variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aab3aa"),
+    variables={
+        **_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aab3aa"),
+        # Textual's default contrast tints narrowly miss AA on Grove's muted
+        # semantic surfaces, so keep the hues and lift only the text roles.
+        "text-warning": "#ebd4ad",
+        "text-error": "#f5bdbe",
+    },
 )
 
 WISP_THEME_WAVE = Theme(

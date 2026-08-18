@@ -321,21 +321,21 @@ class TextualTui(App[None]):
     .message--approved {
         border-left: outer $success;
         background: $success-muted;
-        color: $success;
+        color: $text-success;
         padding-right: 1;
     }
 
     .message--denied {
         border-left: outer $warning;
         background: $warning-muted;
-        color: $warning;
+        color: $text-warning;
         padding-right: 1;
     }
 
     .message--error {
         border-left: outer $error;
         background: $error-muted;
-        color: $error;
+        color: $text-error;
         padding-right: 1;
     }
 
