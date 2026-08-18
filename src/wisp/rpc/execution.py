@@ -3354,14 +3354,33 @@ def handle_rpc_configure_command(
                 configure_overrides.effort = None
                 configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
-        selected_provider = auto_switch_provider_for_model(
-            model,
-            command_id=command_id,
-            current_provider=selected_provider,
-            runtime=runtime,
-            configure_overrides=configure_overrides,
-            write_event=write_event,
-        )
+        try:
+            selected_provider = auto_switch_provider_for_model(
+                model,
+                command_id=command_id,
+                current_provider=selected_provider,
+                runtime=runtime,
+                configure_overrides=configure_overrides,
+                write_event=write_event,
+            )
+        except AmbiguousModelError as exc:
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message=f"{exc}; specify provider explicitly",
+                write_event=write_event,
+            )
+            return
+        except UnknownProviderError as exc:
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message=(
+                    f"Model {model!r} resolves to provider {exc.name!r}, which is not available"
+                ),
+                write_event=write_event,
+            )
+            return
         if not has_effort:
             selected_effort = None
             if configure_overrides is not None:
@@ -3415,14 +3434,11 @@ def auto_switch_provider_for_model(
 ) -> Provider:
     try:
         resolved_provider, _entry = runtime.models.resolve(model, prefer=current_provider.name)
-    except (UnknownModelError, AmbiguousModelError):
+    except UnknownModelError:
         return current_provider
     if resolved_provider == current_provider.name:
         return current_provider
-    try:
-        new_provider = runtime.providers.get(resolved_provider)
-    except UnknownProviderError:
-        return current_provider
+    new_provider = runtime.providers.get(resolved_provider)
     write_event(
         ModelProviderAutoSwitched(command_id=command_id, provider=resolved_provider, model=model)
     )

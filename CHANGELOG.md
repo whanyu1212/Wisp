@@ -15,6 +15,8 @@ This log starts at schema v27. Earlier history is in the git log.
   reasoning, native tool-call continuation, API-key authentication, and model catalog metadata.
 - Preserved RPC command ordering when changing providers or models so configuration waits for
   active session work and takes effect before later prompts.
+- Rejected ambiguous bare model selections when the active provider cannot disambiguate them,
+  preventing cataloged models from being silently applied to an unrelated provider.
 
 ## 0.1.0rc2 — 2026-08-18
 

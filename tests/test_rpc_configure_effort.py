@@ -18,6 +18,7 @@ from functools import partial
 from tests.cli_support import *
 from tests.cli_support import _test_model_registry
 from tests.test_coding_session import CapturingProvider
+from wisp.events import ErrorEvent, RpcCommandFinished, WispEvent
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.execution import handle_rpc_configure_command
 
@@ -224,6 +225,87 @@ def test_model_only_configure_does_not_override_provider_without_auto_switch(
 
     assert overrides.provider is None
     assert overrides.model == "custom-model"
+
+
+def test_ambiguous_model_configure_is_atomic_across_agent_and_overrides(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path),
+        model="capturing-model",
+        effort="low",
+        auto_compaction_enabled=False,
+    )
+    overrides = _RpcConfigureOverrides()
+    events: list[WispEvent] = []
+
+    handle_rpc_configure_command(
+        {
+            "model": "gpt-5.6",
+            "effort": "high",
+            "auto_compaction_enabled": True,
+            "mode": "plan",
+        },
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+        write_event=events.append,
+    )
+
+    assert agent.provider is provider
+    assert agent.model == "capturing-model"
+    assert agent.effort == "low"
+    assert agent.auto_compaction_enabled is False
+    assert agent.mode == "build"
+    assert overrides == _RpcConfigureOverrides()
+    assert isinstance(events[0], ErrorEvent)
+    assert events[0].message == (
+        "Model 'gpt-5.6' is available from multiple providers: openai, openai-codex; "
+        "specify provider explicitly"
+    )
+    assert isinstance(events[1], RpcCommandFinished)
+    assert events[1].ok is False
+
+
+def test_model_only_configure_rejects_catalog_provider_missing_from_runtime(
+    tmp_path: Path,
+) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path),
+        model="capturing-model",
+        effort="high",
+        auto_compaction_enabled=False,
+    )
+    overrides = _RpcConfigureOverrides()
+    events: list[WispEvent] = []
+
+    handle_rpc_configure_command(
+        {"model": "gpt-5.5-pro"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+        write_event=events.append,
+    )
+
+    assert agent.provider is provider
+    assert agent.model == "capturing-model"
+    assert agent.effort == "high"
+    assert agent.auto_compaction_enabled is False
+    assert overrides == _RpcConfigureOverrides()
+    assert isinstance(events[0], ErrorEvent)
+    assert events[0].message == (
+        "Model 'gpt-5.5-pro' resolves to provider 'openai', which is not available"
+    )
+    assert isinstance(events[1], RpcCommandFinished)
+    assert events[1].ok is False
 
 
 def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> None:
