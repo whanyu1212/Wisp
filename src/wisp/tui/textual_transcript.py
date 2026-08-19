@@ -586,7 +586,15 @@ class TextualTranscriptController:
             len(self._settled_widgets) > self._settled_capacity
             or self._settled_durable_entry_count > self._durable_entry_capacity
         ):
-            evicted, evicted_entry_count = self._settled_widgets.popleft()
+            if self._surface.transcript_is_following():
+                evicted, evicted_entry_count = self._settled_widgets.popleft()
+            else:
+                # Preserve both the oldest mounted anchor and newest unseen output.
+                # Virtualize the settled widget immediately before the new tail; it
+                # remains recoverable from durable history in either direction.
+                eviction_index = -2 if len(self._settled_widgets) > 1 else -1
+                evicted, evicted_entry_count = self._settled_widgets[eviction_index]
+                del self._settled_widgets[eviction_index]
             self._settled_durable_entry_count -= evicted_entry_count
             self.forget_widget(evicted)
             self._surface.remove_live_transcript_widget(evicted)

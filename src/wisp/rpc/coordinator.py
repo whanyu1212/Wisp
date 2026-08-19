@@ -111,6 +111,7 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "get_skills",
     "trust",
 }
+_ACTIVE_PROMPT_READ_COMMAND_TYPES = frozenset({"get_messages"})
 
 
 def _bypasses_active_command(command_type: str) -> bool:
@@ -145,6 +146,7 @@ class RpcCoordinator:
             raise ValueError("max_queued_commands must be non-negative")
         self.session_state = session_state
         self.running_command: _RpcRunningCommand | None = None
+        self.auxiliary_commands: dict[str, _RpcRunningCommand] = {}
         self.queued_commands: deque[dict[str, object]] = deque()
         self.pending_prompt_queue_commands: deque[dict[str, object]] = deque()
         self.input_closed = False
@@ -165,6 +167,10 @@ class RpcCoordinator:
 
         if self.running_command is not None and self.running_command.command_id == target_id:
             self.running_command.cancel_scope.cancel()
+            return _RpcCancelResult("running")
+        auxiliary = self.auxiliary_commands.get(target_id)
+        if auxiliary is not None:
+            auxiliary.cancel_scope.cancel()
             return _RpcCancelResult("running")
         for queue in (self.pending_prompt_queue_commands, self.queued_commands):
             queued_target = next(
@@ -187,7 +193,11 @@ class RpcCoordinator:
         """Async-dispatch variant used when event delivery applies backpressure."""
 
         while True:
-            if self.running_command is None and self._shutdown_is_next():
+            if (
+                self.running_command is None
+                and not self.auxiliary_commands
+                and self._shutdown_is_next()
+            ):
                 if await self._drain_buffered_events_before_shutdown(
                     receive,
                     dispatch=dispatch,
@@ -195,19 +205,28 @@ class RpcCoordinator:
                     command_type=command_type,
                 ):
                     return True
-            if self.running_command is None and self.pending_prompt_queue_commands:
+            if (
+                self.running_command is None
+                and not self.auxiliary_commands
+                and self.pending_prompt_queue_commands
+            ):
                 if await self._dispatch(
                     self.pending_prompt_queue_commands.popleft(), dispatch=dispatch
                 ):
                     return True
                 continue
-            if self.running_command is None and self.queued_commands:
+            if (
+                self.running_command is None
+                and not self.auxiliary_commands
+                and self.queued_commands
+            ):
                 if await self._dispatch(self.queued_commands.popleft(), dispatch=dispatch):
                     return True
                 continue
             if (
                 self.input_closed
                 and self.running_command is None
+                and not self.auxiliary_commands
                 and not self.pending_prompt_queue_commands
                 and not self.queued_commands
             ):
@@ -274,6 +293,10 @@ class RpcCoordinator:
         if isinstance(event, self._command_completed_type):
             completed = cast(_RpcCommandCompleted, event)
             running = self.running_command
+            auxiliary = self.auxiliary_commands.get(completed.command_id)
+            if auxiliary is not None and completed.command_type == auxiliary.command_type:
+                del self.auxiliary_commands[completed.command_id]
+                return False
             if (
                 running is not None
                 and completed.command_id == running.command_id
@@ -334,12 +357,34 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        new_session_waits_for_ordered_operation = (
-            selected_type == "new_session"
-            and running is not None
-            and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
+        if (
+            running is not None
+            and running.command_type in _PROMPT_RUN_COMMAND_TYPES
+            and selected_type in _ACTIVE_PROMPT_READ_COMMAND_TYPES
+            and command.get("allow_during_prompt") is True
+        ):
+            if self._outstanding_command_count() >= self._max_queued_commands:
+                await reject(
+                    command,
+                    "RPC command queue is full while another RPC command is running",
+                )
+                return False
+            previous_running = running
+            result = await dispatch(command, running)
+            auxiliary = result.running_command
+            self.running_command = previous_running
+            if auxiliary is not None and auxiliary is not previous_running:
+                self.auxiliary_commands[auxiliary.command_id] = auxiliary
+            return result.should_shutdown
+        auxiliary_read_pending = bool(self.auxiliary_commands)
+        new_session_waits_for_ordered_operation = selected_type == "new_session" and (
+            auxiliary_read_pending
+            or (
+                running is not None
+                and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
+            )
         )
-        if running is not None and (
+        if (running is not None or auxiliary_read_pending) and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
         ):
             await self._enqueue_command(command, queue=self.queued_commands, reject=reject)
@@ -368,6 +413,8 @@ class RpcCoordinator:
         if not isinstance(command_id, str) or not command_id:
             return None
         if self.running_command is not None and self.running_command.command_id == command_id:
+            return command_id
+        if command_id in self.auxiliary_commands:
             return command_id
         if any(
             queued.get("id") == command_id
@@ -409,11 +456,19 @@ class RpcCoordinator:
         queue: deque[dict[str, object]],
         reject: RpcReject,
     ) -> None:
-        queued_count = len(self.pending_prompt_queue_commands) + len(self.queued_commands)
-        if queued_count >= self._max_queued_commands:
+        if self._outstanding_command_count() >= self._max_queued_commands:
             await reject(command, "RPC command queue is full while another RPC command is running")
             return
         queue.append(command)
+
+    def _outstanding_command_count(self) -> int:
+        """Count queued and concurrent auxiliary work sharing the configured bound."""
+
+        return (
+            len(self.auxiliary_commands)
+            + len(self.pending_prompt_queue_commands)
+            + len(self.queued_commands)
+        )
 
 
 __all__ = ["RpcCoordinator"]

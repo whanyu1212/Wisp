@@ -182,6 +182,7 @@ class ScriptedController:
         self.skills_requests: list[str] = []
         self.mcp_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
+        self.message_after_requests: list[str | None] = []
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
         self.new_session_requests: list[str] = []
@@ -293,10 +294,14 @@ class ScriptedController:
         session_id: str | None = None,
         limit: int = 200,
         before_entry_id: str | None = None,
+        after_entry_id: str | None = None,
+        allow_during_prompt: bool = False,
         command_id: str | None = None,
     ) -> str:
+        del allow_during_prompt
         selected_id = command_id or f"messages-{len(self.messages_requests) + 1}"
         self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
+        self.message_after_requests.append(after_entry_id)
         await self._emit_scripted(
             self.messages_events,
             default=[

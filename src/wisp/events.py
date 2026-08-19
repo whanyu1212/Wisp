@@ -27,7 +27,7 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[33] = 33
+EVENT_SCHEMA_VERSION: Literal[34] = 34
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -52,6 +52,7 @@ MCP_STATUS_SCHEMA_VERSION = 30
 PACKAGE_SKILLS_SCHEMA_VERSION = 31
 CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
 TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
+RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION = 34
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -128,6 +129,7 @@ class WispEvent(BaseModel):
         31,
         32,
         33,
+        34,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -1117,6 +1119,7 @@ class RpcMessagesReported(WispEvent):
     messages: tuple[RpcMessageSnapshot, ...] = ()
     truncated: bool = False
     next_before_entry_id: str | None = None
+    next_after_entry_id: str | None = None
 
     @model_validator(mode="after")
     def _validate_schema_version(self) -> Self:
@@ -1138,10 +1141,20 @@ class RpcMessagesReported(WispEvent):
                 "RPC message skill-invocation metadata requires schema_version "
                 f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
             )
-        if self.next_before_entry_id is not None and not self.truncated:
+        if (
+            self.schema_version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION
+            and self.next_after_entry_id is not None
+        ):
             raise ValueError(
-                "RPC message reports cannot include next_before_entry_id unless truncated"
+                "RPC message forward cursors require schema_version "
+                f"{RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION} or newer"
             )
+        if (
+            self.next_before_entry_id is not None or self.next_after_entry_id is not None
+        ) and not self.truncated:
+            raise ValueError("RPC message reports cannot include a cursor unless truncated")
+        if self.next_before_entry_id is not None and self.next_after_entry_id is not None:
+            raise ValueError("RPC message report cursors are mutually exclusive")
         return self
 
     @model_serializer(mode="wrap")
@@ -1153,6 +1166,8 @@ class RpcMessagesReported(WispEvent):
                 for message in messages:
                     if isinstance(message, dict):
                         message.pop("tool_result", None)
+        if self.schema_version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION:
+            data.pop("next_after_entry_id", None)
         return data
 
 
@@ -1695,6 +1710,15 @@ def _require_current_schema(data: JsonObject) -> None:
                 "RPC message tool-result metadata requires schema_version "
                 f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
             )
+    if (
+        data.get("type") == "rpc.messages"
+        and version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION
+        and "next_after_entry_id" in data
+    ):
+        raise ValueError(
+            "RPC message forward cursors require schema_version "
+            f"{RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION} or newer"
+        )
     if data.get("type") in {"rpc.sessions", "rpc.session.selected"} and (
         version < RPC_SESSIONS_SCHEMA_VERSION
     ):

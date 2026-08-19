@@ -851,6 +851,69 @@ def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> N
     anyio.run(run)
 
 
+def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.newer_history_hook = None
+            self.appended: list[tuple[tuple[HistoricalTranscriptEntry, ...], str | None]] = []
+
+        def set_history_newer_page_request_hook(self, hook: object) -> None:
+            self.newer_history_hook = hook
+
+        def append_newer_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            next_after_entry_id: str | None,
+        ) -> str:
+            self.appended.append((entries, next_after_entry_id))
+            return "new-retained-front"
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="older",
+            )
+        )
+
+        assert callable(renderer.newer_history_hook)
+        await renderer.newer_history_hook("edge")
+        command_id = controller.messages_requests[-1][0]
+        assert controller.message_after_requests[-1] == "edge"
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=command_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "newer", entry_id="newer"),),
+                truncated=True,
+                next_after_entry_id="newer",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.appended == [
+            ((HistoricalTranscriptMessage(role="assistant", content="newer"),), "newer")
+        ]
+        await shell._request_previous_history_page()
+        assert controller.messages_requests[-1][3] == "new-retained-front"
+
+    anyio.run(run)
+
+
 def test_tui_shell_reloads_latest_history_after_retention_eviction() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -1271,8 +1334,11 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_send_failure() -> 
             session_id: str | None = None,
             limit: int = 200,
             before_entry_id: str | None = None,
+            after_entry_id: str | None = None,
+            allow_during_prompt: bool = False,
             command_id: str | None = None,
         ) -> str:
+            del after_entry_id, allow_during_prompt
             selected_id = command_id or "unexpected-history-page"
             self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
             if before_entry_id is not None:
@@ -1309,7 +1375,7 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_send_failure() -> 
     anyio.run(run)
 
 
-def test_tui_shell_reloads_latest_history_after_the_active_prompt_finishes() -> None:
+def test_tui_shell_reloads_latest_history_during_an_active_prompt() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
             super().__init__(_console()[0])
@@ -1340,25 +1406,19 @@ def test_tui_shell_reloads_latest_history_after_the_active_prompt_finishes() -> 
         assert callable(renderer.latest_history_hook)
         await renderer.latest_history_hook()
 
-        assert controller.messages_requests == []
-        assert shell._history_pagination is not None
-        assert shell._history_pagination.latest_reload_pending
-
-        await shell._finish_current_prompt(
-            RpcCommandFinished(
-                command_id="prompt-1",
-                command_type="prompt",
-                ok=True,
-            )
+        assert controller.messages_requests[-1][1:] == (
+            "target",
+            TUI_HISTORY_PAGE_LIMIT,
+            None,
         )
-
-        assert controller.messages_requests[-1][1:] == ("target", TUI_HISTORY_PAGE_LIMIT, None)
+        assert shell._history_pagination is not None
+        assert not shell._history_pagination.latest_reload_pending
         assert renderer.latest_history_captures == 1
 
     anyio.run(run)
 
 
-def test_tui_shell_defers_latest_history_while_prompt_submission_is_in_flight() -> None:
+def test_tui_shell_sends_latest_history_while_prompt_submission_is_in_flight() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
             super().__init__(_console()[0])
@@ -1384,9 +1444,13 @@ def test_tui_shell_defers_latest_history_while_prompt_submission_is_in_flight() 
         assert callable(renderer.latest_history_hook)
         await renderer.latest_history_hook()
 
-        assert controller.messages_requests == []
+        assert controller.messages_requests[-1][1:] == (
+            "target",
+            TUI_HISTORY_PAGE_LIMIT,
+            None,
+        )
         assert shell._history_pagination is not None
-        assert shell._history_pagination.latest_reload_pending
+        assert not shell._history_pagination.latest_reload_pending
 
     anyio.run(run)
 
@@ -1415,8 +1479,11 @@ def test_tui_shell_handles_immediate_history_page_events() -> None:
             session_id: str | None = None,
             limit: int = 200,
             before_entry_id: str | None = None,
+            after_entry_id: str | None = None,
+            allow_during_prompt: bool = False,
             command_id: str | None = None,
         ) -> str:
+            del after_entry_id, allow_during_prompt
             selected_id = command_id or "unexpected-history-page"
             self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
             assert self.shell is not None

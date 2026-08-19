@@ -65,7 +65,9 @@ class TextualHistorySurface(Protocol):
 
     def request_latest_history(self) -> bool: ...
 
-    def set_history_window_available(self, *, has_older: bool) -> None: ...
+    def request_newer_history(self, after_entry_id: str) -> bool: ...
+
+    def set_history_window_available(self, *, has_older: bool, has_newer: bool) -> None: ...
 
     def history_insertion_boundary(self, history_widgets: set[Widget]) -> Widget | None: ...
 
@@ -195,6 +197,7 @@ class TextualHistoryController:
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
         self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
+        self._next_newer_entry_id: str | None = None
 
     @property
     def retained_entry_count(self) -> int:
@@ -348,11 +351,15 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._discard_entries(self._window.prepend(retained))
+            evicted = self._window.prepend(retained)
+            evicted += self._complete_newest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
+            if evicted:
+                self._next_newer_entry_id = None
             # A durable page arrived because the reader is already at the top.
             # Reveal its leading slice now so an exhausted page cursor never hides
             # fetched entries behind Transcript's durable-page request gate.
-            if self._surface.history_is_at_top():
+            if self._surface.history_is_at_top() and not self._surface.history_is_following():
                 self._window.shift_older()
             self._reconcile()
         finally:
@@ -372,6 +379,94 @@ class TextualHistoryController:
             self._surface.finish_history_render()
             self._surface.finish_history_prepend()
         return True
+
+    def shift_newer(self) -> bool:
+        """Move toward newer retained history, paging after the local edge."""
+
+        if not self._window.shift_newer():
+            if self._window.latest_is_retained or not self._window.entries:
+                return False
+            cursor = self._next_newer_entry_id or _history_entry_cursor(
+                self._window.entries[-1].entry
+            )
+            return cursor is not None and self._surface.request_newer_history(cursor)
+        self._surface.begin_history_render()
+        try:
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+        return True
+
+    def append_newer_entries(
+        self,
+        entries: Iterable[HistoricalTranscriptEntry],
+        *,
+        next_after_entry_id: str | None,
+    ) -> str | None:
+        """Append one newer page and return its new backward cursor after eviction."""
+
+        has_more = next_after_entry_id is not None
+        incoming = tuple(entries)
+        if not has_more:
+            incoming = self._exclude_live_tail(
+                incoming,
+                live_entries=tuple(self._live_entries),
+            )
+        retained = self._retain(incoming)
+        next_before_entry_id = None
+        self._surface.begin_history_render()
+        try:
+            evicted = self._window.append(retained, follow_tail=False)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
+            if evicted and self._window.entries:
+                next_before_entry_id = _history_entry_cursor(self._window.entries[0].entry)
+            self._next_newer_entry_id = next_after_entry_id
+            if not has_more:
+                self._window.mark_latest_retained()
+            self._window.shift_newer()
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+        return next_before_entry_id
+
+    def _complete_oldest_message_group_eviction(
+        self,
+        evicted: tuple[_RetainedHistoryEntry, ...],
+    ) -> tuple[_RetainedHistoryEntry, ...]:
+        """Evict the rest of an RPC message split across the oldest boundary."""
+
+        retained = self._window.entries
+        if not evicted or not retained:
+            return ()
+        boundary_id = _history_entry_id(evicted[-1].entry)
+        if boundary_id is None or _history_entry_id(retained[0].entry) != boundary_id:
+            return ()
+        count = 0
+        for item in retained:
+            if _history_entry_id(item.entry) != boundary_id:
+                break
+            count += 1
+        return self._window.discard_oldest(count)
+
+    def _complete_newest_message_group_eviction(
+        self,
+        evicted: tuple[_RetainedHistoryEntry, ...],
+    ) -> tuple[_RetainedHistoryEntry, ...]:
+        """Evict the rest of an RPC message split across the newest boundary."""
+
+        retained = self._window.entries
+        if not evicted or not retained:
+            return ()
+        boundary_id = _history_entry_id(evicted[0].entry)
+        if boundary_id is None or _history_entry_id(retained[-1].entry) != boundary_id:
+            return ()
+        count = 0
+        for item in reversed(retained):
+            if _history_entry_id(item.entry) != boundary_id:
+                break
+            count += 1
+        return self._window.discard_newest(count)
 
     def show_oldest(self) -> bool:
         """Move the mounted window to the oldest retained history."""
@@ -424,7 +519,8 @@ class TextualHistoryController:
             self._clear(clear_live=False)
             retained = self._retain(reloaded_entries)
             self._remap_transferred_history_entry_ids(retained)
-            self._window.replace(retained)
+            evicted = self._window.replace(retained)
+            self._complete_oldest_message_group_eviction(evicted)
             self._reconcile()
             self._surface.follow_transcript_tail_after_refresh()
         finally:
@@ -463,7 +559,9 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._discard_entries(self._window.append(self._retain(recovered), follow_tail=False))
+            evicted = self._window.append(self._retain(recovered), follow_tail=False)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
             self._reconcile()
         finally:
             self._surface.finish_history_render()
@@ -483,6 +581,7 @@ class TextualHistoryController:
         self._window.clear()
         self._widgets.clear()
         self._next_entry_id = 0
+        self._next_newer_entry_id = None
         if clear_live:
             self._live_entries.clear()
             self._transferred_history_entry_ids.clear()
@@ -495,7 +594,9 @@ class TextualHistoryController:
         self._surface.begin_history_render()
         try:
             following = self._surface.history_is_following()
-            self._discard_entries(self._window.append(self._retain(entries), follow_tail=following))
+            evicted = self._window.append(self._retain(entries), follow_tail=following)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
             self._reconcile()
             if following:
                 self._surface.follow_transcript_tail_after_refresh()
@@ -625,7 +726,10 @@ class TextualHistoryController:
         )
         visible_ids = {item.id for item in visible}
         reposition_widgets: set[Widget] = set()
-        self._surface.set_history_window_available(has_older=not self._window.is_at_oldest)
+        self._surface.set_history_window_available(
+            has_older=not self._window.is_at_oldest,
+            has_newer=not self._window.is_at_latest or not self._window.latest_is_retained,
+        )
         for item_id, widget in tuple(self._widgets.items()):
             if item_id not in self._widgets:
                 continue
@@ -1048,7 +1152,13 @@ def _history_entry_id(entry: HistoricalTranscriptEntry) -> str | None:
         return entry.entry_id
     if isinstance(entry, HistoricalSkillInvocation):
         return entry.entry_id
-    return entry.card_id
+    return entry.entry_id or entry.card_id
+
+
+def _history_entry_cursor(entry: HistoricalTranscriptEntry) -> str | None:
+    """Return the persisted message id used by directional RPC paging."""
+
+    return _history_entry_id(entry)
 
 
 def _same_durable_history_entry(

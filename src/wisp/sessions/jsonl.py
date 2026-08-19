@@ -210,6 +210,7 @@ class SessionMessagePage:
     messages: tuple[RpcMessageSnapshot, ...]
     truncated: bool
     next_before_entry_id: str | None
+    next_after_entry_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,6 +809,7 @@ class JsonlSession:
         *,
         limit: int = DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
         before_entry_id: str | None = None,
+        after_entry_id: str | None = None,
     ) -> SessionMessagePage:
         """Read a bounded active-path transcript page in chronological order."""
 
@@ -828,6 +830,7 @@ class JsonlSession:
                     path=self.path,
                     limit=limit,
                     before_entry_id=before_entry_id,
+                    after_entry_id=after_entry_id,
                 )
 
     def read_tree_page(
@@ -1805,19 +1808,29 @@ def _message_page_from_index(
     path: Path,
     limit: int,
     before_entry_id: str | None,
+    after_entry_id: str | None,
 ) -> SessionMessagePage:
     _validate_message_page_limit(limit)
+    if before_entry_id is not None and after_entry_id is not None:
+        raise ValueError("message page cursors are mutually exclusive")
     active_messages = index.messages
-    if before_entry_id is None:
-        candidates = active_messages
-    else:
-        cursor_index = index.positions.get(before_entry_id)
+    if after_entry_id is not None:
+        cursor_index = index.positions.get(after_entry_id)
         if cursor_index is None:
-            raise SessionError(f"Session message cursor not found: {before_entry_id}")
-        candidates = active_messages[:cursor_index]
-
-    truncated = len(candidates) > limit
-    selected = candidates[-limit:]
+            raise SessionError(f"Session message cursor not found: {after_entry_id}")
+        candidates = active_messages[cursor_index + 1 :]
+        truncated = len(candidates) > limit
+        selected = candidates[:limit]
+    else:
+        if before_entry_id is None:
+            candidates = active_messages
+        else:
+            cursor_index = index.positions.get(before_entry_id)
+            if cursor_index is None:
+                raise SessionError(f"Session message cursor not found: {before_entry_id}")
+            candidates = active_messages[:cursor_index]
+        truncated = len(candidates) > limit
+        selected = candidates[-limit:]
     text_budget = _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
     newest_first_messages = tuple(
         _rpc_message_snapshot(entry, text_budget=text_budget) for entry in reversed(selected)
@@ -1828,7 +1841,12 @@ def _message_page_from_index(
         active_leaf_id=index.active_leaf_id,
         messages=tuple(reversed(newest_first_messages)),
         truncated=truncated,
-        next_before_entry_id=selected[0].id if truncated and selected else None,
+        next_before_entry_id=(
+            selected[0].id if after_entry_id is None and truncated and selected else None
+        ),
+        next_after_entry_id=(
+            selected[-1].id if after_entry_id is not None and truncated and selected else None
+        ),
     )
 
 

@@ -228,7 +228,13 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             [
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
-                _RpcInputCommand({"id": "messages", "type": "get_messages"}),
+                _RpcInputCommand(
+                    {
+                        "id": "messages",
+                        "type": "get_messages",
+                        "allow_during_prompt": True,
+                    }
+                ),
                 _RpcInputCommand({"id": "sessions", "type": "get_sessions"}),
                 _RpcInputCommand({"id": "select", "type": "select_session"}),
                 _RpcInputCommand({"id": "clone", "type": "clone_session"}),
@@ -247,9 +253,9 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "pop", "type": "pop_queue"}),
                 _RpcInputCommand({"id": "clear", "type": "clear_queue"}),
                 _RpcPromptReady("prompt"),
+                _RpcCommandCompleted("messages", "get_messages", True, (), 1),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
-                _RpcCommandCompleted("messages", "get_messages", True, (), 2),
                 _RpcCommandCompleted("sessions", "get_sessions", True, (), 2),
                 _RpcCommandCompleted("select", "select_session", True, (), 2),
                 _RpcCommandCompleted("clone", "clone_session", True, (), 2),
@@ -295,6 +301,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
 
         assert dispatched == [
             "prompt",
+            "messages",
             "commands",
             "approval",
             "steer",
@@ -304,7 +311,6 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "pop",
             "clear",
             "queued",
-            "messages",
             "sessions",
             "select",
             "clone",
@@ -635,6 +641,180 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("navigate_session_tree")
         await assert_bypasses("unrevert_session_tree")
         await assert_bypasses("set_session_name")
+
+    anyio.run(scenario)
+
+
+def test_coordinator_runs_message_read_alongside_active_prompt() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        message_read = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert command["type"] == "get_messages"
+            assert running is prompt
+            return _RpcDispatchResult(message_read)
+
+        await coordinator.handle_event(
+            _RpcInputCommand(
+                {
+                    "id": "messages",
+                    "type": "get_messages",
+                    "allow_during_prompt": True,
+                }
+            ),
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is prompt
+        assert coordinator.auxiliary_commands == {"messages": message_read}
+
+        await coordinator.handle_event(
+            _RpcCommandCompleted("messages", "get_messages", True, (), 0),
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is prompt
+        assert coordinator.auxiliary_commands == {}
+
+    anyio.run(scenario)
+
+
+def test_coordinator_bounds_concurrent_message_reads_during_a_prompt() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_commands=2,
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        dispatched: list[str] = []
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert running is prompt
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, "get_messages", anyio.CancelScope())
+            )
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
+        for index in range(3):
+            await coordinator.handle_event(
+                _RpcInputCommand(
+                    {
+                        "id": f"messages-{index}",
+                        "type": "get_messages",
+                        "allow_during_prompt": True,
+                    }
+                ),
+                dispatch=dispatch,
+                reject=reject,
+                command_type=_command_type,
+            )
+
+        assert coordinator.running_command is prompt
+        assert dispatched == ["messages-0", "messages-1"]
+        assert set(coordinator.auxiliary_commands) == {"messages-0", "messages-1"}
+        assert rejected == [
+            (
+                "messages-2",
+                "RPC command queue is full while another RPC command is running",
+            )
+        ]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        auxiliary = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+        coordinator.auxiliary_commands[auxiliary.command_id] = auxiliary
+        coordinator.queued_commands.append({"id": "configure", "type": "configure"})
+        dispatched: list[str] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert running is None
+            dispatched.append(str(command["id"]))
+            return _RpcDispatchResult(
+                _RpcRunningCommand(
+                    str(command["id"]),
+                    str(command["type"]),
+                    anyio.CancelScope(),
+                )
+            )
+
+        await coordinator.handle_event(
+            _RpcInputCommand({"id": "later-prompt", "type": "prompt"}),
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [
+            {"id": "configure", "type": "configure"},
+            {"id": "later-prompt", "type": "prompt"},
+        ]
+
+        receiver = _Receiver(
+            [
+                _RpcCommandCompleted("messages", "get_messages", True, (), 0),
+                _RpcCommandCompleted("configure", "configure", True, (), 0),
+                _RpcCommandCompleted("later-prompt", "prompt", True, (), 0),
+                _RpcInputClosed(),
+            ]
+        )
+        await coordinator.run(
+            receiver,
+            dispatch=dispatch,
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == ["configure", "later-prompt"]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("command_type", ["new_session", "select_session"])
+def test_coordinator_queues_session_work_behind_auxiliary_read(command_type: str) -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        auxiliary = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+        coordinator.auxiliary_commands[auxiliary.command_id] = auxiliary
+        dispatched: list[str] = []
+
+        await coordinator.handle_event(
+            _RpcInputCommand({"id": "session-work", "type": command_type}),
+            dispatch=lambda command, running: (
+                dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
+            ),
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [{"id": "session-work", "type": command_type}]
 
     anyio.run(scenario)
 

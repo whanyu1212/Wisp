@@ -417,6 +417,39 @@ def test_session_message_page_reads_active_path_messages_and_pages(
     assert older.next_before_entry_id is None
 
 
+def test_session_message_page_reads_forward_after_cursor(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> list[str]:
+        entries = []
+        for index in range(7):
+            entries.append(
+                await session.append_message(Message(role="user", content=f"message-{index}"))
+            )
+        return [entry.id for entry in entries]
+
+    entry_ids = anyio.run(write)
+
+    first = session.read_message_page(limit=2, after_entry_id=entry_ids[1])
+    second = session.read_message_page(
+        limit=2,
+        after_entry_id=first.next_after_entry_id,
+    )
+
+    assert [message.content for message in first.messages] == ["message-2", "message-3"]
+    assert first.truncated
+    assert first.next_before_entry_id is None
+    assert first.next_after_entry_id == entry_ids[3]
+    assert [message.content for message in second.messages] == ["message-4", "message-5"]
+    assert second.next_after_entry_id == entry_ids[5]
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        session.read_message_page(
+            before_entry_id=entry_ids[4],
+            after_entry_id=entry_ids[1],
+        )
+
+
 def test_session_message_pages_reuse_validated_entry_index(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

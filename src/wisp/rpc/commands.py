@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from wisp.agent.mode import AgentMode
 from wisp.events import QueueKind, QueueMode
@@ -93,6 +93,14 @@ class GetMessagesCommand(RpcCommandModel):
     session_id: str | None = Field(default=None, min_length=1)
     limit: int = Field(default=200, ge=1, le=500, strict=True)
     before_entry_id: str | None = Field(default=None, min_length=1)
+    after_entry_id: str | None = Field(default=None, min_length=1)
+    allow_during_prompt: bool | None = Field(default=None, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_cursor_direction(self) -> GetMessagesCommand:
+        if self.before_entry_id is not None and self.after_entry_id is not None:
+            raise ValueError("message page cursors are mutually exclusive")
+        return self
 
 
 class GetSessionsCommand(RpcCommandModel):

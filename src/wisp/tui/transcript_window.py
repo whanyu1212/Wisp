@@ -81,12 +81,16 @@ class TranscriptWindow[Entry]:
         self._start = 0
         self._latest_is_retained = True
 
-    def replace(self, entries: Iterable[Entry]) -> None:
+    def replace(self, entries: Iterable[Entry]) -> tuple[Entry, ...]:
         self._entries = list(entries)
+        evicted: tuple[Entry, ...] = ()
         if len(self._entries) > self.retained_capacity:
-            del self._entries[: len(self._entries) - self.retained_capacity]
+            overflow = len(self._entries) - self.retained_capacity
+            evicted = tuple(self._entries[:overflow])
+            del self._entries[:overflow]
         self._latest_is_retained = True
         self.show_latest()
+        return evicted
 
     def prepend(self, entries: Iterable[Entry]) -> tuple[Entry, ...]:
         """Retain an older page and return entries evicted from the newest edge."""
@@ -124,6 +128,37 @@ class TranscriptWindow[Entry]:
         if follow_tail:
             self.show_latest()
         return evicted
+
+    def discard_oldest(self, count: int) -> tuple[Entry, ...]:
+        """Discard an additional oldest prefix to align a caller-owned boundary."""
+
+        if count <= 0:
+            return ()
+        selected = min(count, len(self._entries))
+        evicted = tuple(self._entries[:selected])
+        del self._entries[:selected]
+        self._start = max(0, self._start - selected)
+        return evicted
+
+    def discard_newest(self, count: int) -> tuple[Entry, ...]:
+        """Discard an additional newest suffix to align a caller-owned boundary."""
+
+        if count <= 0:
+            return ()
+        selected = min(count, len(self._entries))
+        evicted = tuple(self._entries[-selected:])
+        del self._entries[-selected:]
+        self._start = min(
+            self._start,
+            max(0, len(self._entries) - self.capacity),
+        )
+        self._latest_is_retained = False
+        return evicted
+
+    def mark_latest_retained(self) -> None:
+        """Record that retained entries now include the durable transcript tail."""
+
+        self._latest_is_retained = True
 
     def show_latest(self) -> bool:
         target = max(0, len(self._entries) - self.capacity)

@@ -948,6 +948,23 @@ def start_rpc_messages_command(
             write_event=write_event,
         )
         return None
+    after_entry_id = _optional_non_empty_string(command, "after_entry_id", command_type)
+    if isinstance(after_entry_id, ValueError):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(after_entry_id),
+            write_event=write_event,
+        )
+        return None
+    if before_entry_id is not None and after_entry_id is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages cursors are mutually exclusive",
+            write_event=write_event,
+        )
+        return None
 
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
@@ -958,6 +975,7 @@ def start_rpc_messages_command(
         session_id,
         limit,
         before_entry_id,
+        after_entry_id,
         command_id,
         cancel_scope,
         send.clone(),
@@ -1479,6 +1497,7 @@ async def run_rpc_messages_command(
     session_id: str | None,
     limit: int,
     before_entry_id: str | None,
+    after_entry_id: str | None,
     command_id: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
@@ -1505,6 +1524,7 @@ async def run_rpc_messages_command(
                     messages=(),
                     truncated=False,
                     next_before_entry_id=None,
+                    next_after_entry_id=None,
                 )
             elif not session.path.is_file():
                 page = SessionMessagePage(
@@ -1514,6 +1534,7 @@ async def run_rpc_messages_command(
                     messages=(),
                     truncated=False,
                     next_before_entry_id=None,
+                    next_after_entry_id=None,
                 )
             else:
                 page = await _run_abandonable_session_read(
@@ -1521,6 +1542,7 @@ async def run_rpc_messages_command(
                         session.read_message_page,
                         limit=limit,
                         before_entry_id=before_entry_id,
+                        after_entry_id=after_entry_id,
                     )
                 )
 
@@ -1545,6 +1567,7 @@ async def run_rpc_messages_command(
                         messages=page.messages,
                         truncated=page.truncated,
                         next_before_entry_id=page.next_before_entry_id,
+                        next_after_entry_id=page.next_after_entry_id,
                     )
                 )
                 ok = True

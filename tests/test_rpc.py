@@ -280,6 +280,30 @@ def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
     assert rpc_command_from_json(command.to_json_line()) == command
 
 
+def test_get_messages_command_serializes_forward_cursor() -> None:
+    command = GetMessagesCommand(id="messages-2", after_entry_id="entry-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-2",
+        "type": "get_messages",
+        "limit": 200,
+        "after_entry_id": "entry-1",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_messages_command_serializes_active_prompt_read_opt_in() -> None:
+    command = GetMessagesCommand(id="messages-live", allow_during_prompt=True)
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-live",
+        "type": "get_messages",
+        "limit": 200,
+        "allow_during_prompt": True,
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
 def test_get_messages_command_rejects_invalid_bounds() -> None:
     with pytest.raises(ValidationError):
         GetMessagesCommand(limit=True)
@@ -293,6 +317,10 @@ def test_get_messages_command_rejects_invalid_bounds() -> None:
         GetMessagesCommand(session_id="")
     with pytest.raises(ValidationError):
         GetMessagesCommand(before_entry_id="")
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(after_entry_id="")
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        GetMessagesCommand(before_entry_id="before", after_entry_id="after")
 
 
 def test_get_sessions_command_serializes_as_jsonl_and_parses() -> None:
@@ -718,6 +746,38 @@ def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 24"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 23}).model_dump_json())
+
+
+def test_rpc_message_forward_cursor_round_trips_only_at_schema_v34() -> None:
+    report = RpcMessagesReported(
+        command_id="messages-1",
+        truncated=True,
+        next_after_entry_id="entry-1",
+    )
+
+    assert report.schema_version == 34
+    assert wisp_event_from_json(report.model_dump_json()) == report
+
+    legacy_without_cursor = RpcMessagesReported(
+        command_id="messages-legacy",
+        schema_version=33,
+    )
+    legacy_payload = json.loads(legacy_without_cursor.model_dump_json())
+    assert "next_after_entry_id" not in legacy_payload
+    assert wisp_event_from_json(json.dumps(legacy_payload)) == legacy_without_cursor
+
+    legacy_payload["next_after_entry_id"] = "entry-1"
+    legacy_payload["truncated"] = True
+    with pytest.raises(ValueError, match="forward cursors require schema_version 34"):
+        wisp_event_from_json(json.dumps(legacy_payload))
+
+    with pytest.raises(ValidationError, match="forward cursors require schema_version 34"):
+        RpcMessagesReported(
+            command_id="messages-invalid",
+            schema_version=33,
+            truncated=True,
+            next_after_entry_id="entry-1",
+        )
 
 
 def test_tool_failure_metadata_round_trips_only_at_schema_v33() -> None:

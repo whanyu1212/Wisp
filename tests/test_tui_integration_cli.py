@@ -12,7 +12,9 @@ from decimal import Decimal
 import pytest
 from pytest import MonkeyPatch
 from rich.cells import cell_len
+from rich.console import RenderableType
 from textual import events
+from textual.app import App
 from textual.content import Content
 from textual.screen import Screen
 from textual.widget import Widget
@@ -4625,6 +4627,189 @@ def test_textual_stream_widget_is_available_before_async_finalization() -> None:
     assert anyio.run(scenario)
 
 
+@pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
+def test_textual_tool_heavy_active_turn_keeps_prior_conversation_reachable(
+    navigation: str,
+) -> None:
+    """Normal PageUp and wheel scrolling must reach locally evicted output."""
+
+    async def scenario() -> tuple[bool, bool, int, bool, int]:
+        app_instance, renderer = create_textual_tui()
+        latest_requests = 0
+
+        sentinel = "conversation before the tool-heavy turn"
+        tool_count = TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT // 2 + 1
+
+        async def request_latest_history() -> None:
+            # Production services this durable read concurrently with the active
+            # prompt. Return the persisted tail exactly as get_messages would.
+            nonlocal latest_requests
+            latest_requests += 1
+            renderer.capture_latest_history_reload()
+            renderer.replace_latest_history_entries(
+                (
+                    HistoricalTranscriptMessage(role="assistant", content=sentinel),
+                    *(
+                        HistoricalToolCard(
+                            card_id=f"history:tool-heavy-{index}",
+                            name="grep",
+                            arguments={"pattern": f"needle-{index}"},
+                            output=f"match-{index}",
+                            is_error=False,
+                            tool_call_id=f"tool-heavy-{index}",
+                        )
+                        for index in range(tool_count)
+                    ),
+                )
+            )
+            renderer.history_page_loaded(has_more=False)
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.event(completed_message(content=sentinel))
+            renderer.event(completed_message(content=sentinel))
+
+            # One assistant entry plus this many two-entry tool cards crosses the
+            # live durable-entry cap, evicting both the sentinel and the first card.
+            for index in range(tool_count):
+                call_id = f"tool-heavy-{index}"
+                renderer.event(
+                    ToolCallRequested(
+                        call_id=call_id,
+                        name="grep",
+                        arguments={"pattern": f"needle-{index}"},
+                    )
+                )
+                renderer.event(
+                    ToolResultReady(
+                        call_id=call_id,
+                        name="grep",
+                        output=f"match-{index}",
+                        is_error=False,
+                    )
+                )
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            evicted_before_navigation = sentinel not in _transcript_texts(app_instance)
+            app_instance.set_history_latest_request_hook(request_latest_history)
+
+            # Use only normal reader navigation. Both PageUp and mouse-wheel
+            # scrolling must cross the mounted top and reveal older logical data.
+            if navigation == "page_up":
+                for _ in range(tool_count + 5):
+                    app_instance.action_scroll_transcript_page_up()
+                    await pilot.pause()
+            else:
+                await pilot._post_mouse_events(
+                    [events.MouseScrollUp],
+                    widget=transcript,
+                    times=tool_count * 2,
+                )
+                await pilot.pause()
+
+            texts = _transcript_texts(app_instance)
+            mounted_count = sum(
+                isinstance(child, LineMessage | StreamMessage | ToolCard)
+                for child in transcript.children
+            )
+            return (
+                evicted_before_navigation,
+                sentinel in texts,
+                latest_requests,
+                transcript.is_following,
+                mounted_count,
+            )
+
+    evicted_before, reachable_after_navigation, latest_requests, following, mounted_count = (
+        anyio.run(scenario)
+    )
+
+    assert evicted_before  # Reproduces the bounded-live-window precondition.
+    assert reachable_after_navigation, (latest_requests, following, mounted_count)
+    assert latest_requests <= 1
+    assert not following
+    assert mounted_count <= TUI_TRANSCRIPT_WINDOW_SIZE + 1
+
+
+def test_textual_tool_heavy_output_preserves_a_scrollback_anchor() -> None:
+    """Settling a new tool must not remove the card currently under the reader."""
+
+    async def scenario() -> tuple[bool, float | None, float, bool]:
+        app_instance, renderer = create_textual_tui()
+
+        def emit_tool(index: int) -> None:
+            call_id = f"anchor-tool-{index}"
+            renderer.event(
+                ToolCallRequested(
+                    call_id=call_id,
+                    name="grep",
+                    arguments={"pattern": f"anchor-{index}"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id=call_id,
+                    name="grep",
+                    output=f"anchor-match-{index}",
+                    is_error=False,
+                )
+            )
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            initial_count = TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT // 2
+            for index in range(initial_count):
+                emit_tool(index)
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=initial_count * 2,
+            )
+            await pilot.pause()
+            assert transcript.scroll_y == 0
+            anchor = next(child for child in transcript.children if isinstance(child, ToolCard))
+            anchor_text = anchor.render().plain
+            anchor_offset_before = anchor.region.y - transcript.content_region.y
+
+            # The next two-entry card crosses the durable live cap. The bounded
+            # implementation may virtualize another edge, but not the widget that
+            # anchors a reader who is actively browsing the oldest mounted output.
+            emit_tool(initial_count)
+            await pilot.pause()
+            await pilot.pause()
+
+            mounted_anchor = next(
+                (
+                    child
+                    for child in transcript.children
+                    if isinstance(child, ToolCard) and child.render().plain == anchor_text
+                ),
+                None,
+            )
+            anchor_offset_after = (
+                mounted_anchor.region.y - transcript.content_region.y
+                if mounted_anchor is not None
+                else None
+            )
+            return (
+                mounted_anchor is not None,
+                anchor_offset_after,
+                anchor_offset_before,
+                transcript.is_following,
+            )
+
+    still_mounted, offset_after, offset_before, following = anyio.run(scenario)
+
+    assert still_mounted
+    assert offset_after is not None
+    assert abs(offset_after - offset_before) <= 1
+    assert not following
+
+
 def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() -> None:
     async def scenario() -> tuple[int, int]:
         app_instance, _renderer = create_textual_tui()
@@ -6788,6 +6973,71 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
     assert following is False
 
 
+def test_textual_history_prepend_never_displays_unanchored_intermediate_frame(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[float, list[float]]:
+        app_instance, renderer = create_textual_tui()
+        transcript: Transcript | None = None
+        anchor: Widget | None = None
+        recording = False
+        displayed_anchor_positions: list[float] = []
+
+        def record_display(
+            _app: App[object],
+            _screen: Screen,
+            _renderable: RenderableType | None,
+        ) -> None:
+            if (
+                recording
+                and transcript is not None
+                and anchor is not None
+                and anchor.parent is transcript
+            ):
+                displayed_anchor_positions.append(float(anchor.region.y))
+
+        monkeypatch.setattr(App, "_display", record_display)
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(30)
+                ),
+                session_label="Paged session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=8, animate=False)
+            await pilot.pause()
+            anchor = next(
+                child
+                for child in transcript.children
+                if (isinstance(child, LineMessage) and "current 8" in child.render().plain)
+                or (isinstance(child, StreamMessage) and "current 8" in child.source)
+            )
+            anchor_y_before = float(anchor.region.y)
+
+            recording = True
+            renderer.prepend_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                    for index in range(12)
+                )
+            )
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            return anchor_y_before, displayed_anchor_positions
+
+    anchor_y_before, displayed_anchor_positions = anyio.run(scenario)
+
+    assert displayed_anchor_positions
+    assert all(abs(anchor_y - anchor_y_before) <= 1 for anchor_y in displayed_anchor_positions), (
+        displayed_anchor_positions
+    )
+
+
 def test_textual_history_prepend_does_not_override_return_to_latest() -> None:
     async def scenario() -> tuple[bool, float, float]:
         app_instance, renderer = create_textual_tui()
@@ -7141,6 +7391,244 @@ def test_textual_history_window_navigation_reaches_retained_entries_in_tall_view
     assert "current 0" in texts
     assert f"current {TUI_TRANSCRIPT_WINDOW_SHIFT - 1}" in texts
     assert f"current {TUI_HISTORY_PAGE_LIMIT - 1}" not in texts
+
+
+@pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
+def test_textual_forward_navigation_crosses_to_newer_retained_history(
+    navigation: str,
+) -> None:
+    """PageDown and wheel-down must leave an older virtualized window."""
+
+    async def scenario() -> tuple[bool, bool, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 200)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(TUI_HISTORY_PAGE_LIMIT)
+                ),
+                session_label="Windowed session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+
+            # Move from the newest retained slice (15..74) to the older slice
+            # (0..59). A tall viewport deliberately has no physical scroll range,
+            # so crossing either edge requires the logical transcript window.
+            app_instance.action_scroll_transcript_page_up()
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            older_texts = _transcript_texts(app_instance)
+            assert "current 0" in older_texts
+            assert f"current {TUI_HISTORY_PAGE_LIMIT - 1}" not in older_texts
+
+            if navigation == "page_down":
+                app_instance.action_scroll_transcript_page_down()
+            else:
+                await pilot._post_mouse_events(
+                    [events.MouseScrollDown],
+                    widget=transcript,
+                    times=1,
+                )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            newer_texts = _transcript_texts(app_instance)
+            return (
+                f"current {TUI_HISTORY_PAGE_LIMIT - 1}" in newer_texts,
+                "current 0" in newer_texts,
+                transcript.max_scroll_y,
+            )
+
+    newest_reachable, oldest_still_mounted, max_scroll_y = anyio.run(scenario)
+
+    assert newest_reachable
+    assert not oldest_still_mounted
+    assert max_scroll_y == 0
+
+
+@pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
+def test_textual_forward_navigation_crosses_multiple_durable_pages(
+    navigation: str,
+) -> None:
+    async def scenario() -> tuple[list[str], list[str], int]:
+        app_instance, renderer = create_textual_tui()
+        newer_requests: list[str] = []
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        older_pages = [messages(120), messages(60), messages(0)]
+
+        async def request_older() -> None:
+            renderer.prepend_history_entries(older_pages.pop(0))
+            renderer.history_page_loaded(has_more=bool(older_pages))
+
+        async def request_newer(after_entry_id: str) -> None:
+            newer_requests.append(after_entry_id)
+            start = int(after_entry_id.removeprefix("entry-")) + 1
+            renderer.append_newer_history_entries(
+                messages(start),
+                next_after_entry_id=(
+                    f"entry-{start + TUI_TRANSCRIPT_WINDOW_SIZE - 1}" if start < 180 else None
+                ),
+            )
+
+        async with app_instance.run_test(size=(80, 200)) as pilot:
+            renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(180), session_label="Long session")
+            renderer.set_history_page_request_hook(request_older)
+            app_instance.set_history_newer_page_request_hook(request_newer)
+            renderer.history_page_loaded(has_more=True)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            app_instance.action_scroll_transcript_home()
+            with anyio.fail_after(10):
+                while older_pages or app_instance._oldest_navigation_generation is not None:
+                    await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert "message 0" in _transcript_texts(app_instance)
+            for _ in range(3):
+                if navigation == "page_down":
+                    app_instance.action_scroll_transcript_page_down()
+                else:
+                    await pilot._post_mouse_events(
+                        [events.MouseScrollDown],
+                        widget=transcript,
+                        times=1,
+                    )
+                await app_instance.wait_for_history_render()
+                await pilot.pause()
+                await pilot.pause()
+
+            return (
+                newer_requests,
+                _transcript_texts(app_instance),
+                sum(
+                    isinstance(child, LineMessage | StreamMessage | ToolCard)
+                    for child in transcript.children
+                ),
+            )
+
+    newer_requests, texts, mounted_count = anyio.run(scenario)
+
+    assert newer_requests == ["entry-59", "entry-119", "entry-179"]
+    assert "message 0" not in texts
+    assert "message 239" in texts
+    assert mounted_count <= TUI_TRANSCRIPT_WINDOW_SIZE + 1
+
+
+def test_textual_forward_history_failure_retries_from_the_same_edge() -> None:
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        requests: list[str] = []
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        async def request_newer(after_entry_id: str) -> None:
+            requests.append(after_entry_id)
+            if len(requests) == 1:
+                app_instance.history_newer_page_request_failed()
+                return
+            renderer.append_newer_history_entries(messages(60), next_after_entry_id=None)
+
+        async with app_instance.run_test(size=(80, 200)) as pilot:
+            renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(60), session_label="Retry session")
+            renderer.prepend_history_entries(messages(0))
+            app_instance.set_history_newer_page_request_hook(request_newer)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            app_instance.action_scroll_transcript_page_down()
+            with anyio.fail_after(5):
+                while len(requests) < 1:
+                    await pilot.pause()
+            app_instance.action_scroll_transcript_page_down()
+            with anyio.fail_after(5):
+                while len(requests) < 2:
+                    await pilot.pause()
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            return requests, _transcript_texts(app_instance)
+
+    requests, texts = anyio.run(scenario)
+
+    assert requests == ["entry-59", "entry-59"]
+    assert "message 119" in texts
+
+
+def test_textual_end_reloads_true_latest_after_history_retention_overflow() -> None:
+    async def scenario() -> tuple[int, bool, float, float, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        reloads = 0
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        async def request_latest() -> None:
+            nonlocal reloads
+            reloads += 1
+            renderer.replace_latest_history_entries(messages(180))
+            renderer.history_page_loaded(has_more=True)
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(180), session_label="Long session")
+            renderer.prepend_history_entries(messages(120))
+            app_instance.set_history_latest_request_hook(request_latest)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            app_instance.action_scroll_transcript_home()
+            await pilot.pause()
+            app_instance.action_scroll_transcript_end()
+            with anyio.fail_after(5):
+                while reloads == 0 or app_instance._live_history_reload_pending:
+                    await pilot.pause()
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return (
+                reloads,
+                transcript.is_following,
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+                _transcript_texts(app_instance),
+            )
+
+    reloads, following, scroll_y, max_scroll_y, texts = anyio.run(scenario)
+
+    assert reloads == 1
+    assert following
+    assert scroll_y >= max_scroll_y - 1
+    assert "message 239" in texts
 
 
 def test_textual_history_window_shifts_without_evicting_live_output() -> None:

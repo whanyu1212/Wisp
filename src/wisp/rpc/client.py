@@ -141,6 +141,8 @@ class RpcController:
         session_id: str | None = None,
         limit: int = 200,
         before_entry_id: str | None = None,
+        after_entry_id: str | None = None,
+        allow_during_prompt: bool = False,
         command_id: str | None = None,
     ) -> str:
         """Request a bounded persisted transcript page."""
@@ -152,6 +154,8 @@ class RpcController:
                 session_id=session_id,
                 limit=limit,
                 before_entry_id=before_entry_id,
+                after_entry_id=after_entry_id,
+                allow_during_prompt=True if allow_during_prompt else None,
             )
         )
         return selected_id

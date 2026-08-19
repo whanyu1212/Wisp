@@ -18,11 +18,13 @@ from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.console import RenderableType
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
+from textual.screen import Screen
 from textual.widget import AwaitMount, Widget
 from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 
@@ -200,6 +202,13 @@ class TextualTui(App[None]):
     # Wisp owns a typed, RPC-backed palette. Keep Textual's framework ctrl+p
     # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
+
+    def _display(self, screen: Screen[object], renderable: RenderableType | None) -> None:
+        """Hide the transient history-window frame before its anchor is restored."""
+
+        if getattr(self, "_history_prepend_paint_suppressed", False):
+            return
+        super()._display(screen, renderable)
 
     CSS = """
     Screen {
@@ -533,6 +542,7 @@ class TextualTui(App[None]):
         self._runner_result = TuiExitReason.exited
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
+        self._history_newer_request_hook: Callable[[str], Awaitable[None]] | None = None
         self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
         self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
         self._update_action_hook: (
@@ -541,10 +551,12 @@ class TextualTui(App[None]):
         self._pending_update: UpdateAvailable | None = None
         self._visible_input_mode = "idle"
         self._history_window_older_hook: Callable[[], bool] | None = None
+        self._history_window_newer_hook: Callable[[], bool] | None = None
         self._history_window_oldest_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
         self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
         self._live_history_reload_pending = False
+        self._history_newer_request_pending = False
         self._live_history_reload_needed = False
         self._live_history_eviction_generation = 0
         self._live_history_reload_generation: int | None = None
@@ -552,6 +564,7 @@ class TextualTui(App[None]):
         self._live_history_recovery_blocked = False
         self._history_marker: Widget | None = None
         self._prepending_history = False
+        self._history_prepend_paint_suppressed = False
         self._history_prepend_mounts: list[AwaitMount] = []
         self._history_prepend_anchor: _HistoryPrependAnchor | None = None
         self._transcript_navigation_generation = 0
@@ -1117,6 +1130,14 @@ class TextualTui(App[None]):
         if self._wheel_event_targets_transcript(event):
             self._cancel_card_expand_repin()
             self._begin_transcript_navigation()
+            transcript = self._transcript
+            shift_newer = self._history_window_newer_hook
+            if (
+                transcript is not None
+                and transcript.is_vertical_scroll_end
+                and shift_newer is not None
+            ):
+                shift_newer()
         self._forward_jump_overlay_scroll(event, direction=1)
 
     def _wheel_event_targets_transcript(
@@ -1572,6 +1593,14 @@ class TextualTui(App[None]):
 
         self._history_latest_request_hook = hook
 
+    def set_history_newer_page_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Register the shell callback for an adjacent newer durable page."""
+
+        self._history_newer_request_hook = hook
+
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register the renderer's at-accept input-mode snapshot callback."""
 
@@ -1903,6 +1932,10 @@ class TextualTui(App[None]):
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._begin_transcript_navigation()
+            if self._transcript.is_vertical_scroll_end:
+                shift_newer = self._history_window_newer_hook
+                if shift_newer is not None and shift_newer():
+                    return
             self._transcript.page_down()
 
     def action_scroll_transcript_home(self) -> None:
@@ -2202,7 +2235,9 @@ class TextualTui(App[None]):
         self._transcript_epoch += 1
         self._history_marker = None
         self._prepending_history = False
+        self._history_prepend_paint_suppressed = False
         self._live_history_reload_pending = False
+        self._history_newer_request_pending = False
         self._live_history_reload_needed = False
         self._live_history_eviction_generation = 0
         self._live_history_reload_generation = None
@@ -2229,12 +2264,14 @@ class TextualTui(App[None]):
         self,
         *,
         shift_older: Callable[[], bool],
+        shift_newer: Callable[[], bool],
         show_oldest: Callable[[], bool],
         show_latest: Callable[[], bool],
     ) -> None:
         """Install renderer-owned history-window navigation callbacks."""
 
         self._history_window_older_hook = shift_older
+        self._history_window_newer_hook = shift_newer
         self._history_window_oldest_hook = show_oldest
         self._history_window_latest_hook = show_latest
 
@@ -2330,6 +2367,30 @@ class TextualTui(App[None]):
             return False
         self._start_live_history_reload(hook)
         return True
+
+    def request_newer_history(self, after_entry_id: str) -> bool:
+        """Request the durable page immediately after a retained window edge."""
+
+        hook = self._history_newer_request_hook
+        if hook is None or self._history_newer_request_pending:
+            return False
+        self._history_newer_request_pending = True
+        self.run_worker(
+            hook(after_entry_id),
+            group="history-newer-page-request",
+            exit_on_error=False,
+        )
+        return True
+
+    def history_newer_page_loaded(self) -> None:
+        """Release the serialized newer-page request guard."""
+
+        self._history_newer_request_pending = False
+
+    def history_newer_page_request_failed(self) -> None:
+        """Allow retrying a failed adjacent-newer page request."""
+
+        self._history_newer_request_pending = False
 
     def history_is_at_top(self) -> bool:
         """Return whether persisted-history navigation is at the transcript top."""
@@ -2991,11 +3052,14 @@ class TextualTui(App[None]):
 
         return self._transcript_controller.historical_tool_card(card_id)
 
-    def set_history_window_available(self, *, has_older: bool) -> None:
-        """Expose retained older entries to transcript edge navigation."""
+    def set_history_window_available(self, *, has_older: bool, has_newer: bool) -> None:
+        """Expose retained entries beyond both mounted transcript edges."""
 
         if self._transcript is not None:
-            self._transcript.history_window_available(has_older=has_older)
+            self._transcript.history_window_available(
+                has_older=has_older,
+                has_newer=has_newer,
+            )
 
     def begin_history_render(self) -> None:
         """Track one renderer history batch until all of its widgets mount."""
@@ -3220,6 +3284,7 @@ class TextualTui(App[None]):
             None,
         )
         self._prepending_history = True
+        self._history_prepend_paint_suppressed = True
         self._history_prepend_mounts.clear()
         navigation = self._pending_history_navigation
         self._pending_history_navigation = HistoryNavigation()
@@ -3253,32 +3318,51 @@ class TextualTui(App[None]):
         anchor: _HistoryPrependAnchor,
         mounts: tuple[AwaitMount, ...],
     ) -> None:
-        for mounted in mounts:
-            await mounted
-        self.call_after_refresh(self._restore_prepend_viewport, anchor)
+        try:
+            for mounted in mounts:
+                await mounted
+        finally:
+            self.call_after_refresh(self._restore_prepend_viewport, anchor)
 
     def _restore_prepend_viewport(
         self,
         anchor: _HistoryPrependAnchor,
     ) -> None:
-        if self._history_prepend_anchor is anchor:
+        owns_paint_suppression = self._history_prepend_anchor is anchor
+        if owns_paint_suppression:
             self._history_prepend_anchor = None
         transcript = anchor.transcript
-        if (
+        if not (
             anchor.epoch != self._transcript_epoch
             or anchor.navigation_generation != self._transcript_navigation_generation
             or transcript is not self._transcript
             or transcript.is_following != anchor.following
             or (not anchor.following and transcript.scroll_y != anchor.scroll_y)
         ):
+            transcript.restore_prepend_viewport(
+                scroll_y=anchor.scroll_y,
+                anchor=anchor.widget,
+                anchor_y_before=anchor.widget_y,
+                following=anchor.following,
+                navigation=anchor.navigation,
+            )
+        if owns_paint_suppression:
+            # ``restore_prepend_viewport`` schedules a second layout at the corrected
+            # scroll offset. Keep suppressing paints through that pass too; otherwise
+            # the compositor can still emit the newly mounted anchor at its old offset.
+            self.call_after_refresh(self._finish_history_prepend_paint, anchor)
+
+    def _finish_history_prepend_paint(self, anchor: _HistoryPrependAnchor) -> None:
+        """Emit the settled history replacement after its corrected layout pass."""
+
+        if self._history_prepend_anchor is not None:
             return
-        transcript.restore_prepend_viewport(
-            scroll_y=anchor.scroll_y,
-            anchor=anchor.widget,
-            anchor_y_before=anchor.widget_y,
-            following=anchor.following,
-            navigation=anchor.navigation,
-        )
+        if anchor.epoch != self._transcript_epoch:
+            return
+        self._history_prepend_paint_suppressed = False
+        # Both suppressed compositor passes consumed their dirty regions, so request
+        # one complete repaint now that the viewport anchor is stable.
+        self.refresh(repaint=True)
 
     def append_stream(self, delta: str) -> None:
         self._stream.append(delta)

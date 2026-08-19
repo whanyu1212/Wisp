@@ -13,6 +13,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 - Added bounded Markdown structure, inline-code, and fenced-code highlighting to the Textual prompt
   editor without changing submitted prompt text.
+- Kept complete Textual conversation and tool history reachable through wheel, PageUp/PageDown,
+  Home, and End navigation during long and tool-heavy turns without unbounded widget mounting.
 - Added first-class DeepSeek support with streamed thinking, reasoning-preserving tool
   continuations, API-key authentication, automatic cache telemetry, and model catalog metadata.
 - Added first-class xAI Grok support through the stateful Responses API, including streamed

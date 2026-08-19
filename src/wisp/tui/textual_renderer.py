@@ -122,6 +122,7 @@ class TextualTuiRenderer:
         app.set_live_widget_evicted_hook(self._forget_live_widget)
         app.set_history_window_hooks(
             shift_older=self._history.shift_older,
+            shift_newer=self._history.shift_newer,
             show_oldest=self._history.show_oldest,
             show_latest=self._history.show_latest,
         )
@@ -365,6 +366,12 @@ class TextualTuiRenderer:
     ) -> None:
         self.app.set_history_latest_request_hook(hook)
 
+    def set_history_newer_page_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_newer_page_request_hook(hook)
+
     def history_page_loaded(self, *, has_more: bool) -> None:
         self.app.history_page_loaded(has_more=has_more)
 
@@ -398,6 +405,22 @@ class TextualTuiRenderer:
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.prepend_entries(entries)
+
+    def append_newer_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        next_after_entry_id: str | None,
+    ) -> str | None:
+        next_before_entry_id = self._history.append_newer_entries(
+            entries,
+            next_after_entry_id=next_after_entry_id,
+        )
+        self.app.history_newer_page_loaded()
+        return next_before_entry_id
+
+    def history_newer_page_request_failed(self) -> None:
+        self.app.history_newer_page_request_failed()
 
     def replace_latest_history_entries(
         self,

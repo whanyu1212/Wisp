@@ -93,14 +93,15 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Ctrl+R` | Search prompt history for this TUI run |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
-| `Home` / `End` | Jump to the oldest loaded content / return to the latest output |
+| `Home` / `End` | Traverse to the session beginning / return to the latest output |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Copy selection; otherwise press twice within 1.5s to quit |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |
 
-The Textual transcript has no visible scrollbar, but all transcript scrolling remains available
-through the controls above. When new output arrives while you are reading earlier content, select the
-`↓ new` indicator to return to the live tail.
+The Textual transcript has no visible scrollbar, but all persisted conversation and tool activity
+remains reachable through the controls above. Older and newer pages load transparently at the
+mounted window edges. When new output arrives while you are reading earlier content, your viewport
+stays anchored; select the `↓ new` indicator or press `End` to return to the live tail.
 
 Run `/theme` to preview Vapor, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one of
 those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
