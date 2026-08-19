@@ -53,7 +53,7 @@ class TextualHistorySurface(Protocol):
 
     def history_is_following(self) -> bool: ...
 
-    def begin_history_prepend(self) -> None: ...
+    def begin_history_prepend(self, *, anchor: Widget | None = None) -> None: ...
 
     def finish_history_prepend(self) -> None: ...
 
@@ -390,11 +390,13 @@ class TextualHistoryController:
                 self._window.entries[-1].entry
             )
             return cursor is not None and self._surface.request_newer_history(cursor)
+        self._surface.begin_history_prepend(anchor=self._newest_visible_widget())
         self._surface.begin_history_render()
         try:
             self._reconcile()
         finally:
             self._surface.finish_history_render()
+            self._surface.finish_history_prepend()
         return True
 
     def append_newer_entries(
@@ -414,6 +416,7 @@ class TextualHistoryController:
             )
         retained = self._retain(incoming)
         next_before_entry_id = None
+        self._surface.begin_history_prepend(anchor=self._newest_visible_widget())
         self._surface.begin_history_render()
         try:
             evicted = self._window.append(retained, follow_tail=False)
@@ -428,7 +431,16 @@ class TextualHistoryController:
             self._reconcile()
         finally:
             self._surface.finish_history_render()
+            self._surface.finish_history_prepend()
         return next_before_entry_id
+
+    def _newest_visible_widget(self) -> Widget | None:
+        """Return a stable overlap anchor for a move toward newer history."""
+
+        for item in reversed(self._window.visible):
+            if widget := self._widgets.get(item.id):
+                return widget
+        return None
 
     def _complete_oldest_message_group_eviction(
         self,

@@ -66,7 +66,7 @@ class _HistorySurface:
     def history_is_following(self) -> bool:
         return self.following
 
-    def begin_history_prepend(self) -> None:
+    def begin_history_prepend(self, *, anchor: Widget | None = None) -> None:
         self.prepend_starts += 1
 
     def finish_history_prepend(self) -> None:

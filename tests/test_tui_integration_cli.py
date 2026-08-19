@@ -7431,6 +7431,15 @@ def test_textual_forward_navigation_crosses_to_newer_retained_history(
                     widget=transcript,
                     times=1,
                 )
+            # A forward gesture reaches the window shift through its own message
+            # and a deferred callback, so the request may not exist yet when
+            # ``wait_for_history_render`` is first awaited. Settle on the
+            # observable outcome instead of a fixed number of frames.
+            with anyio.fail_after(10):
+                while f"current {TUI_HISTORY_PAGE_LIMIT - 1}" not in _transcript_texts(
+                    app_instance
+                ):
+                    await pilot.pause()
             await app_instance.wait_for_history_render()
             await pilot.pause()
 
@@ -7446,6 +7455,182 @@ def test_textual_forward_navigation_crosses_to_newer_retained_history(
     assert newest_reachable
     assert not oldest_still_mounted
     assert max_scroll_y == 0
+
+
+@pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
+def test_textual_forward_navigation_consumes_the_boundary_step_without_jumping(
+    navigation: str,
+) -> None:
+    """A forward step composes physical and virtual scrolling into one movement."""
+
+    async def scenario() -> tuple[float, float, float, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(TUI_HISTORY_PAGE_LIMIT)
+                ),
+                session_label="Windowed session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+
+            # Reveal the older logical window, then park just short of its physical
+            # bottom. The next input must consume that short distance and continue
+            # through the newer-window boundary in the same reader gesture.
+            transcript.scroll_to(y=5, animate=False)
+            await pilot.pause()
+            app_instance.action_scroll_transcript_page_up()
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            await pilot.pause()
+            assert "current 0" in _transcript_texts(app_instance)
+
+            transcript.scroll_to(y=max(0.0, transcript.max_scroll_y - 1), animate=False)
+            await pilot.pause()
+            anchor = next(
+                child
+                for child in transcript.children
+                if (isinstance(child, LineMessage) and child.render().plain == "current 59")
+                or (isinstance(child, StreamMessage) and child.source == "current 59")
+            )
+            offset_before = anchor.region.y - transcript.content_region.y
+            expected_rows = (
+                float(transcript.scrollable_content_region.height)
+                if navigation == "page_down"
+                else float(app_instance.scroll_sensitivity_y)
+            )
+
+            if navigation == "page_down":
+                await pilot.press("pagedown")
+            else:
+                await pilot._post_mouse_events(
+                    [events.MouseScrollDown],
+                    widget=transcript,
+                    times=1,
+                )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            await pilot.pause()
+
+            offset_after = anchor.region.y - transcript.content_region.y
+            return (
+                offset_before,
+                offset_after,
+                expected_rows,
+                f"current {TUI_HISTORY_PAGE_LIMIT - 1}" in _transcript_texts(app_instance),
+            )
+
+    offset_before, offset_after, expected_rows, crossed_window = anyio.run(scenario)
+
+    assert crossed_window
+    assert offset_after == pytest.approx(offset_before - expected_rows, abs=1)
+
+
+@pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
+def test_textual_repeated_forward_navigation_accumulates_during_a_page_request(
+    navigation: str,
+) -> None:
+    """Key repeat must not drop forward rows while a durable page is in flight."""
+
+    async def scenario() -> tuple[float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        request_started = anyio.Event()
+        release_request = anyio.Event()
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        async def request_newer(after_entry_id: str) -> None:
+            assert after_entry_id == "entry-119"
+            request_started.set()
+            await release_request.wait()
+            renderer.append_newer_history_entries(
+                messages(120),
+                next_after_entry_id=None,
+            )
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer._history._window.retained_capacity = 2 * TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(120), session_label="Long session")
+            app_instance.set_history_newer_page_request_hook(request_newer)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            renderer.prepend_history_entries(messages(60))
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            renderer.prepend_history_entries(messages(0))
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            # Retention evicted the original latest page, leaving 60..119 as the
+            # newest local slice. Its forward edge is durable, so the following
+            # gesture starts a request.
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+
+            anchor = next(
+                child
+                for child in transcript.children
+                if (isinstance(child, LineMessage) and child.render().plain == "message 119")
+                or (isinstance(child, StreamMessage) and child.source == "message 119")
+            )
+            offset_before = anchor.region.y - transcript.content_region.y
+            step = (
+                float(transcript.scrollable_content_region.height)
+                if navigation == "page_down"
+                else float(app_instance.scroll_sensitivity_y)
+            )
+
+            async def navigate_once() -> None:
+                if navigation == "page_down":
+                    await pilot.press("pagedown")
+                else:
+                    await pilot._post_mouse_events(
+                        [events.MouseScrollDown],
+                        widget=transcript,
+                        times=1,
+                    )
+
+            if navigation == "wheel_down":
+                await pilot._post_mouse_events(
+                    [events.MouseScrollDown],
+                    widget=transcript,
+                    times=2,
+                )
+            else:
+                await navigate_once()
+            with anyio.fail_after(5):
+                await request_started.wait()
+            if navigation == "page_down":
+                await navigate_once()
+            release_request.set()
+            with anyio.fail_after(5):
+                while app_instance._history_newer_request_pending:
+                    await pilot.pause()
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            await pilot.pause()
+
+            return (
+                offset_before,
+                anchor.region.y - transcript.content_region.y,
+                step,
+            )
+
+    offset_before, offset_after, step = anyio.run(scenario)
+
+    assert offset_after == pytest.approx(offset_before - 2 * step, abs=1)
 
 
 @pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
@@ -7526,6 +7711,262 @@ def test_textual_forward_navigation_crosses_multiple_durable_pages(
     assert "message 0" not in texts
     assert "message 239" in texts
     assert mounted_count <= TUI_TRANSCRIPT_WINDOW_SIZE + 1
+
+
+def test_textual_wheel_down_moves_one_scroll_step() -> None:
+    """One wheel tick must move exactly one step, matching wheel-up.
+
+    ``Transcript`` overrides ``_on_mouse_scroll_down`` to carry forward-history
+    intent. Textual dispatches *every* matching handler in the MRO
+    (``MessagePump._get_dispatch_methods``), so an override that scrolls without
+    calling ``event.prevent_default()`` scrolls twice: once in the override and
+    again in ``Widget._on_mouse_scroll_down``.
+    """
+
+    async def scenario() -> tuple[float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"line {index}")
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+                ),
+                session_label="Scrollable session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+
+            # Park mid-transcript so a wheel tick in either direction has room.
+            transcript.scroll_to(y=20, animate=False)
+            await pilot.pause()
+
+            before = transcript.scroll_y
+            await pilot._post_mouse_events([events.MouseScrollDown], widget=transcript, times=1)
+            await pilot.pause()
+            down_delta = transcript.scroll_y - before
+
+            before = transcript.scroll_y
+            await pilot._post_mouse_events([events.MouseScrollUp], widget=transcript, times=1)
+            await pilot.pause()
+            up_delta = before - transcript.scroll_y
+
+            return down_delta, up_delta, float(app_instance.scroll_sensitivity_y)
+
+    down_delta, up_delta, sensitivity = anyio.run(scenario)
+
+    assert down_delta == pytest.approx(sensitivity)
+    assert down_delta == pytest.approx(up_delta)
+
+
+def test_textual_wheel_up_burst_keeps_the_reader_anchored_across_older_pages() -> None:
+    """A rapid wheel-up burst must not abandon the pending prepend restore.
+
+    Each physical tick versions reader intent, and a stale version makes
+    ``_restore_prepend_viewport`` skip the anchor restore. When a burst crosses
+    the older-window edge the reader must still land on the content that was
+    under the viewport, not be thrown to an arbitrary offset.
+    """
+
+    async def scenario() -> tuple[list[str], float, float]:
+        app_instance, renderer = create_textual_tui()
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer._history._window.retained_capacity = 3 * TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(120), session_label="Long session")
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            renderer.prepend_history_entries(messages(60))
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            renderer.prepend_history_entries(messages(0))
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=3, animate=False)
+            await pilot.pause()
+
+            await pilot._post_mouse_events([events.MouseScrollUp], widget=transcript, times=5)
+            for _ in range(4):
+                await pilot.pause()
+
+            return (
+                _transcript_texts(app_instance),
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+            )
+
+    texts, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    # Older entries were revealed, and the reader kept a real position inside the
+    # newly mounted page rather than being slammed to either extreme.
+    assert "message 80" in texts
+    assert 0 < scroll_y < max_scroll_y
+
+
+def test_textual_wheel_down_crosses_newer_edge_in_a_scrollable_viewport() -> None:
+    """Forward paging works at a realistic terminal height.
+
+    The sibling forward-navigation tests use a viewport tall enough that
+    ``max_scroll_y`` is 0, so the transcript never scrolls physically and a
+    wheel step that moved twice would look identical to one that moved once.
+    Here the transcript genuinely scrolls, so physical movement and the window
+    shift have to compose correctly.
+    """
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        newer_requests: list[str] = []
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        older_pages = [messages(60), messages(0)]
+
+        async def request_older() -> None:
+            renderer.prepend_history_entries(older_pages.pop(0))
+            renderer.history_page_loaded(has_more=bool(older_pages))
+
+        async def request_newer(after_entry_id: str) -> None:
+            newer_requests.append(after_entry_id)
+            start = int(after_entry_id.removeprefix("entry-")) + 1
+            renderer.append_newer_history_entries(
+                messages(start),
+                next_after_entry_id=(
+                    f"entry-{start + TUI_TRANSCRIPT_WINDOW_SIZE - 1}" if start < 120 else None
+                ),
+            )
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(messages(120), session_label="Long session")
+            renderer.set_history_page_request_hook(request_older)
+            app_instance.set_history_newer_page_request_hook(request_newer)
+            renderer.history_page_loaded(has_more=True)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            app_instance.action_scroll_transcript_home()
+            with anyio.fail_after(10):
+                while older_pages or app_instance._oldest_navigation_generation is not None:
+                    await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert "message 0" in _transcript_texts(app_instance)
+
+            # Wheel forward until the oldest window has been left behind. A
+            # scrollable viewport needs several steps to consume its physical
+            # range before each window boundary is reached.
+            with anyio.fail_after(10):
+                while "message 119" not in _transcript_texts(app_instance):
+                    await pilot._post_mouse_events(
+                        [events.MouseScrollDown], widget=transcript, times=1
+                    )
+                    await pilot.pause()
+
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            return newer_requests, _transcript_texts(app_instance)
+
+    newer_requests, texts = anyio.run(scenario)
+
+    assert newer_requests == ["entry-59"]
+    assert "message 119" in texts
+    assert "message 0" not in texts
+
+
+def test_textual_backward_navigation_never_paints_the_transcript_top() -> None:
+    """An evicting prepend must not flash the top of the transcript.
+
+    When retention drops the whole mounted page the captured anchor widget is
+    gone, so the captured ``scroll_y`` describes content that no longer exists.
+    Reusing that offset paints the very top of the transcript for a frame before
+    the next page corrects it, which the reader sees as a flicker.
+    """
+
+    async def scenario() -> list[float]:
+        app_instance, renderer = create_textual_tui()
+        painted_offsets: list[float] = []
+
+        def messages(start: int) -> tuple[HistoricalTranscriptMessage, ...]:
+            return tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"message {index}",
+                    entry_id=f"entry-{index}",
+                )
+                for index in range(start, start + TUI_TRANSCRIPT_WINDOW_SIZE)
+            )
+
+        app_type = type(app_instance)
+        original_display = app_type._display
+
+        def record_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+            transcript = self._transcript
+            if not self._history_prepend_paint_suppressed and transcript is not None:
+                painted_offsets.append(transcript.scroll_y)
+            return original_display(self, screen, renderable)
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            # Capacity equal to the window forces every prepend to evict the whole
+            # mounted page, so no anchor widget survives the replacement.
+            renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE
+            older_pages = [messages(60), messages(0)]
+
+            async def request_older() -> None:
+                if older_pages:
+                    renderer.prepend_history_entries(older_pages.pop(0))
+                renderer.history_page_loaded(has_more=bool(older_pages))
+
+            renderer.replace_history_entries(messages(120), session_label="Long session")
+            renderer.set_history_page_request_hook(request_older)
+            renderer.history_page_loaded(has_more=True)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=2, animate=False)
+            await pilot.pause()
+
+            app_type._display = record_display
+            try:
+                for _ in range(4):
+                    await pilot._post_mouse_events(
+                        [events.MouseScrollUp], widget=transcript, times=1
+                    )
+                    await pilot.pause()
+                for _ in range(5):
+                    await pilot.pause()
+            finally:
+                app_type._display = original_display
+
+            # Drop the pre-gesture frame; only mid-gesture repaints matter.
+            return painted_offsets[1:]
+
+    painted_offsets = anyio.run(scenario)
+
+    # Every visible frame after the gesture starts must sit inside the newly
+    # mounted older page, never back at the transcript origin.
+    assert painted_offsets
+    assert all(offset > 0 for offset in painted_offsets)
 
 
 def test_textual_forward_history_failure_retries_from_the_same_edge() -> None:

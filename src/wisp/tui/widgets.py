@@ -1844,12 +1844,14 @@ class HistoryNavigationIntent(Enum):
     PRESERVE = auto()
     PAGE_UP = auto()
     WHEEL_UP = auto()
+    PAGE_DOWN = auto()
+    WHEEL_DOWN = auto()
     OLDEST = auto()
 
 
 @dataclass(frozen=True)
 class HistoryNavigation:
-    """Viewport movement left to apply after older history has mounted."""
+    """Viewport movement left to apply after a history edge has mounted."""
 
     intent: HistoryNavigationIntent = HistoryNavigationIntent.PRESERVE
     remaining_rows: float = 0.0
@@ -1908,6 +1910,13 @@ class Transcript(VerticalScroll):
             super().__init__()
             self.navigation = navigation
 
+    class NeedNewerHistory(Message):
+        """A forward reader gesture crossed the newest mounted content."""
+
+        def __init__(self, navigation: HistoryNavigation) -> None:
+            super().__init__()
+            self.navigation = navigation
+
     def __init__(
         self,
         *args: object,
@@ -1932,6 +1941,8 @@ class Transcript(VerticalScroll):
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
+        self._pending_newer_navigation = HistoryNavigation()
+        self._newer_navigation_scheduled = False
 
     def _size_updated(
         self,
@@ -1987,6 +1998,8 @@ class Transcript(VerticalScroll):
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
+        self._pending_newer_navigation = HistoryNavigation()
+        self._newer_navigation_scheduled = False
         self.remove_children()
         self.scroll_home(animate=False)
 
@@ -2003,6 +2016,8 @@ class Transcript(VerticalScroll):
         previous = self._follow
         super().watch_scroll_y(old_value, new_value)
         if not self._content_driven_scroll_update:
+            if new_value < old_value:
+                self._discard_pending_newer_navigation()
             self._follow = self.is_vertical_scroll_end and not self._has_newer_history
             if self._follow != previous:
                 if not self._follow:
@@ -2155,10 +2170,23 @@ class Transcript(VerticalScroll):
         if navigation.intent is HistoryNavigationIntent.OLDEST:
             target_y = 0.0
         else:
-            height_delta = (
-                max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
-            )
-            target_y = scroll_y + height_delta - navigation.remaining_rows
+            anchor_retained = anchor is not None and anchor in self.children
+            navigating_forward = navigation.intent in {
+                HistoryNavigationIntent.PAGE_DOWN,
+                HistoryNavigationIntent.WHEEL_DOWN,
+            }
+            if not anchor_retained:
+                # A retention boundary may replace a complete durable page, leaving
+                # no widget in common. The captured ``scroll_y`` belongs to content
+                # that no longer exists, so reusing it paints an unrelated offset —
+                # for a backward move that means briefly showing the transcript top.
+                # The adjacent edge is the only continuous fallback: the top of the
+                # newer page or the bottom of the older page.
+                target_y = 0.0 if navigating_forward else self.max_scroll_y
+            else:
+                height_delta = anchor.virtual_region.y - anchor_y_before if anchor else 0.0
+                direction = 1.0 if navigating_forward else -1.0
+                target_y = scroll_y + height_delta + direction * navigation.remaining_rows
         self.restore_viewport_state(
             TranscriptViewportState(
                 scroll_y=target_y,
@@ -2196,6 +2224,7 @@ class Transcript(VerticalScroll):
     def page_up(self) -> HistoryNavigation | None:
         """Move away from the tail before a page-up layout can re-pin it."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         page_height = float(self.scrollable_content_region.height)
         navigation = None
@@ -2217,6 +2246,7 @@ class Transcript(VerticalScroll):
     ) -> HistoryNavigation | None:
         """Arm the unconsumed wheel step before Textual processes the event."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         step = float(self.app.scroll_sensitivity_y)
         if self.scroll_y <= step:
@@ -2230,14 +2260,101 @@ class Transcript(VerticalScroll):
             return navigation
         return None
 
-    def page_down(self) -> None:
-        """Scroll one transcript page without Textual's default animation."""
+    def page_down(self) -> HistoryNavigation | None:
+        """Scroll down one page and retain movement beyond the mounted edge."""
 
+        page_height = float(self.scrollable_content_region.height)
+        distance_to_end = max(0.0, self.max_scroll_y - self.scroll_y)
+        navigation = None
+        if self._has_newer_history and page_height > 0 and distance_to_end <= page_height:
+            self._stop_following()
+            navigation = HistoryNavigation(
+                HistoryNavigationIntent.PAGE_DOWN,
+                remaining_rows=page_height - distance_to_end,
+                reader_generation=self._follow_generation,
+            )
         self.scroll_page_down(animate=False)
+        if navigation is not None:
+            self._queue_newer_navigation(navigation)
+        return navigation
+
+    def prepare_wheel_down(self) -> HistoryNavigation | None:
+        """Retain the unconsumed wheel step at the mounted newer edge."""
+
+        if not self._has_newer_history:
+            return None
+        step = float(self.app.scroll_sensitivity_y)
+        distance_to_end = max(0.0, self.max_scroll_y - self.scroll_y)
+        if distance_to_end > step:
+            return None
+        self._stop_following()
+        return HistoryNavigation(
+            HistoryNavigationIntent.WHEEL_DOWN,
+            remaining_rows=max(0.0, step - distance_to_end),
+            reader_generation=self._follow_generation,
+        )
+
+    def wheel_down(self) -> bool:
+        """Apply one wheel step and request a newer window at its boundary."""
+
+        navigation = self.prepare_wheel_down()
+        moved = self._scroll_down_for_pointer(animate=False)
+        if navigation is not None and self.is_vertical_scroll_end:
+            self._queue_newer_navigation(navigation)
+        return moved
+
+    def _queue_newer_navigation(self, navigation: HistoryNavigation) -> None:
+        """Coalesce wheel bursts before publishing one forward-edge request."""
+
+        current = self._pending_newer_navigation
+        intent = (
+            navigation.intent
+            if current.intent is HistoryNavigationIntent.PRESERVE
+            else current.intent
+        )
+        self._pending_newer_navigation = HistoryNavigation(
+            intent,
+            current.remaining_rows + navigation.remaining_rows,
+            navigation.reader_generation,
+        )
+        if self._newer_navigation_scheduled:
+            return
+        self._newer_navigation_scheduled = True
+        self.call_after_refresh(self._post_pending_newer_navigation)
+
+    def _post_pending_newer_navigation(self) -> None:
+        """Publish a settled wheel burst unless later reader intent superseded it."""
+
+        self._newer_navigation_scheduled = False
+        navigation = self._pending_newer_navigation
+        self._pending_newer_navigation = HistoryNavigation()
+        if (
+            navigation.intent is HistoryNavigationIntent.PRESERVE
+            or navigation.reader_generation != self._follow_generation
+            or self._follow
+        ):
+            return
+        self.post_message(self.NeedNewerHistory(navigation))
+
+    def _discard_pending_newer_navigation(self) -> None:
+        self._pending_newer_navigation = HistoryNavigation()
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Preserve a wheel gesture that crosses the virtual newer edge."""
+
+        # ``MessagePump._get_dispatch_methods`` walks the MRO and invokes *every*
+        # matching handler, so ``Widget._on_mouse_scroll_down`` still runs after
+        # this one and would apply a second scroll step. ``stop()`` only ends
+        # bubbling to the parent; ``prevent_default()`` is what breaks that MRO
+        # walk. Textual's own ``Footer`` pairs both for exactly this reason.
+        if not (event.ctrl or event.shift) and self.allow_vertical_scroll and self.wheel_down():
+            event.stop()
+            event.prevent_default()
 
     def scroll_to_oldest(self) -> None:
         """Move to the durable-history boundary without waiting for scroll settlement."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         self.scroll_home(animate=False)
 
@@ -2257,6 +2374,7 @@ class Transcript(VerticalScroll):
     def return_to_latest(self) -> None:
         """Restore tail-follow intent and jump to the newest output immediately."""
 
+        self._discard_pending_newer_navigation()
         was_following = self._follow
         self._follow_generation += 1
         self._follow = True
