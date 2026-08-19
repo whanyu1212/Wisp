@@ -1865,8 +1865,15 @@ def _message_page_from_index(
             candidates = active_messages[:cursor_index]
         truncated = len(candidates) > limit
         selected = candidates[-limit:]
+    structural_argument_bytes = (
+        _complete_structure_argument_bytes(selected) if complete_structure else 0
+    )
     text_budget = (
-        None if full_content else _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
+        None
+        if full_content
+        else _MessagePageTextBudget(
+            remaining=max(MESSAGE_PAGE_TEXT_BYTE_LIMIT - structural_argument_bytes, 0)
+        )
     )
     newest_first_messages = tuple(
         _rpc_message_snapshot(
@@ -1930,7 +1937,11 @@ def _rpc_message_snapshot(
         tool_call_id=message.tool_call_id,
         tool_name=message.tool_name,
         tool_calls=tuple(
-            _rpc_tool_call_snapshot(tool_call, text_budget=text_budget)
+            _rpc_tool_call_snapshot(
+                tool_call,
+                text_budget=text_budget,
+                preserve_process_identity=complete_structure,
+            )
             for tool_call in selected_tool_calls
         ),
         tool_calls_original_count=len(tool_calls),
@@ -2023,7 +2034,11 @@ def _rpc_tool_call_snapshot(
     tool_call: ToolCallSnapshot,
     *,
     text_budget: _MessagePageTextBudget | None,
+    preserve_process_identity: bool = False,
 ) -> RpcMessageToolCallSnapshot:
+    process_identity = (
+        _process_tool_identity_arguments(tool_call) if preserve_process_identity else None
+    )
     if text_budget is None:
         clipped_arguments = tool_call.arguments
         original_bytes = len(
@@ -2032,6 +2047,21 @@ def _rpc_tool_call_snapshot(
             )
         )
         truncated = False
+    elif process_identity is not None:
+        original_bytes = _json_object_byte_count(tool_call.arguments)
+        preview_arguments = {
+            key: value for key, value in tool_call.arguments.items() if key not in process_identity
+        }
+        if preview_arguments:
+            clipped_preview, _preview_bytes, truncated = _clip_json_object(
+                preview_arguments,
+                limit=TOOL_ARGUMENTS_BYTE_LIMIT,
+                text_budget=text_budget,
+            )
+        else:
+            clipped_preview = {}
+            truncated = False
+        clipped_arguments = {**clipped_preview, **process_identity}
     else:
         clipped_arguments, original_bytes, truncated = _clip_json_object(
             tool_call.arguments,
@@ -2046,6 +2076,31 @@ def _rpc_tool_call_snapshot(
         arguments_truncated=truncated,
         parse_error=tool_call.parse_error,
     )
+
+
+def _complete_structure_argument_bytes(entries: Sequence[MessageSessionEntry]) -> int:
+    """Reserve the bounded process keys needed to group complete-history rows."""
+
+    return sum(
+        _json_object_byte_count(identity)
+        for entry in entries
+        for tool_call in entry.message.tool_calls or ()
+        if (identity := _process_tool_identity_arguments(tool_call)) is not None
+    )
+
+
+def _process_tool_identity_arguments(tool_call: ToolCallSnapshot) -> JsonObject | None:
+    """Return the structural Bash poll/cancel keys needed by transcript replay."""
+
+    if tool_call.name != "bash":
+        return None
+    operation = tool_call.arguments.get("operation")
+    process_id = tool_call.arguments.get("process_id")
+    if not isinstance(operation, str) or operation not in {"poll", "cancel"}:
+        return None
+    if not isinstance(process_id, str) or not process_id.strip():
+        return None
+    return {"operation": operation, "process_id": process_id}
 
 
 def _clip_text_with_budget(

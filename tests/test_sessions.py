@@ -1008,6 +1008,52 @@ def test_session_message_page_complete_structure_preserves_every_tool_call(
     )
 
 
+def test_session_message_page_complete_structure_reserves_process_identity(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    process_id = "a" * 32
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="poll-call",
+                        name="bash",
+                        arguments={
+                            "operation": "poll",
+                            "process_id": process_id,
+                            "wait_seconds": 30,
+                        },
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        for _ in range(8):
+            await session.append_message(
+                Message(
+                    role="assistant",
+                    content="x" * jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT,
+                )
+            )
+
+    anyio.run(write)
+
+    page = session.read_message_page(limit=9, complete_structure=True)
+    process_call = page.messages[0].tool_calls[0]
+
+    assert process_call.arguments == {
+        "operation": "poll",
+        "process_id": process_id,
+    }
+    assert process_call.arguments_truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
 def test_session_message_page_exact_full_content_bypasses_preview_limits(
     tmp_path: Path,
 ) -> None:
