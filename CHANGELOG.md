@@ -11,6 +11,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0rc3 — 2026-08-19
+
 - Added bounded Markdown structure, inline-code, and fenced-code highlighting to the Textual prompt
   editor without changing submitted prompt text.
 - Kept complete Textual conversation and tool history reachable through wheel, PageUp/PageDown,
