@@ -7893,6 +7893,170 @@ def test_textual_wheel_down_crosses_newer_edge_in_a_scrollable_viewport() -> Non
     assert "message 0" not in texts
 
 
+def test_textual_resumed_process_card_stays_stable_across_history_windows(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A long resumed process must not mutate or paint mid-restore while scrolling."""
+
+    async def scenario() -> tuple[
+        list[ProcessCard],
+        list[object],
+        list[str],
+        list[int],
+        list[str],
+        list[str],
+        int,
+        int,
+    ]:
+        app_instance, renderer = create_textual_tui()
+        process_id = "583470d9b9b848299792314292a8ca8f"
+        prefix = tuple(
+            HistoricalTranscriptMessage(role="assistant", content=f"prefix {index}")
+            for index in range(30)
+        )
+        polls = tuple(
+            HistoricalToolCard(
+                card_id=f"history:poll-{index}",
+                name="bash",
+                arguments={"operation": "poll", "process_id": process_id},
+                output=(
+                    f"Process {process_id} completed with exit code 0\n"
+                    f"stdout:\n{'.' * 70} [100%]\n"
+                    "3885 passed, 6 skipped in 399.00s (0:06:38)\n"
+                    if index == 88
+                    else (
+                        f"Process {process_id} is still running\n"
+                        f"stdout:\n{'.' * 70} [{index + 1:3d}%]\n"
+                    )
+                ),
+                is_error=False,
+                status="done" if index == 88 else None,
+                exit_code=0 if index == 88 else None,
+                tool_call_id=f"poll-{index}",
+            )
+            for index in range(89)
+        )
+        suffix = tuple(
+            HistoricalTranscriptMessage(role="assistant", content=f"suffix {index}")
+            for index in range(30)
+        )
+        cards: list[ProcessCard] = []
+        presentations: list[object] = []
+        rendered_cards: list[str] = []
+        heights: list[int] = []
+        painted_cards: list[str] = []
+        exposed_unsettled_paints = 0
+        suppressed_frames = 0
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                (*prefix, *polls, *suffix),
+                session_label="Long process session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            baseline_card = app_instance.query_one(ProcessCard)
+            baseline_presentation = baseline_card.lifecycle_presentation
+            baseline_render = baseline_card.render().plain
+
+            app_type = type(app_instance)
+            original_display = app_type._display
+
+            def record_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+                nonlocal exposed_unsettled_paints, suppressed_frames
+                if self is app_instance:
+                    if self._history_prepend_paint_suppressed:
+                        suppressed_frames += 1
+                    else:
+                        if self._history_prepend_anchor is not None:
+                            exposed_unsettled_paints += 1
+                        mounted_cards = list(self.query(ProcessCard))
+                        if mounted_cards:
+                            painted_cards.append(mounted_cards[0].render().plain)
+                return original_display(self, screen, renderable)
+
+            monkeypatch.setattr(app_type, "_display", record_display)
+
+            async def settle_window() -> None:
+                await app_instance.wait_for_history_render()
+                with anyio.fail_after(5):
+                    while (
+                        app_instance._history_prepend_anchor is not None
+                        or app_instance._history_prepend_paint_suppressed
+                    ):
+                        await pilot.pause()
+                await pilot.pause()
+
+            latest_texts = _transcript_texts(app_instance)
+            assert latest_texts.index(baseline_render) < latest_texts.index("suffix 0")
+
+            shifts = (
+                renderer._history.shift_older,
+                renderer._history.shift_older,
+                renderer._history.shift_older,
+                renderer._history.shift_newer,
+                renderer._history.shift_newer,
+                renderer._history.shift_newer,
+            )
+            oldest_texts: list[str] = []
+            for index, shift in enumerate(shifts):
+                assert shift()
+                await settle_window()
+                mounted = list(app_instance.query(ProcessCard))
+                assert len(mounted) == 1
+                card = mounted[0]
+                cards.append(card)
+                presentations.append(card.lifecycle_presentation)
+                rendered_cards.append(card.render().plain)
+                heights.append(card.virtual_region.height)
+                if index == 2:
+                    oldest_texts = _transcript_texts(app_instance)
+
+            assert oldest_texts.index("prefix 29") < oldest_texts.index(baseline_render)
+            assert transcript.query(ProcessCard).first() is baseline_card
+            assert all(presentation == baseline_presentation for presentation in presentations)
+            assert all(rendered == baseline_render for rendered in rendered_cards)
+
+        return (
+            cards,
+            presentations,
+            rendered_cards,
+            heights,
+            painted_cards,
+            oldest_texts,
+            exposed_unsettled_paints,
+            suppressed_frames,
+        )
+
+    (
+        cards,
+        presentations,
+        rendered_cards,
+        heights,
+        painted_cards,
+        oldest_texts,
+        exposed_unsettled_paints,
+        suppressed_frames,
+    ) = anyio.run(scenario)
+
+    assert len({id(card) for card in cards}) == 1
+    assert len(presentations) == len(rendered_cards) == len(heights) == 6
+    presentation = cards[0].lifecycle_presentation
+    assert presentation.poll_count == 89
+    assert presentation.display_state == "completed"
+    assert presentation.full_output.count("stdout:") == 1
+    assert presentation.detail.startswith("… earlier process output hidden")
+    assert "3885 passed, 6 skipped" in presentation.detail
+    assert len(set(heights)) == 1
+    assert heights[0] > 0
+    assert painted_cards
+    assert set(painted_cards) == {rendered_cards[0]}
+    assert "prefix 29" in oldest_texts
+    assert exposed_unsettled_paints == 0
+    assert suppressed_frames > 0
+
+
 def test_textual_backward_navigation_never_paints_the_transcript_top() -> None:
     """An evicting prepend must not flash the top of the transcript.
 
