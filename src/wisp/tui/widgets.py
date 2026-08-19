@@ -473,10 +473,9 @@ def _tree_line(
         if cell_len(value.plain) <= available
         else value.wrap(available, overflow="fold") or [Content("")]
     )
-    content = Content(first_prefix) + wrapped[0]
-    for line in wrapped[1:]:
-        content += Content("\n" + continuation_prefix) + line
-    return content
+    if len(wrapped) == 1:
+        return Content(first_prefix) + wrapped[0]
+    return Content(first_prefix) + Content("\n" + continuation_prefix).join(wrapped)
 
 
 def _tree_detail(detail: str | Content, *, width: int) -> Content:
@@ -484,19 +483,19 @@ def _tree_detail(detail: str | Content, *, width: int) -> Content:
 
     source = detail if isinstance(detail, Content) else Content(detail)
     logical_lines = source.split("\n", allow_blank=True) or [Content("")]
-    content = Content("")
-    first = True
-    for logical_line in logical_lines:
-        if not first:
-            content += Content("\n")
-        content += _tree_line(
+    # ``Content.__add__`` copies the accumulated text and every span on each call,
+    # so folding hundreds of output lines one at a time is quadratic — long process
+    # output (a pytest progress dump) took seconds to lay out. ``join`` accumulates
+    # into lists and builds the result once.
+    return Content("\n").join(
+        _tree_line(
             logical_line,
             width=width,
-            first_prefix="  └ " if first else "    ",
+            first_prefix="  └ " if index == 0 else "    ",
             continuation_prefix="    ",
         )
-        first = False
-    return content
+        for index, logical_line in enumerate(logical_lines)
+    )
 
 
 def _render_diff_presentation(
@@ -520,13 +519,20 @@ def _render_diff_presentation(
         + Content(" ")
         + Content.styled(deletions, DIFF_DEL_COUNT_STYLE)
     )
-    content = Content("  └ ") + header
-    for visible_row in presentation.visible_rows(expanded=expanded):
-        content += Content("\n  ") + _render_diff_visible_row(
+    # Fold the rows with ``join`` rather than repeated ``+=``: ``Content.__add__``
+    # copies the accumulated text and spans every time, so an expanded diff (up to
+    # ``DIFF_EXPANDED_ROWS``) would lay out in quadratic time.
+    rows = Content("\n  ").join(
+        _render_diff_visible_row(
             visible_row,
             width=inner_width,
             show_line_numbers=presentation.show_line_numbers,
         )
+        for visible_row in presentation.visible_rows(expanded=expanded)
+    )
+    content = Content("  └ ") + header
+    if rows.plain:
+        content += Content("\n  ") + rows
     return content
 
 

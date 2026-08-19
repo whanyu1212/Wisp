@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from rich.cells import cell_len
 from textual.content import Content
 
@@ -534,3 +536,51 @@ def test_selection_clips_utf8_on_a_character_boundary_and_reports_the_remainder(
     assert "�" not in text
     assert any(row.row.kind is DiffRowKind.omission for row in visible)
     assert "bytes hidden" in text
+
+
+def test_expanded_diff_renders_in_linear_time() -> None:
+    """A fully expanded diff must not fold its rows quadratically.
+
+    ``Content.__add__`` copies the accumulated text and spans on every call, so
+    appending up to ``DIFF_EXPANDED_ROWS`` rows one at a time made opening a
+    large edit card stall the TUI.
+    """
+
+    def presentation(row_count: int) -> DiffPresentation:
+        rows = tuple(
+            DiffRow(
+                kind=(
+                    DiffRowKind.context,
+                    DiffRowKind.addition,
+                    DiffRowKind.deletion,
+                )[index % 3],
+                text=f"line {index} " + "z" * (index % 40),
+                old_line=index + 1,
+                new_line=index + 1,
+            )
+            for index in range(row_count)
+        )
+        return DiffPresentation(
+            path="module.py",
+            operation=DiffOperation.modify,
+            additions=row_count // 3,
+            deletions=row_count // 3,
+            rows=rows,
+            show_line_numbers=True,
+        )
+
+    def layout_duration(row_count: int) -> float:
+        prepared = presentation(row_count)
+        samples = []
+        for _ in range(5):
+            start = time.perf_counter()
+            _render_diff_presentation(prepared, width=110, expanded=True)
+            samples.append(time.perf_counter() - start)
+        return min(samples)
+
+    layout_duration(50)  # warm caches
+    baseline = layout_duration(100)
+    quadrupled = layout_duration(400)
+
+    # Linear predicts ~4x; the quadratic version grew far past 8x.
+    assert quadrupled < baseline * 8
