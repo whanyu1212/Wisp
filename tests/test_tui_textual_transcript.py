@@ -225,6 +225,38 @@ def test_live_process_reuse_detaches_historical_card_ownership() -> None:
     assert controller.settled_widget_count == 1
 
 
+def test_identical_historical_process_update_skips_repaint_and_surface_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = _Surface()
+    controller = _controller(surface)
+    card = controller.mount_process_card("proc-1", historical=True)
+    assert isinstance(card, ProcessCard)
+    lifecycle = ProcessLifecycle("proc-1")
+    lifecycle.begin("poll")
+    presentation = lifecycle.observe(operation="poll", state="running", stdout="progress\n")
+    controller.update_historical_process_card(card, presentation)
+
+    surface.following = False
+    surface.follow_requests = 0
+    controller.clear_unseen_output()
+
+    def reject_repaint(
+        self: ProcessCard,
+        incoming: object,
+        *,
+        elapsed: float | None = None,
+    ) -> None:
+        del self, incoming, elapsed
+        raise AssertionError("identical historical presentation must not repaint")
+
+    monkeypatch.setattr(ProcessCard, "set_lifecycle", reject_repaint)
+
+    assert controller.update_historical_process_card(card, presentation) is card
+    assert controller.unseen_output_count == 0
+    assert surface.follow_requests == 0
+
+
 def test_historical_process_mount_stays_separate_from_live_owned_card() -> None:
     surface = _Surface()
     controller = _controller(surface)
