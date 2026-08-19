@@ -35,6 +35,7 @@ class OverlayKind(StrEnum):
 class OverlayOperation(StrEnum):
     """Non-visual operations that keep the composer temporarily unavailable."""
 
+    history_hydration = "history_hydration"
     session_catalog = "session_catalog"
     session_switch = "session_switch"
     update = "update"

@@ -70,6 +70,7 @@ from wisp.tui.widgets import (
     HistoryNavigationIntent,
     JumpToLatest,
     LineMessage,
+    OperationIndicator,
     ProcessCard,
     SlashSuggest,
     StatusBar,
@@ -7913,6 +7914,49 @@ def test_textual_reverse_wheel_during_prepend_does_not_restore_stale_anchor(
     assert moved
     assert reader_generation > anchor_generation
     assert restored == 0
+
+
+def test_textual_complete_history_hydration_is_covered_and_revealed_at_tail() -> None:
+    async def scenario() -> tuple[list[str], str, bool, bool, float, float]:
+        app_instance, renderer = create_textual_tui()
+        entries = tuple(
+            HistoricalTranscriptMessage(role="assistant", content=f"message {index}")
+            for index in range(40)
+        )
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            label = app_instance.query_one("#operation-indicator-label", Label)
+            renderer.history_hydration_started()
+            await pilot.pause()
+
+            await renderer.hydrate_history_entries(entries, session_label="Complete session")
+            await pilot.pause()
+            content = label.render()
+            assert isinstance(content, Content)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            result = (
+                _transcript_texts(app_instance),
+                content.plain,
+                indicator.is_open,
+                indicator.has_class("-covers-transcript"),
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+            )
+            renderer.history_hydration_finished()
+            await pilot.pause()
+            assert not indicator.is_open
+            return result
+
+    texts, progress, covered, cover_class, scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert texts[0] == "resumed session: Complete session"
+    assert texts[1:] == [f"message {index}" for index in range(40)]
+    assert progress == "Preparing transcript… 40 / 40 cards"
+    assert covered is True
+    assert cover_class is True
+    assert max_scroll_y > 0
+    assert scroll_y == max_scroll_y
 
 
 def test_textual_wheel_down_crosses_newer_edge_in_a_scrollable_viewport() -> None:

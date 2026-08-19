@@ -1749,6 +1749,10 @@ class OperationIndicator(Vertical):
         background: transparent;
     }
 
+    OperationIndicator.-covers-transcript {
+        background: $background;
+    }
+
     OperationIndicator #operation-indicator-panel {
         width: auto;
         height: 3;
@@ -1787,11 +1791,17 @@ class OperationIndicator(Vertical):
 
         return self.display
 
-    def show_operation(self, label: str) -> None:
-        """Display a caller-owned operation label beside the native spinner."""
+    def show_operation(self, label: str, *, cover_transcript: bool = False) -> None:
+        """Display one operation and configure whether it covers partial history."""
+
+        self.set_class(cover_transcript, "-covers-transcript")
+        self.update_operation(label)
+        self.display = True
+
+    def update_operation(self, label: str) -> None:
+        """Update an active operation label without changing spinner or coverage state."""
 
         self._label.update(label)
-        self.display = True
 
     def hide(self) -> None:
         """Hide the operation surface through the generic overlay protocol."""

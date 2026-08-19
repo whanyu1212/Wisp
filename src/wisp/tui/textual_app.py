@@ -141,6 +141,7 @@ _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
 _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
+    OverlayOperation.history_hydration: "Loading session history…",
     OverlayOperation.session_catalog: "Loading sessions…",
     OverlayOperation.session_switch: "Switching session…",
 }
@@ -2297,6 +2298,25 @@ class TextualTui(App[None]):
             return False
         return overlays.close(OverlayKind.diff_viewer)
 
+    def history_hydration_started(self) -> None:
+        self._start_session_operation(OverlayOperation.history_hydration)
+
+    def history_hydration_progress(self, label: str) -> None:
+        """Update the active history operation without restarting its spinner."""
+
+        overlays = self._overlay_controller
+        if overlays is None or overlays.active_operation not in {
+            OverlayOperation.history_hydration,
+            OverlayOperation.session_switch,
+        }:
+            return
+        indicator = self._operation_indicator
+        if indicator is not None:
+            indicator.update_operation(label)
+
+    def history_hydration_finished(self) -> None:
+        self._finish_session_operation(OverlayOperation.history_hydration)
+
     def session_catalog_started(self) -> None:
         self._start_session_operation(OverlayOperation.session_catalog)
 
@@ -2317,7 +2337,14 @@ class TextualTui(App[None]):
             overlays.start_operation(operation)
         indicator = self._operation_indicator
         if indicator is not None:
-            indicator.show_operation(_SESSION_OPERATION_LABELS[operation])
+            indicator.show_operation(
+                _SESSION_OPERATION_LABELS[operation],
+                cover_transcript=operation
+                in {
+                    OverlayOperation.history_hydration,
+                    OverlayOperation.session_switch,
+                },
+            )
 
     def _finish_session_operation(self, operation: OverlayOperation) -> None:
         """Hide only after the active typed session operation completed."""
@@ -3202,6 +3229,17 @@ class TextualTui(App[None]):
 
         for mounted in self._last_history_render_mounts:
             await mounted
+
+    async def wait_for_complete_history_batch(self) -> None:
+        """Wait once for an ordered fresh-mount batch instead of relayout per widget."""
+
+        if self._last_history_render_mounts:
+            await self._last_history_render_mounts[-1]
+
+    async def wait_for_history_refresh(self) -> None:
+        """Yield through the next Textual refresh so progress remains animated."""
+
+        await self.wait_for_refresh()
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record pagination state after the current history batch has laid out."""

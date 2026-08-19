@@ -867,6 +867,90 @@ def test_tui_shell_resume_complete_history_buffers_all_pages_before_replacement(
     anyio.run(run)
 
 
+def test_tui_shell_resume_awaits_complete_history_mount_before_finishing_switch() -> None:
+    class AsyncRenderer(LineTuiRenderer):
+        history_hydration_policy = HistoryHydrationPolicy.COMPLETE
+
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.mount_started = anyio.Event()
+            self.release_mount = anyio.Event()
+            self.hydrated: list[tuple[tuple[HistoricalTranscriptEntry, ...], str | None]] = []
+            self.switches: list[str] = []
+
+        def session_switch_started(self, session_id: str) -> None:
+            self.switches.append(f"start:{session_id}")
+
+        def session_switch_finished(self) -> None:
+            self.switches.append("finish")
+
+        async def hydrate_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str | None,
+        ) -> None:
+            self.mount_started.set()
+            await self.release_mount.wait()
+            self.hydrated.append((entries, session_label))
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = AsyncRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_resume_command(("target",))
+        await shell._handle_rpc_event(
+            RpcSessionSelected(
+                command_id="select-session-1",
+                session_id="target",
+                session_path="/tmp/target.jsonl",
+                entry_count=1,
+                session_name="Target task",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="select-session-1",
+                command_type="select_session",
+                ok=True,
+            )
+        )
+        history_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=history_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "answer", entry_id="answer"),),
+            )
+        )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                shell._handle_rpc_event,
+                RpcCommandFinished(
+                    command_id=history_id,
+                    command_type="get_messages",
+                    ok=True,
+                ),
+            )
+            await renderer.mount_started.wait()
+            assert shell.pending_session_switch is not None
+            assert renderer.switches == ["start:target"]
+            renderer.release_mount.set()
+
+        assert renderer.hydrated == [
+            (
+                (HistoricalTranscriptMessage(role="assistant", content="answer"),),
+                "Target task",
+            )
+        ]
+        assert renderer.switches == ["start:target", "finish"]
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
 def test_tui_shell_resume_complete_history_rejects_mismatched_page() -> None:
     class RecordingRenderer(LineTuiRenderer):
         history_hydration_policy = HistoryHydrationPolicy.COMPLETE
@@ -2367,6 +2451,64 @@ def test_tui_shell_complete_history_hydration_renders_all_pages_once_in_order() 
             )
         ]
         assert shell._history_pagination is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_startup_mount_failure_closes_history_operation() -> None:
+    class FailingRenderer(LineTuiRenderer):
+        history_hydration_policy = HistoryHydrationPolicy.COMPLETE
+
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.lifecycle: list[str] = []
+            self.errors: list[str] = []
+
+        def history_hydration_started(self) -> None:
+            self.lifecycle.append("start")
+
+        def history_hydration_finished(self) -> None:
+            self.lifecycle.append("finish")
+
+        async def hydrate_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str | None,
+        ) -> None:
+            del entries, session_label
+            raise RuntimeError("mount failed")
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController(
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(_rpc_message("assistant", "history", entry_id="history"),),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        renderer = FailingRenderer()
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert renderer.lifecycle == ["start", "finish"]
+        assert renderer.errors == ["Failed to mount session history: mount failed"]
 
     anyio.run(run)
 

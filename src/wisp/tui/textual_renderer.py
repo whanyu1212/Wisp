@@ -360,6 +360,15 @@ class TextualTuiRenderer:
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
 
+    def history_hydration_started(self) -> None:
+        self.app.history_hydration_started()
+
+    def history_hydration_progress(self, label: str) -> None:
+        self.app.history_hydration_progress(label)
+
+    def history_hydration_finished(self) -> None:
+        self.app.history_hydration_finished()
+
     def set_history_page_request_hook(
         self,
         hook: Callable[[], Awaitable[None]],
@@ -408,6 +417,27 @@ class TextualTuiRenderer:
     ) -> None:
         self._clear_tool_presentation_state()
         self._history.replace_entries(entries, session_label=session_label)
+
+    async def hydrate_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str | None,
+    ) -> None:
+        """Mount complete history in responsive batches behind the operation overlay."""
+
+        self._clear_tool_presentation_state()
+
+        def report_progress(completed: int, total: int) -> None:
+            self.history_hydration_progress(
+                f"Preparing transcript… {completed:,} / {total:,} cards"
+            )
+
+        await self._history.hydrate_entries(
+            entries,
+            session_label=session_label,
+            progress=report_progress,
+        )
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.prepend_entries(entries)

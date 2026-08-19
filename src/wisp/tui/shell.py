@@ -230,6 +230,7 @@ class _CompleteHistoryHydration:
     expected_session_id: str | None
     newest_first_pages: list[tuple[RpcMessageSnapshot, ...]] = field(default_factory=list)
     seen_before_entry_ids: set[str] = field(default_factory=set)
+    loaded_message_count: int = 0
 
     def add(self, report: RpcMessagesReported) -> None:
         if self.newest_first_pages:
@@ -248,6 +249,7 @@ class _CompleteHistoryHydration:
         if cursor is not None:
             self.seen_before_entry_ids.add(cursor)
         self.newest_first_pages.append(report.messages)
+        self.loaded_message_count += len(report.messages)
 
     @property
     def messages(self) -> tuple[RpcMessageSnapshot, ...]:
@@ -560,6 +562,19 @@ class TuiShell:
         self,
         receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
     ) -> bool:
+        complete = self._history_hydration_policy is HistoryHydrationPolicy.COMPLETE
+        if complete:
+            self._call_renderer_optional("history_hydration_started")
+        try:
+            return await self._hydrate_session_history_pages(receive)
+        finally:
+            if complete:
+                self._call_renderer_optional("history_hydration_finished")
+
+    async def _hydrate_session_history_pages(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
         command_id = await self._request_session_history()
         if command_id is None:
             return False
@@ -581,8 +596,12 @@ class TuiShell:
                         except ValueError as exc:
                             self.renderer.command_error(f"Failed to load session history: {exc}")
                             return False
+                        self._call_renderer_optional(
+                            "history_hydration_progress",
+                            f"Loading session history… {len(hydration.messages):,} messages",
+                        )
                     elif not rendered:
-                        self._render_history_entries(
+                        await self._render_history_entries(
                             history_entries_from_rpc_messages(event.messages),
                             text_fallback=history_from_rpc_messages(event.messages),
                         )
@@ -613,10 +632,13 @@ class TuiShell:
                         continue
                     if hydration is not None:
                         messages = hydration.messages
-                        self._render_history_entries(
-                            history_entries_from_rpc_messages(messages),
-                            text_fallback=history_from_rpc_messages(messages),
-                        )
+                        try:
+                            await self._render_history_entries(
+                                history_entries_from_rpc_messages(messages),
+                                text_fallback=history_from_rpc_messages(messages),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - startup history is optional
+                            self.renderer.command_error(f"Failed to mount session history: {exc}")
                     return False
                 continue
             if isinstance(signal, _RpcEventsClosed):
@@ -723,12 +745,29 @@ class TuiShell:
             return
         cast(Callable[[tuple[HistoricalTranscriptMessage, ...]], None], render_history)(messages)
 
-    def _render_history_entries(
+    async def _render_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
         *,
         text_fallback: tuple[HistoricalTranscriptMessage, ...],
+        session_label: str | None = None,
     ) -> None:
+        hydrate_entries = getattr(self.renderer, "hydrate_history_entries", None)
+        if self._history_hydration_policy is HistoryHydrationPolicy.COMPLETE and callable(
+            hydrate_entries
+        ):
+            await cast(Callable[..., Awaitable[None]], hydrate_entries)(
+                entries,
+                session_label=session_label,
+            )
+            return
+        if session_label is not None:
+            self._call_renderer_optional(
+                "replace_history_entries",
+                entries,
+                session_label=session_label,
+            )
+            return
         render_entries = getattr(self.renderer, "render_history_entries", None)
         if callable(render_entries):
             cast(Callable[[tuple[HistoricalTranscriptEntry, ...]], None], render_entries)(entries)
@@ -1794,6 +1833,11 @@ class TuiShell:
                         hydration.add(event)
                     except ValueError as exc:
                         self._fail_committed_session_hydration(str(exc))
+                        return False
+                    self._call_renderer_optional(
+                        "history_hydration_progress",
+                        f"Loading session history… {len(hydration.messages):,} messages",
+                    )
                 return False
 
         if (
@@ -2163,11 +2207,17 @@ class TuiShell:
         label = selected.session_name or _compact_session_path(selected.session_path)
         messages = hydration.messages if hydration is not None else pending.history_report.messages
         entries = history_entries_from_rpc_messages(messages)
-        self._call_renderer_optional(
-            "replace_history_entries",
-            entries,
-            session_label=label,
-        )
+        try:
+            await self._render_history_entries(
+                entries,
+                text_fallback=history_from_rpc_messages(messages),
+                session_label=label,
+            )
+        except Exception as exc:  # noqa: BLE001 - selection already committed
+            self._fail_committed_session_hydration(
+                f"failed to mount selected session history: {exc}"
+            )
+            return
         if hydration is None:
             self._activate_history_pagination(pending.history_report)
         self.view.context = None

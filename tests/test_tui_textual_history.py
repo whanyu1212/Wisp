@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
+import anyio
 import pytest
 from textual.content import Content
 from textual.widget import Widget
@@ -44,6 +45,10 @@ class _HistorySurface:
     window_availability: list[bool] = field(default_factory=list)
     render_starts: int = 0
     render_finishes: int = 0
+    render_waits: int = 0
+    refresh_waits: int = 0
+    batch_mount_counts: list[int] = field(default_factory=list)
+    _batch_start: int = 0
     prepend_starts: int = 0
     prepend_finishes: int = 0
     follow_requests: int = 0
@@ -75,11 +80,26 @@ class _HistorySurface:
 
     def begin_history_render(self) -> None:
         self.render_starts += 1
+        self._batch_start = len(self.widgets)
 
     def finish_history_render(self) -> None:
         self.render_finishes += 1
+        self.batch_mount_counts.append(len(self.widgets) - self._batch_start)
+
+    async def wait_for_history_render(self) -> None:
+        self.render_waits += 1
+
+    async def wait_for_complete_history_batch(self) -> None:
+        self.render_waits += 1
+
+    async def wait_for_history_refresh(self) -> None:
+        self.refresh_waits += 1
+        await anyio.sleep(0)
 
     def follow_transcript_tail_after_refresh(self) -> None:
+        self.follow_requests += 1
+
+    def return_transcript_to_latest(self) -> None:
         self.follow_requests += 1
 
     def request_latest_history(self) -> bool:
@@ -255,6 +275,57 @@ def _messages(
         HistoricalTranscriptMessage(role=role, content=f"{prefix} {index}")
         for index in range(count)
     )
+
+
+def test_history_controller_hydrates_complete_history_in_bounded_batches() -> None:
+    async def scenario() -> tuple[
+        list[str],
+        list[tuple[int, int]],
+        list[int],
+        int,
+        int,
+        int,
+        int,
+        int,
+    ]:
+        surface = _HistorySurface()
+        controller = TextualHistoryController(surface)
+        progress: list[tuple[int, int]] = []
+
+        await controller.hydrate_entries(
+            _messages("assistant", "message", 40),
+            session_label="Complete",
+            progress=lambda completed, total: progress.append((completed, total)),
+        )
+
+        return (
+            surface.history_labels,
+            progress,
+            surface.batch_mount_counts,
+            surface.render_starts,
+            surface.render_finishes,
+            surface.render_waits,
+            surface.refresh_waits,
+            surface.follow_requests,
+        )
+
+    (
+        labels,
+        progress,
+        batch_mount_counts,
+        render_starts,
+        render_finishes,
+        render_waits,
+        refresh_waits,
+        follow_requests,
+    ) = anyio.run(scenario)
+
+    assert labels == [f"assistant: message {index}" for index in range(40)]
+    assert progress == [(0, 40), (16, 40), (32, 40), (40, 40)]
+    assert batch_mount_counts == [16, 16, 8, 1]
+    assert render_starts == render_finishes == render_waits == 4
+    assert refresh_waits == 5
+    assert follow_requests == 1
 
 
 def test_history_controller_reconciles_a_bounded_window_without_full_history_scans(

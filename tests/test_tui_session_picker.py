@@ -241,6 +241,32 @@ def test_session_catalog_loading_hides_composer_and_preserves_draft() -> None:
     assert visible_after_finish is False
 
 
+def test_history_hydration_indicator_covers_partial_transcript_and_updates_in_place() -> None:
+    async def scenario() -> tuple[str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            indicator = app.query_one("#operation-indicator", OperationIndicator)
+            label = app.query_one("#operation-indicator-label", Label)
+
+            renderer.history_hydration_started()
+            await pilot.pause()
+            covered_before = indicator.has_class("-covers-transcript")
+            renderer.history_hydration_progress("Preparing transcript… 16 / 40 cards")
+            await pilot.pause()
+            content = label.render()
+            assert isinstance(content, Content)
+            covered_after = indicator.has_class("-covers-transcript")
+            renderer.history_hydration_finished()
+            await pilot.pause()
+            return content.plain, covered_before and covered_after, indicator.is_open
+
+    label, covered, visible_after_finish = anyio.run(scenario)
+
+    assert label == "Preparing transcript… 16 / 40 cards"
+    assert covered is True
+    assert visible_after_finish is False
+
+
 def test_session_operation_indicator_does_not_obscure_an_approval() -> None:
     async def scenario() -> tuple[bool, bool]:
         app, renderer = create_textual_tui()

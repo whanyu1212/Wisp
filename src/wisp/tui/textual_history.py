@@ -13,7 +13,7 @@ state. The app remains responsible for widget lifecycle and viewport restoration
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -41,6 +41,8 @@ from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
+_COMPLETE_HISTORY_MOUNT_BATCH_SIZE = 16
+
 
 class TextualHistorySurface(Protocol):
     """Textual operations needed to mount and reconcile retained history."""
@@ -61,7 +63,15 @@ class TextualHistorySurface(Protocol):
 
     def finish_history_render(self) -> None: ...
 
+    async def wait_for_history_render(self) -> None: ...
+
+    async def wait_for_complete_history_batch(self) -> None: ...
+
+    async def wait_for_history_refresh(self) -> None: ...
+
     def follow_transcript_tail_after_refresh(self) -> None: ...
+
+    def return_transcript_to_latest(self) -> None: ...
 
     def request_latest_history(self) -> bool: ...
 
@@ -346,6 +356,61 @@ class TextualHistoryController:
             f"resumed session: {session_label}",
             before=next(iter(self._widgets.values()), None),
         )
+
+    async def hydrate_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str | None,
+        progress: Callable[[int, int], None],
+    ) -> None:
+        """Mount one complete transcript responsively, then reveal it at the tail."""
+
+        self._clear()
+        self._surface.replace_transcript()
+        retained = self._retain(entries)
+        capacity = max(1, len(retained))
+        self._window = TranscriptWindow(
+            capacity=capacity,
+            shift=capacity,
+            retained_capacity=capacity,
+        )
+        self._window.replace(retained)
+        visible = self._window.visible
+        process_groups = self._historical_process_groups(visible)
+        roots = tuple(
+            (item, process_groups.get(item.id))
+            for item in visible
+            if (group := process_groups.get(item.id)) is None or item.id == group.first_entry_id
+        )
+        total = len(roots)
+        progress(0, total)
+        for start in range(0, total, _COMPLETE_HISTORY_MOUNT_BATCH_SIZE):
+            batch = roots[start : start + _COMPLETE_HISTORY_MOUNT_BATCH_SIZE]
+            self._surface.begin_history_render()
+            try:
+                for item, process_group in batch:
+                    self._mount_complete_root(item, process_group)
+            finally:
+                self._surface.finish_history_render()
+            await self._surface.wait_for_complete_history_batch()
+            await self._surface.wait_for_history_refresh()
+            progress(min(start + len(batch), total), total)
+
+        if session_label is not None:
+            self._surface.begin_history_render()
+            try:
+                self._surface.mount_history_marker(
+                    f"resumed session: {session_label}",
+                    before=next(iter(self._widgets.values()), None),
+                )
+            finally:
+                self._surface.finish_history_render()
+            await self._surface.wait_for_complete_history_batch()
+        self._surface.set_history_window_available(has_older=False, has_newer=False)
+        self._surface.return_transcript_to_latest()
+        await self._surface.wait_for_history_refresh()
+        await self._surface.wait_for_history_refresh()
 
     def prepend_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
         """Prepend one durable older-history page and preserve its viewport anchor."""
@@ -730,6 +795,32 @@ class TextualHistoryController:
             for result_card_id, tool_call in self._boundary_tool_calls.items()
             if result_card_id not in card_ids
         }
+
+    def _mount_complete_root(
+        self,
+        item: _RetainedHistoryEntry,
+        process_group: _HistoricalProcessGroup | None,
+    ) -> None:
+        """Mount one prepared presentation root into a fresh complete transcript."""
+
+        if process_group is None:
+            mounted = self._mount_entry(item.entry, before=None)
+        else:
+            mounted = self._surface.mount_process_card(
+                process_group.presentation.process_id,
+                historical=True,
+            )
+            if mounted is not None:
+                self._surface.update_historical_process_card(
+                    mounted,
+                    process_group.presentation,
+                )
+        if mounted is None:
+            return
+        self._widgets[item.id] = mounted
+        if process_group is not None:
+            for member_id in process_group.member_entry_ids:
+                self._widgets[member_id] = mounted
 
     def _reconcile(self) -> None:
         """Apply only the changed edges of the retained history window."""
