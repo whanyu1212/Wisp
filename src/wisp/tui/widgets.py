@@ -2187,8 +2187,11 @@ class Transcript(VerticalScroll):
                 # that no longer exists, so reusing it paints an unrelated offset —
                 # for a backward move that means briefly showing the transcript top.
                 # The adjacent edge is the only continuous fallback: the top of the
-                # newer page or the bottom of the older page.
-                target_y = 0.0 if navigating_forward else self.max_scroll_y
+                # newer page or the bottom of the older page. Continue through that
+                # edge by any rows the triggering gesture could not consume.
+                direction = 1.0 if navigating_forward else -1.0
+                edge_y = 0.0 if navigating_forward else self.max_scroll_y
+                target_y = edge_y + direction * navigation.remaining_rows
             else:
                 height_delta = anchor.virtual_region.y - anchor_y_before if anchor else 0.0
                 direction = 1.0 if navigating_forward else -1.0
@@ -2287,13 +2290,16 @@ class Transcript(VerticalScroll):
     def prepare_wheel_down(self) -> HistoryNavigation | None:
         """Retain the unconsumed wheel step at the mounted newer edge."""
 
-        if not self._has_newer_history:
-            return None
         step = float(self.app.scroll_sensitivity_y)
         distance_to_end = max(0.0, self.max_scroll_y - self.scroll_y)
-        if distance_to_end > step:
+        if distance_to_end <= 0 and not self._has_newer_history:
             return None
+        # Version every effective reader move, even when it remains within the
+        # mounted window. A delayed prepend restore must not overwrite a wheel
+        # reversal that happened while its replacement widgets were settling.
         self._stop_following()
+        if not self._has_newer_history or distance_to_end > step:
+            return None
         return HistoryNavigation(
             HistoryNavigationIntent.WHEEL_DOWN,
             remaining_rows=max(0.0, step - distance_to_end),

@@ -164,8 +164,12 @@ class ProcessLifecycle:
         if output:
             self._append_output(output)
             # Unlabelled text (a fallback or failure reason) interrupts the run of
-            # stream output, so the next chunk must re-state its label.
-            self._last_stream_label = stream_label if chunk else ""
+            # stream output, so the next chunk must re-state its label. Tail
+            # truncation can also remove the retained run's sole header; only
+            # suppress the next header while one remains in bounded output.
+            self._last_stream_label = (
+                stream_label if chunk and _retained_stream_label(self._output, stream_label) else ""
+            )
         self._source_truncated = (
             self._source_truncated or source_truncated or source_dropped_bytes > 0
         )
@@ -308,6 +312,15 @@ def _historical_output_streams(output: str) -> tuple[str, str, str]:
     if output.startswith("stderr:\n"):
         return "", output.removeprefix("stderr:\n"), ""
     return "", "", output
+
+
+def _retained_stream_label(output: str, label: str) -> bool:
+    """Return whether the latest retained stream header identifies this run."""
+
+    for line in reversed(output.splitlines()):
+        if line in {"stdout:", "stderr:"}:
+            return line == f"{label}:"
+    return False
 
 
 def _process_output_chunk(stdout: str, stderr: str, *, last_label: str = "") -> tuple[str, str]:

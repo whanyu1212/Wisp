@@ -4,6 +4,7 @@ import pytest
 
 from wisp.tui.process_lifecycle import (
     PROCESS_OUTPUT_MAX_BYTES,
+    PROCESS_OUTPUT_MAX_LINES,
     ProcessLifecycle,
     historical_process_observation,
     process_call_identity,
@@ -133,6 +134,20 @@ def test_process_lifecycle_counts_short_line_drops_without_helper_marker() -> No
     assert presentation.retained_output == "\n".join("x" for _ in range(500))
     assert "[truncated]" not in presentation.full_output
     assert "2 earlier process-output bytes omitted by TUI" in presentation.full_output
+
+
+def test_process_lifecycle_relabels_stream_after_its_header_is_truncated() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    source = "\n".join(f"line {index}" for index in range(PROCESS_OUTPUT_MAX_LINES))
+
+    first = lifecycle.observe(operation="poll", state="running", stdout=source)
+    second = lifecycle.observe(operation="poll", state="running", stdout="next")
+    third = lifecycle.observe(operation="poll", state="running", stdout="again")
+
+    assert "stdout:" not in first.retained_output.splitlines()
+    assert second.retained_output.endswith("stdout:\nnext")
+    assert third.retained_output.endswith("stdout:\nnext\nagain")
+    assert third.retained_output.splitlines().count("stdout:") == 1
 
 
 def test_historical_process_envelope_requires_the_expected_process_id() -> None:

@@ -66,6 +66,8 @@ from wisp.tui.widgets import (
     _ROLE_LABELS,
     ComposerMeta,
     ComposerPanel,
+    HistoryNavigation,
+    HistoryNavigationIntent,
     JumpToLatest,
     LineMessage,
     ProcessCard,
@@ -7457,6 +7459,56 @@ def test_textual_forward_navigation_crosses_to_newer_retained_history(
     assert max_scroll_y == 0
 
 
+@pytest.mark.parametrize(
+    ("intent", "remaining_rows", "from_newer_edge"),
+    [
+        (HistoryNavigationIntent.PAGE_DOWN, 7.0, True),
+        (HistoryNavigationIntent.WHEEL_DOWN, 3.0, True),
+        (HistoryNavigationIntent.PAGE_UP, 7.0, False),
+        (HistoryNavigationIntent.WHEEL_UP, 3.0, False),
+    ],
+)
+def test_transcript_applies_residual_navigation_when_replacement_evicts_anchor(
+    intent: HistoryNavigationIntent,
+    remaining_rows: float,
+    from_newer_edge: bool,
+) -> None:
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"line {index}")
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+                ),
+                session_label="Scrollable session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.stop_following()
+
+            transcript.restore_prepend_viewport(
+                scroll_y=10.0,
+                anchor=Widget(),
+                anchor_y_before=0.0,
+                following=False,
+                navigation=HistoryNavigation(
+                    intent,
+                    remaining_rows=remaining_rows,
+                    reader_generation=transcript.follow_generation,
+                ),
+            )
+            await pilot.pause()
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+
+    assert max_scroll_y > remaining_rows
+    expected_y = remaining_rows if from_newer_edge else max_scroll_y - remaining_rows
+    assert scroll_y == pytest.approx(expected_y)
+
+
 @pytest.mark.parametrize("navigation", ["page_down", "wheel_down"])
 def test_textual_forward_navigation_consumes_the_boundary_step_without_jumping(
     navigation: str,
@@ -7813,6 +7865,54 @@ def test_textual_wheel_up_burst_keeps_the_reader_anchored_across_older_pages() -
     # newly mounted page rather than being slammed to either extreme.
     assert "message 80" in texts
     assert 0 < scroll_y < max_scroll_y
+
+
+def test_textual_reverse_wheel_during_prepend_does_not_restore_stale_anchor(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[int, int, int, bool]:
+        app_instance, renderer = create_textual_tui()
+        restored = 0
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer._history._window.retained_capacity = 2 * TUI_TRANSCRIPT_WINDOW_SIZE
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"message {index}")
+                    for index in range(2 * TUI_TRANSCRIPT_WINDOW_SIZE)
+                ),
+                session_label="Long session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.stop_following()
+            transcript.scroll_to(y=5, animate=False)
+            await pilot.pause()
+
+            def record_stale_restore(**_: object) -> None:
+                nonlocal restored
+                restored += 1
+
+            monkeypatch.setattr(transcript, "restore_prepend_viewport", record_stale_restore)
+            assert renderer._history.shift_older()
+            anchor = app_instance._history_prepend_anchor
+            assert anchor is not None
+            assert transcript.max_scroll_y - transcript.scroll_y > app_instance.scroll_sensitivity_y
+
+            moved = transcript.wheel_down()
+            generation_after = transcript.follow_generation
+            with anyio.fail_after(5):
+                while app_instance._history_prepend_anchor is not None:
+                    await pilot.pause()
+
+            return restored, anchor.reader_generation, generation_after, moved
+
+    restored, anchor_generation, reader_generation, moved = anyio.run(scenario)
+
+    assert moved
+    assert reader_generation > anchor_generation
+    assert restored == 0
 
 
 def test_textual_wheel_down_crosses_newer_edge_in_a_scrollable_viewport() -> None:
