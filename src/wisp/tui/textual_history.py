@@ -395,19 +395,30 @@ class TextualHistoryController:
         entries: Iterable[HistoricalTranscriptEntry],
         *,
         has_more: bool,
-    ) -> None:
-        """Append one adjacent newer durable page and reveal its leading slice."""
+    ) -> str | None:
+        """Append one newer page and return its new backward cursor after eviction."""
 
-        retained = self._retain(entries)
+        incoming = tuple(entries)
+        if not has_more:
+            incoming = self._exclude_live_tail(
+                incoming,
+                live_entries=tuple(self._live_entries),
+            )
+        retained = self._retain(incoming)
+        next_before_entry_id = None
         self._surface.begin_history_render()
         try:
-            self._discard_entries(self._window.append(retained, follow_tail=False))
+            evicted = self._window.append(retained, follow_tail=False)
+            self._discard_entries(evicted)
+            if evicted and self._window.entries:
+                next_before_entry_id = _history_entry_cursor(self._window.entries[0].entry)
             if not has_more:
                 self._window.mark_latest_retained()
             self._window.shift_newer()
             self._reconcile()
         finally:
             self._surface.finish_history_render()
+        return next_before_entry_id
 
     def show_oldest(self) -> bool:
         """Move the mounted window to the oldest retained history."""

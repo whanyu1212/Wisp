@@ -2376,11 +2376,21 @@ class TuiShell:
                 self._call_renderer_optional("history_newer_page_request_failed")
                 return
             entries = history_entries_from_rpc_messages(report.messages)
-            self._call_renderer_optional(
+            append_newer_entries = getattr(
+                self.renderer,
                 "append_newer_history_entries",
-                entries,
-                has_more=report.next_after_entry_id is not None,
+                None,
             )
+            next_before_entry_id = (
+                append_newer_entries(
+                    entries,
+                    has_more=report.next_after_entry_id is not None,
+                )
+                if callable(append_newer_entries)
+                else None
+            )
+            if isinstance(next_before_entry_id, str):
+                pagination.next_before_entry_id = next_before_entry_id
         finally:
             if self._history_pagination is pagination and pagination.latest_reload_pending:
                 await self._request_latest_history_page()

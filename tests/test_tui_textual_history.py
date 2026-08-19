@@ -363,11 +363,65 @@ def test_history_controller_pages_forward_after_newer_retention_was_evicted() ->
     assert controller.shift_newer()
     assert surface.newer_history_requests == ["entry-119"]
 
-    controller.append_newer_entries(latest, has_more=False)
+    next_before_entry_id = controller.append_newer_entries(latest, has_more=False)
 
+    assert next_before_entry_id == "entry-120"
     assert surface.history_labels[0] == "assistant: message 120"
     assert surface.history_labels[-1] == "assistant: message 179"
     assert not controller.shift_newer()
+
+
+def test_history_controller_excludes_live_entries_from_the_final_newer_page() -> None:
+    surface = _HistorySurface(at_top=True, following=False)
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="retained",
+                entry_id="retained",
+            ),
+        ),
+        session_label="Windowed",
+    )
+    prompt_widget = surface.add_live_widget("live: prompt")
+    reply_widget = surface.add_live_widget("live: reply")
+    tool_widget = surface.add_live_widget("live: tool")
+    controller.record_live_message("user", "prompt", widget=cast(Widget, prompt_widget))
+    controller.record_live_message("assistant", "reply", widget=cast(Widget, reply_widget))
+    controller.record_live_tool_call("call-1", widget=cast(Widget, tool_widget))
+    controller.record_live_tool_result("call-1", widget=cast(Widget, tool_widget))
+
+    controller.append_newer_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="user",
+                content="prompt",
+                entry_id="prompt",
+            ),
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="reply",
+                entry_id="reply",
+            ),
+            HistoricalToolCard(
+                card_id="history:result",
+                name="bash",
+                arguments={},
+                output="done",
+                is_error=False,
+                tool_call_id="call-1",
+            ),
+        ),
+        has_more=False,
+    )
+
+    assert surface.history_labels == ["assistant: retained"]
+    assert [widget.label for widget in surface.widgets[-3:]] == [
+        "live: prompt",
+        "live: reply",
+        "live: tool",
+    ]
 
 
 def test_history_controller_mounts_session_marker_before_restored_history() -> None:

@@ -866,8 +866,9 @@ def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
             entries: tuple[HistoricalTranscriptEntry, ...],
             *,
             has_more: bool,
-        ) -> None:
+        ) -> str:
             self.appended.append((entries, has_more))
+            return "new-retained-front"
 
     async def run() -> None:
         controller = ScriptedController()
@@ -907,6 +908,8 @@ def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
         assert renderer.appended == [
             ((HistoricalTranscriptMessage(role="assistant", content="newer"),), True)
         ]
+        await shell._request_previous_history_page()
+        assert controller.messages_requests[-1][3] == "new-retained-front"
 
     anyio.run(run)
 
