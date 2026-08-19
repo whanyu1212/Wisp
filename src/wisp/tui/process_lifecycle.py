@@ -95,6 +95,11 @@ class ProcessLifecycle:
     _output: str = ""
     _source_truncated: bool = False
     _ui_dropped_bytes: int = 0
+    # The stream label most recently written into ``_output``. A long-running
+    # poll appends to the same stream every time, so repeating the label per
+    # chunk buries the output in dozens of ``stdout:`` headers. Track it and
+    # label only when the stream actually changes.
+    _last_stream_label: str = ""
 
     @classmethod
     def from_presentation(
@@ -135,13 +140,21 @@ class ProcessLifecycle:
         failure_reason: str = "",
         failed: bool = False,
     ) -> ProcessLifecyclePresentation:
-        output = _process_output_chunk(stdout, stderr) or fallback_output
+        chunk, stream_label = _process_output_chunk(
+            stdout,
+            stderr,
+            last_label=self._last_stream_label,
+        )
+        output = chunk or fallback_output
         if failure_reason and not (
             output == failure_reason or output.startswith(f"{failure_reason}\n")
         ):
             output = f"{failure_reason}\n{output}" if output else failure_reason
         if output:
             self._append_output(output)
+            # Unlabelled text (a fallback or failure reason) interrupts the run of
+            # stream output, so the next chunk must re-state its label.
+            self._last_stream_label = stream_label if chunk else ""
         self._source_truncated = (
             self._source_truncated or source_truncated or source_dropped_bytes > 0
         )
@@ -162,6 +175,8 @@ class ProcessLifecycle:
     ) -> ProcessLifecyclePresentation:
         if reason:
             self._append_output(reason)
+            # Unlabelled text breaks the run, so the next chunk re-states its stream.
+            self._last_stream_label = ""
         self.display_state = "poll_denied" if operation == "poll" else "cancel_denied"
         return self.presentation()
 
@@ -269,13 +284,23 @@ def _historical_output_chunk(output: str) -> str:
     return output
 
 
-def _process_output_chunk(stdout: str, stderr: str) -> str:
+def _process_output_chunk(stdout: str, stderr: str, *, last_label: str = "") -> tuple[str, str]:
+    """Join one poll's streams, labelling only where the stream changes.
+
+    Returns the chunk and the label its final line belongs to, so a caller can
+    suppress a repeated header on the next append. Long-running polls emit many
+    consecutive ``stdout`` chunks; labelling each one drowns the output.
+    """
+
     parts: list[str] = []
-    if stdout:
-        parts.append(f"stdout:\n{stdout.rstrip(chr(10))}")
-    if stderr:
-        parts.append(f"stderr:\n{stderr.rstrip(chr(10))}")
-    return "\n".join(part for part in parts if part)
+    label = last_label
+    for candidate, text in (("stdout", stdout), ("stderr", stderr)):
+        if not text:
+            continue
+        body = text.rstrip("\n")
+        parts.append(f"{candidate}:\n{body}" if candidate != label else body)
+        label = candidate
+    return "\n".join(part for part in parts if part), label
 
 
 def _tail_preview(output: str) -> str:

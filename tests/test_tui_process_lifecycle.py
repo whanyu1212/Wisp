@@ -42,7 +42,9 @@ def test_process_lifecycle_accumulates_incremental_output_and_poll_count() -> No
 
     assert presentation.poll_count == 2
     assert presentation.display_state == "completed"
-    assert presentation.full_output == "stdout:\nfirst chunk\nstdout:\nsecond chunk"
+    # Consecutive chunks from the same stream carry one label. A long poll appends
+    # to stdout dozens of times, and repeating the header buries the output.
+    assert presentation.full_output == "stdout:\nfirst chunk\nsecond chunk"
     assert "first chunk" in presentation.detail
     assert "second chunk" in presentation.detail
     assert presentation.terminal is True
@@ -197,3 +199,31 @@ def test_denied_poll_preserves_reason() -> None:
     assert presentation.display_state == "poll_denied"
     assert presentation.detail == "not now"
     assert presentation.full_output == "not now"
+
+
+def test_process_lifecycle_labels_only_where_the_stream_changes() -> None:
+    """Stream labels disambiguate; they must appear on change and not per chunk."""
+
+    lifecycle = ProcessLifecycle("proc-1")
+
+    lifecycle.observe(operation="poll", state="running", stdout="out one")
+    lifecycle.observe(operation="poll", state="running", stdout="out two")
+    lifecycle.observe(operation="poll", state="running", stderr="err one")
+    lifecycle.observe(operation="poll", state="running", stderr="err two")
+    presentation = lifecycle.observe(operation="poll", state="running", stdout="out three")
+
+    assert presentation.full_output == (
+        "stdout:\nout one\nout two\nstderr:\nerr one\nerr two\nstdout:\nout three"
+    )
+
+
+def test_process_lifecycle_relabels_after_unlabelled_output() -> None:
+    """A denial or failure reason interrupts the run, so the next chunk relabels."""
+
+    lifecycle = ProcessLifecycle("proc-1")
+
+    lifecycle.observe(operation="poll", state="running", stdout="before")
+    lifecycle.deny("poll", reason="poll denied")
+    presentation = lifecycle.observe(operation="poll", state="running", stdout="after")
+
+    assert presentation.full_output == "stdout:\nbefore\npoll denied\nstdout:\nafter"
