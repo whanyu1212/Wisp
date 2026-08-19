@@ -745,9 +745,17 @@ class JsonlSession:
             )
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
-        """Read all committed entries, repairing an incomplete final record first."""
+        """Read all committed entries, repairing an incomplete final record first.
 
-        return tuple(_read_entries(self.path))
+        Served from the validated entry index so repeated reads of one session
+        parse the file once. Resuming a long session previously re-parsed it for
+        every derived read (context replay, name, entry count), which dominated
+        startup: three full passes over a 10 MB transcript before the first
+        frame. The index refreshes itself whenever the file's signature or
+        generation changes, so callers still observe external writes.
+        """
+
+        return self.read_entry_snapshot()
 
     def read_run_snapshot(self) -> SessionRunSnapshot:
         """Read provider context and its active leaf under one session lock."""

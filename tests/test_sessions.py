@@ -2486,8 +2486,47 @@ def test_repeated_append_does_not_rescan_full_session_tree(
     anyio.run(write)
 
     assert resolver_calls == 0
+    # Appends keep the entry index current, so reading back never re-resolves the
+    # tree. Reads are served from that index rather than re-parsing the file.
     assert len(session.read_entries()) == 50
-    assert resolver_calls == 1
+    assert resolver_calls == 0
+
+
+def test_repeated_reads_parse_a_resumed_session_file_once(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Resuming must not re-parse the transcript for every derived read.
+
+    ``rpc_session_state`` asks a freshly loaded session for its context, its
+    entry count and its name. Parsing the file once per call dominated startup
+    on long sessions, so all three must share one pass over the entry index.
+    """
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        for index in range(20):
+            await session.append_message(Message(role="user", content=str(index)))
+
+    anyio.run(write)
+
+    reopened = JsonlSessionStore(tmp_path).load(session.path)
+    parses = 0
+    read_entries_unlocked = jsonl_module._read_entries_unlocked
+
+    def counted_parse(path: Path, **kwargs: object) -> list[SessionEntry]:
+        nonlocal parses
+        parses += 1
+        return read_entries_unlocked(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jsonl_module, "_read_entries_unlocked", counted_parse)
+
+    assert len(reopened.read_entries()) == 20
+    assert len(reopened.read_context_messages()) == 20
+    assert reopened.read_name() is None
+
+    assert parses == 1
 
 
 def test_append_entry_reloads_identity_after_uncertain_write_failure(
