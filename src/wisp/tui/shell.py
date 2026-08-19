@@ -74,6 +74,7 @@ from wisp.tui.history import (
     history_from_rpc_messages,
     represented_history_entry_ids,
 )
+from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
 from wisp.tui.mcp import mcp_status_text
@@ -200,7 +201,7 @@ class TuiController(Protocol):
     async def close(self) -> None: ...
 
 
-PromptReader = Callable[[str], Awaitable[str]]
+PromptReader = Callable[[str], Awaitable[str | TuiSubmission]]
 UpdateChecker = Callable[[], Awaitable[UpdateAvailable | None]]
 UpdateCapabilityChecker = Callable[[], Awaitable[bool]]
 UpdateSkipWriter = Callable[..., Awaitable[bool]]
@@ -525,6 +526,7 @@ class TuiShell:
             input_hint=_prompt_for_status(self.state.status),
             input_mode=mode,
             queued_follow_ups=len(self.state.queued_prompts),
+            pending_submissions=self._pending_submission_views(),
         )
 
     def _update_view(
@@ -534,6 +536,7 @@ class TuiShell:
         input_hint: str | None = None,
         input_mode: _InputMode | None = None,
         queued_follow_ups: int | None = None,
+        pending_submissions: tuple[PendingSubmissionView, ...] | None = None,
         last_session: str | None = None,
     ) -> None:
         if status is not None:
@@ -544,6 +547,8 @@ class TuiShell:
             self.view.input_mode = input_mode.value
         if queued_follow_ups is not None:
             self.view.queued_follow_ups = queued_follow_ups
+        if pending_submissions is not None:
+            self.view.pending_submissions = pending_submissions
         if last_session is not None:
             self.view.last_session = last_session
         self.renderer.view_updated(self.view.snapshot())
@@ -882,20 +887,56 @@ class TuiShell:
             return await self._handle_rpc_event(signal.event)
         return self._handle_rpc_closed(signal)
 
-    def _clear_queued_prompts(self) -> None:
-        # Single seam for dropping queued follow-ups: also tell the renderer so it
-        # can reclaim any pending large-paste compact echoes tied to those dropped
-        # prompts (only these paths abandon the queue — denying an approval leaves
-        # queued follow-ups, and their echoes, intact).
+    def _submission(self, value: str | TuiSubmission) -> TuiSubmission:
+        if isinstance(value, TuiSubmission):
+            return value
+        return TuiSubmission(id=new_submission_id(), content=value, display=value)
+
+    def _queued_submissions(self) -> tuple[TuiSubmission, ...]:
+        normalized = tuple(self._submission(value) for value in self.state.queued_prompts)
+        if any(not isinstance(value, TuiSubmission) for value in self.state.queued_prompts):
+            self.state.queued_prompts.clear()
+            self.state.queued_prompts.extend(normalized)
+        return normalized
+
+    def _pending_submission_views(self) -> tuple[PendingSubmissionView, ...]:
+        return tuple(submission.pending_view() for submission in self._queued_submissions())
+
+    def _publish_pending_submissions(self) -> None:
+        self._update_view(
+            queued_follow_ups=len(self.state.queued_prompts),
+            pending_submissions=self._pending_submission_views(),
+        )
+
+    def _restore_queued_prompts(self) -> None:
+        submissions = self._queued_submissions()
+        if not submissions:
+            return
         self.state.queued_prompts.clear()
+        restore_submissions = getattr(self.renderer, "restore_submissions", None)
+        restored = callable(restore_submissions) and restore_submissions(submissions)
+        if not restored:
+            for submission in submissions:
+                self.renderer.notice(f"unsent follow-up: {submission.display}")
+        self._publish_pending_submissions()
         self.renderer.queued_prompts_cleared()
 
-    def _queue_prompt(self, prompt: str) -> None:
-        """Retain and queue one accepted follow-up through a single seam."""
+    def _report_unsent_queued_prompts(self) -> None:
+        submissions = self._queued_submissions()
+        if not submissions:
+            return
+        self.state.queued_prompts.clear()
+        for submission in submissions:
+            self.renderer.notice(f"unsent follow-up: {submission.display}")
+        self._publish_pending_submissions()
+        self.renderer.queued_prompts_cleared()
 
-        self._record_prompt_acceptance(prompt)
+    def _queue_prompt(self, prompt: TuiSubmission) -> None:
+        """Retain and visibly queue one accepted follow-up through a single seam."""
+
+        self._record_prompt_acceptance(prompt.content)
         self.state.queued_prompts.append(prompt)
-        self._update_view(queued_follow_ups=len(self.state.queued_prompts))
+        self._publish_pending_submissions()
         self.renderer.queued_follow_up(len(self.state.queued_prompts))
 
     def _record_prompt_acceptance(self, prompt: str) -> None:
@@ -907,54 +948,62 @@ class TuiShell:
 
     async def _handle_input_line(self, signal: _InputLine) -> bool:
         self._disarm_quit()
-        text = signal.text
+        submission = self._submission(signal.text)
+        text = submission.content
         has_content = bool(text.strip())
         if self.state.status is TuiStatus.exiting:
+            self._call_renderer_optional("restore_submissions", (submission,))
             return False
         try:
             command = parse_tui_slash_command(text, catalog=self.command_catalog)
         except TuiSlashCommandError as exc:
+            self._call_renderer_optional("restore_submissions", (submission,))
             self.renderer.command_error(str(exc))
             return False
         if command is not None:
+            self._call_renderer_optional("resolve_submission", int(submission.id))
             return await self._handle_slash_command(command)
         if self._update_cancel_scope is not None:
             if has_content:
                 self.renderer.command_error(
                     "Cannot submit prompts while a Wisp update operation is in progress."
                 )
+                self._call_renderer_optional("restore_submissions", (submission,))
             return False
         if self._connect_cancel_scope is not None:
             if has_content:
                 self.renderer.command_error(
                     "Cannot submit prompts while a provider connection is in progress."
                 )
+                self._call_renderer_optional("restore_submissions", (submission,))
             return False
         if self._session_operation_active():
             if has_content:
                 self.renderer.command_error(
                     f"Cannot submit prompts while {self._session_operation_name()}."
                 )
+                self._call_renderer_optional("restore_submissions", (submission,))
             return False
         if self.state.pending_trust is not None:
             if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
             if has_content and self.state.current_command_id is not None:
-                self._queue_prompt(text)
+                self._queue_prompt(submission)
             return False
         if self.state.pending_approval is not None:
             if signal.mode is _InputMode.approval:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
             if has_content and self.state.current_command_id is not None:
-                self._queue_prompt(text)
+                self._queue_prompt(submission)
             return False
         if not has_content:
+            self._call_renderer_optional("resolve_submission", int(submission.id))
             return False
         if self.state.current_command_id is not None:
-            self._queue_prompt(text)
+            self._queue_prompt(submission)
             return False
         self._record_prompt_acceptance(text)
-        return await self._start_prompt(text)
+        return await self._start_prompt(submission)
 
     async def _handle_slash_command(self, command: TuiSlashCommand) -> bool:
         if command.name is TuiSlashCommandName.help:
@@ -1078,6 +1127,11 @@ class TuiShell:
         )
 
     async def _handle_new_session_command(self, args: tuple[str, ...]) -> None:
+        if self.state.queued_prompts:
+            self.renderer.command_error(
+                "Cannot start a new session while follow-up prompts are queued."
+            )
+            return
         if args:
             self.renderer.command_error("Usage: /new")
             return
@@ -1090,6 +1144,11 @@ class TuiShell:
         self._update_view(status="starting new session")
 
     async def _handle_resume_command(self, args: tuple[str, ...]) -> None:
+        if self.state.queued_prompts:
+            self.renderer.command_error(
+                "Cannot switch sessions while follow-up prompts are queued."
+            )
+            return
         if len(args) > 1:
             self.renderer.command_error("Usage: /resume [session-id]")
             return
@@ -1346,7 +1405,7 @@ class TuiShell:
                 exit_after_denial=True,
             )
         if self.state.current_command_id is not None:
-            self._clear_queued_prompts()
+            self._report_unsent_queued_prompts()
             self._update_view(queued_follow_ups=0)
             if self.state.current_command_type == "compact":
                 self.renderer.notice("input closed; finishing compaction")
@@ -1437,7 +1496,7 @@ class TuiShell:
         self.state.exit_requested = True
         self._cancel_connect("Provider connection cancelled: quit requested.")
         self._cancel_update("Wisp update cancelled: quit requested.")
-        self._clear_queued_prompts()
+        self._report_unsent_queued_prompts()
         self._update_view(queued_follow_ups=0)
         if self.state.pending_trust is not None:
             return await self._answer_pending_trust(
@@ -1618,7 +1677,7 @@ class TuiShell:
         self.state.current_command_id = command_id
         return False
 
-    async def _start_prompt(self, prompt: str) -> bool:
+    async def _start_prompt(self, prompt: TuiSubmission) -> bool:
         self.state.status = TuiStatus.running
         self.state.current_command_type = "prompt"
         self.state.pending_approval = None
@@ -1627,13 +1686,14 @@ class TuiShell:
         self.state.rendered_tokens = False
         self._sync_view()
         self.renderer.prompt_submitted(prompt)
+        self._call_renderer_optional("resolve_submission", int(prompt.id))
         self.renderer.running()
         try:
-            command_id = await self.controller.prompt(prompt)
+            command_id = await self.controller.prompt(prompt.content)
         except Exception as exc:
             self.state.current_command_type = None
             self._update_view(status="error")
-            self._call_renderer_optional("discard_live_prompt", prompt)
+            self._call_renderer_optional("discard_live_prompt", prompt.content)
             self.renderer.send_failed("prompt", exc)
             pagination = self._history_pagination
             if pagination is not None and pagination.latest_reload_pending:
@@ -1676,7 +1736,7 @@ class TuiShell:
         if self.state.cancel_requested:
             self.renderer.cancel_already_requested()
             return False
-        self._clear_queued_prompts()
+        self._restore_queued_prompts()
         self.state.cancel_requested = True
         self._update_view(status="cancelling", queued_follow_ups=0)
         self.renderer.cancelling(message)
@@ -2437,6 +2497,7 @@ class TuiShell:
             input_hint=_prompt_for_mode(_InputMode.idle),
             input_mode=_InputMode.idle,
             queued_follow_ups=len(self.state.queued_prompts),
+            pending_submissions=self._pending_submission_views(),
         )
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
@@ -2453,15 +2514,15 @@ class TuiShell:
             self.state.token_stream_started = False
         self.state.rendered_tokens = False
         if self.state.exit_requested:
-            self._clear_queued_prompts()
+            self._report_unsent_queued_prompts()
             self.state.cancel_requested = False
             return await self._request_shutdown()
         if finished_command_type in {"prompt", "init", "compact"}:
             await self._request_session_stats()
         if not event.ok and finished_command_type != "compact":
-            self._clear_queued_prompts()
+            self._restore_queued_prompts()
         if self.state.queued_prompts:
-            queued_prompt = self.state.queued_prompts.popleft()
+            queued_prompt = self._submission(self.state.queued_prompts.popleft())
             self._update_view(
                 status="running queued follow-up",
                 input_hint=_prompt_for_mode(_InputMode.running),
@@ -2778,7 +2839,7 @@ class TuiShell:
             ):
                 self.state.status = TuiStatus.idle
                 self.state.cancel_requested = False
-                self._clear_queued_prompts()
+                self._restore_queued_prompts()
                 self._sync_view()
                 if event.command_type == "compact":
                     self.renderer.notice("Compaction cancelled.")

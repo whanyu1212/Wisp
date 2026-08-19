@@ -8,6 +8,7 @@ from textual.widgets import Input, OptionList
 from tests.tui_support import ScriptedController
 from wisp.events import ToolApprovalRequested
 from wisp.tui import TuiViewSnapshot
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.prompt_history import (
     PROMPT_HISTORY_PREVIEW_CHARS,
@@ -189,7 +190,8 @@ def test_history_search_restores_exact_prompt_without_submitting() -> None:
             focused = editor.has_focus
             await pilot.press("enter")
             submitted = await app.read_prompt("wisp> ")
-            return restored, focused, submitted
+            assert isinstance(submitted, TuiSubmission)
+            return restored, focused, submitted.content
 
     restored, focused, submitted = anyio.run(scenario)
     assert restored == "Exact [bold]\nmultiline prompt"
@@ -231,7 +233,8 @@ def test_history_selection_keeps_large_prompt_compact_and_submits_exact_text() -
             expanded = editor.text_for_submission()
             await pilot.press("enter")
             submitted = await app.read_prompt("wisp> ")
-            return display, expanded, submitted
+            assert isinstance(submitted, TuiSubmission)
+            return display, expanded, submitted.content
 
     display, expanded, submitted = anyio.run(scenario)
     assert display.startswith("[Pasted content #1:")
@@ -472,7 +475,7 @@ def test_shell_accepts_prompts_with_legacy_renderer_without_history_hook() -> No
     assert anyio.run(scenario) == ["compatible prompt"]
 
 
-def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_it() -> None:
+def test_shell_records_queued_prompt_immediately_and_restore_does_not_erase_it() -> None:
     async def scenario() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         app, renderer = create_textual_tui()
         shell = TuiShell(ScriptedController(), renderer=renderer)
@@ -480,15 +483,17 @@ def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_
         shell.state.current_command_type = "prompt"
 
         await shell._handle_input_line(_InputLine("submitted follow-up", _InputMode.running))
-        recorded_before_clear = tuple(
+        recorded_before_restore = tuple(
             entry.prompt for entry in app._input_controller.prompt_history_entries
         )
-        queued_before_clear = tuple(shell.state.queued_prompts)
-        shell._clear_queued_prompts()
-        recorded_after_clear = tuple(
+        queued_before_restore = tuple(
+            submission.content for submission in shell.state.queued_prompts
+        )
+        shell._restore_queued_prompts()
+        recorded_after_restore = tuple(
             entry.prompt for entry in app._input_controller.prompt_history_entries
         )
-        return recorded_before_clear, queued_before_clear, recorded_after_clear
+        return recorded_before_restore, queued_before_restore, recorded_after_restore
 
     before, queued, after = anyio.run(scenario)
     assert before == ("submitted follow-up",)

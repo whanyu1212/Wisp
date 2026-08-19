@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.tui_support import *
+from wisp.tui.input_types import TuiSubmission
 
 
 def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
@@ -160,7 +161,9 @@ def test_live_fullscreen_tui_accepts_submitted_input() -> None:
         renderer._buffer.insert_text("hello")
         renderer._accept_input()
 
-        assert await read_task == "hello"
+        submitted = await read_task
+        assert isinstance(submitted, TuiSubmission)
+        assert submitted.content == "hello"
 
     anyio.run(run)
 
@@ -183,9 +186,13 @@ def test_live_fullscreen_tui_queues_submission_accepted_between_reads() -> None:
         renderer._buffer.insert_text("second")
         renderer._accept_input()
 
-        assert await first_read == "first"
+        first = await first_read
+        assert isinstance(first, TuiSubmission)
+        assert first.content == "first"
         assert renderer.consume_submitted_input_mode("idle") == "running"
-        assert await renderer.read_prompt("wisp(running)> ") == "second"
+        second = await renderer.read_prompt("wisp(running)> ")
+        assert isinstance(second, TuiSubmission)
+        assert second.content == "second"
         assert renderer.consume_submitted_input_mode("idle") == "running"
 
     anyio.run(run)
@@ -209,7 +216,9 @@ def test_live_fullscreen_tui_preserves_bracketed_paste_newlines() -> None:
         assert not read_task.done()
 
         renderer._accept_input()
-        assert await read_task == "first\nsecond\nthird"
+        submitted = await read_task
+        assert isinstance(submitted, TuiSubmission)
+        assert submitted.content == "first\nsecond\nthird"
         assert renderer.consume_submitted_input_mode("idle") == "running"
 
     anyio.run(run)
@@ -227,7 +236,9 @@ def test_live_fullscreen_tui_ctrl_j_builds_multiline_prompt() -> None:
         assert not read_task.done()
 
         renderer._accept_input()
-        assert await read_task == "first\nsecond"
+        submitted = await read_task
+        assert isinstance(submitted, TuiSubmission)
+        assert submitted.content == "first\nsecond"
 
     anyio.run(run)
 
@@ -278,10 +289,12 @@ def test_tui_shell_reads_live_submission_queued_between_reads() -> None:
             task_group.cancel_scope.cancel()
 
         assert isinstance(first, _InputLine)
-        assert first.text == "first"
+        assert isinstance(first.text, TuiSubmission)
+        assert first.text.content == "first"
         assert first.mode is _InputMode.running
         assert isinstance(second, _InputLine)
-        assert second.text == "second"
+        assert isinstance(second.text, TuiSubmission)
+        assert second.text.content == "second"
         assert second.mode is _InputMode.running
 
     anyio.run(run)
@@ -304,7 +317,9 @@ def test_live_fullscreen_tui_preserves_typed_buffer_between_reads() -> None:
         renderer._accept_input()
         renderer._buffer.insert_text("sec")
 
-        assert await first_read == "first"
+        first = await first_read
+        assert isinstance(first, TuiSubmission)
+        assert first.content == "first"
         assert renderer.consume_submitted_input_mode("idle") == "running"
         second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
         await anyio.sleep(0)
@@ -313,7 +328,9 @@ def test_live_fullscreen_tui_preserves_typed_buffer_between_reads() -> None:
         renderer._buffer.insert_text("ond")
         renderer._accept_input()
 
-        assert await second_read == "second"
+        second = await second_read
+        assert isinstance(second, TuiSubmission)
+        assert second.content == "second"
         assert renderer.consume_submitted_input_mode("idle") == "running"
 
     anyio.run(run)
@@ -350,7 +367,9 @@ def test_live_fullscreen_tui_queues_escape_between_reads_and_preserves_draft() -
         renderer._buffer.insert_text("next draft")
         renderer._interrupt_input()
 
-        assert await first_read == "submitted"
+        submitted = await first_read
+        assert isinstance(submitted, TuiSubmission)
+        assert submitted.content == "submitted"
         with pytest.raises(LiveFullscreenInputInterrupted):
             await renderer.read_prompt("wisp> ")
         assert renderer._buffer.text == "next draft"
@@ -555,7 +574,8 @@ def test_live_fullscreen_tui_retags_empty_submission_after_mode_change() -> None
             task_group.cancel_scope.cancel()
 
         assert isinstance(signal, _InputLine)
-        assert signal.text == "y"
+        assert isinstance(signal.text, TuiSubmission)
+        assert signal.text.content == "y"
         assert signal.mode is _InputMode.approval
 
     anyio.run(run)
@@ -590,14 +610,15 @@ def test_live_fullscreen_tui_keeps_preexisting_text_mode_when_approval_arrives()
             task_group.cancel_scope.cancel()
 
         assert isinstance(signal, _InputLine)
-        assert signal.text == "run tests"
+        assert isinstance(signal.text, TuiSubmission)
+        assert signal.text.content == "run tests"
         assert signal.mode is _InputMode.running
 
         should_exit = await shell._handle_input_line(signal)
 
         assert should_exit is False
         assert controller.approvals == []
-        assert list(shell.state.queued_prompts) == ["run tests"]
+        assert [submission.content for submission in shell._queued_submissions()] == ["run tests"]
 
     anyio.run(run)
 
@@ -634,7 +655,8 @@ def test_live_fullscreen_tui_retags_after_preexisting_text_is_cleared() -> None:
             task_group.cancel_scope.cancel()
 
         assert isinstance(signal, _InputLine)
-        assert signal.text == "y"
+        assert isinstance(signal.text, TuiSubmission)
+        assert signal.text.content == "y"
         assert signal.mode is _InputMode.approval
 
     anyio.run(run)
@@ -663,7 +685,9 @@ def test_live_fullscreen_tui_captures_mode_at_accept_time() -> None:
             )
         )
 
-        assert await read_task == "y"
+        submitted = await read_task
+        assert isinstance(submitted, TuiSubmission)
+        assert submitted.content == "y"
         assert renderer.consume_submitted_input_mode("running") == "approval"
 
     anyio.run(run)

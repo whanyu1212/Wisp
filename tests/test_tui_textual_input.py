@@ -8,6 +8,7 @@ import anyio
 import pytest
 
 from wisp.tui.compact_echo import CompactEchoLog
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.textual_input import TextualInputController
 
 
@@ -15,12 +16,16 @@ from wisp.tui.textual_input import TextualInputController
 class _Surface:
     clear_count: int = 0
     errors: list[str] = field(default_factory=list)
+    buffered: list[TuiSubmission] = field(default_factory=list)
 
     def clear_prompt_editor(self) -> None:
         self.clear_count += 1
 
     def write_input_error(self, message: str) -> None:
         self.errors.append(message)
+
+    def buffer_submission(self, submission: TuiSubmission) -> None:
+        self.buffered.append(submission)
 
 
 def test_submission_clears_only_ordinary_editor_and_runs_hook_before_enqueue() -> None:
@@ -41,10 +46,16 @@ def test_submission_clears_only_ordinary_editor_and_runs_hook_before_enqueue() -
     assert surface.clear_count == 1
     assert hook_calls == ["before enqueue", "decision submit"]
 
-    async def receive() -> tuple[str, str]:
-        return await controller.receive(), await controller.receive()
+    async def receive() -> tuple[TuiSubmission, TuiSubmission]:
+        first = await controller.receive()
+        second = await controller.receive()
+        assert isinstance(first, TuiSubmission)
+        assert isinstance(second, TuiSubmission)
+        return first, second
 
-    assert anyio.run(receive) == ("typed prompt", "decision answer")
+    first, second = anyio.run(receive)
+    assert (first.content, second.content) == ("typed prompt", "decision answer")
+    assert surface.buffered == [first]
 
 
 def test_full_submission_queue_reports_error_after_running_submit_hook() -> None:
@@ -57,7 +68,9 @@ def test_full_submission_queue_reports_error_after_running_submit_hook() -> None
     assert not controller.submit_line("dropped", clear_editor=True)
 
     assert hooks == [None, None]
-    assert surface.clear_count == 2  # preserves existing typed-submission behavior
+    assert surface.clear_count == 1
+    assert len(surface.buffered) == 1
+    assert surface.buffered[0].content == "first"
     assert surface.errors == ["input buffer full; command dropped"]
 
 
@@ -71,7 +84,9 @@ def test_signal_clears_editor_only_after_queueing_and_receive_reraises() -> None
     assert surface.errors == ["input buffer full; interrupt ignored"]
 
     async def receive() -> None:
-        assert await controller.receive() == "queued"
+        queued = await controller.receive()
+        assert isinstance(queued, TuiSubmission)
+        assert queued.content == "queued"
         assert controller.signal(EOFError(), action="EOF")
         with pytest.raises(EOFError):
             await controller.receive()

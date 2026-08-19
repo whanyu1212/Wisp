@@ -49,6 +49,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     HistoryHydrationPolicy,
 )
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.process_lifecycle import (
     ProcessCallIdentity,
     ProcessLifecycle,
@@ -324,16 +325,26 @@ class TextualTuiRenderer:
     def command_error(self, message: str) -> None:
         self.app.write_error(message)
 
-    def prompt_submitted(self, prompt: str) -> None:
-        # Echo a compact line for large pastes (marker kept) while the model still
-        # received the full expanded text via controller.prompt(prompt).
-        widget = self.app.write_user(self.app.compact_echo_for(prompt))
-        self._prompt_widgets.append((prompt, widget))
+    def prompt_submitted(self, prompt: str | TuiSubmission) -> None:
+        if isinstance(prompt, TuiSubmission):
+            content = prompt.content
+            display = prompt.display
+        else:
+            content = prompt
+            display = self.app.compact_echo_for(prompt)
+        widget = self.app.write_user(display)
+        self._prompt_widgets.append((content, widget))
         del self._prompt_widgets[:-100]
-        self._history.record_live_message("user", prompt, widget=widget)
+        self._history.record_live_message("user", content, widget=widget)
 
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
+
+    def resolve_submission(self, submission_id: int) -> None:
+        self.app.resolve_submission(submission_id)
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        return self.app.restore_submissions(submissions)
 
     def discard_live_prompt(self, prompt: str) -> None:
         self._pop_prompt_widget(prompt)

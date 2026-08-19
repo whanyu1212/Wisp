@@ -7,6 +7,7 @@ import base64
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import replace
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -22,6 +23,7 @@ from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
+from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
 from wisp.tui.rendering import (
     FullscreenTuiRenderer,
     TuiViewSnapshot,
@@ -72,18 +74,20 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         super().__init__(clear_screen=False)
         self.run_application = run_application
         self._buffer = Buffer(multiline=True)
-        self._input_future: asyncio.Future[str] | None = None
+        self._input_future: asyncio.Future[str | TuiSubmission] | None = None
         self._application: Application[None] | None = None
         self._application_task: asyncio.Task[None] | None = None
         self._visible_input_mode = "idle"
         self._buffer_input_mode = "idle"
         self._submitted_input_mode: str | None = None
-        self._queued_inputs: deque[tuple[str | BaseException, str]] = deque()
+        self._queued_inputs: deque[tuple[str | TuiSubmission | BaseException, str]] = deque()
+        self._buffered_submissions: dict[int, TuiSubmission] = {}
+        self._shell_pending_submissions: tuple[PendingSubmissionView, ...] = ()
         self._last_buffer_text = ""
         self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
 
-    async def read_prompt(self, prompt: str) -> str:
+    async def read_prompt(self, prompt: str) -> str | TuiSubmission:
         """Read one line from the live fullscreen input area."""
 
         if self._input_future is not None and not self._input_future.done():
@@ -133,7 +137,19 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         """Apply a shell view snapshot and keep live input tags in sync."""
 
-        super().view_updated(snapshot)
+        self._shell_pending_submissions = snapshot.pending_submissions
+        shell_ids = {int(submission.id) for submission in snapshot.pending_submissions}
+        provisional = tuple(
+            submission.pending_view()
+            for submission_id, submission in self._buffered_submissions.items()
+            if submission_id not in shell_ids
+        )
+        super().view_updated(
+            replace(
+                snapshot,
+                pending_submissions=snapshot.pending_submissions + provisional,
+            )
+        )
         self._visible_input_mode = snapshot.input_mode
         if not self._buffer.text:
             self._buffer_input_mode = self._visible_input_mode
@@ -144,6 +160,35 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         mode = self._submitted_input_mode or fallback
         self._submitted_input_mode = None
         return mode
+
+    def resolve_submission(self, submission_id: int) -> None:
+        self._buffered_submissions.pop(submission_id, None)
+        self.state.pending_submissions = tuple(
+            submission
+            for submission in self.state.pending_submissions
+            if int(submission.id) != submission_id
+        )
+        self._refresh()
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        """Restore unstarted prompts before any newer live-editor draft."""
+
+        restored = [submission.content for submission in submissions if submission.content]
+        if self._buffer.text:
+            restored.append(self._buffer.text)
+        self._clear_buffer()
+        if restored:
+            self._buffer.insert_text("\n".join(restored))
+        restored_ids = {int(submission.id) for submission in submissions}
+        for submission_id in restored_ids:
+            self._buffered_submissions.pop(submission_id, None)
+        self.state.pending_submissions = tuple(
+            submission
+            for submission in self.state.pending_submissions
+            if int(submission.id) not in restored_ids
+        )
+        self._refresh()
+        return True
 
     def _refresh(self) -> None:
         if self._application is not None and not self._application.is_done:
@@ -292,12 +337,24 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def _accept_input(self) -> None:
         text = self._buffer.text
         mode = self._buffer_input_mode
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content=text,
+            display=text,
+        )
+        if mode not in {"approval", "trust"}:
+            self._buffered_submissions[int(submission.id)] = submission
+            self.state.pending_submissions = (
+                *self.state.pending_submissions,
+                submission.pending_view(),
+            )
         self._clear_buffer()
+        self._refresh()
         if self._input_future is None or self._input_future.done():
-            self._queued_inputs.append((text, mode))
+            self._queued_inputs.append((submission, mode))
             return
         self._submitted_input_mode = mode
-        self._input_future.set_result(text)
+        self._input_future.set_result(submission)
 
     def _insert_newline(self) -> None:
         self._buffer.insert_text("\n")

@@ -83,6 +83,7 @@ from wisp.tui.diff_presentation import (
 )
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.file_index import ProjectSnapshot
+from wisp.tui.input_types import PendingSubmissionView
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_highlighting import (
@@ -3547,8 +3548,36 @@ class ComposerMeta(Static):
         self.update(rendered)
 
 
+class PendingInputPreview(Static):
+    """Compact projection of accepted prompts that have not started yet."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002
+        super().__init__(id=id, markup=False)
+        self._submissions: tuple[PendingSubmissionView, ...] = ()
+        self.display = False
+
+    def set_submissions(self, submissions: tuple[PendingSubmissionView, ...]) -> None:
+        if submissions == self._submissions:
+            return
+        self._submissions = submissions
+        self.display = bool(submissions)
+        if not submissions:
+            self.update("")
+            return
+        lines = ["Queued follow-ups"]
+        for submission in submissions:
+            display_lines = submission.display.splitlines() or [""]
+            lines.extend(
+                f"{'↳' if index == 0 else ' '} {line}"
+                for index, line in enumerate(display_lines[:3])
+            )
+            if len(display_lines) > 3:
+                lines.append("  …")
+        self.update("\n".join(lines))
+
+
 class ComposerPanel(Vertical):
-    """Focusable composer body that groups the editor and its metadata."""
+    """Focusable composer body that groups pending input, editor, and metadata."""
 
     def __init__(
         self,
@@ -3557,12 +3586,20 @@ class ComposerPanel(Vertical):
         id: str | None = None,  # noqa: A002 - Textual's parameter name
     ) -> None:
         super().__init__(id=id)
+        self._pending = PendingInputPreview(id="pending-input")
         self._input = PromptEditor(placeholder=placeholder, id="input")
         self._metadata = ComposerMeta(id="composer-meta")
 
     def compose(self) -> ComposeResult:
+        yield self._pending
         yield self._input
         yield self._metadata
+
+    def set_pending_submissions(
+        self,
+        submissions: tuple[PendingSubmissionView, ...],
+    ) -> None:
+        self._pending.set_submissions(submissions)
 
     def on_mount(self) -> None:
         self.refresh_layout()

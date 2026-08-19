@@ -23,6 +23,7 @@ from wisp.events import (
     TrustRequested,
     UsageCost,
 )
+from wisp.tui.input_types import PendingSubmissionView, TuiSubmission
 from wisp.tui.rendering import TuiViewSnapshot
 from wisp.update_check import UpdateAvailable
 
@@ -55,7 +56,7 @@ class TuiInteractionState:
     shutdown_command_id: str | None = None
     pending_approval: ToolApprovalRequested | None = None
     pending_trust: TrustRequested | None = None
-    queued_prompts: deque[str] = field(default_factory=deque)
+    queued_prompts: deque[TuiSubmission] = field(default_factory=deque)
     exit_requested: bool = False
     input_closed: bool = False
     cancel_requested: bool = False
@@ -72,6 +73,7 @@ class TuiViewState:
     input_hint: str = "wisp> "
     input_mode: str = "idle"
     queued_follow_ups: int = 0
+    pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
     cwd: str = field(default_factory=lambda: str(Path.cwd()))
     provider: str | None = None
@@ -88,6 +90,7 @@ class TuiViewState:
             input_hint=self.input_hint,
             input_mode=self.input_mode,
             queued_follow_ups=self.queued_follow_ups,
+            pending_submissions=self.pending_submissions,
             last_session=self.last_session,
             cwd=self.cwd,
             provider=self.provider,
@@ -184,7 +187,7 @@ class _InputMode(StrEnum):
 
 @dataclass(frozen=True)
 class _InputLine:
-    text: str
+    text: str | TuiSubmission
     mode: _InputMode
 
 

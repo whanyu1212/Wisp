@@ -40,13 +40,13 @@ from wisp.events import (
 from wisp.skills.models import SkillInvocationEvidence
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
-from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.history import (
     TUI_HISTORY_PAGE_LIMIT,
     HistoricalToolCard,
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
 )
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
@@ -9462,8 +9462,8 @@ def test_textual_large_paste_survives_cut_and_move() -> None:
             await pilot.press("enter")
             with anyio.fail_after(1):
                 submitted = await app_instance._input_controller.receive_stream.receive()
-            assert isinstance(submitted, str)
-            return marker, submitted
+            assert isinstance(submitted, TuiSubmission)
+            return marker, submitted.content
 
     marker, submitted = anyio.run(scenario)
     assert submitted == f"head tail {pasted}"
@@ -9490,11 +9490,11 @@ def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() ->
             await pilot.press("enter")
             with anyio.fail_after(1):
                 submitted = await app_instance._input_controller.receive_stream.receive()
-            assert isinstance(submitted, str)
-            # Drive the echo seam the shell uses: prompt_submitted(full_text).
+            assert isinstance(submitted, TuiSubmission)
             renderer.prompt_submitted(submitted)
+            renderer.resolve_submission(int(submitted.id))
             await pilot.pause()
-            return submitted, _transcript_texts(app_instance)
+            return submitted.content, _transcript_texts(app_instance)
 
     submitted, transcript = anyio.run(scenario)
     # Model side: the full expanded blob.
@@ -9506,98 +9506,150 @@ def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() ->
     assert not any("echo me\necho me" in line for line in transcript)
 
 
-def test_textual_duplicate_large_paste_submissions_each_echo_compactly() -> None:
-    # Regression (Codex P3): the compact-echo map is keyed by the expanded prompt
-    # text. Two identical large pastes submitted before either is echoed (e.g.
-    # duplicate queued follow-ups) must NOT collide — each keeps a compact echo,
-    # consumed in submission order, or the second echoes the whole blob.
-    async def scenario() -> tuple[str, str, str, str]:
-        app_instance, renderer = create_textual_tui()
+def test_textual_duplicate_large_paste_submissions_keep_distinct_pending_identity() -> None:
+    async def scenario() -> tuple[TuiSubmission, TuiSubmission, str]:
+        app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             marker = "[Pasted content #1: 5,000 characters, 5.0 KB]"
             full = "duplicate blob " * 400
-            # Two identical submissions register two echoes under the same key.
             app_instance.post_message(input_widget.Submitted(full, marker))
             app_instance.post_message(input_widget.Submitted(full, marker))
             await pilot.pause()
-            # The shell echoes each in submission order via prompt_submitted(full).
-            first = app_instance.compact_echo_for(full)
-            second = app_instance.compact_echo_for(full)
-            # A third identical prompt with no fresh paste echoes verbatim.
-            third = app_instance.compact_echo_for(full)
-            return marker, first, second, third
+            first = await app_instance._input_controller.receive_stream.receive()
+            second = await app_instance._input_controller.receive_stream.receive()
+            preview = app_instance.query_one("#pending-input", Static).render().plain
+            assert isinstance(first, TuiSubmission)
+            assert isinstance(second, TuiSubmission)
+            return first, second, preview
 
-    marker, first, second, third = anyio.run(scenario)
-    assert first == marker  # first echo is compact
-    assert second == marker  # second (duplicate) is ALSO compact, not the blob
-    assert third == "duplicate blob " * 400  # exhausted → falls back to full text
+    first, second, preview = anyio.run(scenario)
+    assert first.content == second.content == "duplicate blob " * 400
+    assert first.display == second.display
+    assert first.id != second.id
+    assert preview.count(first.display) == 2
 
 
-def test_textual_queue_drop_clears_pending_paste_echoes_but_bare_interrupt_does_not() -> None:
-    # Regression (Codex P2 on the round-4 fix): an echo is registered on Enter but
-    # consumed only when the prompt is echoed. Echoes must be reclaimed when the
-    # shell actually DROPS its queued follow-ups (cancel/quit/input-closed/error)
-    # — via clear_compact_echoes() / the queued_prompts_cleared renderer hook — so
-    # an orphan can't mis-echo a later identical paste. But a bare Ctrl+C during an
-    # approval only DENIES that decision; the queued follow-ups (and their echoes)
-    # survive, so action_interrupt alone must NOT clear the echoes.
-    async def scenario() -> tuple[int, int, str]:
-        app_instance = TextualTui()
+def test_textual_submission_moves_from_pending_preview_to_transcript_once() -> None:
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
-            full = "orphan blob " * 400
-            marker = "[Pasted content #1: 4,800 characters, 4.7 KB]"
-            app_instance.post_message(input_widget.Submitted(full, marker))
+            input_widget.value = "visible during handoff"
+            await pilot.press("enter")
             await pilot.pause()
-
-            # A bare interrupt (approval-deny shape) must PRESERVE queued echoes.
-            app_instance.action_interrupt()
+            submission = await app_instance._input_controller.receive_stream.receive()
+            assert isinstance(submission, TuiSubmission)
+            pending = app_instance.query_one("#pending-input", Static).render().plain
+            renderer.prompt_submitted(submission)
+            renderer.resolve_submission(int(submission.id))
             await pilot.pause()
-            after_bare_interrupt = app_instance._input_controller.compact_echo_key_count
+            return pending, _transcript_texts(app_instance)
 
-            # The shell's real queue-drop hook reclaims them.
-            app_instance.clear_compact_echoes()
-            after_queue_drop = app_instance._input_controller.compact_echo_key_count
-
-            # A later identical paste registers and echoes its OWN marker.
-            fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
-            app_instance.post_message(input_widget.Submitted(full, fresh_marker))
-            await pilot.pause()
-            echoed = app_instance.compact_echo_for(full)
-            return after_bare_interrupt, after_queue_drop, echoed
-
-    after_bare_interrupt, after_queue_drop, echoed = anyio.run(scenario)
-    assert after_bare_interrupt == 1  # bare interrupt preserves queued echoes
-    assert after_queue_drop == 0  # a real queue-drop reclaims them
-    assert echoed == "[Pasted content #2: 4,800 characters, 4.7 KB]"  # not stale #1
+    pending, transcript = anyio.run(scenario)
+    assert "visible during handoff" in pending
+    assert sum("visible during handoff" in line for line in transcript) == 1
 
 
-def test_textual_pending_paste_echoes_are_bounded() -> None:
-    # Regression (verification P2): echoes for prompts that are never echoed
-    # (abandoned before consumption) must not accumulate without bound. Registering
-    # far more than the cap evicts the oldest so the map stays bounded, and the
-    # most-recent echoes are the ones that survive.
-    async def scenario() -> tuple[int, int, str]:
+def test_textual_restore_preserves_large_payload_before_newer_draft() -> None:
+    async def scenario() -> tuple[str, bool]:
         app_instance = TextualTui()
+        full = "restored payload\n" * 300
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content=full,
+            display="[Pasted content #1: restored]",
+        )
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
-            overflow = _MAX_PENDING_ECHOES + 10
-            for i in range(overflow):
-                full = f"blob-{i} " * 400  # distinct >2 KB prompt each
-                marker = f"[Pasted content #{i}: ...]"
-                app_instance.post_message(input_widget.Submitted(full, marker))
+            app_instance.buffer_submission(submission)
+            input_widget.value = "newer draft"
+            restored = app_instance.restore_submissions((submission,))
             await pilot.pause()
-            total = app_instance._input_controller.pending_compact_echo_count
-            order_len = app_instance._input_controller.compact_echo_order_length
-            # The oldest were evicted; the newest survives and still echoes compact.
-            newest = app_instance.compact_echo_for(f"blob-{overflow - 1} " * 400)
-            return total, order_len, newest
+            return input_widget.text_for_submission(), restored
 
-    total, order_len, newest = anyio.run(scenario)
-    assert total <= _MAX_PENDING_ECHOES  # bounded, never grows past the cap
-    assert order_len <= _MAX_PENDING_ECHOES
-    assert newest == f"[Pasted content #{_MAX_PENDING_ECHOES + 9}: ...]"  # newest kept
+    restored_text, restored = anyio.run(scenario)
+    assert restored
+    assert restored_text == f"{'restored payload\n' * 300}\nnewer draft"
+
+
+def test_textual_queued_prompt_stays_visible_until_shell_starts_it() -> None:
+    async def scenario() -> tuple[str, str, list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        controller = ScriptedController()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        shell.state.status = TuiStatus.running
+
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "follow up during command boundary"
+            await pilot.press("enter")
+            await pilot.pause()
+            submission = await app_instance._input_controller.receive_stream.receive()
+            assert isinstance(submission, TuiSubmission)
+            await shell._handle_input_line(_InputLine(submission, _InputMode.running))
+            await pilot.pause()
+            pending_before = app_instance.query_one("#pending-input", Static).render().plain
+
+            await shell._finish_current_prompt(
+                RpcCommandFinished(
+                    command_id="prompt-1",
+                    command_type="prompt",
+                    ok=True,
+                )
+            )
+            await pilot.pause()
+            pending_after = app_instance.query_one("#pending-input", Static).render().plain
+            return (
+                pending_before,
+                pending_after,
+                _transcript_texts(app_instance),
+                controller.prompts,
+            )
+
+    pending_before, pending_after, transcript, prompts = anyio.run(scenario)
+    assert "follow up during command boundary" in pending_before
+    assert "follow up during command boundary" not in pending_after
+    assert sum("follow up during command boundary" in line for line in transcript) == 1
+    assert prompts == ["follow up during command boundary"]
+
+
+def test_textual_failed_current_turn_restores_unstarted_follow_up() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        shell.state.status = TuiStatus.running
+
+        async with app_instance.run_test() as pilot:
+            submission = TuiSubmission(
+                id=new_submission_id(),
+                content="retry this follow up",
+                display="retry this follow up",
+            )
+            app_instance.buffer_submission(submission)
+            await shell._handle_input_line(_InputLine(submission, _InputMode.running))
+            await pilot.pause()
+            pending_before = app_instance.query_one("#pending-input", Static).render().plain
+
+            await shell._finish_current_prompt(
+                RpcCommandFinished(
+                    command_id="prompt-1",
+                    command_type="prompt",
+                    ok=False,
+                    error="failed",
+                )
+            )
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            return pending_before, input_widget.text_for_submission()
+
+    pending_before, restored = anyio.run(scenario)
+    assert "retry this follow up" in pending_before
+    assert restored == "retry this follow up"
 
 
 def test_textual_newline_keys_edit_without_submitting() -> None:

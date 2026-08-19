@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.tui_support import *
+from wisp.tui.input_types import TuiSubmission
 
 
 def test_tui_shell_preserves_error_footer_after_failed_prompt_completion() -> None:
@@ -404,25 +405,26 @@ def test_tui_shell_interrupt_during_approval_preserves_queued_prompts_and_echoes
         assert should_exit is False
         assert controller.approvals == [("call-1", False, "Denied from TUI: interrupted")]
         # The queued follow-up survives, and the echo-reclaim hook never fired.
-        assert list(shell.state.queued_prompts) == ["already-queued follow-up"]
+        assert [submission.content for submission in shell._queued_submissions()] == [
+            "already-queued follow-up"
+        ]
         assert renderer.cleared_calls == 0
 
     anyio.run(run)
 
 
-def test_tui_shell_cancelling_running_prompt_clears_queued_prompts_and_echoes() -> None:
-    # Complement: cancelling the RUNNING prompt genuinely drops the queue, so the
-    # renderer hook fires exactly once to reclaim the abandoned prompts' echoes.
+def test_tui_shell_cancelling_running_prompt_restores_queued_prompts() -> None:
     async def run() -> None:
         controller = ScriptedController()
 
         class SpyRenderer(FullscreenTuiRenderer):
             def __init__(self) -> None:
                 super().__init__(_console()[0], clear_screen=False)
-                self.cleared_calls = 0
+                self.restored: tuple[TuiSubmission, ...] = ()
 
-            def queued_prompts_cleared(self) -> None:
-                self.cleared_calls += 1
+            def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+                self.restored = submissions
+                return True
 
         renderer = SpyRenderer()
         shell = TuiShell(controller, renderer=renderer)
@@ -436,8 +438,8 @@ def test_tui_shell_cancelling_running_prompt_clears_queued_prompts_and_echoes() 
 
         assert should_exit is False
         assert controller.cancelled == ["prompt-1"]
-        assert list(shell.state.queued_prompts) == []  # queue dropped
-        assert renderer.cleared_calls == 1  # echo-reclaim hook fired
+        assert list(shell.state.queued_prompts) == []
+        assert [submission.content for submission in renderer.restored] == ["doomed follow-up"]
 
     anyio.run(run)
 
@@ -461,7 +463,7 @@ def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
 
         assert should_exit is False
         assert controller.approvals == []
-        assert list(shell.state.queued_prompts) == ["yes"]
+        assert [submission.content for submission in shell._queued_submissions()] == ["yes"]
 
     anyio.run(run)
 
@@ -505,7 +507,7 @@ def test_tui_shell_queues_non_answer_from_stale_running_trust_input() -> None:
         assert should_exit is False
         assert controller.trusts == []
         assert shell.state.pending_trust is not None
-        assert list(shell.state.queued_prompts) == ["follow up"]
+        assert [submission.content for submission in shell._queued_submissions()] == ["follow up"]
 
     anyio.run(run)
 

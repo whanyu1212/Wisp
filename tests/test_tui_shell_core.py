@@ -4464,6 +4464,40 @@ def test_tui_shell_quit_then_eof_sends_one_shutdown() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_normalizes_legacy_queued_prompt_once_with_stable_identity() -> None:
+    shell = TuiShell(ScriptedController())
+    shell.state.queued_prompts.append("legacy follow up")
+
+    first = shell._queued_submissions()
+    second = shell._queued_submissions()
+
+    assert first == second
+    assert first[0] is second[0]
+    assert first[0].content == "legacy follow up"
+
+
+def test_tui_shell_blocks_session_changes_while_follow_ups_are_queued() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        shell.state.queued_prompts.append("keep this follow up")
+
+        await shell._handle_new_session_command(())
+        await shell._handle_resume_command(("session-2",))
+
+        assert controller.new_session_requests == []
+        assert controller.selected_sessions == []
+        rendered = output.getvalue()
+        assert "Cannot start a new session while follow-up prompts are queued." in rendered
+        assert "Cannot switch sessions while follow-up prompts are queued." in rendered
+        assert [submission.content for submission in shell._queued_submissions()] == [
+            "keep this follow up"
+        ]
+
+    anyio.run(run)
+
+
 def test_tui_shell_queues_follow_up_while_running() -> None:
     async def run() -> None:
         controller = ScriptedController(
@@ -4570,6 +4604,7 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
         assert "input closed; finishing current prompt" in rendered
         assert "waiting for current prompt" not in rendered
@@ -4607,6 +4642,7 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
 
     anyio.run(run)

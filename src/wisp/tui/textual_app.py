@@ -58,6 +58,7 @@ from wisp.tui.file_index import (
     format_file_reference,
 )
 from wisp.tui.file_suggest import FileSuggest
+from wisp.tui.input_types import PendingSubmissionView, SubmissionId, TuiSubmission
 from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
@@ -403,6 +404,12 @@ class TextualTui(App[None]):
         color: $foreground 60%;
     }
 
+    #pending-input {
+        height: auto;
+        margin-bottom: 1;
+        color: $foreground 60%;
+    }
+
     #composer-meta {
         height: 1;
         margin-top: 1;
@@ -510,6 +517,8 @@ class TextualTui(App[None]):
         self._file_index_cwd: str | None = None
         self._file_index_request: FileIndexRequest | None = None
         self._input_controller = TextualInputController(self)
+        self._buffered_submissions: dict[SubmissionId, TuiSubmission] = {}
+        self._shell_pending_submissions: tuple[PendingSubmissionView, ...] = ()
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
         self._composer: ComposerPanel | None = None
@@ -595,6 +604,65 @@ class TextualTui(App[None]):
 
         self.write_error(message)
 
+    def buffer_submission(self, submission: TuiSubmission) -> None:
+        """Keep a frontend-accepted prompt visible until shell classification."""
+
+        self._buffered_submissions[submission.id] = submission
+        self._refresh_pending_submissions()
+
+    def set_pending_submissions(
+        self,
+        submissions: tuple[PendingSubmissionView, ...],
+    ) -> None:
+        """Reconcile shell-owned queued prompts with provisional frontend input."""
+
+        self._shell_pending_submissions = submissions
+        self._refresh_pending_submissions()
+
+    def resolve_submission(self, submission_id: int) -> None:
+        """Remove one accepted prompt after it gains another visible destination."""
+
+        self._buffered_submissions.pop(SubmissionId(submission_id), None)
+        self._shell_pending_submissions = tuple(
+            submission
+            for submission in self._shell_pending_submissions
+            if int(submission.id) != submission_id
+        )
+        self._refresh_pending_submissions()
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        """Restore unstarted prompts before any newer composer draft."""
+
+        if self._input is None:
+            return False
+        restored = [submission.content for submission in submissions if submission.content]
+        current = self._input.text_for_submission()
+        if current:
+            restored.append(current)
+        self._input.restore_prompt("\n".join(restored))
+        for submission in submissions:
+            self._buffered_submissions.pop(submission.id, None)
+        restored_ids = {submission.id for submission in submissions}
+        self._shell_pending_submissions = tuple(
+            submission
+            for submission in self._shell_pending_submissions
+            if submission.id not in restored_ids
+        )
+        self._refresh_pending_submissions()
+        self._input.focus()
+        return True
+
+    def _refresh_pending_submissions(self) -> None:
+        if self._composer is None:
+            return
+        shell_ids = {submission.id for submission in self._shell_pending_submissions}
+        provisional = tuple(
+            submission.pending_view()
+            for submission in self._buffered_submissions.values()
+            if submission.id not in shell_ids
+        )
+        self._composer.set_pending_submissions(self._shell_pending_submissions + provisional)
+
     def compose(self) -> ComposeResult:
         with Vertical():
             # This full-screen overlay must be the first normal-layout child so
@@ -656,6 +724,7 @@ class TextualTui(App[None]):
         self._status = self.query_one("#status", StatusBar)
         self._composer = self.query_one("#composer", ComposerPanel)
         self._input = self.query_one("#input", PromptEditor)
+        self._refresh_pending_submissions()
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._file_suggest = self.query_one("#file-suggest", FileSuggest)
         self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
@@ -725,9 +794,7 @@ class TextualTui(App[None]):
         # Register a compact echo when the submitted (expanded) text differs from
         # what the editor showed — a large paste. The transcript then echoes the
         # marker line, not the whole blob, while the model still gets event.value.
-        if event.display != event.value:
-            self._input_controller.register_compact_echo(event.value, event.display)
-        self.submit_command_line(event.value)
+        self.submit_command_line(event.value, display=event.display)
 
     def _accept_menu_highlight_on_enter(self, typed: str) -> bool:
         """Accept the highlighted slash command on Enter; return whether it handled.
@@ -1215,13 +1282,13 @@ class TextualTui(App[None]):
             )
         event.stop()
 
-    def submit_command_line(self, text: str) -> None:
+    def submit_command_line(self, text: str, *, display: str | None = None) -> None:
         """Submit a typed slash-command line through the input controller."""
 
         if self._submit_local_theme_command(text):
             self.clear_prompt_editor()
             return
-        self._input_controller.submit_line(text, clear_editor=True)
+        self._input_controller.submit_line(text, clear_editor=True, display=display)
 
     def _submit_local_theme_command(self, text: str) -> bool:
         """Handle Textual-only ``/theme`` without crossing the RPC boundary."""
@@ -1691,7 +1758,7 @@ class TextualTui(App[None]):
 
         self._input_controller.set_submit_hook(on_submit)
 
-    async def read_prompt(self, prompt: str) -> str:
+    async def read_prompt(self, prompt: str) -> str | TuiSubmission:
         self.set_input_hint(prompt)
         return await self._input_controller.receive()
 
@@ -2163,6 +2230,7 @@ class TextualTui(App[None]):
         self._visible_input_mode = snapshot.input_mode
         if self._composer is not None:
             self._composer.set_snapshot(snapshot)
+        self.set_pending_submissions(snapshot.pending_submissions)
         if self._status is not None:
             self._status.set_snapshot(snapshot)
         self._schedule_update_prompt()
