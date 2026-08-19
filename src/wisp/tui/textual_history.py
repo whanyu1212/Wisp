@@ -352,6 +352,7 @@ class TextualHistoryController:
         self._surface.begin_history_render()
         try:
             evicted = self._window.prepend(retained)
+            evicted += self._complete_newest_message_group_eviction(evicted)
             self._discard_entries(evicted)
             if evicted:
                 self._next_newer_entry_id = None
@@ -416,6 +417,7 @@ class TextualHistoryController:
         self._surface.begin_history_render()
         try:
             evicted = self._window.append(retained, follow_tail=False)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
             self._discard_entries(evicted)
             if evicted and self._window.entries:
                 next_before_entry_id = _history_entry_cursor(self._window.entries[0].entry)
@@ -427,6 +429,44 @@ class TextualHistoryController:
         finally:
             self._surface.finish_history_render()
         return next_before_entry_id
+
+    def _complete_oldest_message_group_eviction(
+        self,
+        evicted: tuple[_RetainedHistoryEntry, ...],
+    ) -> tuple[_RetainedHistoryEntry, ...]:
+        """Evict the rest of an RPC message split across the oldest boundary."""
+
+        retained = self._window.entries
+        if not evicted or not retained:
+            return ()
+        boundary_id = _history_entry_id(evicted[-1].entry)
+        if boundary_id is None or _history_entry_id(retained[0].entry) != boundary_id:
+            return ()
+        count = 0
+        for item in retained:
+            if _history_entry_id(item.entry) != boundary_id:
+                break
+            count += 1
+        return self._window.discard_oldest(count)
+
+    def _complete_newest_message_group_eviction(
+        self,
+        evicted: tuple[_RetainedHistoryEntry, ...],
+    ) -> tuple[_RetainedHistoryEntry, ...]:
+        """Evict the rest of an RPC message split across the newest boundary."""
+
+        retained = self._window.entries
+        if not evicted or not retained:
+            return ()
+        boundary_id = _history_entry_id(evicted[0].entry)
+        if boundary_id is None or _history_entry_id(retained[-1].entry) != boundary_id:
+            return ()
+        count = 0
+        for item in reversed(retained):
+            if _history_entry_id(item.entry) != boundary_id:
+                break
+            count += 1
+        return self._window.discard_newest(count)
 
     def show_oldest(self) -> bool:
         """Move the mounted window to the oldest retained history."""
@@ -479,7 +519,8 @@ class TextualHistoryController:
             self._clear(clear_live=False)
             retained = self._retain(reloaded_entries)
             self._remap_transferred_history_entry_ids(retained)
-            self._window.replace(retained)
+            evicted = self._window.replace(retained)
+            self._complete_oldest_message_group_eviction(evicted)
             self._reconcile()
             self._surface.follow_transcript_tail_after_refresh()
         finally:
@@ -518,7 +559,9 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._discard_entries(self._window.append(self._retain(recovered), follow_tail=False))
+            evicted = self._window.append(self._retain(recovered), follow_tail=False)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
             self._reconcile()
         finally:
             self._surface.finish_history_render()
@@ -551,7 +594,9 @@ class TextualHistoryController:
         self._surface.begin_history_render()
         try:
             following = self._surface.history_is_following()
-            self._discard_entries(self._window.append(self._retain(entries), follow_tail=following))
+            evicted = self._window.append(self._retain(entries), follow_tail=following)
+            evicted += self._complete_oldest_message_group_eviction(evicted)
+            self._discard_entries(evicted)
             self._reconcile()
             if following:
                 self._surface.follow_transcript_tail_after_refresh()

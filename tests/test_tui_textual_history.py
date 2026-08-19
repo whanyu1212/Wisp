@@ -374,6 +374,85 @@ def test_history_controller_pages_forward_after_newer_retention_was_evicted() ->
     assert not controller.shift_newer()
 
 
+def test_history_controller_evicts_a_whole_message_group_from_the_oldest_edge() -> None:
+    surface = _HistorySurface(at_top=True, following=False)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    split_group = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"split projection {index}",
+            entry_id="split-message",
+        )
+        for index in range(3)
+    )
+    surviving = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"surviving {index}",
+            entry_id=f"surviving-{index}",
+        )
+        for index in range(TUI_TRANSCRIPT_WINDOW_SIZE - len(split_group))
+    )
+    controller.replace_entries((*split_group, *surviving), session_label="Windowed")
+
+    next_before_entry_id = controller.append_newer_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="newer",
+                entry_id="newer",
+            ),
+        ),
+        next_after_entry_id=None,
+    )
+
+    assert next_before_entry_id == "surviving-0"
+    assert all("split projection" not in label for label in surface.history_labels)
+    assert surface.history_labels[0] == "assistant: surviving 0"
+
+
+def test_history_controller_evicts_a_whole_message_group_from_the_newest_edge() -> None:
+    surface = _HistorySurface(at_top=True, following=False)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    surviving = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"surviving {index}",
+            entry_id=f"surviving-{index}",
+        )
+        for index in range(TUI_TRANSCRIPT_WINDOW_SIZE - 3)
+    )
+    split_group = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"split projection {index}",
+            entry_id="split-message",
+        )
+        for index in range(3)
+    )
+    controller.replace_entries((*surviving, *split_group), session_label="Windowed")
+
+    controller.prepend_entries(
+        (
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content="older",
+                entry_id="older",
+            ),
+        )
+    )
+
+    assert all("split projection" not in label for label in surface.history_labels)
+    assert controller.shift_newer()
+    assert surface.newer_history_requests == [f"surviving-{len(surviving) - 1}"]
+
+
 def test_history_controller_excludes_live_entries_from_the_final_newer_page() -> None:
     surface = _HistorySurface(at_top=True, following=False)
     controller = TextualHistoryController(surface)
