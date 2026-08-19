@@ -1766,6 +1766,7 @@ class OperationIndicator(Vertical):
         width: 9;
         height: 1;
         min-height: 1;
+        margin-right: 2;
         color: $accent;
     }
 
@@ -2847,6 +2848,12 @@ class ToolCard(Static):
         if isinstance(self._detail, DiffPresentation):
             self.post_message(self.ViewDiffRequested(self, self._detail))
 
+    def _expanded_supplement(self, *, width: int) -> Content:
+        """Return subclass-owned bounded content shown only while expanded."""
+
+        del width
+        return Content()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_expand":
             return self._can_expand()
@@ -2922,6 +2929,10 @@ class ToolCard(Static):
         elif self._detail:
             content += Content("\n") + _tree_detail(self._detail, width=width)
 
+        supplement = self._expanded_supplement(width=width)
+        if supplement:
+            content += Content("\n") + supplement
+
         if self._truncated:
             # The tool capped its own output before it ever reached here, so what the
             # card shows — collapsed preview or expanded full output — isn't the whole
@@ -2955,6 +2966,15 @@ def _process_id_for_display(process_id: str) -> str:
 class ProcessCard(ToolCard):
     """One bounded presentation card spanning repeated polls for a process ID."""
 
+    HELP = """
+    # Process history
+
+    Enter or Space expands the represented process timeline. Use p and n to select
+    an earlier or later persisted update, then l to load that row's exact persisted
+    output. Loading history never reruns the process. Tool-level truncation markers
+    mean the discarded bytes were not persisted and cannot be recovered.
+    """
+
     _STATE_WORDS = {
         "polling": "Polling process",
         "cancelling": "Cancelling process",
@@ -2978,6 +2998,13 @@ class ProcessCard(ToolCard):
         "denied": "bold $warning",
         "cancelled": "bold $warning",
     }
+    _HISTORY_UPDATE_WINDOW = 6
+    BINDINGS = [
+        *ToolCard.BINDINGS,
+        Binding("p", "previous_history_update", "Previous process update", show=False),
+        Binding("n", "next_history_update", "Next process update", show=False),
+        Binding("l", "load_history_output", "Load persisted output", show=False),
+    ]
 
     def __init__(self, process_id: str, *, track_elapsed: bool = True) -> None:
         self._process_id = process_id
@@ -2992,6 +3019,11 @@ class ProcessCard(ToolCard):
             source_truncated=False,
             ui_dropped_bytes=0,
         )
+        self._history_update_index = 0
+        self._history_detail_entry_id: str | None = None
+        self._history_detail_output = ""
+        self._history_detail_loading = False
+        self._history_detail_error = ""
         super().__init__(
             "bash",
             {"operation": "poll", "process_id": process_id},
@@ -3022,10 +3054,17 @@ class ProcessCard(ToolCard):
     ) -> None:
         """Replace the bounded lifecycle snapshot and repaint this card in place."""
 
+        had_history_updates = bool(self._process_presentation.history_updates)
         self._process_presentation = presentation
         self._detail = presentation.detail
-        self._full_output = presentation.full_output
+        self._full_output = "" if presentation.history_updates else presentation.full_output
         self._truncated = presentation.source_truncated
+        if presentation.history_updates:
+            self._history_update_index = (
+                min(self._history_update_index, len(presentation.history_updates) - 1)
+                if had_history_updates
+                else len(presentation.history_updates) - 1
+            )
         state = presentation.display_state
         if state == "completed":
             status: ToolActionStatus = "done"
@@ -3057,7 +3096,107 @@ class ProcessCard(ToolCard):
                 f" · {presentation.poll_count} {unit}",
                 "$text-muted",
             )
+        if presentation.history_entry_ids:
+            row_count = len(presentation.history_entry_ids)
+            content += Content.styled(
+                f" · {row_count}/{row_count} rows",
+                "$text-muted",
+            )
         return content
+
+    def _can_expand(self) -> bool:
+        return bool(self._process_presentation.history_updates) or super()._can_expand()
+
+    def action_previous_history_update(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return
+        self._history_update_index = max(0, self._history_update_index - 1)
+        self._clear_history_detail_if_selection_changed()
+        self._repaint()
+
+    def action_next_history_update(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return
+        self._history_update_index = min(len(updates) - 1, self._history_update_index + 1)
+        self._clear_history_detail_if_selection_changed()
+        self._repaint()
+
+    def action_load_history_output(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates or self._history_detail_loading:
+            return
+        selected = updates[self._history_update_index]
+        if self._history_detail_entry_id == selected.entry_id and self._history_detail_output:
+            return
+        self._history_detail_loading = True
+        self._history_detail_error = ""
+        self._repaint()
+        self.post_message(self.HistoryDetailRequested(self, selected.entry_id))
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        updates = self._process_presentation.history_updates
+        if not updates or updates[self._history_update_index].entry_id != entry_id:
+            return
+        self._history_detail_entry_id = entry_id
+        self._history_detail_output = output
+        self._history_detail_loading = False
+        self._history_detail_error = ""
+        self._repaint()
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        updates = self._process_presentation.history_updates
+        if not updates or updates[self._history_update_index].entry_id != entry_id:
+            return
+        self._history_detail_loading = False
+        self._history_detail_error = error
+        self._repaint()
+
+    def _clear_history_detail_if_selection_changed(self) -> None:
+        updates = self._process_presentation.history_updates
+        if (
+            updates
+            and self._history_detail_entry_id != updates[self._history_update_index].entry_id
+        ):
+            self._history_detail_output = ""
+            self._history_detail_error = ""
+            self._history_detail_loading = False
+
+    def _expanded_supplement(self, *, width: int) -> Content:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return Content()
+        selected_index = min(self._history_update_index, len(updates) - 1)
+        half = self._HISTORY_UPDATE_WINDOW // 2
+        start = min(
+            max(0, selected_index - half),
+            max(0, len(updates) - self._HISTORY_UPDATE_WINDOW),
+        )
+        stop = min(len(updates), start + self._HISTORY_UPDATE_WINDOW)
+        lines = [f"    updates {start + 1}–{stop} of {len(updates)} · p/n navigate · l load output"]
+        for index in range(start, stop):
+            update = updates[index]
+            marker = "▸" if index == selected_index else " "
+            state = update.display_state.replace("_", " ")
+            lines.append(f"    {marker} #{index + 1} {state}: {update.preview}")
+        if self._history_detail_loading:
+            lines.append("    ⟳ Loading persisted output…")
+        elif self._history_detail_error:
+            lines.append(f"    ! {self._history_detail_error} · l retry")
+        elif self._history_detail_output:
+            detail_lines = self._history_detail_output.splitlines() or ["(empty persisted output)"]
+            lines.append(f"    persisted output · {len(detail_lines)} lines")
+            lines.extend(f"      {line}" for line in detail_lines)
+        return _tree_detail("\n".join(lines), width=width)
+
+    class HistoryDetailRequested(Message):
+        """The reader requested exact persisted output for one represented update."""
+
+        def __init__(self, card: ProcessCard, entry_id: str) -> None:
+            super().__init__()
+            self.card = card
+            self.entry_id = entry_id
 
 
 class WorkingIndicator(Static):

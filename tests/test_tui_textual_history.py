@@ -293,7 +293,7 @@ def test_history_controller_hydrates_complete_history_in_bounded_batches() -> No
         progress: list[tuple[int, int]] = []
 
         await controller.hydrate_entries(
-            _messages("assistant", "message", 40),
+            _messages("assistant", "message", 300),
             session_label="Complete",
             progress=lambda completed, total: progress.append((completed, total)),
         )
@@ -320,12 +320,49 @@ def test_history_controller_hydrates_complete_history_in_bounded_batches() -> No
         follow_requests,
     ) = anyio.run(scenario)
 
-    assert labels == [f"assistant: message {index}" for index in range(40)]
-    assert progress == [(0, 40), (16, 40), (32, 40), (40, 40)]
-    assert batch_mount_counts == [16, 16, 8, 1]
+    assert labels == [f"assistant: message {index}" for index in range(300)]
+    assert progress == [(0, 300), (128, 300), (256, 300), (300, 300)]
+    assert batch_mount_counts == [128, 128, 44, 1]
     assert render_starts == render_finishes == render_waits == 4
     assert refresh_waits == 5
     assert follow_requests == 1
+
+
+def test_history_controller_discards_partial_complete_hydration_after_mount_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    original_mount = surface.mount_historical_line
+    mount_count = 0
+
+    def fail_second_mount(
+        role: str,
+        message: str,
+        *,
+        before: Widget | None = None,
+    ) -> Widget:
+        nonlocal mount_count
+        mount_count += 1
+        if mount_count == 2:
+            raise RuntimeError("second mount failed")
+        return original_mount(role, message, before=before)
+
+    monkeypatch.setattr(surface, "mount_historical_line", fail_second_mount)
+
+    async def scenario() -> None:
+        await controller.hydrate_entries(
+            _messages("assistant", "message", 3),
+            session_label="Partial",
+            progress=lambda _completed, _total: None,
+        )
+
+    with pytest.raises(RuntimeError, match="second mount failed"):
+        anyio.run(scenario)
+
+    assert surface.widgets == []
+    assert controller.retained_entry_count == 0
+    assert surface.render_starts == surface.render_finishes == 1
 
 
 def test_history_controller_reconciles_a_bounded_window_without_full_history_scans(

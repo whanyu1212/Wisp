@@ -963,6 +963,104 @@ def test_session_message_page_clips_large_content_and_tool_arguments(
     assert len(str(tool_call.arguments["truncated_json_preview"]).encode("utf-8")) <= 64 * 1024
 
 
+def test_session_message_page_complete_structure_preserves_every_tool_call(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    tool_argument = "x" * 70_000
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=tuple(
+                    ToolCallSnapshot(
+                        call_id=f"call-{index}",
+                        name="bash",
+                        arguments={"command": tool_argument},
+                    )
+                    for index in range(20)
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    message = session.read_message_page(complete_structure=True).messages[0]
+
+    assert len(message.tool_calls) == message.tool_calls_original_count == 20
+    assert message.tool_calls_truncated is False
+    assert all(tool_call.arguments_truncated for tool_call in message.tool_calls)
+    assert (
+        _message_page_text_bytes(
+            SessionMessagePage(
+                session_id=session.session_id,
+                path=session.path,
+                active_leaf_id=message.entry_id,
+                messages=(message,),
+                truncated=False,
+                next_before_entry_id=None,
+            )
+        )
+        <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    )
+
+
+def test_session_message_page_exact_full_content_bypasses_preview_limits(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    content = "🙂" * 20_000
+    tool_argument = "x" * 70_000
+
+    async def write() -> str:
+        entry = await session.append_message(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=tuple(
+                    ToolCallSnapshot(
+                        call_id=f"call-{index}",
+                        name="bash",
+                        arguments={"command": tool_argument},
+                    )
+                    for index in range(20)
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        return entry.id
+
+    entry_id = anyio.run(write)
+    page = session.read_message_page(
+        limit=1,
+        entry_ids=(entry_id,),
+        complete_structure=True,
+        full_content=True,
+    )
+    message = page.messages[0]
+
+    assert page.truncated is False
+    assert page.next_before_entry_id is None
+    assert message.content == content
+    assert message.content_truncated is False
+    assert len(message.tool_calls) == 20
+    assert message.tool_calls_truncated is False
+    assert all(
+        tool_call.arguments == {"command": tool_argument} for tool_call in message.tool_calls
+    )
+    assert all(not tool_call.arguments_truncated for tool_call in message.tool_calls)
+
+    with pytest.raises(SessionError, match="not found on active path"):
+        session.read_message_page(entry_ids=("missing",), full_content=True)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        session.read_message_page(entry_ids=(entry_id,), before_entry_id=entry_id)
+    with pytest.raises(ValueError, match="must be unique"):
+        session.read_message_page(entry_ids=(entry_id, entry_id), full_content=True)
+
+
 def test_session_message_page_applies_aggregate_budget_newest_first(
     tmp_path: Path,
 ) -> None:

@@ -31,7 +31,7 @@ class HistoryHydrationPolicy(StrEnum):
 class HistoricalTranscriptMessage:
     """One historical user/assistant line ready for TUI rendering."""
 
-    role: Literal["user", "assistant"]
+    role: Literal["system", "user", "assistant"]
     content: str
     entry_id: str | None = field(default=None, compare=False)
 
@@ -56,6 +56,7 @@ class HistoricalToolCard:
     tool_call_id: str | None = field(default=None, compare=False)
     call_missing: bool = field(default=False, compare=False)
     entry_id: str | None = field(default=None, compare=False)
+    call_entry_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,21 @@ class HistoricalSkillInvocation:
 type HistoricalTranscriptEntry = (
     HistoricalTranscriptMessage | HistoricalSkillInvocation | HistoricalToolCard
 )
+
+
+def represented_history_entry_ids(
+    entries: tuple[HistoricalTranscriptEntry, ...],
+) -> frozenset[str]:
+    """Return persisted message IDs accounted for by logical transcript entries."""
+
+    represented: set[str] = set()
+    for entry in entries:
+        entry_id = entry.entry_id
+        if entry_id is not None:
+            represented.add(entry_id)
+        if isinstance(entry, HistoricalToolCard) and entry.call_entry_id is not None:
+            represented.add(entry.call_entry_id)
+    return frozenset(represented)
 
 
 def history_from_rpc_messages(
@@ -114,7 +130,15 @@ def history_entries_from_rpc_messages(
     rendered: list[HistoricalTranscriptEntry] = []
     pending_tool_calls: dict[str, tuple[RpcMessageToolCallSnapshot, str]] = {}
     for message in messages:
-        if message.role == "user":
+        if message.role == "system":
+            rendered.append(
+                HistoricalTranscriptMessage(
+                    role="system",
+                    content=_content_for_history(message) or "(empty system message)",
+                    entry_id=message.entry_id,
+                )
+            )
+        elif message.role == "user":
             invocation = message.skill_invocation
             if invocation is not None:
                 rendered.append(
@@ -142,6 +166,14 @@ def history_entries_from_rpc_messages(
                     HistoricalTranscriptMessage(
                         role="assistant",
                         content=_content_for_history(message),
+                        entry_id=message.entry_id,
+                    )
+                )
+            elif not message.tool_calls:
+                rendered.append(
+                    HistoricalTranscriptMessage(
+                        role="assistant",
+                        content="(empty assistant message)",
                         entry_id=message.entry_id,
                     )
                 )
@@ -181,6 +213,7 @@ def _historical_tool_card(
     return HistoricalToolCard(
         card_id=f"history:{message.entry_id}",
         entry_id=message.entry_id,
+        call_entry_id=pending_call[1] if pending_call is not None else None,
         name=message.tool_name or (tool_call.name if tool_call is not None else "unknown"),
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,

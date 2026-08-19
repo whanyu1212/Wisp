@@ -546,6 +546,8 @@ class TextualTui(App[None]):
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_newer_request_hook: Callable[[str], Awaitable[None]] | None = None
+        self._history_detail_request_hook: Callable[[str], Awaitable[None]] | None = None
+        self._history_detail_cards: dict[str, list[ProcessCard]] = {}
         self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
         self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
         self._update_action_hook: (
@@ -1640,6 +1642,50 @@ class TextualTui(App[None]):
 
         self._history_newer_request_hook = hook
 
+    def set_history_detail_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Register the shell callback for exact persisted process output."""
+
+        self._history_detail_request_hook = hook
+
+    def on_process_card_history_detail_requested(
+        self,
+        event: ProcessCard.HistoryDetailRequested,
+    ) -> None:
+        """Coalesce cards waiting on the same exact persisted row."""
+
+        event.stop()
+        cards = self._history_detail_cards.setdefault(event.entry_id, [])
+        if event.card not in cards:
+            cards.append(event.card)
+        if len(cards) > 1:
+            return
+        hook = self._history_detail_request_hook
+        if hook is None:
+            self.history_detail_failed(event.entry_id, "Persisted output loading is unavailable.")
+            return
+        self.run_worker(
+            hook(event.entry_id),
+            group=f"history-detail-{event.entry_id}",
+            exit_on_error=False,
+        )
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        """Deliver one exact persisted payload to every waiting mounted card."""
+
+        for card in self._history_detail_cards.pop(entry_id, []):
+            if card.is_mounted:
+                card.history_detail_loaded(entry_id, output)
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        """Settle every card waiting on a failed exact-row lookup."""
+
+        for card in self._history_detail_cards.pop(entry_id, []):
+            if card.is_mounted:
+                card.history_detail_failed(entry_id, error)
+
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register the renderer's at-accept input-mode snapshot callback."""
 
@@ -2329,6 +2375,14 @@ class TextualTui(App[None]):
     def session_switch_finished(self) -> None:
         self._finish_session_operation(OverlayOperation.session_switch)
 
+    async def wait_for_session_operation_paint(self) -> None:
+        """Wait until newly visible session-operation chrome reaches a frame."""
+
+        indicator = self._operation_indicator
+        if indicator is None or not indicator.is_running or not indicator.is_open:
+            return
+        await indicator.wait_for_refresh()
+
     def _start_session_operation(self, operation: OverlayOperation) -> None:
         """Show typed session work without giving the indicator lifecycle ownership."""
 
@@ -2360,6 +2414,7 @@ class TextualTui(App[None]):
         """Drop the previous session's UI-owned transcript bookkeeping."""
 
         self._transcript_epoch += 1
+        self._history_detail_cards.clear()
         self._history_marker = None
         self._prepending_history = False
         self._history_prepend_paint_suppressed = False
@@ -3239,7 +3294,10 @@ class TextualTui(App[None]):
     async def wait_for_history_refresh(self) -> None:
         """Yield through the next Textual refresh so progress remains animated."""
 
-        await self.wait_for_refresh()
+        transcript = self._transcript
+        if transcript is None or not transcript.is_running:
+            return
+        await transcript.wait_for_refresh()
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record pagination state after the current history batch has laid out."""

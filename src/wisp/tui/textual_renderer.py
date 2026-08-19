@@ -387,6 +387,18 @@ class TextualTuiRenderer:
     ) -> None:
         self.app.set_history_newer_page_request_hook(hook)
 
+    def set_history_detail_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_detail_request_hook(hook)
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        self.app.history_detail_loaded(entry_id, output)
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        self.app.history_detail_failed(entry_id, error)
+
     def history_page_loaded(self, *, has_more: bool) -> None:
         self.app.history_page_loaded(has_more=has_more)
 
@@ -655,6 +667,9 @@ class TextualTuiRenderer:
 
     def session_switch_finished(self) -> None:
         self.app.session_switch_finished()
+
+    async def wait_for_session_operation_paint(self) -> None:
+        await self.app.wait_for_session_operation_paint()
 
     def context_status(self, stats: SessionStats) -> None:
         self.app.show_context_status(stats)

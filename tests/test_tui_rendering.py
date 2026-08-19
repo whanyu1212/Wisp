@@ -29,6 +29,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
     history_from_rpc_messages,
+    represented_history_entry_ids,
 )
 from wisp.tui.theme import WISP_THEMES
 
@@ -265,7 +266,7 @@ def _context_budget(
     )
 
 
-def test_history_from_rpc_messages_filters_to_visible_user_and_assistant_text() -> None:
+def test_history_from_rpc_messages_represents_system_and_empty_assistant_rows() -> None:
     history = history_from_rpc_messages(
         (
             _rpc_message("system", "system prompt", entry_id="system-1"),
@@ -288,7 +289,9 @@ def test_history_from_rpc_messages_filters_to_visible_user_and_assistant_text() 
     )
 
     assert history == (
+        HistoricalTranscriptMessage(role="system", content="system prompt"),
         HistoricalTranscriptMessage(role="user", content="hello"),
+        HistoricalTranscriptMessage(role="assistant", content="(empty assistant message)"),
         HistoricalTranscriptMessage(role="assistant", content="[content truncated]"),
         HistoricalTranscriptMessage(role="assistant", content="long answer\n[content truncated]"),
     )
@@ -338,6 +341,11 @@ def test_history_entries_from_rpc_messages_pairs_tool_calls_and_results() -> Non
             truncated=True,
         ),
     )
+    assert represented_history_entry_ids(entries) == {
+        "user-1",
+        "assistant-1",
+        "tool-1",
+    }
     assert isinstance(entries[0], HistoricalTranscriptMessage)
     assert isinstance(entries[1], HistoricalTranscriptMessage)
     assert (entries[0].entry_id, entries[1].entry_id) == ("user-1", "assistant-1")

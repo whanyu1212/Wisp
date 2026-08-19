@@ -7959,6 +7959,197 @@ def test_textual_complete_history_hydration_is_covered_and_revealed_at_tail() ->
     assert scroll_y == max_scroll_y
 
 
+def test_textual_complete_history_refresh_wait_uses_running_transcript() -> None:
+    """A shell worker waits on the transcript node, not the taskless App node."""
+
+    async def scenario() -> tuple[list[str], Exception | None]:
+        app_instance, renderer = create_textual_tui()
+        hydrated = anyio.Event()
+        release_runner = anyio.Event()
+
+        async def runner() -> TuiExitReason:
+            try:
+                renderer.history_hydration_started()
+                await renderer.hydrate_history_entries(
+                    tuple(
+                        HistoricalTranscriptMessage(
+                            role="assistant",
+                            content=f"startup message {index}",
+                        )
+                        for index in range(40)
+                    ),
+                    session_label="Startup session",
+                )
+                renderer.history_hydration_finished()
+            finally:
+                hydrated.set()
+            await release_runner.wait()
+            return TuiExitReason.exited
+
+        app_instance._runner = runner
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            with anyio.fail_after(5):
+                await hydrated.wait()
+            await pilot.pause()
+            result = _transcript_texts(app_instance), app_instance._runner_error
+            release_runner.set()
+            return result
+
+    texts, runner_error = anyio.run(scenario)
+
+    assert runner_error is None
+    assert texts[0] == "resumed session: Startup session"
+    assert texts[1:] == [f"startup message {index}" for index in range(40)]
+
+
+def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() -> None:
+    """Complete hydration removes the process-row boundary that trapped wheel-up."""
+
+    async def scenario() -> tuple[list[float], int, int, int, int, bool]:
+        app_instance, renderer = create_textual_tui()
+        process_id = "583470d9b9b848299792314292a8ca8f"
+        prefix = tuple(
+            HistoricalTranscriptMessage(role="assistant", content=f"prefix {index}")
+            for index in range(30)
+        )
+        polls = tuple(
+            HistoricalToolCard(
+                card_id=f"history:poll-{index}",
+                name="bash",
+                arguments={"operation": "poll", "process_id": process_id},
+                output=(
+                    f"Process {process_id} completed with exit code 0\n"
+                    "stdout:\n3885 passed, 6 skipped in 399.00s (0:06:38)\n"
+                    if index == 88
+                    else (
+                        f"Process {process_id} is still running\n"
+                        f"stdout:\n{'.' * 70} [{index + 1:3d}%]\n"
+                    )
+                ),
+                is_error=False,
+                status="done" if index == 88 else None,
+                exit_code=0 if index == 88 else None,
+                tool_call_id=f"poll-{index}",
+                call_entry_id=f"poll-call-entry-{index}",
+                entry_id=f"poll-result-entry-{index}",
+            )
+            for index in range(89)
+        )
+        suffix = tuple(
+            HistoricalTranscriptMessage(role="assistant", content=f"suffix {index}")
+            for index in range(30)
+        )
+        history_requests = 0
+
+        async def request_history() -> None:
+            nonlocal history_requests
+            history_requests += 1
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.set_history_page_request_hook(request_history)
+            renderer.history_hydration_started()
+            await pilot.pause()
+            await renderer.hydrate_history_entries(
+                (*prefix, *polls, *suffix),
+                session_label="Complete process session",
+            )
+            renderer.history_hydration_finished()
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            positions = [transcript.scroll_y]
+            with anyio.fail_after(10):
+                while transcript.scroll_y > 0:
+                    delivered = await pilot._post_mouse_events(
+                        [events.MouseScrollUp],
+                        widget=transcript,
+                        times=1,
+                    )
+                    assert delivered
+                    await pilot.pause()
+                    positions.append(transcript.scroll_y)
+
+            card = app_instance.query_one(ProcessCard)
+            return (
+                positions,
+                history_requests,
+                card.lifecycle_presentation.poll_count,
+                len(card.lifecycle_presentation.history_entry_ids),
+                len(card.lifecycle_presentation.history_updates),
+                transcript.can_page_to_older_history,
+            )
+
+    (
+        positions,
+        history_requests,
+        poll_count,
+        represented_row_count,
+        update_count,
+        can_page_older,
+    ) = anyio.run(scenario)
+
+    assert positions[0] > 0
+    assert positions[-1] == 0
+    deltas = [previous - new for previous, new in zip(positions, positions[1:], strict=False)]
+    assert all(delta >= 0 for delta in deltas)
+    assert sum(delta == 0 for delta in deltas) <= 1
+    assert any(delta > 0 for delta in deltas)
+    assert history_requests == 0
+    assert poll_count == 89
+    assert represented_row_count == 178
+    assert update_count == 89
+    assert can_page_older is False
+
+
+def test_textual_resumed_process_timeline_loads_selected_persisted_output() -> None:
+    async def scenario() -> tuple[list[str], str]:
+        app_instance, renderer = create_textual_tui()
+        requested: list[str] = []
+
+        async def load_detail(entry_id: str) -> None:
+            requested.append(entry_id)
+
+        polls = tuple(
+            HistoricalToolCard(
+                card_id=f"history:poll-{index}",
+                name="bash",
+                arguments={"operation": "poll", "process_id": "proc-1"},
+                output=f"Process proc-1 is still running\nstdout:\npreview {index}\n",
+                is_error=False,
+                tool_call_id=f"poll-{index}",
+                call_entry_id=f"call-entry-{index}",
+                entry_id=f"result-entry-{index}",
+            )
+            for index in range(8)
+        )
+
+        async with app_instance.run_test(size=(70, 18)) as pilot:
+            renderer.set_history_detail_request_hook(load_detail)
+            renderer.render_history_entries(polls)
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            card = app_instance.query_one(ProcessCard)
+            card.action_toggle_expand()
+            card.action_previous_history_update()
+            card.action_load_history_output()
+            await pilot.pause()
+            assert requested == ["result-entry-6"]
+            renderer.history_detail_loaded(
+                "result-entry-6",
+                "line one\nline two\nexact persisted output\n",
+            )
+            await pilot.pause()
+            return requested, card.render().plain
+
+    requested, rendered = anyio.run(scenario)
+
+    assert requested == ["result-entry-6"]
+    assert "8 polls · 16/16 rows" in rendered
+    assert "updates 3–8 of 8" in rendered
+    assert "▸ #7 running: preview 6" in rendered
+    assert "exact persisted output" in rendered
+
+
 def test_textual_wheel_down_crosses_newer_edge_in_a_scrollable_viewport() -> None:
     """Forward paging works at a realistic terminal height.
 

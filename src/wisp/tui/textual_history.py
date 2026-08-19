@@ -31,6 +31,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.process_lifecycle import (
+    HistoricalProcessUpdate,
     ProcessLifecycle,
     ProcessLifecyclePresentation,
     historical_process_observation,
@@ -41,7 +42,22 @@ from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
-_COMPLETE_HISTORY_MOUNT_BATCH_SIZE = 16
+# A complete `/resume` already renders behind an operation overlay, so favor
+# amortizing Textual's per-batch mount and refresh cost while still yielding often
+# enough for the loading indicator to advance on long transcripts.
+_COMPLETE_HISTORY_MOUNT_BATCH_SIZE = 128
+_PROCESS_UPDATE_PREVIEW_CHARS = 160
+
+
+def _process_update_preview(output: str) -> str:
+    """Return one bounded line describing a represented persisted process update."""
+
+    normalized = output.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    preview = lines[-1] if lines else "(no persisted output)"
+    if len(preview) <= _PROCESS_UPDATE_PREVIEW_CHARS:
+        return preview
+    return f"{preview[: _PROCESS_UPDATE_PREVIEW_CHARS - 1]}…"
 
 
 class TextualHistorySurface(Protocol):
@@ -196,6 +212,8 @@ class TextualHistoryController:
         retained_capacity: int = TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
     ) -> None:
         self._surface = surface
+        self._retained_capacity = retained_capacity
+        self._complete_history_retained = False
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
         self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
         self._boundary_result_calls: dict[str, str] = {}
@@ -339,6 +357,7 @@ class TextualHistoryController:
         """Clear retained and live transcript state for a fresh session."""
 
         self._clear()
+        self._restore_bounded_window()
         self._surface.replace_transcript()
 
     def replace_entries(
@@ -350,6 +369,7 @@ class TextualHistoryController:
         """Replace all retained history for a newly selected session."""
 
         self._clear()
+        self._restore_bounded_window()
         self._surface.replace_transcript()
         self._append_entries(tuple(entries))
         self._surface.mount_history_marker(
@@ -368,6 +388,26 @@ class TextualHistoryController:
 
         self._clear()
         self._surface.replace_transcript()
+        try:
+            await self._hydrate_entries(entries, session_label=session_label, progress=progress)
+        except BaseException:
+            # The operation overlay hides every in-progress batch. If mounting
+            # fails, remove those hidden partial widgets before the shell closes
+            # the overlay and exposes the selected session again.
+            self._clear()
+            self._restore_bounded_window()
+            self._surface.replace_transcript()
+            raise
+
+    async def _hydrate_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str | None,
+        progress: Callable[[int, int], None],
+    ) -> None:
+        """Prepare and mount a complete transcript after atomic setup."""
+
         retained = self._retain(entries)
         capacity = max(1, len(retained))
         self._window = TranscriptWindow(
@@ -375,6 +415,7 @@ class TextualHistoryController:
             shift=capacity,
             retained_capacity=capacity,
         )
+        self._complete_history_retained = True
         self._window.replace(retained)
         visible = self._window.visible
         process_groups = self._historical_process_groups(visible)
@@ -672,6 +713,14 @@ class TextualHistoryController:
         else:
             self._transferred_history_entry_ids.clear()
         self._latest_reload_live_entries = None
+
+    def _restore_bounded_window(self) -> None:
+        """Restore ordinary paging bounds after complete-history ownership ends."""
+
+        if not self._complete_history_retained:
+            return
+        self._window = TranscriptWindow(retained_capacity=self._retained_capacity)
+        self._complete_history_retained = False
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._surface.begin_history_render()
@@ -1022,6 +1071,9 @@ class TextualHistoryController:
         lifecycles: dict[str, ProcessLifecycle] = {}
         first_ids: dict[str, int] = {}
         member_ids: dict[str, set[int]] = {}
+        history_entry_ids: dict[str, list[str]] = {}
+        history_updates: dict[str, list[HistoricalProcessUpdate]] = {}
+        retained_by_id = {item.id: item for item in retained}
         for item in retained:
             entry = item.entry
             if (
@@ -1049,6 +1101,13 @@ class TextualHistoryController:
             )
             first_ids.setdefault(identity.process_id, item.id)
             member_ids.setdefault(identity.process_id, set()).update(observation_member_ids)
+            represented_ids = history_entry_ids.setdefault(identity.process_id, [])
+            for member_id in sorted(observation_member_ids):
+                member = retained_by_id[member_id].entry
+                if isinstance(member, HistoricalToolCard):
+                    for persisted_id in (member.call_entry_id, member.entry_id):
+                        if persisted_id is not None and persisted_id not in represented_ids:
+                            represented_ids.append(persisted_id)
             lifecycle.begin(identity.operation)
             historical_status = historical_tool_status(observation)
             if historical_status == "denied":
@@ -1072,6 +1131,17 @@ class TextualHistoryController:
                     source_truncated=observation.truncated,
                     failed=historical_status == "error",
                 )
+            update_entry_id = observation.entry_id or entry.entry_id
+            if update_entry_id is not None:
+                history_updates.setdefault(identity.process_id, []).append(
+                    HistoricalProcessUpdate(
+                        entry_id=update_entry_id,
+                        operation=identity.operation,
+                        display_state=lifecycle.display_state,
+                        preview=_process_update_preview(observation.output),
+                        truncated=observation.truncated,
+                    )
+                )
 
         by_entry_id: dict[int, _HistoricalProcessGroup] = {}
         for process_id, lifecycle in lifecycles.items():
@@ -1079,7 +1149,11 @@ class TextualHistoryController:
             group = _HistoricalProcessGroup(
                 first_entry_id=first_ids[process_id],
                 member_entry_ids=group_members,
-                presentation=lifecycle.presentation(),
+                presentation=replace(
+                    lifecycle.presentation(),
+                    history_entry_ids=tuple(history_entry_ids.get(process_id, ())),
+                    history_updates=tuple(history_updates.get(process_id, ())),
+                ),
             )
             for member_id in group_members:
                 by_entry_id[member_id] = group
@@ -1092,8 +1166,7 @@ class TextualHistoryController:
         before: Widget | None,
     ) -> Widget | None:
         if isinstance(entry, HistoricalTranscriptMessage):
-            role = "user" if entry.role == "user" else "assistant"
-            return self._surface.mount_historical_line(role, entry.content, before=before)
+            return self._surface.mount_historical_line(entry.role, entry.content, before=before)
         if isinstance(entry, HistoricalSkillInvocation):
             return self._surface.mount_historical_line(
                 "user",

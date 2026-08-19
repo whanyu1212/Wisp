@@ -58,6 +58,17 @@ class HistoricalProcessObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalProcessUpdate:
+    """One persisted process observation retained behind a logical process card."""
+
+    entry_id: str
+    operation: ProcessOperation
+    display_state: ProcessDisplayState
+    preview: str
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessLifecyclePresentation:
     """Bounded immutable snapshot consumed by a process lifecycle card."""
 
@@ -70,6 +81,8 @@ class ProcessLifecyclePresentation:
     retained_output: str
     source_truncated: bool
     ui_dropped_bytes: int
+    history_entry_ids: tuple[str, ...] = ()
+    history_updates: tuple[HistoricalProcessUpdate, ...] = ()
 
     @property
     def terminal(self) -> bool:
@@ -358,6 +371,7 @@ __all__ = [
     "PROCESS_OUTPUT_MAX_BYTES",
     "PROCESS_OUTPUT_MAX_LINES",
     "HistoricalProcessObservation",
+    "HistoricalProcessUpdate",
     "ProcessCallIdentity",
     "ProcessDisplayState",
     "ProcessLifecycle",

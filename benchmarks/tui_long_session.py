@@ -1,4 +1,4 @@
-"""Measure bounded paging and history rendering for long Textual sessions."""
+"""Measure complete history hydration and rendering for long Textual sessions."""
 
 from __future__ import annotations
 
@@ -17,17 +17,20 @@ from pathlib import Path
 
 import anyio
 import textual
+from textual import events
 from textual.pilot import Pilot
 
 from wisp.agent.messages import Message
+from wisp.events import ToolCallSnapshot
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionMessagePage
 from wisp.tools.process_manager import ProcessSupervisor
-from wisp.tui.history import history_entries_from_rpc_messages
-from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.transcript_window import (
-    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
-    TUI_TRANSCRIPT_WINDOW_SIZE,
+from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalTranscriptEntry,
+    history_entries_from_rpc_messages,
+    represented_history_entry_ids,
 )
+from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import Transcript
 
 _WORKER_TIMEOUT_SECONDS = 60.0
@@ -37,7 +40,7 @@ DEFAULT_SCENARIO_MESSAGE_COUNTS = (2_000, 5_000)
 @dataclass(frozen=True)
 class ScenarioConfig:
     message_count: int = 2_000
-    page_size: int = TUI_TRANSCRIPT_WINDOW_SIZE
+    page_size: int = TUI_HISTORY_MESSAGE_LIMIT
     stream_chunks: int = 20
     stream_interval_seconds: float = 0.02
 
@@ -51,11 +54,17 @@ class ScenarioReport:
     newest_page_read_ms: float
     warm_newest_page_read_ms: float
     older_page_read_ms: tuple[float, ...]
-    initial_render_ms: float
-    prepend_render_ms: tuple[float, ...]
-    mounted_widget_counts: tuple[int, ...]
-    retained_entry_counts: tuple[int, ...]
-    idle_page_up_ms: float
+    complete_history_convert_ms: float
+    complete_history_mount_ms: float
+    persisted_message_count: int
+    represented_row_count: int
+    hydrated_entry_count: int
+    mounted_widget_count: int
+    retained_entry_count: int
+    persisted_rows_per_widget: float
+    first_wheel_up_ms: float
+    first_wheel_up_rows: float
+    first_wheel_up_attempts: int
     scroll_while_process_ms: float
     stream_following_tail_ms: float
     stream_page_up_ms: float
@@ -109,9 +118,28 @@ async def append_benchmark_messages(session: JsonlSession, count: int) -> None:
         elif position == 4:
             message = Message(
                 role="tool",
-                content=f"tool output {index}\nbenchmark detail {index}\nbenchmark detail {index}",
+                content=(
+                    "Process benchmark-process is still running\n"
+                    f"stdout:\nbenchmark poll output {index}\n"
+                ),
                 tool_call_id=f"benchmark-{index}",
                 tool_name="bash",
+            )
+        elif position == 3:
+            message = Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id=f"benchmark-{index + 1}",
+                        name="bash",
+                        arguments={
+                            "operation": "poll",
+                            "process_id": "benchmark-process",
+                        },
+                    ),
+                ),
+                finish_reason="tool_calls",
             )
         else:
             message = Message(
@@ -128,24 +156,25 @@ def _read_page(
     before_entry_id: str | None = None,
 ) -> tuple[SessionMessagePage, float]:
     started = time.perf_counter_ns()
-    page = session.read_message_page(limit=limit, before_entry_id=before_entry_id)
+    page = session.read_message_page(
+        limit=limit,
+        before_entry_id=before_entry_id,
+        complete_structure=True,
+    )
     return page, _milliseconds(started)
 
 
-async def _render_page(
+async def _hydrate_history(
     app: TextualTui,
     renderer: TextualTuiRenderer,
     pilot: Pilot[None],
-    page: SessionMessagePage,
-    *,
-    prepend: bool,
+    entries: tuple[HistoricalTranscriptEntry, ...],
 ) -> float:
-    entries = history_entries_from_rpc_messages(page.messages)
     started = time.perf_counter_ns()
-    if prepend:
-        renderer.prepend_history_entries(entries)
-    else:
-        renderer.replace_history_entries(entries, session_label="Long-session benchmark")
+    await renderer.hydrate_history_entries(
+        entries,
+        session_label="Long-session benchmark",
+    )
     await app.wait_for_history_render()
     await pilot.pause()
     return _milliseconds(started)
@@ -177,41 +206,51 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             older_pages.append((page, duration_ms))
             cursor = page.next_before_entry_id
 
+        pages = (newest_page, *(page for page, _duration_ms in older_pages))
+        messages = tuple(message for page in reversed(pages) for message in page.messages)
+        started = time.perf_counter_ns()
+        history_entries = history_entries_from_rpc_messages(messages)
+        represented_row_count = len(represented_history_entry_ids(history_entries))
+        if represented_row_count != len(messages):
+            raise RuntimeError("Complete history conversion did not represent every message row")
+        complete_history_convert_ms = _milliseconds(started)
+
         app, renderer = create_textual_tui()
         assert isinstance(renderer, TextualTuiRenderer)
         supervisor = ProcessSupervisor()
         process_id: str | None = None
         try:
             async with app.run_test(size=(100, 12)) as pilot:
-                initial_render_ms = await _render_page(
+                complete_history_mount_ms = await _hydrate_history(
                     app,
                     renderer,
                     pilot,
-                    newest_page,
-                    prepend=False,
+                    history_entries,
                 )
                 transcript = app.query_one("#transcript", Transcript)
-                mounted_counts = [len(transcript.children)]
-                retained_counts = [renderer.retained_history_entry_count]
-                prepend_render_ms: list[float] = []
-                for page, _duration_ms in older_pages:
-                    prepend_render_ms.append(
-                        await _render_page(app, renderer, pilot, page, prepend=True)
-                    )
-                    mounted_counts.append(len(transcript.children))
-                    retained_counts.append(renderer.retained_history_entry_count)
-                    if mounted_counts[-1] > TUI_TRANSCRIPT_WINDOW_SIZE + 1:
-                        raise RuntimeError("Transcript history window exceeded its widget capacity")
-                    if retained_counts[-1] > TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT:
-                        raise RuntimeError("Transcript history exceeded its retention capacity")
+                mounted_widget_count = len(transcript.children)
+                retained_entry_count = renderer.retained_history_entry_count
+                if retained_entry_count != len(history_entries):
+                    raise RuntimeError("Complete hydration did not retain every history entry")
 
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
                 transcript.return_to_latest()
                 await pilot.pause()
+                initial_scroll_y = transcript.scroll_y
                 started = time.perf_counter_ns()
-                transcript.page_up()
-                await pilot.pause()
-                idle_page_up_ms = _milliseconds(started)
+                first_wheel_up_attempts = 0
+                while transcript.scroll_y >= initial_scroll_y and first_wheel_up_attempts < 2:
+                    first_wheel_up_attempts += 1
+                    await pilot._post_mouse_events(
+                        [events.MouseScrollUp],
+                        widget=transcript,
+                        times=1,
+                    )
+                    await pilot.pause()
+                first_wheel_up_ms = _milliseconds(started)
+                first_wheel_up_rows = initial_scroll_y - transcript.scroll_y
+                if first_wheel_up_rows <= 0:
+                    raise RuntimeError("Complete history did not respond to upward wheel input")
                 transcript.return_to_latest()
                 await pilot.pause()
 
@@ -322,11 +361,19 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             newest_page_read_ms=newest_page_read_ms,
             warm_newest_page_read_ms=warm_newest_page_read_ms,
             older_page_read_ms=tuple(duration for _page, duration in older_pages),
-            initial_render_ms=initial_render_ms,
-            prepend_render_ms=tuple(prepend_render_ms),
-            mounted_widget_counts=tuple(mounted_counts),
-            retained_entry_counts=tuple(retained_counts),
-            idle_page_up_ms=idle_page_up_ms,
+            complete_history_convert_ms=complete_history_convert_ms,
+            complete_history_mount_ms=complete_history_mount_ms,
+            persisted_message_count=len(messages),
+            represented_row_count=represented_row_count,
+            hydrated_entry_count=len(history_entries),
+            mounted_widget_count=mounted_widget_count,
+            retained_entry_count=retained_entry_count,
+            persisted_rows_per_widget=(
+                represented_row_count / mounted_widget_count if mounted_widget_count else 0.0
+            ),
+            first_wheel_up_ms=first_wheel_up_ms,
+            first_wheel_up_rows=first_wheel_up_rows,
+            first_wheel_up_attempts=first_wheel_up_attempts,
             scroll_while_process_ms=scroll_while_process_ms,
             stream_following_tail_ms=stream_following_tail_ms,
             stream_page_up_ms=stream_page_up_ms,

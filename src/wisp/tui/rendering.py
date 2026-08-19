@@ -239,7 +239,7 @@ class LineTuiRenderer:
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
-            label = "you" if message.role == "user" else "assistant"
+            label = "you" if message.role == "user" else message.role
             self.console.print(f"{label}: {message.content}", markup=False, highlight=False)
 
     def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:

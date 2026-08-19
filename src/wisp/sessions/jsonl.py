@@ -818,6 +818,9 @@ class JsonlSession:
         limit: int = DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
         before_entry_id: str | None = None,
         after_entry_id: str | None = None,
+        entry_ids: tuple[str, ...] = (),
+        complete_structure: bool = False,
+        full_content: bool = False,
     ) -> SessionMessagePage:
         """Read a bounded active-path transcript page in chronological order."""
 
@@ -839,6 +842,9 @@ class JsonlSession:
                     limit=limit,
                     before_entry_id=before_entry_id,
                     after_entry_id=after_entry_id,
+                    entry_ids=entry_ids,
+                    complete_structure=complete_structure,
+                    full_content=full_content,
                 )
 
     def read_tree_page(
@@ -1817,12 +1823,32 @@ def _message_page_from_index(
     limit: int,
     before_entry_id: str | None,
     after_entry_id: str | None,
+    entry_ids: tuple[str, ...] = (),
+    complete_structure: bool = False,
+    full_content: bool = False,
 ) -> SessionMessagePage:
     _validate_message_page_limit(limit)
     if before_entry_id is not None and after_entry_id is not None:
         raise ValueError("message page cursors are mutually exclusive")
+    if entry_ids and (before_entry_id is not None or after_entry_id is not None):
+        raise ValueError("exact message entry IDs cannot be combined with page cursors")
+    if full_content and not entry_ids:
+        raise ValueError("full message content requires exact entry IDs")
     active_messages = index.messages
-    if after_entry_id is not None:
+    if entry_ids:
+        if len(entry_ids) > 16:
+            raise ValueError("exact message entry lookup cannot exceed 16 entries")
+        if len(set(entry_ids)) != len(entry_ids):
+            raise ValueError("exact message entry IDs must be unique")
+        if full_content and len(entry_ids) != 1:
+            raise ValueError("full message content requires exactly one entry ID")
+        missing = tuple(entry_id for entry_id in entry_ids if entry_id not in index.positions)
+        if missing:
+            raise SessionError(f"Session message entry not found on active path: {missing[0]}")
+        requested = frozenset(entry_ids)
+        selected = tuple(entry for entry in active_messages if entry.id in requested)
+        truncated = False
+    elif after_entry_id is not None:
         cursor_index = index.positions.get(after_entry_id)
         if cursor_index is None:
             raise SessionError(f"Session message cursor not found: {after_entry_id}")
@@ -1839,9 +1865,16 @@ def _message_page_from_index(
             candidates = active_messages[:cursor_index]
         truncated = len(candidates) > limit
         selected = candidates[-limit:]
-    text_budget = _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
+    text_budget = (
+        None if full_content else _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
+    )
     newest_first_messages = tuple(
-        _rpc_message_snapshot(entry, text_budget=text_budget) for entry in reversed(selected)
+        _rpc_message_snapshot(
+            entry,
+            text_budget=text_budget,
+            complete_structure=complete_structure or full_content,
+        )
+        for entry in reversed(selected)
     )
     return SessionMessagePage(
         session_id=session_id,
@@ -1850,10 +1883,14 @@ def _message_page_from_index(
         messages=tuple(reversed(newest_first_messages)),
         truncated=truncated,
         next_before_entry_id=(
-            selected[0].id if after_entry_id is None and truncated and selected else None
+            selected[0].id
+            if not entry_ids and after_entry_id is None and truncated and selected
+            else None
         ),
         next_after_entry_id=(
-            selected[-1].id if after_entry_id is not None and truncated and selected else None
+            selected[-1].id
+            if not entry_ids and after_entry_id is not None and truncated and selected
+            else None
         ),
     )
 
@@ -1861,20 +1898,26 @@ def _message_page_from_index(
 def _rpc_message_snapshot(
     entry: MessageSessionEntry,
     *,
-    text_budget: _MessagePageTextBudget,
+    text_budget: _MessagePageTextBudget | None,
+    complete_structure: bool = False,
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
         message.skill_invocation,
         text_budget=text_budget,
     )
-    content, content_original_bytes, content_truncated = _clip_text_with_budget(
-        message.content,
-        limit=MESSAGE_CONTENT_BYTE_LIMIT,
-        text_budget=text_budget,
-    )
+    if text_budget is None:
+        content = message.content
+        content_original_bytes = len(content.encode("utf-8"))
+        content_truncated = False
+    else:
+        content, content_original_bytes, content_truncated = _clip_text_with_budget(
+            message.content,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
     tool_calls = message.tool_calls or ()
-    selected_tool_calls = tool_calls[:MESSAGE_TOOL_CALL_LIMIT]
+    selected_tool_calls = tool_calls if complete_structure else tool_calls[:MESSAGE_TOOL_CALL_LIMIT]
     return RpcMessageSnapshot(
         entry_id=entry.id,
         parent_id=entry.parent_id,
@@ -1891,7 +1934,7 @@ def _rpc_message_snapshot(
             for tool_call in selected_tool_calls
         ),
         tool_calls_original_count=len(tool_calls),
-        tool_calls_truncated=len(tool_calls) > MESSAGE_TOOL_CALL_LIMIT,
+        tool_calls_truncated=not complete_structure and len(tool_calls) > MESSAGE_TOOL_CALL_LIMIT,
         response_id=message.response_id,
         finish_reason=message.finish_reason,
         is_error=message.is_error,
@@ -1905,20 +1948,28 @@ def _rpc_message_snapshot(
 def _rpc_skill_invocation_snapshot(
     invocation: SkillInvocationEvidence | None,
     *,
-    text_budget: _MessagePageTextBudget,
+    text_budget: _MessagePageTextBudget | None,
 ) -> RpcSkillInvocationSnapshot | None:
     if invocation is None:
         return None
-    request, request_bytes, request_truncated = _clip_text_with_budget(
-        invocation.request,
-        limit=MESSAGE_CONTENT_BYTE_LIMIT,
-        text_budget=text_budget,
-    )
-    original, original_bytes, original_truncated = _clip_text_with_budget(
-        invocation.original_content,
-        limit=MESSAGE_CONTENT_BYTE_LIMIT,
-        text_budget=text_budget,
-    )
+    if text_budget is None:
+        request = invocation.request
+        request_bytes = len(request.encode("utf-8"))
+        request_truncated = False
+        original = invocation.original_content
+        original_bytes = len(original.encode("utf-8"))
+        original_truncated = False
+    else:
+        request, request_bytes, request_truncated = _clip_text_with_budget(
+            invocation.request,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
+        original, original_bytes, original_truncated = _clip_text_with_budget(
+            invocation.original_content,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
     return RpcSkillInvocationSnapshot(
         name=invocation.name,
         original_content=original,
@@ -1935,13 +1986,13 @@ def _rpc_skill_invocation_snapshot(
 def _rpc_tool_result_snapshot(
     tool_result: ToolResultPresentationSnapshot | None,
     *,
-    text_budget: _MessagePageTextBudget,
+    text_budget: _MessagePageTextBudget | None,
 ) -> RpcMessageToolResultSnapshot | None:
     if tool_result is None:
         return None
     before_text = tool_result.before_text
     truncated = tool_result.truncated
-    if before_text is not None:
+    if before_text is not None and text_budget is not None:
         clipped_before_text, _, before_text_truncated = _clip_text_with_budget(
             before_text,
             limit=MESSAGE_CONTENT_BYTE_LIMIT,
@@ -1950,7 +2001,7 @@ def _rpc_tool_result_snapshot(
         before_text = None if before_text_truncated else clipped_before_text
         truncated = truncated or before_text_truncated
     summary = tool_result.summary
-    if summary is not None:
+    if summary is not None and text_budget is not None:
         summary, _, summary_truncated = _clip_text_with_budget(
             summary,
             limit=MESSAGE_CONTENT_BYTE_LIMIT,
@@ -1971,13 +2022,22 @@ def _rpc_tool_result_snapshot(
 def _rpc_tool_call_snapshot(
     tool_call: ToolCallSnapshot,
     *,
-    text_budget: _MessagePageTextBudget,
+    text_budget: _MessagePageTextBudget | None,
 ) -> RpcMessageToolCallSnapshot:
-    clipped_arguments, original_bytes, truncated = _clip_json_object(
-        tool_call.arguments,
-        limit=TOOL_ARGUMENTS_BYTE_LIMIT,
-        text_budget=text_budget,
-    )
+    if text_budget is None:
+        clipped_arguments = tool_call.arguments
+        original_bytes = len(
+            json.dumps(tool_call.arguments, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        truncated = False
+    else:
+        clipped_arguments, original_bytes, truncated = _clip_json_object(
+            tool_call.arguments,
+            limit=TOOL_ARGUMENTS_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
     return RpcMessageToolCallSnapshot(
         call_id=tool_call.call_id,
         name=tool_call.name,

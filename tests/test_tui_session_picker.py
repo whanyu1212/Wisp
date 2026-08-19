@@ -328,20 +328,24 @@ def test_session_operation_indicator_ignores_stale_completion() -> None:
 
 
 def test_session_operation_indicator_fits_a_narrow_terminal() -> None:
-    async def scenario() -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+    async def scenario() -> tuple[tuple[int, int, int, int], tuple[int, int], int]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(40, 12)) as pilot:
             renderer.session_switch_started("target")
             await pilot.pause()
             panel = app.query_one("#operation-indicator-panel", Widget)
+            spinner = app.query_one("#operation-indicator-spinner", Widget)
+            label = app.query_one("#operation-indicator-label", Widget)
             return (
                 (panel.region.x, panel.region.y, panel.region.right, panel.region.bottom),
                 (app.size.width, app.size.height),
+                label.region.x - spinner.region.right,
             )
 
-    (left, top, right, bottom), (width, height) = anyio.run(scenario)
+    (left, top, right, bottom), (width, height), spinner_label_gap = anyio.run(scenario)
     assert 0 <= left < right <= width
     assert 0 <= top < bottom <= height
+    assert spinner_label_gap == 2
 
 
 def test_session_operation_indicator_preserves_transcript_scroll_intent() -> None:

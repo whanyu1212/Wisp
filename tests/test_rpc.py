@@ -304,6 +304,30 @@ def test_get_messages_command_serializes_active_prompt_read_opt_in() -> None:
     assert rpc_command_from_json(command.to_json_line()) == command
 
 
+def test_get_messages_command_serializes_exact_full_content_lookup() -> None:
+    command = GetMessagesCommand(
+        id="messages-detail",
+        session_id="session-1",
+        limit=1,
+        entry_ids=("tool-result-1",),
+        complete_structure=True,
+        full_content=True,
+        allow_during_prompt=True,
+    )
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-detail",
+        "type": "get_messages",
+        "session_id": "session-1",
+        "limit": 1,
+        "entry_ids": ["tool-result-1"],
+        "complete_structure": True,
+        "full_content": True,
+        "allow_during_prompt": True,
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
 def test_get_messages_command_rejects_invalid_bounds() -> None:
     with pytest.raises(ValidationError):
         GetMessagesCommand(limit=True)
@@ -321,6 +345,14 @@ def test_get_messages_command_rejects_invalid_bounds() -> None:
         GetMessagesCommand(after_entry_id="")
     with pytest.raises(ValidationError, match="mutually exclusive"):
         GetMessagesCommand(before_entry_id="before", after_entry_id="after")
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        GetMessagesCommand(entry_ids=("entry",), before_entry_id="before")
+    with pytest.raises(ValidationError, match="requires exact entry IDs"):
+        GetMessagesCommand(full_content=True)
+    with pytest.raises(ValidationError, match="exactly one entry ID"):
+        GetMessagesCommand(entry_ids=("one", "two"), full_content=True)
+    with pytest.raises(ValidationError, match="must be unique"):
+        GetMessagesCommand(entry_ids=("entry", "entry"))
 
 
 def test_get_sessions_command_serializes_as_jsonl_and_parses() -> None:
