@@ -12,7 +12,9 @@ from decimal import Decimal
 import pytest
 from pytest import MonkeyPatch
 from rich.cells import cell_len
+from rich.console import RenderableType
 from textual import events
+from textual.app import App
 from textual.content import Content
 from textual.screen import Screen
 from textual.widget import Widget
@@ -6969,6 +6971,71 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
     )
     assert abs(anchor_y_after - anchor_y_before) <= 1
     assert following is False
+
+
+def test_textual_history_prepend_never_displays_unanchored_intermediate_frame(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[float, list[float]]:
+        app_instance, renderer = create_textual_tui()
+        transcript: Transcript | None = None
+        anchor: Widget | None = None
+        recording = False
+        displayed_anchor_positions: list[float] = []
+
+        def record_display(
+            _app: App[object],
+            _screen: Screen,
+            _renderable: RenderableType | None,
+        ) -> None:
+            if (
+                recording
+                and transcript is not None
+                and anchor is not None
+                and anchor.parent is transcript
+            ):
+                displayed_anchor_positions.append(float(anchor.region.y))
+
+        monkeypatch.setattr(App, "_display", record_display)
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(30)
+                ),
+                session_label="Paged session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=8, animate=False)
+            await pilot.pause()
+            anchor = next(
+                child
+                for child in transcript.children
+                if (isinstance(child, LineMessage) and "current 8" in child.render().plain)
+                or (isinstance(child, StreamMessage) and "current 8" in child.source)
+            )
+            anchor_y_before = float(anchor.region.y)
+
+            recording = True
+            renderer.prepend_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                    for index in range(12)
+                )
+            )
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            return anchor_y_before, displayed_anchor_positions
+
+    anchor_y_before, displayed_anchor_positions = anyio.run(scenario)
+
+    assert displayed_anchor_positions
+    assert all(abs(anchor_y - anchor_y_before) <= 1 for anchor_y in displayed_anchor_positions), (
+        displayed_anchor_positions
+    )
 
 
 def test_textual_history_prepend_does_not_override_return_to_latest() -> None:

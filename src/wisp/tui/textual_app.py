@@ -18,11 +18,13 @@ from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.console import RenderableType
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
+from textual.screen import Screen
 from textual.widget import AwaitMount, Widget
 from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 
@@ -200,6 +202,13 @@ class TextualTui(App[None]):
     # Wisp owns a typed, RPC-backed palette. Keep Textual's framework ctrl+p
     # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
+
+    def _display(self, screen: Screen[object], renderable: RenderableType | None) -> None:
+        """Hide the transient history-window frame before its anchor is restored."""
+
+        if getattr(self, "_history_prepend_paint_suppressed", False):
+            return
+        super()._display(screen, renderable)
 
     CSS = """
     Screen {
@@ -555,6 +564,7 @@ class TextualTui(App[None]):
         self._live_history_recovery_blocked = False
         self._history_marker: Widget | None = None
         self._prepending_history = False
+        self._history_prepend_paint_suppressed = False
         self._history_prepend_mounts: list[AwaitMount] = []
         self._history_prepend_anchor: _HistoryPrependAnchor | None = None
         self._transcript_navigation_generation = 0
@@ -2225,6 +2235,7 @@ class TextualTui(App[None]):
         self._transcript_epoch += 1
         self._history_marker = None
         self._prepending_history = False
+        self._history_prepend_paint_suppressed = False
         self._live_history_reload_pending = False
         self._history_newer_request_pending = False
         self._live_history_reload_needed = False
@@ -3273,6 +3284,7 @@ class TextualTui(App[None]):
             None,
         )
         self._prepending_history = True
+        self._history_prepend_paint_suppressed = True
         self._history_prepend_mounts.clear()
         navigation = self._pending_history_navigation
         self._pending_history_navigation = HistoryNavigation()
@@ -3306,32 +3318,51 @@ class TextualTui(App[None]):
         anchor: _HistoryPrependAnchor,
         mounts: tuple[AwaitMount, ...],
     ) -> None:
-        for mounted in mounts:
-            await mounted
-        self.call_after_refresh(self._restore_prepend_viewport, anchor)
+        try:
+            for mounted in mounts:
+                await mounted
+        finally:
+            self.call_after_refresh(self._restore_prepend_viewport, anchor)
 
     def _restore_prepend_viewport(
         self,
         anchor: _HistoryPrependAnchor,
     ) -> None:
-        if self._history_prepend_anchor is anchor:
+        owns_paint_suppression = self._history_prepend_anchor is anchor
+        if owns_paint_suppression:
             self._history_prepend_anchor = None
         transcript = anchor.transcript
-        if (
+        if not (
             anchor.epoch != self._transcript_epoch
             or anchor.navigation_generation != self._transcript_navigation_generation
             or transcript is not self._transcript
             or transcript.is_following != anchor.following
             or (not anchor.following and transcript.scroll_y != anchor.scroll_y)
         ):
+            transcript.restore_prepend_viewport(
+                scroll_y=anchor.scroll_y,
+                anchor=anchor.widget,
+                anchor_y_before=anchor.widget_y,
+                following=anchor.following,
+                navigation=anchor.navigation,
+            )
+        if owns_paint_suppression:
+            # ``restore_prepend_viewport`` schedules a second layout at the corrected
+            # scroll offset. Keep suppressing paints through that pass too; otherwise
+            # the compositor can still emit the newly mounted anchor at its old offset.
+            self.call_after_refresh(self._finish_history_prepend_paint, anchor)
+
+    def _finish_history_prepend_paint(self, anchor: _HistoryPrependAnchor) -> None:
+        """Emit the settled history replacement after its corrected layout pass."""
+
+        if self._history_prepend_anchor is not None:
             return
-        transcript.restore_prepend_viewport(
-            scroll_y=anchor.scroll_y,
-            anchor=anchor.widget,
-            anchor_y_before=anchor.widget_y,
-            following=anchor.following,
-            navigation=anchor.navigation,
-        )
+        if anchor.epoch != self._transcript_epoch:
+            return
+        self._history_prepend_paint_suppressed = False
+        # Both suppressed compositor passes consumed their dirty regions, so request
+        # one complete repaint now that the viewport anchor is stable.
+        self.refresh(repaint=True)
 
     def append_stream(self, delta: str) -> None:
         self._stream.append(delta)
