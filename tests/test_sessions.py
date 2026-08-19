@@ -963,6 +963,150 @@ def test_session_message_page_clips_large_content_and_tool_arguments(
     assert len(str(tool_call.arguments["truncated_json_preview"]).encode("utf-8")) <= 64 * 1024
 
 
+def test_session_message_page_complete_structure_preserves_every_tool_call(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    tool_argument = "x" * 70_000
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=tuple(
+                    ToolCallSnapshot(
+                        call_id=f"call-{index}",
+                        name="bash",
+                        arguments={"command": tool_argument},
+                    )
+                    for index in range(20)
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    message = session.read_message_page(complete_structure=True).messages[0]
+
+    assert len(message.tool_calls) == message.tool_calls_original_count == 20
+    assert message.tool_calls_truncated is False
+    assert all(tool_call.arguments_truncated for tool_call in message.tool_calls)
+    assert (
+        _message_page_text_bytes(
+            SessionMessagePage(
+                session_id=session.session_id,
+                path=session.path,
+                active_leaf_id=message.entry_id,
+                messages=(message,),
+                truncated=False,
+                next_before_entry_id=None,
+            )
+        )
+        <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    )
+
+
+def test_session_message_page_complete_structure_reserves_process_identity(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    process_id = "a" * 32
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="poll-call",
+                        name="bash",
+                        arguments={
+                            "operation": "poll",
+                            "process_id": process_id,
+                            "wait_seconds": 30,
+                        },
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        for _ in range(8):
+            await session.append_message(
+                Message(
+                    role="assistant",
+                    content="x" * jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT,
+                )
+            )
+
+    anyio.run(write)
+
+    page = session.read_message_page(limit=9, complete_structure=True)
+    process_call = page.messages[0].tool_calls[0]
+
+    assert process_call.arguments == {
+        "operation": "poll",
+        "process_id": process_id,
+    }
+    assert process_call.arguments_truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_exact_full_content_bypasses_preview_limits(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    content = "🙂" * 20_000
+    tool_argument = "x" * 70_000
+
+    async def write() -> str:
+        entry = await session.append_message(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=tuple(
+                    ToolCallSnapshot(
+                        call_id=f"call-{index}",
+                        name="bash",
+                        arguments={"command": tool_argument},
+                    )
+                    for index in range(20)
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        return entry.id
+
+    entry_id = anyio.run(write)
+    page = session.read_message_page(
+        limit=1,
+        entry_ids=(entry_id,),
+        complete_structure=True,
+        full_content=True,
+    )
+    message = page.messages[0]
+
+    assert page.truncated is False
+    assert page.next_before_entry_id is None
+    assert message.content == content
+    assert message.content_truncated is False
+    assert len(message.tool_calls) == 20
+    assert message.tool_calls_truncated is False
+    assert all(
+        tool_call.arguments == {"command": tool_argument} for tool_call in message.tool_calls
+    )
+    assert all(not tool_call.arguments_truncated for tool_call in message.tool_calls)
+
+    with pytest.raises(SessionError, match="not found on active path"):
+        session.read_message_page(entry_ids=("missing",), full_content=True)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        session.read_message_page(entry_ids=(entry_id,), before_entry_id=entry_id)
+    with pytest.raises(ValueError, match="must be unique"):
+        session.read_message_page(entry_ids=(entry_id, entry_id), full_content=True)
+
+
 def test_session_message_page_applies_aggregate_budget_newest_first(
     tmp_path: Path,
 ) -> None:
@@ -2486,8 +2630,47 @@ def test_repeated_append_does_not_rescan_full_session_tree(
     anyio.run(write)
 
     assert resolver_calls == 0
+    # Appends keep the entry index current, so reading back never re-resolves the
+    # tree. Reads are served from that index rather than re-parsing the file.
     assert len(session.read_entries()) == 50
-    assert resolver_calls == 1
+    assert resolver_calls == 0
+
+
+def test_repeated_reads_parse_a_resumed_session_file_once(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Resuming must not re-parse the transcript for every derived read.
+
+    ``rpc_session_state`` asks a freshly loaded session for its context, its
+    entry count and its name. Parsing the file once per call dominated startup
+    on long sessions, so all three must share one pass over the entry index.
+    """
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        for index in range(20):
+            await session.append_message(Message(role="user", content=str(index)))
+
+    anyio.run(write)
+
+    reopened = JsonlSessionStore(tmp_path).load(session.path)
+    parses = 0
+    read_entries_unlocked = jsonl_module._read_entries_unlocked
+
+    def counted_parse(path: Path, **kwargs: object) -> list[SessionEntry]:
+        nonlocal parses
+        parses += 1
+        return read_entries_unlocked(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jsonl_module, "_read_entries_unlocked", counted_parse)
+
+    assert len(reopened.read_entries()) == 20
+    assert len(reopened.read_context_messages()) == 20
+    assert reopened.read_name() is None
+
+    assert parses == 1
 
 
 def test_append_entry_reloads_identity_after_uncertain_write_failure(

@@ -44,7 +44,11 @@ from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.connections import ConnectionProviderStatus
-from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
+    HistoryHydrationPolicy,
+)
 from wisp.tui.process_lifecycle import (
     ProcessCallIdentity,
     ProcessLifecycle,
@@ -90,6 +94,8 @@ def _retry_progress_label(event: ProviderRetrying) -> str:
 
 class TextualTuiRenderer:
     """Renderer adapter consumed by `TuiShell` and backed by `TextualTui`."""
+
+    history_hydration_policy = HistoryHydrationPolicy.COMPLETE
 
     def __init__(self, app: TextualTui) -> None:
         self.app = app
@@ -354,6 +360,15 @@ class TextualTuiRenderer:
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
 
+    def history_hydration_started(self) -> None:
+        self.app.history_hydration_started()
+
+    def history_hydration_progress(self, label: str) -> None:
+        self.app.history_hydration_progress(label)
+
+    def history_hydration_finished(self) -> None:
+        self.app.history_hydration_finished()
+
     def set_history_page_request_hook(
         self,
         hook: Callable[[], Awaitable[None]],
@@ -371,6 +386,18 @@ class TextualTuiRenderer:
         hook: Callable[[str], Awaitable[None]],
     ) -> None:
         self.app.set_history_newer_page_request_hook(hook)
+
+    def set_history_detail_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_detail_request_hook(hook)
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        self.app.history_detail_loaded(entry_id, output)
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        self.app.history_detail_failed(entry_id, error)
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         self.app.history_page_loaded(has_more=has_more)
@@ -402,6 +429,27 @@ class TextualTuiRenderer:
     ) -> None:
         self._clear_tool_presentation_state()
         self._history.replace_entries(entries, session_label=session_label)
+
+    async def hydrate_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str | None,
+    ) -> None:
+        """Mount complete history in responsive batches behind the operation overlay."""
+
+        self._clear_tool_presentation_state()
+
+        def report_progress(completed: int, total: int) -> None:
+            self.history_hydration_progress(
+                f"Preparing transcript… {completed:,} / {total:,} cards"
+            )
+
+        await self._history.hydrate_entries(
+            entries,
+            session_label=session_label,
+            progress=report_progress,
+        )
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.prepend_entries(entries)
@@ -620,6 +668,9 @@ class TextualTuiRenderer:
     def session_switch_finished(self) -> None:
         self.app.session_switch_finished()
 
+    async def wait_for_session_operation_paint(self) -> None:
+        await self.app.wait_for_session_operation_paint()
+
     def context_status(self, stats: SessionStats) -> None:
         self.app.show_context_status(stats)
 
@@ -762,29 +813,31 @@ class TextualTuiRenderer:
                 ):
                     presentation = lifecycle.interrupt(identity.operation)
                 else:
-                    parsed_state, fallback_output = historical_process_observation(
+                    historical_observation = historical_process_observation(
                         identity.process_id,
                         event.output,
                     )
                     if event.process_id == identity.process_id:
                         matching_state = event.process_state
                     elif event.process_id is None:
-                        matching_state = parsed_state
+                        matching_state = historical_observation.state
                     else:
                         matching_state = None
                     presentation = lifecycle.observe(
                         operation=identity.operation,
                         state=matching_state,
-                        stdout=event.stdout or "",
-                        stderr=event.stderr or "",
+                        stdout=event.stdout or historical_observation.stdout,
+                        stderr=event.stderr or historical_observation.stderr,
                         source_truncated=(
                             event.truncated or event.stdout_truncated or event.stderr_truncated
                         ),
                         source_dropped_bytes=(
                             event.stdout_dropped_bytes + event.stderr_dropped_bytes
                         ),
-                        fallback_output=fallback_output,
-                        failure_reason=event.process_error or "",
+                        fallback_output=historical_observation.fallback_output,
+                        failure_reason=(
+                            event.process_error or historical_observation.failure_reason
+                        ),
                         failed=status == "error",
                     )
                 started = self._process_started.get(identity.process_id)

@@ -103,6 +103,28 @@ remains reachable through the controls above. Older and newer pages load transpa
 mounted window edges. When new output arrives while you are reading earlier content, your viewport
 stays anchored; select the `↓ new` indicator or press `End` to return to the live tail.
 
+### Resuming long sessions
+
+Selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the complete
+active-path transcript before revealing the replacement. A `Loading session history…` overlay keeps
+the old transcript from being mistaken for the selected session and reports progress for longer
+loads. The switch is atomic: a failed page or mount leaves an explicit error instead of exposing a
+partially loaded history.
+
+Every persisted message row is represented, but representation is logical rather than one widget per
+JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel, and
+completion rows for the same process share one process card; its header reports both the poll count
+and represented row count. Focus and expand that card with `Enter` or `Space`, then use `p`/`n` to
+move through its bounded update timeline and `l` to load the selected row's exact persisted output.
+The timeline keeps transcript layout stable, while exact output is fetched only when requested.
+
+This deliberately trades `/resume` cold-start time and metadata memory for reliable upward scrolling:
+the TUI no longer has to mount older page boundaries while a reader is traversing a long resumed
+session. Output bodies and tool arguments still use bounded previews during the initial load, so the
+same transcript is not held twice in memory. An on-demand detail load returns the exact text stored in
+JSONL; it cannot recover bytes that the tool itself truncated before persistence, and those cards stay
+marked as truncated.
+
 Run `/theme` to preview Vapor, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one of
 those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
 from Dawn it returns to that dark palette too. The choice is written to `~/.wisp/tui.json` and
@@ -141,8 +163,11 @@ wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
 ```
 
-On `--continue` or `--resume`, the TUI hydrates up to 500 active-path persisted messages through the
-same RPC `get_messages` command available to other frontends before accepting input.
+At process startup, `--continue` or `--resume` hydrates at most 500 active-path persisted messages
+through the same RPC `get_messages` command available to other frontends before accepting input. This
+bounded, silent startup path avoids delaying the first frame. Complete hydration begins only after an
+explicit interactive `/resume` selection in the Textual TUI; line and fallback renderers retain
+bounded paging behavior.
 
 The Textual TUI targets truecolor terminals and degrades gracefully — 256-color and 16-color
 terminals are handled by Textual's own detection. Setting `NO_COLOR` switches to deterministic

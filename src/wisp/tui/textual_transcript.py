@@ -348,6 +348,8 @@ class TextualTranscriptController:
 
         if not isinstance(card, ProcessCard):
             return None
+        if card.lifecycle_presentation == presentation:
+            return card
         card.set_lifecycle(presentation)
         self._surface.record_live_transcript_update(card)
         self._surface.follow_transcript_tail_after_refresh()

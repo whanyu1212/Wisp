@@ -8,20 +8,29 @@ These scenarios answer two separate questions:
 Generate profile artifacts under the ignored `profiles/` directory. Compare absolute timings only
 on the same machine, with the same Python build and benchmark arguments.
 
-Run the transcript-windowing scenario:
+Run the complete-history hydration scenario:
 
 ```bash
 uv run python -m benchmarks.tui_long_session
 uv run python -m benchmarks.tui_long_session --messages 5000 --page-size 100 --output before.json
 ```
 
-The scenario creates a temporary JSONL session, reads its production pages, renders
-them in the headless Textual TUI, streams an assistant response, and scrolls while a
-managed CPU-active shell process runs. It reports JSON with page-read and rendering
-durations, mounted-widget growth, retained-history growth, stream durations, final
-scroll state, and process cleanup state. With no `--messages` argument it runs both
-the 2,000- and 5,000-message scenarios; repeat `--messages` to choose a different
-suite.
+The scenario creates a temporary JSONL session, reads every production history page,
+converts and mounts the complete transcript through the Textual hydration path, streams
+an assistant response, and scrolls while a managed CPU-active shell process runs. It
+reports JSON with page-read, conversion, complete-mount, first-wheel response, stream,
+final scroll-state, and process-cleanup measurements. Row-coverage fields compare persisted messages
+with represented row IDs, while `hydrated_entry_count`, `mounted_widget_count`, and
+`persisted_rows_per_widget` expose the reduction from logical process grouping. The fixture includes
+repeated process polls so a regression to one widget per persisted row is visible. With no `--messages` argument it
+runs both the 2,000- and 5,000-message scenarios; repeat `--messages` to choose a
+different suite.
+
+This benchmark measures the chosen `/resume` tradeoff: all structural rows are read and retained up
+front, so conversion and mount time scale with session length, while scrolling should respond without
+requesting or mounting another durable page. Text and arguments remain preview-bounded during that
+initial phase; exact persisted output is an interactive, on-demand path and is intentionally outside
+the cold-mount timing.
 
 The CPU worker runs until it is cancelled immediately after the scroll measurement,
 with a 60-second safety timeout. Streaming metrics therefore run without its load.

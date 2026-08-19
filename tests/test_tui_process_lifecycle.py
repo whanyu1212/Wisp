@@ -4,6 +4,7 @@ import pytest
 
 from wisp.tui.process_lifecycle import (
     PROCESS_OUTPUT_MAX_BYTES,
+    PROCESS_OUTPUT_MAX_LINES,
     ProcessLifecycle,
     historical_process_observation,
     process_call_identity,
@@ -42,7 +43,9 @@ def test_process_lifecycle_accumulates_incremental_output_and_poll_count() -> No
 
     assert presentation.poll_count == 2
     assert presentation.display_state == "completed"
-    assert presentation.full_output == "stdout:\nfirst chunk\nstdout:\nsecond chunk"
+    # Consecutive chunks from the same stream carry one label. A long poll appends
+    # to stdout dozens of times, and repeating the header buries the output.
+    assert presentation.full_output == "stdout:\nfirst chunk\nsecond chunk"
     assert "first chunk" in presentation.detail
     assert "second chunk" in presentation.detail
     assert presentation.terminal is True
@@ -133,26 +136,41 @@ def test_process_lifecycle_counts_short_line_drops_without_helper_marker() -> No
     assert "2 earlier process-output bytes omitted by TUI" in presentation.full_output
 
 
+def test_process_lifecycle_relabels_stream_after_its_header_is_truncated() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    source = "\n".join(f"line {index}" for index in range(PROCESS_OUTPUT_MAX_LINES))
+
+    first = lifecycle.observe(operation="poll", state="running", stdout=source)
+    second = lifecycle.observe(operation="poll", state="running", stdout="next")
+    third = lifecycle.observe(operation="poll", state="running", stdout="again")
+
+    assert "stdout:" not in first.retained_output.splitlines()
+    assert second.retained_output.endswith("stdout:\nnext")
+    assert third.retained_output.endswith("stdout:\nnext\nagain")
+    assert third.retained_output.splitlines().count("stdout:") == 1
+
+
 def test_historical_process_envelope_requires_the_expected_process_id() -> None:
-    state, output = historical_process_observation(
+    observation = historical_process_observation(
         "proc-1",
         "Process proc-1 is still running\nstdout:\nprogress\n",
     )
-    mismatched_state, mismatched_output = historical_process_observation(
+    mismatched = historical_process_observation(
         "proc-1",
         "Process proc-other completed with exit code 0\nstdout:\ndone\n",
     )
-    malformed_state, malformed_output = historical_process_observation(
+    malformed = historical_process_observation(
         "proc-1",
         "Process proc-1 completed with exit code unknown",
     )
 
-    assert state == "running"
-    assert output == "stdout:\nprogress\n"
-    assert mismatched_state is None
-    assert mismatched_output.startswith("Process proc-other completed")
-    assert malformed_state is None
-    assert malformed_output == "Process proc-1 completed with exit code unknown"
+    assert observation.state == "running"
+    assert observation.stdout == "progress\n"
+    assert observation.fallback_output == ""
+    assert mismatched.state is None
+    assert mismatched.fallback_output.startswith("Process proc-other completed")
+    assert malformed.state is None
+    assert malformed.fallback_output == "Process proc-1 completed with exit code unknown"
 
 
 @pytest.mark.parametrize(
@@ -169,13 +187,49 @@ def test_historical_failed_process_preserves_header_reason(
     body: str,
     expected_output: str,
 ) -> None:
-    state, output = historical_process_observation(
+    observation = historical_process_observation(
         "proc-1",
         f"Process proc-1 failed: cleanup failed{body}",
     )
 
-    assert state == "failed"
-    assert output == expected_output
+    assert observation.state == "failed"
+    assert observation.failure_reason == "cleanup failed"
+    output = observation.stdout or observation.stderr or observation.fallback_output
+    expected_body = expected_output.removeprefix("cleanup failed").lstrip("\n")
+    assert output == expected_body.removeprefix("stdout:\n")
+
+
+def test_historical_process_streams_use_live_label_deduplication() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    observations = (
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 is still running\nstdout:\nfirst chunk\n",
+        ),
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 is still running\nstdout:\nsecond chunk\nstderr:\nwarning\n",
+        ),
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 completed with exit code 0\nstderr:\nfinal warning\n",
+        ),
+    )
+
+    for observation in observations:
+        lifecycle.begin("poll")
+        presentation = lifecycle.observe(
+            operation="poll",
+            state=observation.state,
+            stdout=observation.stdout,
+            stderr=observation.stderr,
+            fallback_output=observation.fallback_output,
+            failure_reason=observation.failure_reason,
+        )
+
+    assert presentation.full_output == (
+        "stdout:\nfirst chunk\nsecond chunk\nstderr:\nwarning\nfinal warning"
+    )
 
 
 def test_denied_poll_does_not_claim_that_the_process_was_cancelled() -> None:
@@ -197,3 +251,31 @@ def test_denied_poll_preserves_reason() -> None:
     assert presentation.display_state == "poll_denied"
     assert presentation.detail == "not now"
     assert presentation.full_output == "not now"
+
+
+def test_process_lifecycle_labels_only_where_the_stream_changes() -> None:
+    """Stream labels disambiguate; they must appear on change and not per chunk."""
+
+    lifecycle = ProcessLifecycle("proc-1")
+
+    lifecycle.observe(operation="poll", state="running", stdout="out one")
+    lifecycle.observe(operation="poll", state="running", stdout="out two")
+    lifecycle.observe(operation="poll", state="running", stderr="err one")
+    lifecycle.observe(operation="poll", state="running", stderr="err two")
+    presentation = lifecycle.observe(operation="poll", state="running", stdout="out three")
+
+    assert presentation.full_output == (
+        "stdout:\nout one\nout two\nstderr:\nerr one\nerr two\nstdout:\nout three"
+    )
+
+
+def test_process_lifecycle_relabels_after_unlabelled_output() -> None:
+    """A denial or failure reason interrupts the run, so the next chunk relabels."""
+
+    lifecycle = ProcessLifecycle("proc-1")
+
+    lifecycle.observe(operation="poll", state="running", stdout="before")
+    lifecycle.deny("poll", reason="poll denied")
+    presentation = lifecycle.observe(operation="poll", state="running", stdout="after")
+
+    assert presentation.full_output == "stdout:\nbefore\npoll denied\nstdout:\nafter"

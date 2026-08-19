@@ -47,6 +47,28 @@ class ProcessCallIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalProcessObservation:
+    """One validated persisted process envelope split into presentation fields."""
+
+    state: ManagedProcessState | None
+    stdout: str = ""
+    stderr: str = ""
+    fallback_output: str = ""
+    failure_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalProcessUpdate:
+    """One persisted process observation retained behind a logical process card."""
+
+    entry_id: str
+    operation: ProcessOperation
+    display_state: ProcessDisplayState
+    preview: str
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessLifecyclePresentation:
     """Bounded immutable snapshot consumed by a process lifecycle card."""
 
@@ -59,6 +81,8 @@ class ProcessLifecyclePresentation:
     retained_output: str
     source_truncated: bool
     ui_dropped_bytes: int
+    history_entry_ids: tuple[str, ...] = ()
+    history_updates: tuple[HistoricalProcessUpdate, ...] = ()
 
     @property
     def terminal(self) -> bool:
@@ -95,6 +119,11 @@ class ProcessLifecycle:
     _output: str = ""
     _source_truncated: bool = False
     _ui_dropped_bytes: int = 0
+    # The stream label most recently written into ``_output``. A long-running
+    # poll appends to the same stream every time, so repeating the label per
+    # chunk buries the output in dozens of ``stdout:`` headers. Track it and
+    # label only when the stream actually changes.
+    _last_stream_label: str = ""
 
     @classmethod
     def from_presentation(
@@ -135,13 +164,25 @@ class ProcessLifecycle:
         failure_reason: str = "",
         failed: bool = False,
     ) -> ProcessLifecyclePresentation:
-        output = _process_output_chunk(stdout, stderr) or fallback_output
+        chunk, stream_label = _process_output_chunk(
+            stdout,
+            stderr,
+            last_label=self._last_stream_label,
+        )
+        output = chunk or fallback_output
         if failure_reason and not (
             output == failure_reason or output.startswith(f"{failure_reason}\n")
         ):
             output = f"{failure_reason}\n{output}" if output else failure_reason
         if output:
             self._append_output(output)
+            # Unlabelled text (a fallback or failure reason) interrupts the run of
+            # stream output, so the next chunk must re-state its label. Tail
+            # truncation can also remove the retained run's sole header; only
+            # suppress the next header while one remains in bounded output.
+            self._last_stream_label = (
+                stream_label if chunk and _retained_stream_label(self._output, stream_label) else ""
+            )
         self._source_truncated = (
             self._source_truncated or source_truncated or source_dropped_bytes > 0
         )
@@ -162,6 +203,8 @@ class ProcessLifecycle:
     ) -> ProcessLifecyclePresentation:
         if reason:
             self._append_output(reason)
+            # Unlabelled text breaks the run, so the next chunk re-states its stream.
+            self._last_stream_label = ""
         self.display_state = "poll_denied" if operation == "poll" else "cancel_denied"
         return self.presentation()
 
@@ -229,7 +272,7 @@ def process_call_identity(name: str, arguments: object) -> ProcessCallIdentity |
 def historical_process_observation(
     process_id: str,
     output: str,
-) -> tuple[ManagedProcessState | None, str]:
+) -> HistoricalProcessObservation:
     """Parse only Wisp's managed-process envelope, validated against its call ID."""
 
     normalized = output.replace("\r\n", "\n").replace("\r", "\n")
@@ -242,9 +285,9 @@ def historical_process_observation(
         try:
             exit_code = int(exit_code_text)
         except ValueError:
-            return None, normalized
+            return HistoricalProcessObservation(state=None, fallback_output=normalized)
         if str(exit_code) != exit_code_text:
-            return None, normalized
+            return HistoricalProcessObservation(state=None, fallback_output=normalized)
         state = "completed"
     elif first == f"{prefix} timed out":
         state = "timed_out"
@@ -253,29 +296,63 @@ def historical_process_observation(
     elif first == f"{prefix} failed" or first.startswith(f"{prefix} failed: "):
         state = "failed"
     else:
-        return None, normalized
-    output_chunk = _historical_output_chunk(remainder) if separator else ""
-    if first.startswith(f"{prefix} failed: "):
-        failure_reason = first.removeprefix(f"{prefix} failed: ")
-        output_chunk = f"{failure_reason}\n{output_chunk}" if output_chunk else failure_reason
-    return state, output_chunk
+        return HistoricalProcessObservation(state=None, fallback_output=normalized)
+
+    stdout, stderr, fallback_output = (
+        _historical_output_streams(remainder) if separator else ("", "", "")
+    )
+    failure_reason = (
+        first.removeprefix(f"{prefix} failed: ") if first.startswith(f"{prefix} failed: ") else ""
+    )
+    return HistoricalProcessObservation(
+        state=state,
+        stdout=stdout,
+        stderr=stderr,
+        fallback_output=fallback_output,
+        failure_reason=failure_reason,
+    )
 
 
-def _historical_output_chunk(output: str) -> str:
-    """Preserve Wisp's stream labels so accumulated chunks remain unambiguous."""
+def _historical_output_streams(output: str) -> tuple[str, str, str]:
+    """Split only the ordered stream labels emitted by Wisp's managed Bash tool."""
 
-    if output.startswith(("stdout:\n", "stderr:\n")):
-        return output
-    return output
+    if output.startswith("stdout:\n"):
+        stdout_and_stderr = output.removeprefix("stdout:\n")
+        stdout, separator, stderr = stdout_and_stderr.partition("\nstderr:\n")
+        if separator:
+            return stdout, stderr, ""
+        return stdout_and_stderr, "", ""
+    if output.startswith("stderr:\n"):
+        return "", output.removeprefix("stderr:\n"), ""
+    return "", "", output
 
 
-def _process_output_chunk(stdout: str, stderr: str) -> str:
+def _retained_stream_label(output: str, label: str) -> bool:
+    """Return whether the latest retained stream header identifies this run."""
+
+    for line in reversed(output.splitlines()):
+        if line in {"stdout:", "stderr:"}:
+            return line == f"{label}:"
+    return False
+
+
+def _process_output_chunk(stdout: str, stderr: str, *, last_label: str = "") -> tuple[str, str]:
+    """Join one poll's streams, labelling only where the stream changes.
+
+    Returns the chunk and the label its final line belongs to, so a caller can
+    suppress a repeated header on the next append. Long-running polls emit many
+    consecutive ``stdout`` chunks; labelling each one drowns the output.
+    """
+
     parts: list[str] = []
-    if stdout:
-        parts.append(f"stdout:\n{stdout.rstrip(chr(10))}")
-    if stderr:
-        parts.append(f"stderr:\n{stderr.rstrip(chr(10))}")
-    return "\n".join(part for part in parts if part)
+    label = last_label
+    for candidate, text in (("stdout", stdout), ("stderr", stderr)):
+        if not text:
+            continue
+        body = text.rstrip("\n")
+        parts.append(f"{candidate}:\n{body}" if candidate != label else body)
+        label = candidate
+    return "\n".join(part for part in parts if part), label
 
 
 def _tail_preview(output: str) -> str:
@@ -293,6 +370,8 @@ def _tail_preview(output: str) -> str:
 __all__ = [
     "PROCESS_OUTPUT_MAX_BYTES",
     "PROCESS_OUTPUT_MAX_LINES",
+    "HistoricalProcessObservation",
+    "HistoricalProcessUpdate",
     "ProcessCallIdentity",
     "ProcessDisplayState",
     "ProcessLifecycle",

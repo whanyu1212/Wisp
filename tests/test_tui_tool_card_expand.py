@@ -9,6 +9,7 @@ tool itself truncated. Focus/keybinding wiring is covered by the integration tes
 from __future__ import annotations
 
 import gc
+import time
 import weakref
 
 from textual.content import Content
@@ -224,3 +225,43 @@ def test_diff_detail_expands_to_raw_output() -> None:
     assert card._can_expand() is True
     card.action_toggle_expand()
     assert "context line 19" in _rendered(card)
+
+
+def test_tree_detail_lays_out_long_process_output_in_linear_time() -> None:
+    """Expanding a long process dump must not fold its lines quadratically.
+
+    ``Content.__add__`` copies the accumulated text and every span, so building a
+    card body one line at a time was O(n^2): a few hundred lines of pytest
+    progress output took seconds to lay out and stalled the whole TUI. Compare
+    growth across sizes rather than absolute time so the guard stays stable.
+    """
+
+    def layout_duration(line_count: int) -> float:
+        text = "\n".join("." * 72 + f" [{index % 100:3d}%]" for index in range(line_count))
+        samples = []
+        for _ in range(5):
+            start = time.perf_counter()
+            _tree_detail(text, width=110)
+            samples.append(time.perf_counter() - start)
+        return min(samples)
+
+    layout_duration(50)  # warm caches
+    baseline = layout_duration(125)
+    quadrupled = layout_duration(500)
+
+    # Linear predicts ~4x. The quadratic version grew ~16x (measured ~30x at
+    # these sizes), so a generous 8x threshold separates them without flaking.
+    assert quadrupled < baseline * 8
+
+
+def test_tree_detail_preserves_line_structure_and_prefixes() -> None:
+    """The linear layout must render exactly what the folded version did."""
+
+    rendered = _tree_detail("first\nsecond\n\nfourth", width=40)
+
+    assert rendered.plain.split("\n") == [
+        "  └ first",
+        "    second",
+        "    ",
+        "    fourth",
+    ]

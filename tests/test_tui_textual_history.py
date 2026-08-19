@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
+import anyio
 import pytest
 from textual.content import Content
 from textual.widget import Widget
@@ -31,6 +32,7 @@ class _HistoryWidget:
     arguments: JsonObject | None = None
     status: str | None = None
     detail: str | Content = ""
+    process_presentation: ProcessLifecyclePresentation | None = None
 
 
 @dataclass
@@ -43,6 +45,10 @@ class _HistorySurface:
     window_availability: list[bool] = field(default_factory=list)
     render_starts: int = 0
     render_finishes: int = 0
+    render_waits: int = 0
+    refresh_waits: int = 0
+    batch_mount_counts: list[int] = field(default_factory=list)
+    _batch_start: int = 0
     prepend_starts: int = 0
     prepend_finishes: int = 0
     follow_requests: int = 0
@@ -66,7 +72,7 @@ class _HistorySurface:
     def history_is_following(self) -> bool:
         return self.following
 
-    def begin_history_prepend(self) -> None:
+    def begin_history_prepend(self, *, anchor: Widget | None = None) -> None:
         self.prepend_starts += 1
 
     def finish_history_prepend(self) -> None:
@@ -74,11 +80,26 @@ class _HistorySurface:
 
     def begin_history_render(self) -> None:
         self.render_starts += 1
+        self._batch_start = len(self.widgets)
 
     def finish_history_render(self) -> None:
         self.render_finishes += 1
+        self.batch_mount_counts.append(len(self.widgets) - self._batch_start)
+
+    async def wait_for_history_render(self) -> None:
+        self.render_waits += 1
+
+    async def wait_for_complete_history_batch(self) -> None:
+        self.render_waits += 1
+
+    async def wait_for_history_refresh(self) -> None:
+        self.refresh_waits += 1
+        await anyio.sleep(0)
 
     def follow_transcript_tail_after_refresh(self) -> None:
+        self.follow_requests += 1
+
+    def return_transcript_to_latest(self) -> None:
         self.follow_requests += 1
 
     def request_latest_history(self) -> bool:
@@ -159,6 +180,7 @@ class _HistorySurface:
         widget = cast(_HistoryWidget, card)
         widget.status = presentation.display_state
         widget.detail = presentation.full_output
+        widget.process_presentation = presentation
         return card
 
     def mount_tool_call(
@@ -253,6 +275,94 @@ def _messages(
         HistoricalTranscriptMessage(role=role, content=f"{prefix} {index}")
         for index in range(count)
     )
+
+
+def test_history_controller_hydrates_complete_history_in_bounded_batches() -> None:
+    async def scenario() -> tuple[
+        list[str],
+        list[tuple[int, int]],
+        list[int],
+        int,
+        int,
+        int,
+        int,
+        int,
+    ]:
+        surface = _HistorySurface()
+        controller = TextualHistoryController(surface)
+        progress: list[tuple[int, int]] = []
+
+        await controller.hydrate_entries(
+            _messages("assistant", "message", 300),
+            session_label="Complete",
+            progress=lambda completed, total: progress.append((completed, total)),
+        )
+
+        return (
+            surface.history_labels,
+            progress,
+            surface.batch_mount_counts,
+            surface.render_starts,
+            surface.render_finishes,
+            surface.render_waits,
+            surface.refresh_waits,
+            surface.follow_requests,
+        )
+
+    (
+        labels,
+        progress,
+        batch_mount_counts,
+        render_starts,
+        render_finishes,
+        render_waits,
+        refresh_waits,
+        follow_requests,
+    ) = anyio.run(scenario)
+
+    assert labels == [f"assistant: message {index}" for index in range(300)]
+    assert progress == [(0, 300), (128, 300), (256, 300), (300, 300)]
+    assert batch_mount_counts == [128, 128, 44, 1]
+    assert render_starts == render_finishes == render_waits == 4
+    assert refresh_waits == 5
+    assert follow_requests == 1
+
+
+def test_history_controller_discards_partial_complete_hydration_after_mount_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    original_mount = surface.mount_historical_line
+    mount_count = 0
+
+    def fail_second_mount(
+        role: str,
+        message: str,
+        *,
+        before: Widget | None = None,
+    ) -> Widget:
+        nonlocal mount_count
+        mount_count += 1
+        if mount_count == 2:
+            raise RuntimeError("second mount failed")
+        return original_mount(role, message, before=before)
+
+    monkeypatch.setattr(surface, "mount_historical_line", fail_second_mount)
+
+    async def scenario() -> None:
+        await controller.hydrate_entries(
+            _messages("assistant", "message", 3),
+            session_label="Partial",
+            progress=lambda _completed, _total: None,
+        )
+
+    with pytest.raises(RuntimeError, match="second mount failed"):
+        anyio.run(scenario)
+
+    assert surface.widgets == []
+    assert controller.retained_entry_count == 0
+    assert surface.render_starts == surface.render_finishes == 1
 
 
 def test_history_controller_reconciles_a_bounded_window_without_full_history_scans(
@@ -851,7 +961,50 @@ def test_history_controller_coalesces_process_polls_across_a_prepended_page() ->
     process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
     assert len(process_widgets) == 1
     assert process_widgets[0].status == "completed"
-    assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
+    assert process_widgets[0].detail == "stdout:\nolder\nnewer"
+
+
+def test_history_controller_keeps_process_summary_stable_across_retained_windows() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    first_poll = HistoricalToolCard(
+        card_id="history:first-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running\nstdout:\nfirst chunk\n",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    final_poll = HistoricalToolCard(
+        card_id="history:final-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 completed with exit code 0\nstdout:\nfinal chunk\n",
+        is_error=False,
+        status="done",
+        exit_code=0,
+        tool_call_id="poll-2",
+    )
+    entries = (
+        *_messages("assistant", "prefix", TUI_TRANSCRIPT_WINDOW_SHIFT - 1),
+        first_poll,
+        HistoricalTranscriptMessage(role="assistant", content="between polls"),
+        final_poll,
+        *_messages("assistant", "suffix", TUI_TRANSCRIPT_WINDOW_SIZE - 2),
+    )
+
+    controller.replace_entries(entries, session_label="Windowed")
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    latest_presentation = process_widget.process_presentation
+
+    assert latest_presentation is not None
+    assert latest_presentation.poll_count == 2
+    assert latest_presentation.display_state == "completed"
+    assert "first chunk" in latest_presentation.full_output
+    assert "final chunk" in latest_presentation.full_output
+
+    assert controller.show_oldest()
+    assert process_widget.process_presentation == latest_presentation
 
 
 def test_history_controller_transfers_resumed_process_card_to_live_ownership() -> None:

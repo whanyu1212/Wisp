@@ -94,12 +94,26 @@ class GetMessagesCommand(RpcCommandModel):
     limit: int = Field(default=200, ge=1, le=500, strict=True)
     before_entry_id: str | None = Field(default=None, min_length=1)
     after_entry_id: str | None = Field(default=None, min_length=1)
+    entry_ids: tuple[str, ...] | None = Field(default=None, max_length=16)
+    complete_structure: bool | None = Field(default=None, strict=True)
+    full_content: bool | None = Field(default=None, strict=True)
     allow_during_prompt: bool | None = Field(default=None, strict=True)
 
     @model_validator(mode="after")
     def _validate_cursor_direction(self) -> GetMessagesCommand:
         if self.before_entry_id is not None and self.after_entry_id is not None:
             raise ValueError("message page cursors are mutually exclusive")
+        entry_ids = self.entry_ids or ()
+        if entry_ids and (self.before_entry_id is not None or self.after_entry_id is not None):
+            raise ValueError("exact message entry IDs cannot be combined with page cursors")
+        if any(not entry_id for entry_id in entry_ids):
+            raise ValueError("message entry IDs must be non-empty")
+        if len(set(entry_ids)) != len(entry_ids):
+            raise ValueError("message entry IDs must be unique")
+        if self.full_content and not entry_ids:
+            raise ValueError("full message content requires exact entry IDs")
+        if self.full_content and len(entry_ids) != 1:
+            raise ValueError("full message content requires exactly one entry ID")
         return self
 
 

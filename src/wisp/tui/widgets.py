@@ -473,10 +473,9 @@ def _tree_line(
         if cell_len(value.plain) <= available
         else value.wrap(available, overflow="fold") or [Content("")]
     )
-    content = Content(first_prefix) + wrapped[0]
-    for line in wrapped[1:]:
-        content += Content("\n" + continuation_prefix) + line
-    return content
+    if len(wrapped) == 1:
+        return Content(first_prefix) + wrapped[0]
+    return Content(first_prefix) + Content("\n" + continuation_prefix).join(wrapped)
 
 
 def _tree_detail(detail: str | Content, *, width: int) -> Content:
@@ -484,19 +483,19 @@ def _tree_detail(detail: str | Content, *, width: int) -> Content:
 
     source = detail if isinstance(detail, Content) else Content(detail)
     logical_lines = source.split("\n", allow_blank=True) or [Content("")]
-    content = Content("")
-    first = True
-    for logical_line in logical_lines:
-        if not first:
-            content += Content("\n")
-        content += _tree_line(
+    # ``Content.__add__`` copies the accumulated text and every span on each call,
+    # so folding hundreds of output lines one at a time is quadratic — long process
+    # output (a pytest progress dump) took seconds to lay out. ``join`` accumulates
+    # into lists and builds the result once.
+    return Content("\n").join(
+        _tree_line(
             logical_line,
             width=width,
-            first_prefix="  └ " if first else "    ",
+            first_prefix="  └ " if index == 0 else "    ",
             continuation_prefix="    ",
         )
-        first = False
-    return content
+        for index, logical_line in enumerate(logical_lines)
+    )
 
 
 def _render_diff_presentation(
@@ -520,13 +519,20 @@ def _render_diff_presentation(
         + Content(" ")
         + Content.styled(deletions, DIFF_DEL_COUNT_STYLE)
     )
-    content = Content("  └ ") + header
-    for visible_row in presentation.visible_rows(expanded=expanded):
-        content += Content("\n  ") + _render_diff_visible_row(
+    # Fold the rows with ``join`` rather than repeated ``+=``: ``Content.__add__``
+    # copies the accumulated text and spans every time, so an expanded diff (up to
+    # ``DIFF_EXPANDED_ROWS``) would lay out in quadratic time.
+    rows = Content("\n  ").join(
+        _render_diff_visible_row(
             visible_row,
             width=inner_width,
             show_line_numbers=presentation.show_line_numbers,
         )
+        for visible_row in presentation.visible_rows(expanded=expanded)
+    )
+    content = Content("  └ ") + header
+    if rows.plain:
+        content += Content("\n  ") + rows
     return content
 
 
@@ -1743,6 +1749,10 @@ class OperationIndicator(Vertical):
         background: transparent;
     }
 
+    OperationIndicator.-covers-transcript {
+        background: $background;
+    }
+
     OperationIndicator #operation-indicator-panel {
         width: auto;
         height: 3;
@@ -1756,6 +1766,7 @@ class OperationIndicator(Vertical):
         width: 9;
         height: 1;
         min-height: 1;
+        margin-right: 2;
         color: $accent;
     }
 
@@ -1781,11 +1792,17 @@ class OperationIndicator(Vertical):
 
         return self.display
 
-    def show_operation(self, label: str) -> None:
-        """Display a caller-owned operation label beside the native spinner."""
+    def show_operation(self, label: str, *, cover_transcript: bool = False) -> None:
+        """Display one operation and configure whether it covers partial history."""
+
+        self.set_class(cover_transcript, "-covers-transcript")
+        self.update_operation(label)
+        self.display = True
+
+    def update_operation(self, label: str) -> None:
+        """Update an active operation label without changing spinner or coverage state."""
 
         self._label.update(label)
-        self.display = True
 
     def hide(self) -> None:
         """Hide the operation surface through the generic overlay protocol."""
@@ -1844,12 +1861,14 @@ class HistoryNavigationIntent(Enum):
     PRESERVE = auto()
     PAGE_UP = auto()
     WHEEL_UP = auto()
+    PAGE_DOWN = auto()
+    WHEEL_DOWN = auto()
     OLDEST = auto()
 
 
 @dataclass(frozen=True)
 class HistoryNavigation:
-    """Viewport movement left to apply after older history has mounted."""
+    """Viewport movement left to apply after a history edge has mounted."""
 
     intent: HistoryNavigationIntent = HistoryNavigationIntent.PRESERVE
     remaining_rows: float = 0.0
@@ -1908,6 +1927,13 @@ class Transcript(VerticalScroll):
             super().__init__()
             self.navigation = navigation
 
+    class NeedNewerHistory(Message):
+        """A forward reader gesture crossed the newest mounted content."""
+
+        def __init__(self, navigation: HistoryNavigation) -> None:
+            super().__init__()
+            self.navigation = navigation
+
     def __init__(
         self,
         *args: object,
@@ -1932,6 +1958,8 @@ class Transcript(VerticalScroll):
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
+        self._pending_newer_navigation = HistoryNavigation()
+        self._newer_navigation_scheduled = False
 
     def _size_updated(
         self,
@@ -1987,6 +2015,8 @@ class Transcript(VerticalScroll):
         self._history_loading = False
         self._history_request_armed = True
         self._history_navigation = HistoryNavigation()
+        self._pending_newer_navigation = HistoryNavigation()
+        self._newer_navigation_scheduled = False
         self.remove_children()
         self.scroll_home(animate=False)
 
@@ -2003,6 +2033,8 @@ class Transcript(VerticalScroll):
         previous = self._follow
         super().watch_scroll_y(old_value, new_value)
         if not self._content_driven_scroll_update:
+            if new_value < old_value:
+                self._discard_pending_newer_navigation()
             self._follow = self.is_vertical_scroll_end and not self._has_newer_history
             if self._follow != previous:
                 if not self._follow:
@@ -2155,10 +2187,26 @@ class Transcript(VerticalScroll):
         if navigation.intent is HistoryNavigationIntent.OLDEST:
             target_y = 0.0
         else:
-            height_delta = (
-                max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
-            )
-            target_y = scroll_y + height_delta - navigation.remaining_rows
+            anchor_retained = anchor is not None and anchor in self.children
+            navigating_forward = navigation.intent in {
+                HistoryNavigationIntent.PAGE_DOWN,
+                HistoryNavigationIntent.WHEEL_DOWN,
+            }
+            if not anchor_retained:
+                # A retention boundary may replace a complete durable page, leaving
+                # no widget in common. The captured ``scroll_y`` belongs to content
+                # that no longer exists, so reusing it paints an unrelated offset —
+                # for a backward move that means briefly showing the transcript top.
+                # The adjacent edge is the only continuous fallback: the top of the
+                # newer page or the bottom of the older page. Continue through that
+                # edge by any rows the triggering gesture could not consume.
+                direction = 1.0 if navigating_forward else -1.0
+                edge_y = 0.0 if navigating_forward else self.max_scroll_y
+                target_y = edge_y + direction * navigation.remaining_rows
+            else:
+                height_delta = anchor.virtual_region.y - anchor_y_before if anchor else 0.0
+                direction = 1.0 if navigating_forward else -1.0
+                target_y = scroll_y + height_delta + direction * navigation.remaining_rows
         self.restore_viewport_state(
             TranscriptViewportState(
                 scroll_y=target_y,
@@ -2196,6 +2244,7 @@ class Transcript(VerticalScroll):
     def page_up(self) -> HistoryNavigation | None:
         """Move away from the tail before a page-up layout can re-pin it."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         page_height = float(self.scrollable_content_region.height)
         navigation = None
@@ -2217,6 +2266,7 @@ class Transcript(VerticalScroll):
     ) -> HistoryNavigation | None:
         """Arm the unconsumed wheel step before Textual processes the event."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         step = float(self.app.scroll_sensitivity_y)
         if self.scroll_y <= step:
@@ -2230,14 +2280,104 @@ class Transcript(VerticalScroll):
             return navigation
         return None
 
-    def page_down(self) -> None:
-        """Scroll one transcript page without Textual's default animation."""
+    def page_down(self) -> HistoryNavigation | None:
+        """Scroll down one page and retain movement beyond the mounted edge."""
 
+        page_height = float(self.scrollable_content_region.height)
+        distance_to_end = max(0.0, self.max_scroll_y - self.scroll_y)
+        navigation = None
+        if self._has_newer_history and page_height > 0 and distance_to_end <= page_height:
+            self._stop_following()
+            navigation = HistoryNavigation(
+                HistoryNavigationIntent.PAGE_DOWN,
+                remaining_rows=page_height - distance_to_end,
+                reader_generation=self._follow_generation,
+            )
         self.scroll_page_down(animate=False)
+        if navigation is not None:
+            self._queue_newer_navigation(navigation)
+        return navigation
+
+    def prepare_wheel_down(self) -> HistoryNavigation | None:
+        """Retain the unconsumed wheel step at the mounted newer edge."""
+
+        step = float(self.app.scroll_sensitivity_y)
+        distance_to_end = max(0.0, self.max_scroll_y - self.scroll_y)
+        if distance_to_end <= 0 and not self._has_newer_history:
+            return None
+        # Version every effective reader move, even when it remains within the
+        # mounted window. A delayed prepend restore must not overwrite a wheel
+        # reversal that happened while its replacement widgets were settling.
+        self._stop_following()
+        if not self._has_newer_history or distance_to_end > step:
+            return None
+        return HistoryNavigation(
+            HistoryNavigationIntent.WHEEL_DOWN,
+            remaining_rows=max(0.0, step - distance_to_end),
+            reader_generation=self._follow_generation,
+        )
+
+    def wheel_down(self) -> bool:
+        """Apply one wheel step and request a newer window at its boundary."""
+
+        navigation = self.prepare_wheel_down()
+        moved = self._scroll_down_for_pointer(animate=False)
+        if navigation is not None and self.is_vertical_scroll_end:
+            self._queue_newer_navigation(navigation)
+        return moved
+
+    def _queue_newer_navigation(self, navigation: HistoryNavigation) -> None:
+        """Coalesce wheel bursts before publishing one forward-edge request."""
+
+        current = self._pending_newer_navigation
+        intent = (
+            navigation.intent
+            if current.intent is HistoryNavigationIntent.PRESERVE
+            else current.intent
+        )
+        self._pending_newer_navigation = HistoryNavigation(
+            intent,
+            current.remaining_rows + navigation.remaining_rows,
+            navigation.reader_generation,
+        )
+        if self._newer_navigation_scheduled:
+            return
+        self._newer_navigation_scheduled = True
+        self.call_after_refresh(self._post_pending_newer_navigation)
+
+    def _post_pending_newer_navigation(self) -> None:
+        """Publish a settled wheel burst unless later reader intent superseded it."""
+
+        self._newer_navigation_scheduled = False
+        navigation = self._pending_newer_navigation
+        self._pending_newer_navigation = HistoryNavigation()
+        if (
+            navigation.intent is HistoryNavigationIntent.PRESERVE
+            or navigation.reader_generation != self._follow_generation
+            or self._follow
+        ):
+            return
+        self.post_message(self.NeedNewerHistory(navigation))
+
+    def _discard_pending_newer_navigation(self) -> None:
+        self._pending_newer_navigation = HistoryNavigation()
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Preserve a wheel gesture that crosses the virtual newer edge."""
+
+        # ``MessagePump._get_dispatch_methods`` walks the MRO and invokes *every*
+        # matching handler, so ``Widget._on_mouse_scroll_down`` still runs after
+        # this one and would apply a second scroll step. ``stop()`` only ends
+        # bubbling to the parent; ``prevent_default()`` is what breaks that MRO
+        # walk. Textual's own ``Footer`` pairs both for exactly this reason.
+        if not (event.ctrl or event.shift) and self.allow_vertical_scroll and self.wheel_down():
+            event.stop()
+            event.prevent_default()
 
     def scroll_to_oldest(self) -> None:
         """Move to the durable-history boundary without waiting for scroll settlement."""
 
+        self._discard_pending_newer_navigation()
         self._stop_following()
         self.scroll_home(animate=False)
 
@@ -2257,6 +2397,7 @@ class Transcript(VerticalScroll):
     def return_to_latest(self) -> None:
         """Restore tail-follow intent and jump to the newest output immediately."""
 
+        self._discard_pending_newer_navigation()
         was_following = self._follow
         self._follow_generation += 1
         self._follow = True
@@ -2707,6 +2848,12 @@ class ToolCard(Static):
         if isinstance(self._detail, DiffPresentation):
             self.post_message(self.ViewDiffRequested(self, self._detail))
 
+    def _expanded_supplement(self, *, width: int) -> Content:
+        """Return subclass-owned bounded content shown only while expanded."""
+
+        del width
+        return Content()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_expand":
             return self._can_expand()
@@ -2782,6 +2929,10 @@ class ToolCard(Static):
         elif self._detail:
             content += Content("\n") + _tree_detail(self._detail, width=width)
 
+        supplement = self._expanded_supplement(width=width)
+        if supplement:
+            content += Content("\n") + supplement
+
         if self._truncated:
             # The tool capped its own output before it ever reached here, so what the
             # card shows — collapsed preview or expanded full output — isn't the whole
@@ -2815,6 +2966,15 @@ def _process_id_for_display(process_id: str) -> str:
 class ProcessCard(ToolCard):
     """One bounded presentation card spanning repeated polls for a process ID."""
 
+    HELP = """
+    # Process history
+
+    Enter or Space expands the represented process timeline. Use p and n to select
+    an earlier or later persisted update, then l to load that row's exact persisted
+    output. Loading history never reruns the process. Tool-level truncation markers
+    mean the discarded bytes were not persisted and cannot be recovered.
+    """
+
     _STATE_WORDS = {
         "polling": "Polling process",
         "cancelling": "Cancelling process",
@@ -2838,6 +2998,13 @@ class ProcessCard(ToolCard):
         "denied": "bold $warning",
         "cancelled": "bold $warning",
     }
+    _HISTORY_UPDATE_WINDOW = 6
+    BINDINGS = [
+        *ToolCard.BINDINGS,
+        Binding("p", "previous_history_update", "Previous process update", show=False),
+        Binding("n", "next_history_update", "Next process update", show=False),
+        Binding("l", "load_history_output", "Load persisted output", show=False),
+    ]
 
     def __init__(self, process_id: str, *, track_elapsed: bool = True) -> None:
         self._process_id = process_id
@@ -2852,6 +3019,11 @@ class ProcessCard(ToolCard):
             source_truncated=False,
             ui_dropped_bytes=0,
         )
+        self._history_update_index = 0
+        self._history_detail_entry_id: str | None = None
+        self._history_detail_output = ""
+        self._history_detail_loading = False
+        self._history_detail_error = ""
         super().__init__(
             "bash",
             {"operation": "poll", "process_id": process_id},
@@ -2882,10 +3054,17 @@ class ProcessCard(ToolCard):
     ) -> None:
         """Replace the bounded lifecycle snapshot and repaint this card in place."""
 
+        had_history_updates = bool(self._process_presentation.history_updates)
         self._process_presentation = presentation
         self._detail = presentation.detail
-        self._full_output = presentation.full_output
+        self._full_output = "" if presentation.history_updates else presentation.full_output
         self._truncated = presentation.source_truncated
+        if presentation.history_updates:
+            self._history_update_index = (
+                min(self._history_update_index, len(presentation.history_updates) - 1)
+                if had_history_updates
+                else len(presentation.history_updates) - 1
+            )
         state = presentation.display_state
         if state == "completed":
             status: ToolActionStatus = "done"
@@ -2917,7 +3096,107 @@ class ProcessCard(ToolCard):
                 f" · {presentation.poll_count} {unit}",
                 "$text-muted",
             )
+        if presentation.history_entry_ids:
+            row_count = len(presentation.history_entry_ids)
+            content += Content.styled(
+                f" · {row_count}/{row_count} rows",
+                "$text-muted",
+            )
         return content
+
+    def _can_expand(self) -> bool:
+        return bool(self._process_presentation.history_updates) or super()._can_expand()
+
+    def action_previous_history_update(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return
+        self._history_update_index = max(0, self._history_update_index - 1)
+        self._clear_history_detail_if_selection_changed()
+        self._repaint()
+
+    def action_next_history_update(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return
+        self._history_update_index = min(len(updates) - 1, self._history_update_index + 1)
+        self._clear_history_detail_if_selection_changed()
+        self._repaint()
+
+    def action_load_history_output(self) -> None:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates or self._history_detail_loading:
+            return
+        selected = updates[self._history_update_index]
+        if self._history_detail_entry_id == selected.entry_id and self._history_detail_output:
+            return
+        self._history_detail_loading = True
+        self._history_detail_error = ""
+        self._repaint()
+        self.post_message(self.HistoryDetailRequested(self, selected.entry_id))
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        updates = self._process_presentation.history_updates
+        if not updates or updates[self._history_update_index].entry_id != entry_id:
+            return
+        self._history_detail_entry_id = entry_id
+        self._history_detail_output = output
+        self._history_detail_loading = False
+        self._history_detail_error = ""
+        self._repaint()
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        updates = self._process_presentation.history_updates
+        if not updates or updates[self._history_update_index].entry_id != entry_id:
+            return
+        self._history_detail_loading = False
+        self._history_detail_error = error
+        self._repaint()
+
+    def _clear_history_detail_if_selection_changed(self) -> None:
+        updates = self._process_presentation.history_updates
+        if (
+            updates
+            and self._history_detail_entry_id != updates[self._history_update_index].entry_id
+        ):
+            self._history_detail_output = ""
+            self._history_detail_error = ""
+            self._history_detail_loading = False
+
+    def _expanded_supplement(self, *, width: int) -> Content:
+        updates = self._process_presentation.history_updates
+        if not self._expanded or not updates:
+            return Content()
+        selected_index = min(self._history_update_index, len(updates) - 1)
+        half = self._HISTORY_UPDATE_WINDOW // 2
+        start = min(
+            max(0, selected_index - half),
+            max(0, len(updates) - self._HISTORY_UPDATE_WINDOW),
+        )
+        stop = min(len(updates), start + self._HISTORY_UPDATE_WINDOW)
+        lines = [f"    updates {start + 1}–{stop} of {len(updates)} · p/n navigate · l load output"]
+        for index in range(start, stop):
+            update = updates[index]
+            marker = "▸" if index == selected_index else " "
+            state = update.display_state.replace("_", " ")
+            lines.append(f"    {marker} #{index + 1} {state}: {update.preview}")
+        if self._history_detail_loading:
+            lines.append("    ⟳ Loading persisted output…")
+        elif self._history_detail_error:
+            lines.append(f"    ! {self._history_detail_error} · l retry")
+        elif self._history_detail_output:
+            detail_lines = self._history_detail_output.splitlines() or ["(empty persisted output)"]
+            lines.append(f"    persisted output · {len(detail_lines)} lines")
+            lines.extend(f"      {line}" for line in detail_lines)
+        return _tree_detail("\n".join(lines), width=width)
+
+    class HistoryDetailRequested(Message):
+        """The reader requested exact persisted output for one represented update."""
+
+        def __init__(self, card: ProcessCard, entry_id: str) -> None:
+            super().__init__()
+            self.card = card
+            self.entry_id = entry_id
 
 
 class WorkingIndicator(Static):

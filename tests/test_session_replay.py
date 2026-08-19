@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import time
 from pathlib import Path
 from typing import Any
 
@@ -662,3 +663,38 @@ def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
         replay_session_entries(entries)
+
+
+def test_replay_cost_grows_linearly_with_session_length() -> None:
+    """Replay must stay linear in the session length.
+
+    Rebuilding the context tuple per message made replay O(n^2), which dominated
+    resume on long transcripts. Quadrupling the message count should quadruple
+    the work; the quadratic version grew about sixteenfold. The threshold sits
+    far from both so ordinary timing noise cannot decide the result.
+    """
+
+    def replay_duration(message_count: int) -> float:
+        entries = tuple(
+            _message_entry(
+                f"entry-{index}",
+                "user" if index % 2 == 0 else "assistant",
+                f"message {index}",
+            )
+            for index in range(message_count)
+        )
+        # Take the best of several runs so an unlucky scheduling slice on a busy
+        # CI machine cannot inflate the ratio.
+        samples = []
+        for _ in range(5):
+            start = time.perf_counter()
+            replay_session_entries(entries)
+            samples.append(time.perf_counter() - start)
+        return min(samples)
+
+    replay_duration(500)  # warm import-time caches
+    baseline = replay_duration(2_000)
+    quadrupled = replay_duration(8_000)
+
+    # Linear predicts ~4x, quadratic ~16x (measured ~13.5x before the fix).
+    assert quadrupled < baseline * 8

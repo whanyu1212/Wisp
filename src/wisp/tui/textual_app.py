@@ -21,6 +21,7 @@ from pathlib import Path
 from rich.console import RenderableType
 from textual import events, on, work
 from textual.app import App, ComposeResult
+from textual.await_remove import AwaitRemove
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
@@ -140,6 +141,7 @@ _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
 _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
+    OverlayOperation.history_hydration: "Loading session history…",
     OverlayOperation.session_catalog: "Loading sessions…",
     OverlayOperation.session_switch: "Switching session…",
 }
@@ -177,6 +179,7 @@ class _HistoryPrependAnchor:
     scroll_y: float
     widget_y: float
     following: bool
+    reader_generation: int
     epoch: int
     navigation_generation: int
     navigation: HistoryNavigation
@@ -543,6 +546,8 @@ class TextualTui(App[None]):
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_newer_request_hook: Callable[[str], Awaitable[None]] | None = None
+        self._history_detail_request_hook: Callable[[str], Awaitable[None]] | None = None
+        self._history_detail_cards: dict[str, list[ProcessCard]] = {}
         self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
         self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
         self._update_action_hook: (
@@ -565,15 +570,16 @@ class TextualTui(App[None]):
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_paint_suppressed = False
-        self._history_prepend_mounts: list[AwaitMount] = []
+        self._history_prepend_mounts: list[AwaitMount | AwaitRemove] = []
         self._history_prepend_anchor: _HistoryPrependAnchor | None = None
         self._transcript_navigation_generation = 0
         self._pending_history_navigation = HistoryNavigation()
         self._oldest_navigation_generation: int | None = None
         self._history_render_depth = 0
         self._history_render_batch: AbstractContextManager[None] | None = None
-        self._history_render_mounts: list[AwaitMount] = []
-        self._last_history_render_mounts: tuple[AwaitMount, ...] = ()
+        self._history_render_mounts: list[AwaitMount | AwaitRemove] = []
+        self._last_history_render_mounts: tuple[AwaitMount | AwaitRemove, ...] = ()
+        self._history_removing_widgets: set[Widget] = set()
         self._history_layout_generation = 0
         self._transcript_epoch = 0
         self._stream = MarkdownStreamController(self)
@@ -1024,6 +1030,30 @@ class TextualTui(App[None]):
             exit_on_error=False,
         )
 
+    def on_transcript_need_newer_history(self, event: Transcript.NeedNewerHistory) -> None:
+        """Continue a wheel gesture through the mounted transcript's newer edge."""
+
+        event.stop()
+        transcript = self._transcript
+        if (
+            transcript is None
+            or transcript.is_following
+            or event.navigation.reader_generation != transcript.follow_generation
+        ):
+            return
+        self._cancel_card_expand_repin()
+        generation = (
+            self._transcript_navigation_generation
+            if self._newer_navigation_in_progress()
+            else self._begin_transcript_navigation()
+        )
+        navigation = HistoryNavigation(
+            event.navigation.intent,
+            event.navigation.remaining_rows,
+            transcript.follow_generation,
+        )
+        self._queue_newer_navigation(transcript, navigation, generation)
+
     def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
         event.stop()
         self._scroll_transcript_to_latest()
@@ -1129,15 +1159,23 @@ class TextualTui(App[None]):
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self._wheel_event_targets_transcript(event):
             self._cancel_card_expand_repin()
-            self._begin_transcript_navigation()
             transcript = self._transcript
-            shift_newer = self._history_window_newer_hook
+            jump = self._jump_to_latest
+            target = event.widget
+            # A transcript whose content fits the viewport has no scroll range,
+            # so Textual refuses the wheel entirely (``allow_vertical_scroll`` is
+            # False) and ``Transcript._on_mouse_scroll_down`` never runs. Forward
+            # window navigation is purely virtual there, so drive it from here.
+            # When the transcript *can* scroll, the widget handler owns the step
+            # and this must stay out of the way or the movement doubles.
             if (
                 transcript is not None
-                and transcript.is_vertical_scroll_end
-                and shift_newer is not None
+                and not transcript.allow_vertical_scroll
+                and not (event.ctrl or event.shift)
+                and (jump is None or target not in {jump, jump.parent})
             ):
-                shift_newer()
+                transcript.wheel_down()
+                event.stop()
         self._forward_jump_overlay_scroll(event, direction=1)
 
     def _wheel_event_targets_transcript(
@@ -1168,10 +1206,13 @@ class TextualTui(App[None]):
         target = event.widget
         if jump is None or transcript is None or target not in {jump, jump.parent}:
             return
-        transcript.scroll_to(
-            y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
-            animate=False,
-        )
+        if direction > 0:
+            transcript.wheel_down()
+        else:
+            transcript.scroll_to(
+                y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
+                animate=False,
+            )
         event.stop()
 
     def submit_command_line(self, text: str) -> None:
@@ -1601,6 +1642,50 @@ class TextualTui(App[None]):
 
         self._history_newer_request_hook = hook
 
+    def set_history_detail_request_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Register the shell callback for exact persisted process output."""
+
+        self._history_detail_request_hook = hook
+
+    def on_process_card_history_detail_requested(
+        self,
+        event: ProcessCard.HistoryDetailRequested,
+    ) -> None:
+        """Coalesce cards waiting on the same exact persisted row."""
+
+        event.stop()
+        cards = self._history_detail_cards.setdefault(event.entry_id, [])
+        if event.card not in cards:
+            cards.append(event.card)
+        if len(cards) > 1:
+            return
+        hook = self._history_detail_request_hook
+        if hook is None:
+            self.history_detail_failed(event.entry_id, "Persisted output loading is unavailable.")
+            return
+        self.run_worker(
+            hook(event.entry_id),
+            group=f"history-detail-{event.entry_id}",
+            exit_on_error=False,
+        )
+
+    def history_detail_loaded(self, entry_id: str, output: str) -> None:
+        """Deliver one exact persisted payload to every waiting mounted card."""
+
+        for card in self._history_detail_cards.pop(entry_id, []):
+            if card.is_mounted:
+                card.history_detail_loaded(entry_id, output)
+
+    def history_detail_failed(self, entry_id: str, error: str) -> None:
+        """Settle every card waiting on a failed exact-row lookup."""
+
+        for card in self._history_detail_cards.pop(entry_id, []):
+            if card.is_mounted:
+                card.history_detail_failed(entry_id, error)
+
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register the renderer's at-accept input-mode snapshot callback."""
 
@@ -1931,12 +2016,74 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
-            self._begin_transcript_navigation()
-            if self._transcript.is_vertical_scroll_end:
-                shift_newer = self._history_window_newer_hook
-                if shift_newer is not None and shift_newer():
-                    return
+            if not self._newer_navigation_in_progress():
+                self._begin_transcript_navigation()
             self._transcript.page_down()
+
+    def _newer_navigation_in_progress(self) -> bool:
+        """Return whether a forward edge replacement is queued or in flight."""
+
+        forward_intents = {
+            HistoryNavigationIntent.PAGE_DOWN,
+            HistoryNavigationIntent.WHEEL_DOWN,
+        }
+        anchor = self._history_prepend_anchor
+        return (
+            self._history_newer_request_pending
+            or self._pending_history_navigation.intent in forward_intents
+            or (anchor is not None and anchor.navigation.intent in forward_intents)
+        )
+
+    def _queue_newer_navigation(
+        self,
+        transcript: Transcript,
+        navigation: HistoryNavigation,
+        generation: int,
+    ) -> None:
+        """Merge repeated forward input without losing rows during async replacement."""
+
+        anchor = self._history_prepend_anchor
+        if anchor is not None and anchor.navigation.intent in {
+            HistoryNavigationIntent.PAGE_DOWN,
+            HistoryNavigationIntent.WHEEL_DOWN,
+        }:
+            anchor.navigation = _merge_history_navigation(anchor.navigation, navigation)
+            return
+        if self._history_newer_request_pending or self._pending_history_navigation.intent in {
+            HistoryNavigationIntent.PAGE_DOWN,
+            HistoryNavigationIntent.WHEEL_DOWN,
+        }:
+            self._pending_history_navigation = _merge_history_navigation(
+                self._pending_history_navigation,
+                navigation,
+            )
+            return
+        self._pending_history_navigation = navigation
+        self.call_after_refresh(
+            self._continue_newer_navigation,
+            transcript,
+            generation,
+            self._transcript_epoch,
+        )
+
+    def _continue_newer_navigation(
+        self,
+        transcript: Transcript,
+        generation: int,
+        epoch: int,
+    ) -> None:
+        """Carry a forward reader gesture across the mounted history edge."""
+
+        if not (
+            generation == self._transcript_navigation_generation
+            and epoch == self._transcript_epoch
+            and transcript is self._transcript
+        ):
+            return
+        shift_newer = self._history_window_newer_hook
+        if shift_newer is not None and shift_newer():
+            return
+        self._pending_history_navigation = HistoryNavigation()
 
     def action_scroll_transcript_home(self) -> None:
         if self._diff_viewer is not None and self._diff_viewer.is_open:
@@ -2197,6 +2344,25 @@ class TextualTui(App[None]):
             return False
         return overlays.close(OverlayKind.diff_viewer)
 
+    def history_hydration_started(self) -> None:
+        self._start_session_operation(OverlayOperation.history_hydration)
+
+    def history_hydration_progress(self, label: str) -> None:
+        """Update the active history operation without restarting its spinner."""
+
+        overlays = self._overlay_controller
+        if overlays is None or overlays.active_operation not in {
+            OverlayOperation.history_hydration,
+            OverlayOperation.session_switch,
+        }:
+            return
+        indicator = self._operation_indicator
+        if indicator is not None:
+            indicator.update_operation(label)
+
+    def history_hydration_finished(self) -> None:
+        self._finish_session_operation(OverlayOperation.history_hydration)
+
     def session_catalog_started(self) -> None:
         self._start_session_operation(OverlayOperation.session_catalog)
 
@@ -2209,6 +2375,14 @@ class TextualTui(App[None]):
     def session_switch_finished(self) -> None:
         self._finish_session_operation(OverlayOperation.session_switch)
 
+    async def wait_for_session_operation_paint(self) -> None:
+        """Wait until newly visible session-operation chrome reaches a frame."""
+
+        indicator = self._operation_indicator
+        if indicator is None or not indicator.is_running or not indicator.is_open:
+            return
+        await indicator.wait_for_refresh()
+
     def _start_session_operation(self, operation: OverlayOperation) -> None:
         """Show typed session work without giving the indicator lifecycle ownership."""
 
@@ -2217,7 +2391,14 @@ class TextualTui(App[None]):
             overlays.start_operation(operation)
         indicator = self._operation_indicator
         if indicator is not None:
-            indicator.show_operation(_SESSION_OPERATION_LABELS[operation])
+            indicator.show_operation(
+                _SESSION_OPERATION_LABELS[operation],
+                cover_transcript=operation
+                in {
+                    OverlayOperation.history_hydration,
+                    OverlayOperation.session_switch,
+                },
+            )
 
     def _finish_session_operation(self, operation: OverlayOperation) -> None:
         """Hide only after the active typed session operation completed."""
@@ -2233,6 +2414,7 @@ class TextualTui(App[None]):
         """Drop the previous session's UI-owned transcript bookkeeping."""
 
         self._transcript_epoch += 1
+        self._history_detail_cards.clear()
         self._history_marker = None
         self._prepending_history = False
         self._history_prepend_paint_suppressed = False
@@ -2253,6 +2435,7 @@ class TextualTui(App[None]):
             batch.__exit__(None, None, None)
         self._history_render_mounts.clear()
         self._last_history_render_mounts = ()
+        self._history_removing_widgets.clear()
         self._history_layout_generation += 1
         self._stream.discard()
         self._transcript_controller.reset()
@@ -2391,6 +2574,7 @@ class TextualTui(App[None]):
         """Allow retrying a failed adjacent-newer page request."""
 
         self._history_newer_request_pending = False
+        self._pending_history_navigation = HistoryNavigation()
 
     def history_is_at_top(self) -> bool:
         """Return whether persisted-history navigation is at the transcript top."""
@@ -2973,6 +3157,8 @@ class TextualTui(App[None]):
                 and anchor.transcript is transcript
                 and anchor.widget is not None
                 and anchor.widget.parent is transcript
+                and anchor.navigation.intent
+                not in {HistoryNavigationIntent.PAGE_DOWN, HistoryNavigationIntent.WHEEL_DOWN}
             )
             else None
         )
@@ -3036,7 +3222,9 @@ class TextualTui(App[None]):
             (
                 child
                 for child in transcript.children
-                if child is not self._history_marker and child not in history_widgets
+                if child is not self._history_marker
+                and child not in history_widgets
+                and child not in self._history_removing_widgets
             ),
             None,
         )
@@ -3045,7 +3233,14 @@ class TextualTui(App[None]):
         """Evict retained history without removing a card transferred to live output."""
 
         if self._transcript_controller.release_historical_widget(widget):
-            widget.remove()
+            self._history_removing_widgets.add(widget)
+            removed = widget.remove()
+            if self._prepending_history:
+                self._history_prepend_mounts.append(removed)
+            if self._history_render_depth:
+                self._history_render_mounts.append(removed)
+            else:
+                self.call_after_refresh(self._history_removing_widgets.discard, widget)
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""
@@ -3082,12 +3277,27 @@ class TextualTui(App[None]):
             self._history_render_batch = None
             if batch is not None:
                 batch.__exit__(None, None, None)
+            self._history_removing_widgets.clear()
 
     async def wait_for_history_render(self) -> None:
         """Wait until the latest renderer history batch has mounted its widgets."""
 
         for mounted in self._last_history_render_mounts:
             await mounted
+
+    async def wait_for_complete_history_batch(self) -> None:
+        """Wait once for an ordered fresh-mount batch instead of relayout per widget."""
+
+        if self._last_history_render_mounts:
+            await self._last_history_render_mounts[-1]
+
+    async def wait_for_history_refresh(self) -> None:
+        """Yield through the next Textual refresh so progress remains animated."""
+
+        transcript = self._transcript
+        if transcript is None or not transcript.is_running:
+            return
+        await transcript.wait_for_refresh()
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record pagination state after the current history batch has laid out."""
@@ -3113,7 +3323,7 @@ class TextualTui(App[None]):
     async def _settle_history_page_layout(
         self,
         transcript: Transcript,
-        mounts: tuple[AwaitMount, ...],
+        mounts: tuple[AwaitMount | AwaitRemove, ...],
         generation: int,
         epoch: int,
     ) -> None:
@@ -3236,7 +3446,7 @@ class TextualTui(App[None]):
     async def _continue_oldest_after_mounts(
         self,
         transcript: Transcript,
-        mounts: tuple[AwaitMount, ...],
+        mounts: tuple[AwaitMount | AwaitRemove, ...],
         generation: int,
         epoch: int,
     ) -> None:
@@ -3273,15 +3483,14 @@ class TextualTui(App[None]):
         if transcript is not None and transcript.children:
             self._history_marker = transcript.children[-1]
 
-    def begin_history_prepend(self) -> None:
-        """Capture the viewport before mounting one older transcript page."""
+    def begin_history_prepend(self, *, anchor: Widget | None = None) -> None:
+        """Capture the viewport before replacing a mounted history edge."""
 
         transcript = self._transcript
         if transcript is None or not transcript.children:
             return
-        first_history_entry = next(
-            (child for child in transcript.children if child is not self._history_marker),
-            None,
+        history_anchor = anchor or next(
+            (child for child in transcript.children if child is not self._history_marker), None
         )
         self._prepending_history = True
         self._history_prepend_paint_suppressed = True
@@ -3290,10 +3499,11 @@ class TextualTui(App[None]):
         self._pending_history_navigation = HistoryNavigation()
         self._history_prepend_anchor = _HistoryPrependAnchor(
             transcript=transcript,
-            widget=first_history_entry,
+            widget=history_anchor,
             scroll_y=transcript.scroll_y,
-            widget_y=first_history_entry.region.y if first_history_entry is not None else 0.0,
+            widget_y=history_anchor.virtual_region.y if history_anchor is not None else 0.0,
             following=transcript.is_following,
+            reader_generation=transcript.follow_generation,
             epoch=self._transcript_epoch,
             navigation_generation=self._transcript_navigation_generation,
             navigation=navigation,
@@ -3316,13 +3526,21 @@ class TextualTui(App[None]):
     async def _restore_prepend_viewport_after_mounts(
         self,
         anchor: _HistoryPrependAnchor,
-        mounts: tuple[AwaitMount, ...],
+        mounts: tuple[AwaitMount | AwaitRemove, ...],
     ) -> None:
         try:
             for mounted in mounts:
                 await mounted
         finally:
-            self.call_after_refresh(self._restore_prepend_viewport, anchor)
+            self.call_after_refresh(self._restore_prepend_viewport_after_refresh, anchor)
+
+    def _restore_prepend_viewport_after_refresh(
+        self,
+        anchor: _HistoryPrependAnchor,
+    ) -> None:
+        """Wait through the DOM-prune frame before measuring the surviving anchor."""
+
+        self.call_after_refresh(self._restore_prepend_viewport, anchor)
 
     def _restore_prepend_viewport(
         self,
@@ -3332,12 +3550,16 @@ class TextualTui(App[None]):
         if owns_paint_suppression:
             self._history_prepend_anchor = None
         transcript = anchor.transcript
+        expected_reader_generation = (
+            anchor.navigation.reader_generation
+            if anchor.navigation.reader_generation >= 0
+            else anchor.reader_generation
+        )
         if not (
             anchor.epoch != self._transcript_epoch
             or anchor.navigation_generation != self._transcript_navigation_generation
             or transcript is not self._transcript
-            or transcript.is_following != anchor.following
-            or (not anchor.following and transcript.scroll_y != anchor.scroll_y)
+            or transcript.follow_generation != expected_reader_generation
         ):
             transcript.restore_prepend_viewport(
                 scroll_y=anchor.scroll_y,
@@ -3348,9 +3570,17 @@ class TextualTui(App[None]):
             )
         if owns_paint_suppression:
             # ``restore_prepend_viewport`` schedules a second layout at the corrected
-            # scroll offset. Keep suppressing paints through that pass too; otherwise
-            # the compositor can still emit the newly mounted anchor at its old offset.
-            self.call_after_refresh(self._finish_history_prepend_paint, anchor)
+            # scroll offset. Keep suppressing paints through the following compositor
+            # pass too; DOM pruning may settle one refresh later under load.
+            self.call_after_refresh(self._finish_history_prepend_paint_after_refresh, anchor)
+
+    def _finish_history_prepend_paint_after_refresh(
+        self,
+        anchor: _HistoryPrependAnchor,
+    ) -> None:
+        """Wait one final compositor pass after the corrected scroll layout."""
+
+        self.call_after_refresh(self._finish_history_prepend_paint, anchor)
 
     def _finish_history_prepend_paint(self, anchor: _HistoryPrependAnchor) -> None:
         """Emit the settled history replacement after its corrected layout pass."""

@@ -965,6 +965,70 @@ def start_rpc_messages_command(
             write_event=write_event,
         )
         return None
+    entry_ids_value = command.get("entry_ids", ())
+    if not isinstance(entry_ids_value, (list, tuple)) or any(
+        not isinstance(entry_id, str) or not entry_id for entry_id in entry_ids_value
+    ):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages command field entry_ids must contain non-empty strings",
+            write_event=write_event,
+        )
+        return None
+    entry_ids = tuple(entry_ids_value)
+    if len(entry_ids) > 16:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages command field entry_ids cannot exceed 16 entries",
+            write_event=write_event,
+        )
+        return None
+    if len(set(entry_ids)) != len(entry_ids):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages command field entry_ids must be unique",
+            write_event=write_event,
+        )
+        return None
+    if entry_ids and (before_entry_id is not None or after_entry_id is not None):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages exact entry IDs cannot be combined with page cursors",
+            write_event=write_event,
+        )
+        return None
+    complete_structure = command.get("complete_structure", False)
+    full_content = command.get("full_content", False)
+    if type(complete_structure) is not bool or type(full_content) is not bool:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=(
+                "RPC get_messages complete_structure and full_content fields must be booleans"
+            ),
+            write_event=write_event,
+        )
+        return None
+    if full_content and not entry_ids:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages full content requires exact entry IDs",
+            write_event=write_event,
+        )
+        return None
+    if full_content and len(entry_ids) != 1:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC get_messages full content requires exactly one entry ID",
+            write_event=write_event,
+        )
+        return None
 
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
@@ -976,6 +1040,9 @@ def start_rpc_messages_command(
         limit,
         before_entry_id,
         after_entry_id,
+        entry_ids,
+        complete_structure,
+        full_content,
         command_id,
         cancel_scope,
         send.clone(),
@@ -1498,6 +1565,9 @@ async def run_rpc_messages_command(
     limit: int,
     before_entry_id: str | None,
     after_entry_id: str | None,
+    entry_ids: tuple[str, ...],
+    complete_structure: bool,
+    full_content: bool,
     command_id: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
@@ -1543,6 +1613,9 @@ async def run_rpc_messages_command(
                         limit=limit,
                         before_entry_id=before_entry_id,
                         after_entry_id=after_entry_id,
+                        entry_ids=entry_ids,
+                        complete_structure=complete_structure,
+                        full_content=full_content,
                     )
                 )
 

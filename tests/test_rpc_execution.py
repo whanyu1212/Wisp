@@ -1321,6 +1321,45 @@ def test_executor_messages_reads_forward_after_cursor(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+def test_executor_messages_reads_one_exact_full_content_row(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        exact_content = "x" * 70_000
+        entry = await selected.append_message(Message(role="tool", content=exact_content))
+        fixture.session_state.session = selected
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = await executor.dispatch(
+                {
+                    "id": "detail",
+                    "type": "get_messages",
+                    "entry_ids": [entry.id],
+                    "complete_structure": True,
+                    "full_content": True,
+                },
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert completed.ok is True
+        report = next(
+            event
+            for event in fixture.events
+            if isinstance(event, RpcMessagesReported) and event.command_id == "detail"
+        )
+        assert len(report.messages) == 1
+        assert report.messages[0].entry_id == entry.id
+        assert report.messages[0].content == exact_content
+        assert report.messages[0].content_truncated is False
+
+    anyio.run(scenario)
+
+
 def test_executor_messages_historical_page_refreshes_selected_session_after_external_append(
     tmp_path: Path,
 ) -> None:
@@ -1420,6 +1459,18 @@ def test_executor_messages_reports_validation_and_read_failures(
             {"id": "limit-high", "type": "get_messages", "limit": 501},
             {"id": "session-empty", "type": "get_messages", "session_id": ""},
             {"id": "cursor-container", "type": "get_messages", "before_entry_id": []},
+            {"id": "entry-ids-string", "type": "get_messages", "entry_ids": "entry"},
+            {
+                "id": "entry-ids-duplicate",
+                "type": "get_messages",
+                "entry_ids": ["entry", "entry"],
+            },
+            {"id": "full-without-entry", "type": "get_messages", "full_content": True},
+            {
+                "id": "structure-string",
+                "type": "get_messages",
+                "complete_structure": "yes",
+            },
         ]
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
@@ -1465,6 +1516,26 @@ def test_executor_messages_reports_validation_and_read_failures(
                 "get_messages",
                 False,
                 "RPC get_messages command field before_entry_id must be a non-empty string",
+            ),
+            (
+                "get_messages",
+                False,
+                "RPC get_messages command field entry_ids must contain non-empty strings",
+            ),
+            (
+                "get_messages",
+                False,
+                "RPC get_messages command field entry_ids must be unique",
+            ),
+            (
+                "get_messages",
+                False,
+                "RPC get_messages full content requires exact entry IDs",
+            ),
+            (
+                "get_messages",
+                False,
+                "RPC get_messages complete_structure and full_content fields must be booleans",
             ),
             ("get_messages", False, "Session not found: missing"),
             ("get_messages", False, "Session message cursor not found: missing"),

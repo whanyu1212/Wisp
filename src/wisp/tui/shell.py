@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
@@ -32,6 +32,7 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcMcpStatusReported,
+    RpcMessageSnapshot,
     RpcMessagesReported,
     RpcSessionSelected,
     RpcSessionsReported,
@@ -68,8 +69,10 @@ from wisp.tui.history import (
     TUI_HISTORY_PAGE_LIMIT,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    HistoryHydrationPolicy,
     history_entries_from_rpc_messages,
     history_from_rpc_messages,
+    represented_history_entry_ids,
 )
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
@@ -143,6 +146,9 @@ class TuiController(Protocol):
         limit: int = 200,
         before_entry_id: str | None = None,
         after_entry_id: str | None = None,
+        entry_ids: tuple[str, ...] = (),
+        complete_structure: bool = False,
+        full_content: bool = False,
         allow_during_prompt: bool = False,
         command_id: str | None = None,
     ) -> str: ...
@@ -222,12 +228,70 @@ class _PendingSessionCatalog:
 
 
 @dataclass
+class _PendingHistoryDetail:
+    """One exact persisted-row lookup requested by a mounted history card."""
+
+    entry_id: str
+    session_id: str
+    report: RpcMessagesReported | None = None
+    error: str | None = None
+
+
+@dataclass
+class _CompleteHistoryHydration:
+    """Validated newest-to-oldest RPC pages awaiting one chronological render."""
+
+    expected_session_id: str | None
+    newest_first_pages: list[tuple[RpcMessageSnapshot, ...]] = field(default_factory=list)
+    seen_before_entry_ids: set[str] = field(default_factory=set)
+    seen_entry_ids: set[str] = field(default_factory=set)
+    loaded_message_count: int = 0
+
+    def add(self, report: RpcMessagesReported) -> None:
+        if self.newest_first_pages:
+            if report.session_id != self.expected_session_id:
+                raise ValueError("session history page did not match the active session")
+        else:
+            if (
+                self.expected_session_id is not None
+                and report.session_id != self.expected_session_id
+            ):
+                raise ValueError("session history page did not match the active session")
+            self.expected_session_id = report.session_id
+        cursor = report.next_before_entry_id
+        if cursor is not None and cursor in self.seen_before_entry_ids:
+            raise ValueError("session history pagination repeated an older-page cursor")
+        if cursor is not None:
+            self.seen_before_entry_ids.add(cursor)
+        duplicate_entry_id = next(
+            (
+                message.entry_id
+                for message in report.messages
+                if message.entry_id in self.seen_entry_ids
+            ),
+            None,
+        )
+        if duplicate_entry_id is not None:
+            raise ValueError(
+                f"session history pagination repeated message entry {duplicate_entry_id}"
+            )
+        self.seen_entry_ids.update(message.entry_id for message in report.messages)
+        self.newest_first_pages.append(report.messages)
+        self.loaded_message_count += len(report.messages)
+
+    @property
+    def messages(self) -> tuple[RpcMessageSnapshot, ...]:
+        return tuple(message for page in reversed(self.newest_first_pages) for message in page)
+
+
+@dataclass
 class _PendingSessionSwitch:
     requested_session_id: str
     select_command_id: str
     selected: RpcSessionSelected | None = None
     history_command_id: str | None = None
     history_report: RpcMessagesReported | None = None
+    complete_history: _CompleteHistoryHydration | None = None
 
 
 @dataclass
@@ -321,10 +385,24 @@ class TuiShell:
         self._history_recovery_command_id: str | None = None
         self._history_recovery_report_received = False
         self._ignored_history_page_commands: set[str] = set()
+        self._pending_history_details: dict[str, _PendingHistoryDetail] = {}
+        self._history_detail_commands_by_entry_id: dict[str, str] = {}
+        self._active_history_session_id: str | None = None
+        hydration_policy = getattr(
+            self.renderer,
+            "history_hydration_policy",
+            HistoryHydrationPolicy.LATEST_PAGE,
+        )
+        self._history_hydration_policy = (
+            hydration_policy
+            if isinstance(hydration_policy, HistoryHydrationPolicy)
+            else HistoryHydrationPolicy.LATEST_PAGE
+        )
+        paginating_renderer = callable(
+            getattr(self.renderer, "set_history_page_request_hook", None)
+        )
         self._history_message_limit = (
-            TUI_HISTORY_PAGE_LIMIT
-            if callable(getattr(self.renderer, "set_history_page_request_hook", None))
-            else TUI_HISTORY_MESSAGE_LIMIT
+            TUI_HISTORY_PAGE_LIMIT if paginating_renderer else TUI_HISTORY_MESSAGE_LIMIT
         )
         self._call_renderer_optional(
             "set_history_page_request_hook",
@@ -337,6 +415,10 @@ class TuiShell:
         self._call_renderer_optional(
             "set_history_newer_page_request_hook",
             self._request_newer_history_page,
+        )
+        self._call_renderer_optional(
+            "set_history_detail_request_hook",
+            self._request_history_detail,
         )
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Overrides ~/.wisp for model-selection persistence in tests; None in
@@ -511,17 +593,27 @@ class TuiShell:
         self,
         receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
     ) -> bool:
+        return await self._hydrate_session_history_pages(receive)
+
+    async def _hydrate_session_history_pages(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
         command_id = await self._request_session_history()
         if command_id is None:
             return False
+        report: RpcMessagesReported | None = None
         rendered = False
         while True:
             signal = await receive.receive()
             if isinstance(signal, _RpcEvent):
                 event = signal.event
                 if isinstance(event, RpcMessagesReported) and event.command_id == command_id:
+                    if report is not None:
+                        continue
+                    report = event
                     if not rendered:
-                        self._render_history_entries(
+                        await self._render_history_entries(
                             history_entries_from_rpc_messages(event.messages),
                             text_fallback=history_from_rpc_messages(event.messages),
                         )
@@ -532,6 +624,8 @@ class TuiShell:
                 if should_exit:
                     return True
                 if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    if not event.ok or report is None:
+                        return False
                     return False
                 continue
             if isinstance(signal, _RpcEventsClosed):
@@ -638,19 +732,37 @@ class TuiShell:
             return
         cast(Callable[[tuple[HistoricalTranscriptMessage, ...]], None], render_history)(messages)
 
-    def _render_history_entries(
+    async def _render_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
         *,
-        text_fallback: tuple[HistoricalTranscriptMessage, ...],
+        text_fallback: tuple[HistoricalTranscriptMessage, ...] | None = None,
+        session_label: str | None = None,
+        complete: bool = False,
     ) -> None:
+        hydrate_entries = getattr(self.renderer, "hydrate_history_entries", None)
+        if complete and callable(hydrate_entries):
+            await cast(Callable[..., Awaitable[None]], hydrate_entries)(
+                entries,
+                session_label=session_label,
+            )
+            return
+        if session_label is not None:
+            self._call_renderer_optional(
+                "replace_history_entries",
+                entries,
+                session_label=session_label,
+            )
+            return
         render_entries = getattr(self.renderer, "render_history_entries", None)
         if callable(render_entries):
             cast(Callable[[tuple[HistoricalTranscriptEntry, ...]], None], render_entries)(entries)
             return
-        self._render_history(text_fallback)
+        if text_fallback is not None:
+            self._render_history(text_fallback)
 
     def _activate_history_pagination(self, report: RpcMessagesReported) -> None:
+        self._active_history_session_id = report.session_id
         self._history_pagination = _HistoryPagination(
             session_id=report.session_id,
             next_before_entry_id=report.next_before_entry_id,
@@ -676,6 +788,55 @@ class TuiShell:
         self._history_recovery_report_received = False
         self._history_pagination = None
         self._call_renderer_optional("history_page_loaded", has_more=False)
+
+    def _clear_history_detail_requests(self, reason: str) -> None:
+        """Invalidate exact-row requests whose mounted cards are being replaced."""
+
+        for command_id, pending in self._pending_history_details.items():
+            self._ignored_history_page_commands.add(command_id)
+            self._call_renderer_optional(
+                "history_detail_failed",
+                pending.entry_id,
+                reason,
+            )
+        self._pending_history_details.clear()
+        self._history_detail_commands_by_entry_id.clear()
+
+    async def _request_history_detail(self, entry_id: str) -> None:
+        """Load one exact active-path row after the reader expands a process update."""
+
+        session_id = self._active_history_session_id
+        if session_id is None:
+            self._call_renderer_optional(
+                "history_detail_failed",
+                entry_id,
+                "No resumed session is active.",
+            )
+            return
+        if entry_id in self._history_detail_commands_by_entry_id:
+            return
+        command_id = f"history-detail-{uuid4().hex}"
+        pending = _PendingHistoryDetail(entry_id=entry_id, session_id=session_id)
+        self._pending_history_details[command_id] = pending
+        self._history_detail_commands_by_entry_id[entry_id] = command_id
+        try:
+            await self.controller.get_messages(
+                session_id=session_id,
+                limit=1,
+                entry_ids=(entry_id,),
+                complete_structure=True,
+                full_content=True,
+                allow_during_prompt=True,
+                command_id=command_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - card-local lookup remains retryable
+            self._pending_history_details.pop(command_id, None)
+            self._history_detail_commands_by_entry_id.pop(entry_id, None)
+            self._call_renderer_optional(
+                "history_detail_failed",
+                entry_id,
+                f"Failed to load persisted output: {exc}",
+            )
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
         if isinstance(signal, _UpdateCheckCompleted):
@@ -934,6 +1095,7 @@ class TuiShell:
             return
         if not args:
             self._call_renderer_optional("session_catalog_started")
+            await self._wait_for_session_operation_paint()
             try:
                 command_id = await self.controller.get_sessions(limit=200)
             except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
@@ -948,11 +1110,14 @@ class TuiShell:
         if not session_id:
             self.renderer.command_error("Usage: /resume [session-id]")
             return
+        self._clear_history_detail_requests("Session changed before output loaded.")
+        self._active_history_session_id = None
         # Guard the composer before awaiting a potentially backpressured
         # transport. Picker selections may already have entered this lifecycle;
         # renderer implementations intentionally make the repeated start
         # idempotent.
         self._call_renderer_optional("session_switch_started", session_id)
+        await self._wait_for_session_operation_paint()
         try:
             command_id = await self.controller.select_session(session_id)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
@@ -983,6 +1148,13 @@ class TuiShell:
         method = getattr(self.renderer, method_name, None)
         if callable(method):
             method(*args, **kwargs)
+
+    async def _wait_for_session_operation_paint(self) -> None:
+        """Let Textual reveal session-operation chrome before cold RPC work starts."""
+
+        wait_for_paint = getattr(self.renderer, "wait_for_session_operation_paint", None)
+        if callable(wait_for_paint):
+            await cast(Callable[[], Awaitable[None]], wait_for_paint)()
 
     def _end_token_stream(self, completed_content: str | None = None) -> None:
         """Finalize streaming while preserving the original renderer contract."""
@@ -1678,6 +1850,27 @@ class TuiShell:
             self._ignored_history_page_commands.discard(event.command_id)
             return False
 
+        if isinstance(event, RpcMessagesReported):
+            pending_detail_report = self._pending_history_details.get(event.command_id)
+            if pending_detail_report is not None:
+                if pending_detail_report.report is not None:
+                    pending_detail_report.error = (
+                        "persisted output lookup returned more than one result"
+                    )
+                elif event.session_id != pending_detail_report.session_id:
+                    pending_detail_report.error = (
+                        "persisted output did not match the active session"
+                    )
+                elif len(event.messages) != 1:
+                    pending_detail_report.error = (
+                        "persisted output lookup did not return exactly one row"
+                    )
+                elif event.messages[0].entry_id != pending_detail_report.entry_id:
+                    pending_detail_report.error = "persisted output lookup returned the wrong row"
+                else:
+                    pending_detail_report.report = event
+                return False
+
         catalog = self.pending_session_catalog
         if (
             isinstance(event, RpcSessionsReported)
@@ -1700,7 +1893,20 @@ class TuiShell:
                 isinstance(event, RpcMessagesReported)
                 and event.command_id == session_switch.history_command_id
             ):
+                if session_switch.history_report is not None:
+                    return False
                 session_switch.history_report = event
+                hydration = session_switch.complete_history
+                if hydration is not None:
+                    try:
+                        hydration.add(event)
+                    except ValueError as exc:
+                        self._fail_committed_session_hydration(str(exc))
+                        return False
+                    self._call_renderer_optional(
+                        "history_hydration_progress",
+                        f"Loading session history… {hydration.loaded_message_count:,} messages",
+                    )
                 return False
 
         if (
@@ -1899,6 +2105,33 @@ class TuiShell:
                 self._ignored_session_stats_command_ids.discard(event.command_id)
                 return False
             self._pending_session_stats_command_ids.discard(event.command_id)
+            pending_detail = self._pending_history_details.pop(event.command_id, None)
+            if pending_detail is not None:
+                self._history_detail_commands_by_entry_id.pop(pending_detail.entry_id, None)
+                report = pending_detail.report
+                if (
+                    event.ok
+                    and pending_detail.error is None
+                    and report is not None
+                    and self._active_history_session_id == pending_detail.session_id
+                ):
+                    self._call_renderer_optional(
+                        "history_detail_loaded",
+                        pending_detail.entry_id,
+                        report.messages[0].content,
+                    )
+                else:
+                    error = (
+                        pending_detail.error
+                        or event.error
+                        or "persisted output lookup completed without a result"
+                    )
+                    self._call_renderer_optional(
+                        "history_detail_failed",
+                        pending_detail.entry_id,
+                        error,
+                    )
+                return False
             if event.command_id == self._history_recovery_command_id:
                 received_report = self._history_recovery_report_received
                 self._history_recovery_command_id = None
@@ -1965,6 +2198,8 @@ class TuiShell:
             self.renderer.command_error(event.error or "new session failed")
             self._sync_view()
             return
+        self._clear_history_detail_requests("Session changed before output loaded.")
+        self._active_history_session_id = None
         self._clear_history_pagination()
         self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
         self._pending_session_stats_command_ids.clear()
@@ -2016,9 +2251,18 @@ class TuiShell:
                     "session selection completed without a result"
                 )
                 return
+            if self._history_hydration_policy is HistoryHydrationPolicy.COMPLETE:
+                pending.complete_history = _CompleteHistoryHydration(
+                    expected_session_id=pending.selected.session_id
+                )
             try:
                 pending.history_command_id = await self.controller.get_messages(
-                    limit=self._history_message_limit
+                    limit=(
+                        TUI_HISTORY_MESSAGE_LIMIT
+                        if pending.complete_history is not None
+                        else self._history_message_limit
+                    ),
+                    complete_structure=pending.complete_history is not None,
                 )
             except Exception as exc:  # noqa: BLE001 - selection already committed
                 self._fail_committed_session_hydration(
@@ -2045,14 +2289,53 @@ class TuiShell:
             )
             return
 
+        hydration = pending.complete_history
+        if hydration is not None and pending.history_report.next_before_entry_id is not None:
+            try:
+                pending.history_command_id = await self.controller.get_messages(
+                    session_id=selected.session_id,
+                    limit=TUI_HISTORY_MESSAGE_LIMIT,
+                    before_entry_id=pending.history_report.next_before_entry_id,
+                    complete_structure=True,
+                    allow_during_prompt=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - selection already committed
+                self._fail_committed_session_hydration(
+                    f"failed to request older selected-session history: {exc}"
+                )
+                return
+            pending.history_report = None
+            self._update_view(status="loading session history")
+            return
+
         label = selected.session_name or _compact_session_path(selected.session_path)
-        entries = history_entries_from_rpc_messages(pending.history_report.messages)
-        self._call_renderer_optional(
-            "replace_history_entries",
-            entries,
-            session_label=label,
-        )
-        self._activate_history_pagination(pending.history_report)
+        messages = hydration.messages if hydration is not None else pending.history_report.messages
+        entries = history_entries_from_rpc_messages(messages)
+        if hydration is not None:
+            expected_entry_ids = frozenset(message.entry_id for message in messages)
+            missing_entry_ids = expected_entry_ids - represented_history_entry_ids(entries)
+            if missing_entry_ids:
+                self._fail_committed_session_hydration(
+                    f"history conversion omitted {len(missing_entry_ids)} persisted rows"
+                )
+                return
+        try:
+            await self._render_history_entries(
+                entries,
+                text_fallback=(
+                    None if hydration is not None else history_from_rpc_messages(messages)
+                ),
+                session_label=label,
+                complete=hydration is not None,
+            )
+        except Exception as exc:  # noqa: BLE001 - selection already committed
+            self._fail_committed_session_hydration(
+                f"failed to mount selected session history: {exc}"
+            )
+            return
+        self._active_history_session_id = selected.session_id
+        if hydration is None:
+            self._activate_history_pagination(pending.history_report)
         self.view.context = None
         self.view.cost = None
         self._update_view(last_session=label)
@@ -2060,6 +2343,8 @@ class TuiShell:
         await self._request_session_stats()
 
     def _fail_committed_session_hydration(self, detail: str) -> None:
+        self._clear_history_detail_requests("Session history could not be loaded.")
+        self._active_history_session_id = None
         self._clear_history_pagination()
         pending = self.pending_session_switch
         selected = pending.selected if pending is not None else None

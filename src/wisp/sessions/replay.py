@@ -245,7 +245,10 @@ def _path_to_leaf(
 def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
     """Apply provider-context and compaction semantics to one validated path."""
 
-    rows: tuple[SessionContextRow, ...] = ()
+    # Accumulate in a list: rebuilding a tuple per message made replaying a
+    # resumed session quadratic in its length, which dominated startup on long
+    # transcripts. Compaction boundaries are rare, so they can still rebuild.
+    rows: list[SessionContextRow] = []
     known_context_entry_ids: set[str] = set()
 
     for entry in entries:
@@ -254,12 +257,12 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
         if isinstance(entry, MessageSessionEntry):
             if entry.message.role == "system":
                 continue
-            rows = (*rows, SessionContextRow(entry_id=entry.id, message=entry.message))
+            rows.append(SessionContextRow(entry_id=entry.id, message=entry.message))
             known_context_entry_ids.add(entry.id)
             continue
 
         assert isinstance(entry, CompactionSessionEntry)
-        rows = _ordered_context_rows(rows)
+        rows = list(_ordered_context_rows(tuple(rows)))
         replaced_entry_ids = entry.compaction.replaced_entry_ids
         if len(set(replaced_entry_ids)) != len(replaced_entry_ids):
             raise SessionReplayError(f"Compaction {entry.id} contains duplicate replaced entry ids")
@@ -299,13 +302,13 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
             content=f"{HISTORICAL_CONTEXT_SUMMARY_LABEL}\n\n{entry.compaction.summary}",
             created_at=entry.created_at,
         )
-        rows = (
+        rows = [
             SessionContextRow(entry_id=entry.id, message=summary, source_kind="compaction"),
             *retained_rows,
-        )
+        ]
         known_context_entry_ids.add(entry.id)
 
-    return SessionReplay(rows=_ordered_context_rows(rows))
+    return SessionReplay(rows=_ordered_context_rows(tuple(rows)))
 
 
 def _ordered_context_rows(

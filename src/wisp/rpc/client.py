@@ -142,6 +142,9 @@ class RpcController:
         limit: int = 200,
         before_entry_id: str | None = None,
         after_entry_id: str | None = None,
+        entry_ids: tuple[str, ...] = (),
+        complete_structure: bool = False,
+        full_content: bool = False,
         allow_during_prompt: bool = False,
         command_id: str | None = None,
     ) -> str:
@@ -155,6 +158,9 @@ class RpcController:
                 limit=limit,
                 before_entry_id=before_entry_id,
                 after_entry_id=after_entry_id,
+                entry_ids=entry_ids or None,
+                complete_structure=True if complete_structure else None,
+                full_content=True if full_content else None,
                 allow_during_prompt=True if allow_during_prompt else None,
             )
         )
