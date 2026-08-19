@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.tui_support import *
-from wisp.tui.input_types import TuiSubmission
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 
 
 def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
@@ -29,13 +29,33 @@ def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
     assert app.invalidations == 2
 
 
-def test_live_fullscreen_tui_registers_transcript_scroll_keybindings() -> None:
+def test_live_fullscreen_tui_registers_transcript_and_queue_edit_keybindings() -> None:
     from prompt_toolkit.keys import Keys
 
     renderer = LiveFullscreenTui(run_application=False)
+    bindings = {binding.keys for binding in renderer._key_bindings.bindings}
 
-    assert (Keys.PageUp,) in {binding.keys for binding in renderer._key_bindings.bindings}
-    assert (Keys.PageDown,) in {binding.keys for binding in renderer._key_bindings.bindings}
+    assert (Keys.PageUp,) in bindings
+    assert (Keys.PageDown,) in bindings
+    assert (Keys.Escape, Keys.Up) in bindings
+
+
+def test_live_fullscreen_tui_requests_queued_edit_only_when_pending() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    calls: list[None] = []
+    renderer.set_edit_queued_submission_hook(lambda: calls.append(None))
+
+    renderer._request_edit_latest_queued_submission()
+    renderer.state.pending_submissions = (
+        TuiSubmission(
+            id=new_submission_id(),
+            content="queued",
+            display="queued",
+        ).pending_view(),
+    )
+    renderer._request_edit_latest_queued_submission()
+
+    assert calls == [None]
 
 
 def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:

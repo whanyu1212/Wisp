@@ -478,6 +478,7 @@ class TextualTui(App[None]):
         Binding("right", "file_tree_move(True)", "Expand directory", priority=True, show=False),
         Binding("tab", "menu_complete", "Complete / switch picker", priority=True, show=False),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
+        Binding("alt+up", "edit_latest_queued_submission", "Edit queued", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+t", "toggle_theme", "Light/dark", priority=True, show=False),
         Binding("ctrl+c", "interrupt", "Quit", priority=True),
@@ -562,6 +563,7 @@ class TextualTui(App[None]):
         self._update_action_hook: (
             Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]] | None
         ) = None
+        self._edit_queued_submission_hook: Callable[[], None] | None = None
         self._pending_update: UpdateAvailable | None = None
         self._visible_input_mode = "idle"
         self._history_window_older_hook: Callable[[], bool] | None = None
@@ -827,16 +829,6 @@ class TextualTui(App[None]):
         else:
             self.submit_command_line(spec.command)
         return True
-
-    def clear_compact_echoes(self) -> None:
-        """Drop echoes for queued prompts the shell actually abandoned."""
-
-        self._input_controller.clear_compact_echoes()
-
-    def compact_echo_for(self, prompt: str) -> str:
-        """Return the compact transcript echo for one submitted prompt."""
-
-        return self._input_controller.compact_echo_for(prompt)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline menus in sync with the input WITHOUT ever touching the
@@ -1758,6 +1750,15 @@ class TextualTui(App[None]):
 
         self._input_controller.set_submit_hook(on_submit)
 
+    def set_edit_queued_submission_hook(self, hook: Callable[[], None]) -> None:
+        """Register the shell-owned queued-prompt edit action."""
+
+        self._edit_queued_submission_hook = hook
+
+    def action_edit_latest_queued_submission(self) -> None:
+        if self._shell_pending_submissions and self._edit_queued_submission_hook is not None:
+            self._edit_queued_submission_hook()
+
     async def read_prompt(self, prompt: str) -> str | TuiSubmission:
         self.set_input_hint(prompt)
         return await self._input_controller.receive()
@@ -2507,7 +2508,6 @@ class TextualTui(App[None]):
         self._history_layout_generation += 1
         self._stream.discard()
         self._transcript_controller.reset()
-        self._input_controller.clear_compact_echoes()
         if self._transcript is not None:
             self._transcript.clear_messages()
 

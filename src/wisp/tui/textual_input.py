@@ -1,8 +1,8 @@
-"""Input queue, prompt recall, and compact-echo state for the Textual frontend.
+"""Input queue and prompt-recall state for the Textual frontend.
 
 Import direction is intentionally one-way::
 
-    textual_app -> textual_input -> prompt_history / compact_echo
+    textual_app -> textual_input -> prompt_history
 
 The controller owns process-local input state only. It does not import Textual
 widgets, the shell, RPC, providers, sessions, or approval policy. The app remains
@@ -18,7 +18,6 @@ from typing import Protocol
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream
 
-from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.input_types import TuiSubmission, new_submission_id
 from wisp.tui.prompt_history import PromptHistory, PromptHistoryEntry
 
@@ -39,7 +38,7 @@ class TextualInputSurface(Protocol):
 
 
 class TextualInputController:
-    """Own process-local prompt queue, recall history, and compact echoes.
+    """Own the process-local prompt queue and recall history.
 
     The controller has no knowledge of shell input modes or overlay policy. A
     caller chooses whether a submission clears the editor: ordinary typed and
@@ -53,7 +52,6 @@ class TextualInputController:
         *,
         queue_capacity: int = _INPUT_BUFFER_CAPACITY,
         prompt_history: PromptHistory | None = None,
-        compact_echoes: CompactEchoLog | None = None,
     ) -> None:
         self._surface = surface
         self._send, self._receive = anyio.create_memory_object_stream[
@@ -61,7 +59,6 @@ class TextualInputController:
         ](queue_capacity)
         self._on_submit: Callable[[], None] | None = None
         self._prompt_history = prompt_history or PromptHistory()
-        self._compact_echoes = compact_echoes or CompactEchoLog()
 
     @property
     def receive_stream(self) -> MemoryObjectReceiveStream[str | TuiSubmission | BaseException]:
@@ -74,24 +71,6 @@ class TextualInputController:
         """Return process-local accepted prompts, newest first."""
 
         return self._prompt_history.entries
-
-    @property
-    def compact_echo_key_count(self) -> int:
-        """Return the number of prompts with pending compact echoes."""
-
-        return self._compact_echoes.key_count
-
-    @property
-    def pending_compact_echo_count(self) -> int:
-        """Return the bounded total number of pending compact echoes."""
-
-        return self._compact_echoes.pending_count
-
-    @property
-    def compact_echo_order_length(self) -> int:
-        """Return compact-echo insertion markers retained for bounded eviction."""
-
-        return self._compact_echoes.order_length
 
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Set the callback run immediately before each queued input line."""
@@ -149,21 +128,6 @@ class TextualInputController:
         if clear_editor:
             self._surface.clear_prompt_editor()
         return True
-
-    def register_compact_echo(self, prompt: str, display: str) -> None:
-        """Associate one submitted full prompt with its compact transcript echo."""
-
-        self._compact_echoes.register(prompt, display)
-
-    def compact_echo_for(self, prompt: str) -> str:
-        """Return and consume the compact echo for ``prompt`` when one exists."""
-
-        return self._compact_echoes.take(prompt)
-
-    def clear_compact_echoes(self) -> None:
-        """Drop echoes for queued prompts the shell definitively abandoned."""
-
-        self._compact_echoes.clear()
 
     def record_prompt(self, prompt: str) -> None:
         """Record one shell-accepted prompt for process-local recall."""

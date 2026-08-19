@@ -47,6 +47,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     HistoryHydrationPolicy,
 )
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.state import (
     TuiCancelRequested,
     TuiExitReason,
@@ -4496,6 +4497,40 @@ def test_tui_shell_blocks_session_changes_while_follow_ups_are_queued() -> None:
         ]
 
     anyio.run(run)
+
+
+def test_tui_shell_edits_only_latest_queued_prompt_after_successful_restore() -> None:
+    class RestoringRenderer(FullscreenTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0], clear_screen=False)
+            self.restored: tuple[TuiSubmission, ...] = ()
+
+        def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+            self.restored = submissions
+            return True
+
+    renderer = RestoringRenderer()
+    shell = TuiShell(ScriptedController(), renderer=renderer)
+    shell.state.queued_prompts.extend(["first queued", "second queued"])
+    original_ids = [submission.id for submission in shell._queued_submissions()]
+
+    shell._edit_latest_queued_submission()
+
+    assert [submission.content for submission in shell._queued_submissions()] == ["first queued"]
+    assert [submission.content for submission in renderer.restored] == ["second queued"]
+    assert renderer.restored[0].id == original_ids[1]
+
+
+def test_tui_shell_keeps_latest_queued_prompt_when_restore_is_unsupported() -> None:
+    shell = TuiShell(ScriptedController())
+    shell.state.queued_prompts.append("keep queued")
+    original = shell._queued_submissions()[0]
+
+    shell._edit_latest_queued_submission()
+
+    retained = shell._queued_submissions()
+    assert retained == (original,)
+    assert retained[0] is original
 
 
 def test_tui_shell_queues_follow_up_while_running() -> None:

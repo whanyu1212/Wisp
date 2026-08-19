@@ -370,24 +370,10 @@ def test_tui_shell_escape_denies_pending_approval_safely() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_interrupt_during_approval_preserves_queued_prompts_and_echoes() -> None:
-    # Regression (Codex P2): Ctrl+C during a pending approval DENIES that decision
-    # but does NOT drop queued follow-ups, so the renderer's queued_prompts_cleared
-    # hook (which reclaims pending large-paste echoes) must NOT fire — otherwise an
-    # already-queued large-paste follow-up loses its marker and echoes the blob.
+def test_tui_shell_interrupt_during_approval_preserves_queued_prompts() -> None:
     async def run() -> None:
         controller = ScriptedController()
-
-        class SpyRenderer(FullscreenTuiRenderer):
-            def __init__(self) -> None:
-                super().__init__(_console()[0], clear_screen=False)
-                self.cleared_calls = 0
-
-            def queued_prompts_cleared(self) -> None:
-                self.cleared_calls += 1
-
-        renderer = SpyRenderer()
-        shell = TuiShell(controller, renderer=renderer)
+        shell = TuiShell(controller)
         shell.state.current_command_id = "prompt-1"
         shell.state.status = TuiStatus.waiting_for_approval
         shell.state.pending_approval = ToolApprovalRequested(
@@ -404,11 +390,9 @@ def test_tui_shell_interrupt_during_approval_preserves_queued_prompts_and_echoes
 
         assert should_exit is False
         assert controller.approvals == [("call-1", False, "Denied from TUI: interrupted")]
-        # The queued follow-up survives, and the echo-reclaim hook never fired.
         assert [submission.content for submission in shell._queued_submissions()] == [
             "already-queued follow-up"
         ]
-        assert renderer.cleared_calls == 0
 
     anyio.run(run)
 

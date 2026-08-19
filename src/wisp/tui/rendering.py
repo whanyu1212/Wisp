@@ -108,8 +108,6 @@ class TuiRenderer(Protocol):
 
     def prompt_history_request(self) -> None: ...
 
-    def queued_prompts_cleared(self) -> None: ...
-
     def running(self) -> None: ...
 
     def queued_follow_up(self, count: int) -> None: ...
@@ -311,10 +309,6 @@ class LineTuiRenderer:
             highlight=False,
         )
         self.render_history_entries(entries)
-
-    def queued_prompts_cleared(self) -> None:
-        # No large-paste compact-echo cache in the text renderer; nothing to drop.
-        pass
 
     def running(self) -> None:
         self.console.print("[dim]running...[/dim]")
@@ -717,10 +711,6 @@ class FullscreenTuiRenderer:
         if not entries:
             self._refresh()
 
-    def queued_prompts_cleared(self) -> None:
-        # No large-paste compact-echo cache in the text renderer; nothing to drop.
-        pass
-
     def running(self) -> None:
         self._refresh()
 
@@ -1090,6 +1080,7 @@ class FullscreenTuiRenderer:
             text.append("\n\nQueued follow-ups", style="bold dim")
             for submission in self.state.pending_submissions:
                 text.append(f"\n↳ {submission.display}", style="dim italic")
+            text.append("\nAlt+Up edit last queued message", style="dim")
         return text
 
     def _transcript_title(self) -> str:

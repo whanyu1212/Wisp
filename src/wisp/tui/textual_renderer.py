@@ -155,6 +155,9 @@ class TextualTuiRenderer:
         if snapshot.input_mode not in {"approval", "trust"}:
             self.app.hide_decision()
 
+    def set_edit_queued_submission_hook(self, hook: Callable[[], None]) -> None:
+        self.app.set_edit_queued_submission_hook(hook)
+
     def project_auth_path_changed(self, auth_path: Path) -> None:
         """Re-protect and re-index after a trusted project moved the credential file.
 
@@ -331,7 +334,7 @@ class TextualTuiRenderer:
             display = prompt.display
         else:
             content = prompt
-            display = self.app.compact_echo_for(prompt)
+            display = prompt
         widget = self.app.write_user(display)
         self._prompt_widgets.append((content, widget))
         del self._prompt_widgets[:-100]
@@ -514,11 +517,6 @@ class TextualTuiRenderer:
         self._process_lifecycles.clear()
         self._process_started.clear()
         self._denied_process_calls.clear()
-
-    def queued_prompts_cleared(self) -> None:
-        # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
-        # so their pending compact echoes will never be consumed — reclaim them.
-        self.app.clear_compact_echoes()
 
     def running(self) -> None:
         self._begin_progress()

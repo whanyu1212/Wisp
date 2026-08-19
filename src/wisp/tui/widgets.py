@@ -3573,6 +3573,7 @@ class PendingInputPreview(Static):
             )
             if len(display_lines) > 3:
                 lines.append("  …")
+        lines.append("Alt+Up edit last queued message")
         self.update("\n".join(lines))
 
 

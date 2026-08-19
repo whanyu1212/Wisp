@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 import anyio
 import pytest
 
-from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.input_types import TuiSubmission
 from wisp.tui.textual_input import TextualInputController
 
@@ -110,20 +109,9 @@ def test_cancel_signal_can_preserve_editor_after_successful_queueing() -> None:
     anyio.run(receive)
 
 
-def test_compact_echoes_and_prompt_history_have_one_controller_owner() -> None:
+def test_prompt_history_remains_owned_by_input_controller() -> None:
     surface = _Surface()
-    controller = TextualInputController(surface, compact_echoes=CompactEchoLog(max_pending=2))
-
-    controller.register_compact_echo("same", "first marker")
-    controller.register_compact_echo("same", "second marker")
-    controller.register_compact_echo("new", "new marker")
-
-    assert controller.pending_compact_echo_count == 2
-    assert controller.compact_echo_order_length == 2
-    assert controller.compact_echo_for("same") == "second marker"  # oldest was evicted
-    assert controller.compact_echo_for("new") == "new marker"
-    controller.clear_compact_echoes()
-    assert controller.compact_echo_key_count == 0
+    controller = TextualInputController(surface)
 
     controller.record_prompt("first accepted")
     controller.record_prompt("second accepted")

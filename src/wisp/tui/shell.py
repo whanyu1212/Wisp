@@ -91,6 +91,7 @@ from wisp.tui.state import (
     TuiStatus,
     TuiViewState,
     _coerce_input_mode,
+    _EditLatestQueuedSubmission,
     _input_mode_for_status,
     _InputCancelled,
     _InputClosed,
@@ -457,6 +458,10 @@ class TuiShell:
         self._call_renderer_optional(
             "set_update_action_hook",
             self._handle_update_prompt_action,
+        )
+        self._call_renderer_optional(
+            "set_edit_queued_submission_hook",
+            self._request_edit_latest_queued_submission,
         )
 
     async def run(self) -> TuiExitReason:
@@ -873,6 +878,9 @@ class TuiShell:
             if restarting:
                 self._exit_reason = TuiExitReason.restart_requested
             return await self._request_shutdown()
+        if isinstance(signal, _EditLatestQueuedSubmission):
+            self._edit_latest_queued_submission()
+            return False
         if isinstance(signal, _InputLine):
             return await self._handle_input_line(signal)
         if isinstance(signal, _InputClosed):
@@ -886,6 +894,27 @@ class TuiShell:
         if isinstance(signal, _RpcEvent):
             return await self._handle_rpc_event(signal.event)
         return self._handle_rpc_closed(signal)
+
+    def _request_edit_latest_queued_submission(self) -> None:
+        send = self._signal_send
+        if send is None:
+            return
+        try:
+            send.send_nowait(_EditLatestQueuedSubmission())
+        except anyio.WouldBlock:
+            self.renderer.command_error("input buffer full; queued prompt edit ignored")
+
+    def _edit_latest_queued_submission(self) -> None:
+        submissions = self._queued_submissions()
+        if not submissions:
+            return
+        latest = submissions[-1]
+        restore_submissions = getattr(self.renderer, "restore_submissions", None)
+        if not callable(restore_submissions) or not restore_submissions((latest,)):
+            self.renderer.command_error("This interface cannot edit queued prompts.")
+            return
+        self.state.queued_prompts.pop()
+        self._publish_pending_submissions()
 
     def _submission(self, value: str | TuiSubmission) -> TuiSubmission:
         if isinstance(value, TuiSubmission):
@@ -919,7 +948,6 @@ class TuiShell:
             for submission in submissions:
                 self.renderer.notice(f"unsent follow-up: {submission.display}")
         self._publish_pending_submissions()
-        self.renderer.queued_prompts_cleared()
 
     def _report_unsent_queued_prompts(self) -> None:
         submissions = self._queued_submissions()
@@ -929,7 +957,6 @@ class TuiShell:
         for submission in submissions:
             self.renderer.notice(f"unsent follow-up: {submission.display}")
         self._publish_pending_submissions()
-        self.renderer.queued_prompts_cleared()
 
     def _queue_prompt(self, prompt: TuiSubmission) -> None:
         """Retain and visibly queue one accepted follow-up through a single seam."""

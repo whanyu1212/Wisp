@@ -84,6 +84,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._buffered_submissions: dict[int, TuiSubmission] = {}
         self._shell_pending_submissions: tuple[PendingSubmissionView, ...] = ()
         self._last_buffer_text = ""
+        self._edit_queued_submission_hook: Callable[[], None] | None = None
         self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
 
@@ -153,6 +154,13 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._visible_input_mode = snapshot.input_mode
         if not self._buffer.text:
             self._buffer_input_mode = self._visible_input_mode
+
+    def set_edit_queued_submission_hook(self, hook: Callable[[], None]) -> None:
+        self._edit_queued_submission_hook = hook
+
+    def _request_edit_latest_queued_submission(self) -> None:
+        if self.state.pending_submissions and self._edit_queued_submission_hook is not None:
+            self._edit_queued_submission_hook()
 
     def consume_submitted_input_mode(self, fallback: str) -> str:
         """Return and clear the mode captured when the current line was accepted."""
@@ -305,6 +313,11 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         def _toggle_agent_mode(event: KeyPressEvent) -> None:
             command = "/build" if self.state.mode == "plan" else "/plan"
             self._submit_synthetic_input(command)
+            event.app.invalidate()
+
+        @bindings.add("escape", "up")
+        def _edit_latest_queued_submission(event: KeyPressEvent) -> None:
+            self._request_edit_latest_queued_submission()
             event.app.invalidate()
 
         @bindings.add(Keys.PageUp)

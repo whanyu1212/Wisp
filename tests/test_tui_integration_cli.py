@@ -9573,6 +9573,64 @@ def test_textual_restore_preserves_large_payload_before_newer_draft() -> None:
     assert restored_text == f"{'restored payload\n' * 300}\nnewer draft"
 
 
+def test_textual_alt_up_edits_latest_queued_prompt_and_resubmits_with_fresh_identity() -> None:
+    async def scenario() -> tuple[str, str, list[str], tuple[int, int]]:
+        app_instance, renderer = create_textual_tui()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        shell.state.status = TuiStatus.running
+
+        async with app_instance.run_test() as pilot:
+            first = TuiSubmission(
+                id=new_submission_id(),
+                content="first queued",
+                display="first queued",
+            )
+            second = TuiSubmission(
+                id=new_submission_id(),
+                content="second queued",
+                display="second queued",
+            )
+            shell._queue_prompt(first)
+            shell._queue_prompt(second)
+            app_instance.set_edit_queued_submission_hook(shell._edit_latest_queued_submission)
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "newer draft"
+
+            await pilot.press("alt+up")
+            await pilot.pause()
+            restored = input_widget.text_for_submission()
+            pending = app_instance.query_one("#pending-input", Static).render().plain
+            remaining = [submission.content for submission in shell._queued_submissions()]
+
+            await pilot.press("enter")
+            await pilot.pause()
+            resubmitted = await app_instance._input_controller.receive_stream.receive()
+            assert isinstance(resubmitted, TuiSubmission)
+            return restored, pending, remaining, (int(second.id), int(resubmitted.id))
+
+    restored, pending, remaining, identities = anyio.run(scenario)
+    assert restored == "second queued\nnewer draft"
+    assert "first queued" in pending
+    assert "second queued" not in pending
+    assert remaining == ["first queued"]
+    assert identities[0] != identities[1]
+
+
+def test_textual_alt_up_without_queued_prompt_leaves_draft_unchanged() -> None:
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "current draft"
+            await pilot.press("alt+up")
+            await pilot.pause()
+            return input_widget.value
+
+    assert anyio.run(scenario) == "current draft"
+
+
 def test_textual_queued_prompt_stays_visible_until_shell_starts_it() -> None:
     async def scenario() -> tuple[str, str, list[str], list[str]]:
         app_instance, renderer = create_textual_tui()

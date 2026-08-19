@@ -192,6 +192,11 @@ class _InputLine:
 
 
 @dataclass(frozen=True)
+class _EditLatestQueuedSubmission:
+    """Request that the shell restore its newest queued prompt for editing."""
+
+
+@dataclass(frozen=True)
 class _InputClosed:
     mode: _InputMode
 
@@ -253,7 +258,8 @@ class _UpdateOperationFinished:
 
 
 type _TuiSignal = (
-    _InputLine
+    _EditLatestQueuedSubmission
+    | _InputLine
     | _InputClosed
     | _InputInterrupted
     | _InputCancelled
