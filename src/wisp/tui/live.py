@@ -23,7 +23,12 @@ from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
-from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
+from wisp.tui.input_types import (
+    PendingSubmissionView,
+    TuiSubmission,
+    new_submission_id,
+    pending_submission_preview_lines,
+)
 from wisp.tui.rendering import (
     FullscreenTuiRenderer,
     TuiViewSnapshot,
@@ -433,9 +438,24 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def _transcript_fragments(self) -> StyleAndTextTuples:
         fragments: StyleAndTextTuples = []
         if not self.state.transcript and not self.state.streaming_text:
-            return [("class:dim", "No messages yet.")]
-        for entry in self._visible_transcript_entries():
-            self._append_entry_fragments(fragments, entry)
+            fragments.append(("class:dim", "No messages yet."))
+        else:
+            for entry in self._visible_transcript_entries():
+                self._append_entry_fragments(fragments, entry)
+        preview_lines = pending_submission_preview_lines(
+            self.state.pending_submissions,
+            edit_hint="Esc Up edit last queued message",
+        )
+        if preview_lines:
+            if fragments:
+                fragments.append(("", "\n\n"))
+            fragments.extend(
+                (
+                    "class:dim" if index else "class:status",
+                    f"{line}\n" if index < len(preview_lines) - 1 else line,
+                )
+                for index, line in enumerate(preview_lines)
+            )
         return fragments
 
     def _transcript_view_entries(self) -> int:

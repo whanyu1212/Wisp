@@ -9530,6 +9530,32 @@ def test_textual_duplicate_large_paste_submissions_keep_distinct_pending_identit
     assert preview.count(first.display) == 2
 
 
+def test_textual_pending_preview_is_bounded_and_summarizes_older_prompts() -> None:
+    async def scenario() -> tuple[str, int | None]:
+        app_instance = TextualTui()
+        submissions = tuple(
+            TuiSubmission(
+                id=new_submission_id(),
+                content=f"queued {index}",
+                display=f"queued {index}",
+            )
+            for index in range(12)
+        )
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            for submission in submissions:
+                app_instance.buffer_submission(submission)
+            await pilot.pause()
+            preview = app_instance.query_one("#pending-input", Static)
+            max_height = preview.styles.max_height
+            return preview.render().plain, None if max_height is None else int(max_height.value)
+
+    preview, max_height = anyio.run(scenario)
+    assert "… 9 earlier queued" in preview
+    assert "queued 0" not in preview
+    assert all(f"queued {index}" in preview for index in range(9, 12))
+    assert max_height == 10
+
+
 def test_textual_submission_moves_from_pending_preview_to_transcript_once() -> None:
     async def scenario() -> tuple[str, list[str]]:
         app_instance, renderer = create_textual_tui()

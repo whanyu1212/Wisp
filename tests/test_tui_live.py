@@ -58,6 +58,24 @@ def test_live_fullscreen_tui_requests_queued_edit_only_when_pending() -> None:
     assert calls == [None]
 
 
+def test_live_fullscreen_tui_renders_pending_prompt_with_empty_transcript() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer.state.pending_submissions = (
+        TuiSubmission(
+            id=new_submission_id(),
+            content="visible queued prompt",
+            display="visible queued prompt",
+        ).pending_view(),
+    )
+
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+
+    assert "No messages yet." in rendered
+    assert "Queued follow-ups" in rendered
+    assert "visible queued prompt" in rendered
+    assert "Esc Up edit last queued message" in rendered
+
+
 def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:
     class FakeApplication:
         is_done = False

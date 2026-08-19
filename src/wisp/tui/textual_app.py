@@ -406,6 +406,8 @@ class TextualTui(App[None]):
 
     #pending-input {
         height: auto;
+        max-height: 10;
+        overflow-y: hidden;
         margin-bottom: 1;
         color: $foreground 60%;
     }

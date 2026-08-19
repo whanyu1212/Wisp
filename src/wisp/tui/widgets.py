@@ -83,7 +83,7 @@ from wisp.tui.diff_presentation import (
 )
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.file_index import ProjectSnapshot
-from wisp.tui.input_types import PendingSubmissionView
+from wisp.tui.input_types import PendingSubmissionView, pending_submission_preview_lines
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_highlighting import (
@@ -3564,16 +3564,10 @@ class PendingInputPreview(Static):
         if not submissions:
             self.update("")
             return
-        lines = ["Queued follow-ups"]
-        for submission in submissions:
-            display_lines = submission.display.splitlines() or [""]
-            lines.extend(
-                f"{'↳' if index == 0 else ' '} {line}"
-                for index, line in enumerate(display_lines[:3])
-            )
-            if len(display_lines) > 3:
-                lines.append("  …")
-        lines.append("Alt+Up edit last queued message")
+        lines = pending_submission_preview_lines(
+            submissions,
+            edit_hint="Alt+Up edit last queued message",
+        )
         self.update("\n".join(lines))
 
 
