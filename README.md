@@ -52,11 +52,11 @@ Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires 
 and macOS are supported; Windows is best-effort until it has dedicated CI coverage.
 
 ```bash
-uv tool install "wisp-ai==0.1.0rc2"   # request the prerelease explicitly
+uv tool install "wisp-ai==0.1.0rc3"   # request the prerelease explicitly
 wisp --version
 ```
 
-To run it without installing: `uvx --from "wisp-ai==0.1.0rc2" wisp`. If `wisp` is not on your
+To run it without installing: `uvx --from "wisp-ai==0.1.0rc3" wisp`. If `wisp` is not on your
 `PATH`, run `uv tool update-shell` once and restart your shell.
 
 See [Installation](https://whanyu1212.github.io/Wisp/guide/installation) for the update policy and
