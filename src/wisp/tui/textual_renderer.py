@@ -410,9 +410,12 @@ class TextualTuiRenderer:
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
         *,
-        has_more: bool,
+        next_after_entry_id: str | None,
     ) -> str | None:
-        next_before_entry_id = self._history.append_newer_entries(entries, has_more=has_more)
+        next_before_entry_id = self._history.append_newer_entries(
+            entries,
+            next_after_entry_id=next_after_entry_id,
+        )
         self.app.history_newer_page_loaded()
         return next_before_entry_id
 

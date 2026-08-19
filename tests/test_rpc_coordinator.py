@@ -689,6 +689,58 @@ def test_coordinator_runs_message_read_alongside_active_prompt() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_bounds_concurrent_message_reads_during_a_prompt() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_commands=2,
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        dispatched: list[str] = []
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert running is prompt
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, "get_messages", anyio.CancelScope())
+            )
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
+        for index in range(3):
+            await coordinator.handle_event(
+                _RpcInputCommand(
+                    {
+                        "id": f"messages-{index}",
+                        "type": "get_messages",
+                        "allow_during_prompt": True,
+                    }
+                ),
+                dispatch=dispatch,
+                reject=reject,
+                command_type=_command_type,
+            )
+
+        assert coordinator.running_command is prompt
+        assert dispatched == ["messages-0", "messages-1"]
+        assert set(coordinator.auxiliary_commands) == {"messages-0", "messages-1"}
+        assert rejected == [
+            (
+                "messages-2",
+                "RPC command queue is full while another RPC command is running",
+            )
+        ]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))

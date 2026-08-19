@@ -363,7 +363,10 @@ def test_history_controller_pages_forward_after_newer_retention_was_evicted() ->
     assert controller.shift_newer()
     assert surface.newer_history_requests == ["entry-119"]
 
-    next_before_entry_id = controller.append_newer_entries(latest, has_more=False)
+    next_before_entry_id = controller.append_newer_entries(
+        latest,
+        next_after_entry_id=None,
+    )
 
     assert next_before_entry_id == "entry-120"
     assert surface.history_labels[0] == "assistant: message 120"
@@ -413,7 +416,7 @@ def test_history_controller_excludes_live_entries_from_the_final_newer_page() ->
                 tool_call_id="call-1",
             ),
         ),
-        has_more=False,
+        next_after_entry_id=None,
     )
 
     assert surface.history_labels == ["assistant: retained"]
@@ -422,6 +425,53 @@ def test_history_controller_excludes_live_entries_from_the_final_newer_page() ->
         "live: reply",
         "live: tool",
     ]
+
+
+def test_history_controller_reuses_the_rpc_cursor_after_a_projected_newer_page() -> None:
+    surface = _HistorySurface(at_top=True, following=False)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    controller.replace_entries(
+        tuple(
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content=f"latest {index}",
+                entry_id=f"latest-{index}",
+            )
+            for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+        ),
+        session_label="Windowed",
+    )
+    controller.prepend_entries(
+        tuple(
+            HistoricalTranscriptMessage(
+                role="assistant",
+                content=f"older {index}",
+                entry_id=f"older-{index}",
+            )
+            for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+        )
+    )
+    assert controller.shift_newer()
+
+    projected_page = tuple(
+        HistoricalTranscriptMessage(
+            role="assistant",
+            content=f"projected {index}",
+            # Model a synthetic projection after the page's actual RPC boundary.
+            entry_id="earlier-message" if index == TUI_TRANSCRIPT_WINDOW_SIZE - 1 else None,
+        )
+        for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
+    )
+    controller.append_newer_entries(
+        projected_page,
+        next_after_entry_id="rpc-message-boundary",
+    )
+
+    assert controller.shift_newer()
+    assert surface.newer_history_requests[-1] == "rpc-message-boundary"
 
 
 def test_history_controller_mounts_session_marker_before_restored_history() -> None:

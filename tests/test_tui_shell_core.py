@@ -856,7 +856,7 @@ def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
         def __init__(self) -> None:
             super().__init__(_console()[0])
             self.newer_history_hook = None
-            self.appended: list[tuple[tuple[HistoricalTranscriptEntry, ...], bool]] = []
+            self.appended: list[tuple[tuple[HistoricalTranscriptEntry, ...], str | None]] = []
 
         def set_history_newer_page_request_hook(self, hook: object) -> None:
             self.newer_history_hook = hook
@@ -865,9 +865,9 @@ def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
             self,
             entries: tuple[HistoricalTranscriptEntry, ...],
             *,
-            has_more: bool,
+            next_after_entry_id: str | None,
         ) -> str:
-            self.appended.append((entries, has_more))
+            self.appended.append((entries, next_after_entry_id))
             return "new-retained-front"
 
     async def run() -> None:
@@ -906,7 +906,7 @@ def test_tui_shell_loads_an_adjacent_newer_history_page() -> None:
         )
 
         assert renderer.appended == [
-            ((HistoricalTranscriptMessage(role="assistant", content="newer"),), True)
+            ((HistoricalTranscriptMessage(role="assistant", content="newer"),), "newer")
         ]
         await shell._request_previous_history_page()
         assert controller.messages_requests[-1][3] == "new-retained-front"

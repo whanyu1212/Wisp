@@ -197,6 +197,7 @@ class TextualHistoryController:
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
         self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
+        self._next_newer_entry_id: str | None = None
 
     @property
     def retained_entry_count(self) -> int:
@@ -350,7 +351,10 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._discard_entries(self._window.prepend(retained))
+            evicted = self._window.prepend(retained)
+            self._discard_entries(evicted)
+            if evicted:
+                self._next_newer_entry_id = None
             # A durable page arrived because the reader is already at the top.
             # Reveal its leading slice now so an exhausted page cursor never hides
             # fetched entries behind Transcript's durable-page request gate.
@@ -381,7 +385,9 @@ class TextualHistoryController:
         if not self._window.shift_newer():
             if self._window.latest_is_retained or not self._window.entries:
                 return False
-            cursor = _history_entry_cursor(self._window.entries[-1].entry)
+            cursor = self._next_newer_entry_id or _history_entry_cursor(
+                self._window.entries[-1].entry
+            )
             return cursor is not None and self._surface.request_newer_history(cursor)
         self._surface.begin_history_render()
         try:
@@ -394,10 +400,11 @@ class TextualHistoryController:
         self,
         entries: Iterable[HistoricalTranscriptEntry],
         *,
-        has_more: bool,
+        next_after_entry_id: str | None,
     ) -> str | None:
         """Append one newer page and return its new backward cursor after eviction."""
 
+        has_more = next_after_entry_id is not None
         incoming = tuple(entries)
         if not has_more:
             incoming = self._exclude_live_tail(
@@ -412,6 +419,7 @@ class TextualHistoryController:
             self._discard_entries(evicted)
             if evicted and self._window.entries:
                 next_before_entry_id = _history_entry_cursor(self._window.entries[0].entry)
+            self._next_newer_entry_id = next_after_entry_id
             if not has_more:
                 self._window.mark_latest_retained()
             self._window.shift_newer()
@@ -530,6 +538,7 @@ class TextualHistoryController:
         self._window.clear()
         self._widgets.clear()
         self._next_entry_id = 0
+        self._next_newer_entry_id = None
         if clear_live:
             self._live_entries.clear()
             self._transferred_history_entry_ids.clear()

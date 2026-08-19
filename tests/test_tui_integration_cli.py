@@ -7477,7 +7477,9 @@ def test_textual_forward_navigation_crosses_multiple_durable_pages(
             start = int(after_entry_id.removeprefix("entry-")) + 1
             renderer.append_newer_history_entries(
                 messages(start),
-                has_more=start < 180,
+                next_after_entry_id=(
+                    f"entry-{start + TUI_TRANSCRIPT_WINDOW_SIZE - 1}" if start < 180 else None
+                ),
             )
 
         async with app_instance.run_test(size=(80, 200)) as pilot:
@@ -7546,7 +7548,7 @@ def test_textual_forward_history_failure_retries_from_the_same_edge() -> None:
             if len(requests) == 1:
                 app_instance.history_newer_page_request_failed()
                 return
-            renderer.append_newer_history_entries(messages(60), has_more=False)
+            renderer.append_newer_history_entries(messages(60), next_after_entry_id=None)
 
         async with app_instance.run_test(size=(80, 200)) as pilot:
             renderer._history._window.retained_capacity = TUI_TRANSCRIPT_WINDOW_SIZE

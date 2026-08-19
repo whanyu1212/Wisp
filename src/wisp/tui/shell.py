@@ -2384,7 +2384,7 @@ class TuiShell:
             next_before_entry_id = (
                 append_newer_entries(
                     entries,
-                    has_more=report.next_after_entry_id is not None,
+                    next_after_entry_id=report.next_after_entry_id,
                 )
                 if callable(append_newer_entries)
                 else None

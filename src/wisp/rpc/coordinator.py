@@ -363,6 +363,12 @@ class RpcCoordinator:
             and selected_type in _ACTIVE_PROMPT_READ_COMMAND_TYPES
             and command.get("allow_during_prompt") is True
         ):
+            if self._outstanding_command_count() >= self._max_queued_commands:
+                await reject(
+                    command,
+                    "RPC command queue is full while another RPC command is running",
+                )
+                return False
             previous_running = running
             result = await dispatch(command, running)
             auxiliary = result.running_command
@@ -450,11 +456,19 @@ class RpcCoordinator:
         queue: deque[dict[str, object]],
         reject: RpcReject,
     ) -> None:
-        queued_count = len(self.pending_prompt_queue_commands) + len(self.queued_commands)
-        if queued_count >= self._max_queued_commands:
+        if self._outstanding_command_count() >= self._max_queued_commands:
             await reject(command, "RPC command queue is full while another RPC command is running")
             return
         queue.append(command)
+
+    def _outstanding_command_count(self) -> int:
+        """Count queued and concurrent auxiliary work sharing the configured bound."""
+
+        return (
+            len(self.auxiliary_commands)
+            + len(self.pending_prompt_queue_commands)
+            + len(self.queued_commands)
+        )
 
 
 __all__ = ["RpcCoordinator"]
