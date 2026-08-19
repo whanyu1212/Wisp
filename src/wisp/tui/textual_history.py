@@ -151,7 +151,7 @@ class _BoundaryToolCall:
 
 @dataclass(frozen=True)
 class _HistoricalProcessGroup:
-    """One process lifecycle projected from visible audited history entries."""
+    """One retained process lifecycle projected onto its visible audited entries."""
 
     first_entry_id: int
     member_entry_ids: frozenset[int]
@@ -192,6 +192,9 @@ class TextualHistoryController:
         self._boundary_tool_calls: dict[str, _BoundaryToolCall] = {}
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
+        self._retained_process_groups: dict[int, _HistoricalProcessGroup] = {}
+        self._retained_process_group_exclusions: frozenset[int] | None = None
+        self._retained_process_groups_dirty = True
         self._transferred_history_entry_ids: dict[Widget, set[int]] = {}
         self._transferred_history_entries: dict[Widget, list[HistoricalTranscriptEntry]] = {}
         self._next_entry_id = 0
@@ -592,6 +595,9 @@ class TextualHistoryController:
         self._boundary_tool_calls.clear()
         self._window.clear()
         self._widgets.clear()
+        self._retained_process_groups.clear()
+        self._retained_process_group_exclusions = None
+        self._retained_process_groups_dirty = True
         self._next_entry_id = 0
         self._next_newer_entry_id = None
         if clear_live:
@@ -623,6 +629,8 @@ class TextualHistoryController:
             for index, entry in enumerate(entries)
         )
         self._next_entry_id += len(retained)
+        if retained:
+            self._retained_process_groups_dirty = True
         return retained
 
     def _remap_transferred_history_entry_ids(
@@ -732,11 +740,11 @@ class TextualHistoryController:
             if self._transferred_history_entry_ids
             else set()
         )
+        visible_ids = {item.id for item in visible}
         process_groups = self._historical_process_groups(
             visible,
             excluded_entry_ids=live_owned_history_entry_ids,
         )
-        visible_ids = {item.id for item in visible}
         reposition_widgets: set[Widget] = set()
         self._surface.set_history_window_available(
             has_older=not self._window.is_at_oldest,
@@ -844,17 +852,58 @@ class TextualHistoryController:
                     for member_id in process_group.member_entry_ids:
                         self._widgets[member_id] = mounted
 
-    @staticmethod
     def _historical_process_groups(
+        self,
         visible: tuple[_RetainedHistoryEntry, ...],
         *,
         excluded_entry_ids: set[int] | None = None,
     ) -> dict[int, _HistoricalProcessGroup]:
-        """Project visible poll/cancel records into stable process-level groups."""
+        """Project cached retained process summaries onto visible entries."""
 
-        excluded_entry_ids = excluded_entry_ids or set()
-        split_results: dict[str, deque[_RetainedHistoryEntry]] = {}
+        excluded_ids = frozenset(excluded_entry_ids or ())
+        if (
+            self._retained_process_groups_dirty
+            or excluded_ids != self._retained_process_group_exclusions
+        ):
+            self._retained_process_groups = self._build_retained_process_groups(
+                self._window.entries,
+                excluded_entry_ids=excluded_ids,
+            )
+            self._retained_process_group_exclusions = excluded_ids
+            self._retained_process_groups_dirty = False
+
+        visible_members: dict[str, list[int]] = {}
+        retained_groups: dict[str, _HistoricalProcessGroup] = {}
         for item in visible:
+            retained_group = self._retained_process_groups.get(item.id)
+            if retained_group is None:
+                continue
+            process_id = retained_group.presentation.process_id
+            visible_members.setdefault(process_id, []).append(item.id)
+            retained_groups[process_id] = retained_group
+
+        by_entry_id: dict[int, _HistoricalProcessGroup] = {}
+        for process_id, member_ids in visible_members.items():
+            retained_group = retained_groups[process_id]
+            group = _HistoricalProcessGroup(
+                first_entry_id=member_ids[0],
+                member_entry_ids=frozenset(member_ids),
+                presentation=retained_group.presentation,
+            )
+            for member_id in member_ids:
+                by_entry_id[member_id] = group
+        return by_entry_id
+
+    @staticmethod
+    def _build_retained_process_groups(
+        retained: tuple[_RetainedHistoryEntry, ...],
+        *,
+        excluded_entry_ids: frozenset[int],
+    ) -> dict[int, _HistoricalProcessGroup]:
+        """Build one stable lifecycle presentation from every retained observation."""
+
+        split_results: dict[str, deque[_RetainedHistoryEntry]] = {}
+        for item in retained:
             entry = item.entry
             if item.id in excluded_entry_ids:
                 continue
@@ -866,7 +915,7 @@ class TextualHistoryController:
                 split_results.setdefault(entry.tool_call_id, deque()).append(item)
         paired_results: dict[int, _RetainedHistoryEntry] = {}
         paired_result_ids: set[int] = set()
-        for item in visible:
+        for item in retained:
             entry = item.entry
             if item.id in excluded_entry_ids:
                 continue
@@ -882,7 +931,7 @@ class TextualHistoryController:
         lifecycles: dict[str, ProcessLifecycle] = {}
         first_ids: dict[str, int] = {}
         member_ids: dict[str, set[int]] = {}
-        for item in visible:
+        for item in retained:
             entry = item.entry
             if (
                 not isinstance(entry, HistoricalToolCard)

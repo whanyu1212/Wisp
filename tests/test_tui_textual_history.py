@@ -31,6 +31,7 @@ class _HistoryWidget:
     arguments: JsonObject | None = None
     status: str | None = None
     detail: str | Content = ""
+    process_presentation: ProcessLifecyclePresentation | None = None
 
 
 @dataclass
@@ -159,6 +160,7 @@ class _HistorySurface:
         widget = cast(_HistoryWidget, card)
         widget.status = presentation.display_state
         widget.detail = presentation.full_output
+        widget.process_presentation = presentation
         return card
 
     def mount_tool_call(
@@ -852,6 +854,49 @@ def test_history_controller_coalesces_process_polls_across_a_prepended_page() ->
     assert len(process_widgets) == 1
     assert process_widgets[0].status == "completed"
     assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
+
+
+def test_history_controller_keeps_process_summary_stable_across_retained_windows() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    first_poll = HistoricalToolCard(
+        card_id="history:first-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 is still running\nstdout:\nfirst chunk\n",
+        is_error=False,
+        tool_call_id="poll-1",
+    )
+    final_poll = HistoricalToolCard(
+        card_id="history:final-poll",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "proc-1"},
+        output="Process proc-1 completed with exit code 0\nstdout:\nfinal chunk\n",
+        is_error=False,
+        status="done",
+        exit_code=0,
+        tool_call_id="poll-2",
+    )
+    entries = (
+        *_messages("assistant", "prefix", TUI_TRANSCRIPT_WINDOW_SHIFT - 1),
+        first_poll,
+        HistoricalTranscriptMessage(role="assistant", content="between polls"),
+        final_poll,
+        *_messages("assistant", "suffix", TUI_TRANSCRIPT_WINDOW_SIZE - 2),
+    )
+
+    controller.replace_entries(entries, session_label="Windowed")
+    process_widget = next(widget for widget in surface.widgets if widget.label == "process: proc-1")
+    latest_presentation = process_widget.process_presentation
+
+    assert latest_presentation is not None
+    assert latest_presentation.poll_count == 2
+    assert latest_presentation.display_state == "completed"
+    assert "first chunk" in latest_presentation.full_output
+    assert "final chunk" in latest_presentation.full_output
+
+    assert controller.show_oldest()
+    assert process_widget.process_presentation == latest_presentation
 
 
 def test_history_controller_transfers_resumed_process_card_to_live_ownership() -> None:
