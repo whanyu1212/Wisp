@@ -967,14 +967,17 @@ class TextualHistoryController:
             ):
                 lifecycle.interrupt(identity.operation)
             else:
-                state, output = historical_process_observation(
+                historical_observation = historical_process_observation(
                     identity.process_id,
                     observation.output,
                 )
                 lifecycle.observe(
                     operation=identity.operation,
-                    state=state,
-                    fallback_output=output,
+                    state=historical_observation.state,
+                    stdout=historical_observation.stdout,
+                    stderr=historical_observation.stderr,
+                    fallback_output=historical_observation.fallback_output,
+                    failure_reason=historical_observation.failure_reason,
                     source_truncated=observation.truncated,
                     failed=historical_status == "error",
                 )

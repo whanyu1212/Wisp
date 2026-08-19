@@ -136,25 +136,26 @@ def test_process_lifecycle_counts_short_line_drops_without_helper_marker() -> No
 
 
 def test_historical_process_envelope_requires_the_expected_process_id() -> None:
-    state, output = historical_process_observation(
+    observation = historical_process_observation(
         "proc-1",
         "Process proc-1 is still running\nstdout:\nprogress\n",
     )
-    mismatched_state, mismatched_output = historical_process_observation(
+    mismatched = historical_process_observation(
         "proc-1",
         "Process proc-other completed with exit code 0\nstdout:\ndone\n",
     )
-    malformed_state, malformed_output = historical_process_observation(
+    malformed = historical_process_observation(
         "proc-1",
         "Process proc-1 completed with exit code unknown",
     )
 
-    assert state == "running"
-    assert output == "stdout:\nprogress\n"
-    assert mismatched_state is None
-    assert mismatched_output.startswith("Process proc-other completed")
-    assert malformed_state is None
-    assert malformed_output == "Process proc-1 completed with exit code unknown"
+    assert observation.state == "running"
+    assert observation.stdout == "progress\n"
+    assert observation.fallback_output == ""
+    assert mismatched.state is None
+    assert mismatched.fallback_output.startswith("Process proc-other completed")
+    assert malformed.state is None
+    assert malformed.fallback_output == "Process proc-1 completed with exit code unknown"
 
 
 @pytest.mark.parametrize(
@@ -171,13 +172,49 @@ def test_historical_failed_process_preserves_header_reason(
     body: str,
     expected_output: str,
 ) -> None:
-    state, output = historical_process_observation(
+    observation = historical_process_observation(
         "proc-1",
         f"Process proc-1 failed: cleanup failed{body}",
     )
 
-    assert state == "failed"
-    assert output == expected_output
+    assert observation.state == "failed"
+    assert observation.failure_reason == "cleanup failed"
+    output = observation.stdout or observation.stderr or observation.fallback_output
+    expected_body = expected_output.removeprefix("cleanup failed").lstrip("\n")
+    assert output == expected_body.removeprefix("stdout:\n")
+
+
+def test_historical_process_streams_use_live_label_deduplication() -> None:
+    lifecycle = ProcessLifecycle("proc-1")
+    observations = (
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 is still running\nstdout:\nfirst chunk\n",
+        ),
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 is still running\nstdout:\nsecond chunk\nstderr:\nwarning\n",
+        ),
+        historical_process_observation(
+            "proc-1",
+            "Process proc-1 completed with exit code 0\nstderr:\nfinal warning\n",
+        ),
+    )
+
+    for observation in observations:
+        lifecycle.begin("poll")
+        presentation = lifecycle.observe(
+            operation="poll",
+            state=observation.state,
+            stdout=observation.stdout,
+            stderr=observation.stderr,
+            fallback_output=observation.fallback_output,
+            failure_reason=observation.failure_reason,
+        )
+
+    assert presentation.full_output == (
+        "stdout:\nfirst chunk\nsecond chunk\nstderr:\nwarning\nfinal warning"
+    )
 
 
 def test_denied_poll_does_not_claim_that_the_process_was_cancelled() -> None:

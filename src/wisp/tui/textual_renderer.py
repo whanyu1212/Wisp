@@ -762,29 +762,31 @@ class TextualTuiRenderer:
                 ):
                     presentation = lifecycle.interrupt(identity.operation)
                 else:
-                    parsed_state, fallback_output = historical_process_observation(
+                    historical_observation = historical_process_observation(
                         identity.process_id,
                         event.output,
                     )
                     if event.process_id == identity.process_id:
                         matching_state = event.process_state
                     elif event.process_id is None:
-                        matching_state = parsed_state
+                        matching_state = historical_observation.state
                     else:
                         matching_state = None
                     presentation = lifecycle.observe(
                         operation=identity.operation,
                         state=matching_state,
-                        stdout=event.stdout or "",
-                        stderr=event.stderr or "",
+                        stdout=event.stdout or historical_observation.stdout,
+                        stderr=event.stderr or historical_observation.stderr,
                         source_truncated=(
                             event.truncated or event.stdout_truncated or event.stderr_truncated
                         ),
                         source_dropped_bytes=(
                             event.stdout_dropped_bytes + event.stderr_dropped_bytes
                         ),
-                        fallback_output=fallback_output,
-                        failure_reason=event.process_error or "",
+                        fallback_output=historical_observation.fallback_output,
+                        failure_reason=(
+                            event.process_error or historical_observation.failure_reason
+                        ),
                         failed=status == "error",
                     )
                 started = self._process_started.get(identity.process_id)

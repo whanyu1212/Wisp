@@ -853,7 +853,7 @@ def test_history_controller_coalesces_process_polls_across_a_prepended_page() ->
     process_widgets = [widget for widget in surface.widgets if widget.label == "process: proc-1"]
     assert len(process_widgets) == 1
     assert process_widgets[0].status == "completed"
-    assert process_widgets[0].detail == "stdout:\nolder\nstdout:\nnewer"
+    assert process_widgets[0].detail == "stdout:\nolder\nnewer"
 
 
 def test_history_controller_keeps_process_summary_stable_across_retained_windows() -> None:

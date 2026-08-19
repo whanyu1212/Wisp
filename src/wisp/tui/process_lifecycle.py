@@ -47,6 +47,17 @@ class ProcessCallIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalProcessObservation:
+    """One validated persisted process envelope split into presentation fields."""
+
+    state: ManagedProcessState | None
+    stdout: str = ""
+    stderr: str = ""
+    fallback_output: str = ""
+    failure_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessLifecyclePresentation:
     """Bounded immutable snapshot consumed by a process lifecycle card."""
 
@@ -244,7 +255,7 @@ def process_call_identity(name: str, arguments: object) -> ProcessCallIdentity |
 def historical_process_observation(
     process_id: str,
     output: str,
-) -> tuple[ManagedProcessState | None, str]:
+) -> HistoricalProcessObservation:
     """Parse only Wisp's managed-process envelope, validated against its call ID."""
 
     normalized = output.replace("\r\n", "\n").replace("\r", "\n")
@@ -257,9 +268,9 @@ def historical_process_observation(
         try:
             exit_code = int(exit_code_text)
         except ValueError:
-            return None, normalized
+            return HistoricalProcessObservation(state=None, fallback_output=normalized)
         if str(exit_code) != exit_code_text:
-            return None, normalized
+            return HistoricalProcessObservation(state=None, fallback_output=normalized)
         state = "completed"
     elif first == f"{prefix} timed out":
         state = "timed_out"
@@ -268,20 +279,35 @@ def historical_process_observation(
     elif first == f"{prefix} failed" or first.startswith(f"{prefix} failed: "):
         state = "failed"
     else:
-        return None, normalized
-    output_chunk = _historical_output_chunk(remainder) if separator else ""
-    if first.startswith(f"{prefix} failed: "):
-        failure_reason = first.removeprefix(f"{prefix} failed: ")
-        output_chunk = f"{failure_reason}\n{output_chunk}" if output_chunk else failure_reason
-    return state, output_chunk
+        return HistoricalProcessObservation(state=None, fallback_output=normalized)
+
+    stdout, stderr, fallback_output = (
+        _historical_output_streams(remainder) if separator else ("", "", "")
+    )
+    failure_reason = (
+        first.removeprefix(f"{prefix} failed: ") if first.startswith(f"{prefix} failed: ") else ""
+    )
+    return HistoricalProcessObservation(
+        state=state,
+        stdout=stdout,
+        stderr=stderr,
+        fallback_output=fallback_output,
+        failure_reason=failure_reason,
+    )
 
 
-def _historical_output_chunk(output: str) -> str:
-    """Preserve Wisp's stream labels so accumulated chunks remain unambiguous."""
+def _historical_output_streams(output: str) -> tuple[str, str, str]:
+    """Split only the ordered stream labels emitted by Wisp's managed Bash tool."""
 
-    if output.startswith(("stdout:\n", "stderr:\n")):
-        return output
-    return output
+    if output.startswith("stdout:\n"):
+        stdout_and_stderr = output.removeprefix("stdout:\n")
+        stdout, separator, stderr = stdout_and_stderr.partition("\nstderr:\n")
+        if separator:
+            return stdout, stderr, ""
+        return stdout_and_stderr, "", ""
+    if output.startswith("stderr:\n"):
+        return "", output.removeprefix("stderr:\n"), ""
+    return "", "", output
 
 
 def _process_output_chunk(stdout: str, stderr: str, *, last_label: str = "") -> tuple[str, str]:
@@ -318,6 +344,7 @@ def _tail_preview(output: str) -> str:
 __all__ = [
     "PROCESS_OUTPUT_MAX_BYTES",
     "PROCESS_OUTPUT_MAX_LINES",
+    "HistoricalProcessObservation",
     "ProcessCallIdentity",
     "ProcessDisplayState",
     "ProcessLifecycle",
