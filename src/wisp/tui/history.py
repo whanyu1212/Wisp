@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Literal
 
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -17,6 +18,13 @@ from wisp.tui.skills import format_skill_invocation
 TUI_HISTORY_MESSAGE_LIMIT = 500
 TUI_HISTORY_PAGE_LIMIT = 75
 _TRUNCATED_SUFFIX = "[content truncated]"
+
+
+class HistoryHydrationPolicy(StrEnum):
+    """How much durable history a renderer requests before its first render."""
+
+    LATEST_PAGE = "latest_page"
+    COMPLETE = "complete"
 
 
 @dataclass(frozen=True)

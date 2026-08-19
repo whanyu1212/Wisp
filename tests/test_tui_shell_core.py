@@ -45,6 +45,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    HistoryHydrationPolicy,
 )
 from wisp.tui.state import (
     TuiCancelRequested,
@@ -767,6 +768,161 @@ def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> No
         assert shell.view.last_session == "Target task"
         assert shell.view.context is None
         assert shell.view.cost is None
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_resume_complete_history_buffers_all_pages_before_replacement() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        history_hydration_policy = HistoryHydrationPolicy.COMPLETE
+
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.replacements: list[tuple[tuple[HistoricalTranscriptEntry, ...], str]] = []
+
+        def replace_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str,
+        ) -> None:
+            self.replacements.append((entries, session_label))
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_resume_command(("target",))
+        await shell._handle_rpc_event(
+            RpcSessionSelected(
+                command_id="select-session-1",
+                session_id="target",
+                session_path="/tmp/target.jsonl",
+                entry_count=2,
+                session_name="Target task",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="select-session-1",
+                command_type="select_session",
+                ok=True,
+            )
+        )
+        first_history_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=first_history_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "newer", entry_id="newer"),),
+                truncated=True,
+                next_before_entry_id="newer",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=first_history_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.replacements == []
+        second_history_id = controller.messages_requests[-1][0]
+        assert controller.messages_requests[-1] == (
+            second_history_id,
+            "target",
+            TUI_HISTORY_MESSAGE_LIMIT,
+            "newer",
+        )
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=second_history_id,
+                session_id="target",
+                messages=(_rpc_message("user", "oldest", entry_id="oldest"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=second_history_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.replacements == [
+            (
+                (
+                    HistoricalTranscriptMessage(role="user", content="oldest"),
+                    HistoricalTranscriptMessage(role="assistant", content="newer"),
+                ),
+                "Target task",
+            )
+        ]
+        assert shell.pending_session_switch is None
+        assert shell._history_pagination is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_resume_complete_history_rejects_mismatched_page() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        history_hydration_policy = HistoryHydrationPolicy.COMPLETE
+
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.replacements: list[tuple[tuple[HistoricalTranscriptEntry, ...], str]] = []
+            self.errors: list[str] = []
+
+        def replace_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str,
+        ) -> None:
+            self.replacements.append((entries, session_label))
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_resume_command(("target",))
+        await shell._handle_rpc_event(
+            RpcSessionSelected(
+                command_id="select-session-1",
+                session_id="target",
+                session_path="/tmp/target.jsonl",
+                entry_count=2,
+                session_name="Target task",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="select-session-1",
+                command_type="select_session",
+                ok=True,
+            )
+        )
+        history_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=history_id,
+                session_id="other",
+                messages=(_rpc_message("assistant", "wrong", entry_id="wrong"),),
+            )
+        )
+
+        assert renderer.replacements == [((), "Target task")]
+        assert renderer.errors == [
+            "Session changed, but its transcript could not be loaded: "
+            "session history page did not match the active session"
+        ]
         assert shell.pending_session_switch is None
 
     anyio.run(run)
@@ -2140,6 +2296,77 @@ def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
             ("user", "old prompt"),
             ("assistant", "old answer"),
         ]
+
+    anyio.run(run)
+
+
+def test_tui_shell_complete_history_hydration_renders_all_pages_once_in_order() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        history_hydration_policy = HistoryHydrationPolicy.COMPLETE
+
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.entries: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.entries.append(entries)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        controller = ScriptedController(
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        session_id="target",
+                        messages=(_rpc_message("assistant", "newer", entry_id="newer"),),
+                        truncated=True,
+                        next_before_entry_id="newer",
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ],
+                [
+                    RpcMessagesReported(
+                        command_id="messages-2",
+                        session_id="target",
+                        messages=(_rpc_message("user", "oldest", entry_id="oldest"),),
+                    ),
+                    RpcMessagesReported(
+                        command_id="messages-2",
+                        session_id="target",
+                        messages=(_rpc_message("user", "duplicate", entry_id="duplicate"),),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-2",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ],
+            ]
+        )
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert controller.messages_requests == [
+            ("messages-1", None, TUI_HISTORY_MESSAGE_LIMIT, None),
+            ("messages-2", "target", TUI_HISTORY_MESSAGE_LIMIT, "newer"),
+        ]
+        assert renderer.entries == [
+            (
+                HistoricalTranscriptMessage(role="user", content="oldest"),
+                HistoricalTranscriptMessage(role="assistant", content="newer"),
+            )
+        ]
+        assert shell._history_pagination is None
 
     anyio.run(run)
 

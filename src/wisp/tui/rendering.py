@@ -47,6 +47,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    HistoryHydrationPolicy,
     historical_tool_status,
 )
 from wisp.tui.skills import format_skill_invocation, skill_catalog_text, skill_invocation_text
@@ -80,6 +81,8 @@ class TuiViewSnapshot:
 
 class TuiRenderer(Protocol):
     """Renderer surface consumed by the TUI controller loop."""
+
+    history_hydration_policy: HistoryHydrationPolicy
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None: ...
 
@@ -191,6 +194,8 @@ class TuiRenderer(Protocol):
 
 class LineTuiRenderer:
     """Line-oriented Rich renderer for the current TUI MVP."""
+
+    history_hydration_policy = HistoryHydrationPolicy.LATEST_PAGE
 
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
@@ -547,6 +552,8 @@ class FullscreenTuiRenderer:
     The interaction loop is still line-oriented; this renderer establishes the
     transcript/editor/footer regions that a future richer TUI can make live.
     """
+
+    history_hydration_policy = HistoryHydrationPolicy.LATEST_PAGE
 
     def __init__(
         self,

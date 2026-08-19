@@ -44,7 +44,11 @@ from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.connections import ConnectionProviderStatus
-from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
+    HistoryHydrationPolicy,
+)
 from wisp.tui.process_lifecycle import (
     ProcessCallIdentity,
     ProcessLifecycle,
@@ -90,6 +94,8 @@ def _retry_progress_label(event: ProviderRetrying) -> str:
 
 class TextualTuiRenderer:
     """Renderer adapter consumed by `TuiShell` and backed by `TextualTui`."""
+
+    history_hydration_policy = HistoryHydrationPolicy.COMPLETE
 
     def __init__(self, app: TextualTui) -> None:
         self.app = app
