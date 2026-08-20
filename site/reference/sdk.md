@@ -225,9 +225,9 @@ await JsonlSubprocessRpcTransport.start(
 ```
 
 The default command is the current Python interpreter running `-m wisp --mode rpc`. Commands are
-newline-delimited JSON on stdin; stdout is parsed into typed events. Stderr defaults to `DEVNULL` so
-an undrained pipe cannot deadlock the event stream. If `stderr=subprocess.PIPE` is selected, the
-caller must drain it concurrently.
+newline-delimited JSON on stdin; stdout is parsed into typed events. Keep the default
+`stderr=subprocess.DEVNULL`: the current transport does not expose a public stderr stream, so
+selecting `subprocess.PIPE` can block a noisy child and is not a supported SDK integration pattern.
 
 `close()` closes stdin, waits for bounded graceful exit, then terminates and kills if needed. It is
 idempotent and re-raises a retained close failure.

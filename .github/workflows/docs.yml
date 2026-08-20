@@ -22,6 +22,12 @@ on:
 permissions:
   contents: read
 
+# Keep production build + deploy runs ordered as one unit so an older build
+# cannot publish after a newer commit. Pull-request builds use independent groups.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: Build site
@@ -56,12 +62,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
-    # Serialize only publishing, not independent pull-request builds. Do not
-    # cancel a running deploy so a partially-applied deploy cannot take over.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
 
     permissions:
       contents: read
