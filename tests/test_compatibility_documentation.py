@@ -46,6 +46,19 @@ def test_changelog_covers_every_explicit_event_schema() -> None:
     ]
 
 
+def test_rpc_message_snapshot_history_distinguishes_calls_and_results() -> None:
+    schema_v22 = _CHANGELOG.split("## Schema v22", maxsplit=1)[1].split(
+        "## Schema v21", maxsplit=1
+    )[0]
+    schema_v17 = _CHANGELOG.split("## Schema v17", maxsplit=1)[1].split(
+        "## Schema v16", maxsplit=1
+    )[0]
+
+    assert "tool-result" in schema_v22
+    assert "tool-call" not in schema_v22
+    assert "`tool_calls`" in schema_v17
+
+
 def test_same_version_wire_additions_are_recorded() -> None:
     schema_v24 = _CHANGELOG.split("## Schema v24", maxsplit=1)[1].split(
         "## Schema v23", maxsplit=1

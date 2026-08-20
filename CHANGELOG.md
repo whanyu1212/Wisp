@@ -240,9 +240,9 @@ Adds `rpc.commands`, a typed catalog of commands supported by the active RPC hos
 
 ## Schema v22
 
-Adds optional tool-call and tool-result snapshots to messages returned by `rpc.messages`. Transcript
-consumers should use the structured metadata instead of reconstructing historical tool state from
-text.
+Adds optional tool-result presentation snapshots to messages returned by `rpc.messages`. Transcript
+consumers should use the structured result metadata instead of reconstructing historical tool state
+from text.
 
 ## Schema v21
 
@@ -268,8 +268,9 @@ Consumers should treat the selected session identity and path as authoritative h
 
 ## Schema v17
 
-Adds paginated `rpc.messages` transcript snapshots. Clients should consume the typed message entries
-and pagination metadata rather than reading an active session file concurrently.
+Adds paginated `rpc.messages` transcript snapshots, including optional structured `tool_calls` on
+message entries. Clients should consume the typed message entries and pagination metadata rather
+than reading an active session file concurrently.
 
 ## Schema v16
 
