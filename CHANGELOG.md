@@ -11,6 +11,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Defined and wheel-verified the supported Python SDK import surface, including the typed project
+  trust command used by external RPC clients.
 - Limited routine Textual transcript scrolling to partial viewport updates, preventing unchanged
   composer and status rows from flickering during wheel and keyboard navigation.
 - Kept complete resumed Textual histories covered until composer layout and tail positioning settle,

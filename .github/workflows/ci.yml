@@ -49,6 +49,45 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+  package:
+    name: Build and verify package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Build distributions
+        run: uv build --no-sources
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Verify installed SDK surface
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one wheel, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+          wheel="$(realpath "${wheels[0]}")"
+          pushd "$RUNNER_TEMP"
+          uv run --isolated --no-project --with "$wheel" \
+            python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          popd
+
   test:
     name: Test (${{ matrix.suite }})
     runs-on: ubuntu-latest

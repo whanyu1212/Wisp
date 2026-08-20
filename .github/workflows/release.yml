@@ -151,6 +151,20 @@ jobs:
       - name: Check distribution metadata
         run: uvx twine check dist/*
 
+      - name: Verify installed SDK surface
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one wheel, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+          wheel="$(realpath "${wheels[0]}")"
+          pushd "$RUNNER_TEMP"
+          uv run --isolated --no-project --with "$wheel" \
+            python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          popd
+
       - name: Smoke-test packaged commands
         env:
           WISP_TRUST: "1"

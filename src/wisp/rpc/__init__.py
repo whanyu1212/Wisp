@@ -31,6 +31,7 @@ from wisp.rpc.commands import (
     SetSessionNameCommand,
     ShutdownCommand,
     SteerCommand,
+    TrustCommand,
     UnrevertSessionTreeCommand,
 )
 
@@ -67,5 +68,6 @@ __all__ = [
     "SetQueueModeCommand",
     "ShutdownCommand",
     "SteerCommand",
+    "TrustCommand",
     "UnrevertSessionTreeCommand",
 ]
