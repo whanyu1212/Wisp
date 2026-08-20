@@ -748,7 +748,8 @@ def test_line_tui_renderer_renders_failed_manual_compaction_as_error() -> None:
     # gets Rich's automatic number highlighting). FullscreenTuiRenderer and
     # TextualTuiRenderer both already style this red; LineTuiRenderer must too.
     output = io.StringIO()
-    console = Console(file=output, force_terminal=True, width=120)
+    # Verify the renderer's explicit error style independently of an ambient NO_COLOR setting.
+    console = Console(file=output, force_terminal=True, no_color=False, width=120)
     renderer = LineTuiRenderer(console)
 
     renderer.event(
