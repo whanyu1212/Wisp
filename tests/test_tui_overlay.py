@@ -195,6 +195,28 @@ def test_only_matching_operation_completion_restores_composer() -> None:
     assert not controller.consume_interrupt()
 
 
+def test_preparing_operation_finish_exposes_layout_but_retains_input_guard() -> None:
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.start_operation(OverlayOperation.session_switch)
+
+    assert not controller.prepare_operation_finish(OverlayOperation.session_catalog)
+    assert harness.composer.display is False
+    assert harness.composer.focus_count == 0
+
+    assert controller.prepare_operation_finish(OverlayOperation.session_switch)
+    assert harness.composer.display is True
+    assert harness.composer.focus_count == 0
+    assert controller.active_operation is OverlayOperation.session_switch
+    assert controller.consume_interrupt()
+
+    assert controller.finish_operation(OverlayOperation.session_switch)
+    assert harness.composer.focus_count == 1
+    assert controller.active_operation is None
+    assert not controller.consume_interrupt()
+
+
 def test_session_picker_interrupt_closes_picker_and_preserves_other_interrupts() -> None:
     harness = _Harness()
     controller = harness.controller()

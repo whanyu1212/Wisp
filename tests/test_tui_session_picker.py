@@ -379,6 +379,34 @@ def test_session_operation_indicator_preserves_transcript_scroll_intent() -> Non
     assert during_state == before_state
 
 
+def test_session_switch_settlement_does_not_force_a_reader_to_the_tail() -> None:
+    async def scenario() -> tuple[TranscriptViewportState, TranscriptViewportState]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            for index in range(24):
+                app.write_assistant(f"transcript line {index}")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app.query_one("#transcript", Transcript)
+            transcript.stop_following()
+            transcript.scroll_to(y=4, animate=False)
+            await pilot.pause()
+            before = transcript.viewport_state()
+
+            renderer.session_switch_started("target")
+            await pilot.pause()
+            renderer.session_switch_finished()
+            indicator = app.query_one("#operation-indicator", OperationIndicator)
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            return before, transcript.viewport_state()
+
+    before, after = anyio.run(scenario)
+
+    assert after == before
+
+
 def test_session_picker_table_renders_persisted_values_as_literal_text() -> None:
     session = RpcSessionSummary(
         session_id="literal",

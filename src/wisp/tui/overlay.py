@@ -187,6 +187,15 @@ class TextualOverlayController:
         self._active_operation = operation
         self._composer.hide()
 
+    def prepare_operation_finish(self, operation: OverlayOperation) -> bool:
+        """Expose final layout while retaining the matching operation guard."""
+
+        if self._active_operation is not operation:
+            return False
+        if self._active_overlay is None:
+            self._composer.show()
+        return True
+
     def finish_operation(self, operation: OverlayOperation) -> bool:
         """Finish only the matching operation, ignoring stale completions."""
 

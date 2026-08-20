@@ -7989,8 +7989,9 @@ def test_textual_complete_history_hydration_is_covered_and_revealed_at_tail() ->
                 transcript.max_scroll_y,
             )
             renderer.history_hydration_finished()
-            await pilot.pause()
-            assert not indicator.is_open
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
             return result
 
     texts, progress, covered, cover_class, scroll_y, max_scroll_y = anyio.run(scenario)
@@ -8002,6 +8003,108 @@ def test_textual_complete_history_hydration_is_covered_and_revealed_at_tail() ->
     assert cover_class is True
     assert max_scroll_y > 0
     assert scroll_y == max_scroll_y
+
+
+def test_textual_multi_batch_history_hydration_unmasks_only_a_settled_tail(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The first transcript frame after hydration must use post-composer geometry.
+
+    Complete hydration mounts in bounded batches behind an opaque operation surface.
+    Restoring the composer changes the transcript viewport height, so the operation
+    surface must not disappear until a following transcript has reached the new tail.
+    """
+
+    async def scenario() -> list[tuple[float, float, bool]]:
+        app_instance, renderer = create_textual_tui()
+        app_type = type(app_instance)
+        original_display = app_type._display
+        exposed_frames: list[tuple[float, float, bool]] = []
+        record_exposed_frames = False
+
+        def record_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+            if self is app_instance and record_exposed_frames:
+                indicator = self.query_one("#operation-indicator", OperationIndicator)
+                transcript = self.query_one("#transcript", Transcript)
+                if not indicator.is_open:
+                    exposed_frames.append(
+                        (
+                            float(transcript.scroll_y),
+                            float(transcript.max_scroll_y),
+                            transcript.is_following,
+                        )
+                    )
+            return original_display(self, screen, renderable)
+
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            monkeypatch.setattr(app_type, "_display", record_display)
+            renderer.session_switch_started("multi-batch")
+            await pilot.pause()
+            await renderer.hydrate_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(
+                        role="assistant",
+                        content=f"message {index}",
+                    )
+                    for index in range(300)
+                ),
+                session_label="Multi-batch session",
+            )
+            await pilot.pause()
+
+            record_exposed_frames = True
+            renderer.session_switch_finished()
+            for _ in range(4):
+                await pilot.pause()
+
+        return exposed_frames
+
+    exposed_frames = anyio.run(scenario)
+
+    assert exposed_frames
+    assert all(following for _scroll_y, _max_scroll_y, following in exposed_frames)
+    assert all(scroll_y == max_scroll_y for scroll_y, max_scroll_y, _following in exposed_frames), (
+        exposed_frames
+    )
+
+
+def test_textual_stale_history_settlement_cannot_finish_a_replacement_operation() -> None:
+    async def scenario() -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            editor = app_instance.query_one("#input", Input)
+            renderer.session_switch_started("first")
+            await renderer.hydrate_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(
+                        role="assistant",
+                        content=f"message {index}",
+                    )
+                    for index in range(160)
+                ),
+                session_label="First session",
+            )
+
+            renderer.session_switch_finished()
+            renderer.session_switch_started("replacement")
+            for _ in range(4):
+                await pilot.pause()
+            replacement_remained_open = indicator.is_open
+            replacement_kept_input_guard = not editor.display
+
+            renderer.session_switch_finished()
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            return replacement_remained_open, replacement_kept_input_guard, editor.has_focus
+
+    remained_open, kept_input_guard, focused_after_finish = anyio.run(scenario)
+
+    assert remained_open
+    assert kept_input_guard
+    assert focused_after_finish
 
 
 def test_textual_complete_history_refresh_wait_uses_running_transcript() -> None:
