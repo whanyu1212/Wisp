@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Excluded `cryptography` versions before 50.0.0 from runtime dependency resolution to avoid the
+  PKCS#7 decryption vulnerability fixed in 50.0.0.
+
 ## 0.1.0rc3 — 2026-08-19
 
 - Added bounded Markdown structure, inline-code, and fenced-code highlighting to the Textual prompt
@@ -138,7 +141,22 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v31 — current
+## Schema v34 — current
+
+Adds `next_after_entry_id` to `rpc.messages` results so clients can paginate forward from a known
+transcript entry.
+
+## Schema v33
+
+Adds optional `failure_code`, `retryable`, and `recovery_hint` metadata to failed tool results so
+clients can present structured recovery guidance.
+
+## Schema v32
+
+Adds `trailing_estimated_tokens`, `effective_tokens`, and `accounting_method` to context budget
+snapshots so clients can distinguish provider usage from local estimates.
+
+## Schema v31
 
 Adds `package:wisp` as a skill catalog source for package-owned skills. RPC clients that
 exhaustively validate skill sources must accept the new value.
@@ -168,7 +186,7 @@ Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so 
 reports the active agent mode. The field is stripped for consumers reading at an older schema
 version.
 
-Events at schema v5 through v31 remain readable.
+Events at schema v5 through v34 remain readable.
 
 ---
 

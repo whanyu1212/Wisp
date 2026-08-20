@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from wisp.events import (
+    EVENT_SCHEMA_VERSION,
     ProjectConfigApplied,
     ProviderRetrying,
     QueueItemsRemoved,
@@ -108,6 +109,13 @@ class RecordingTransport:
     async def _iter_events(self) -> AsyncIterator[object]:
         for event in self._events:
             yield event
+
+
+def test_changelog_documents_current_event_schema() -> None:
+    changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert f"## Schema v{EVENT_SCHEMA_VERSION} — current" in changelog
+    assert f"Events at schema v5 through v{EVENT_SCHEMA_VERSION} remain readable." in changelog
 
 
 def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
