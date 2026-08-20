@@ -4436,7 +4436,7 @@ def test_textual_stream_settlement_relayouts_only_at_live_retention_boundary(
 
     source = "".join(f"## Result {index}\n\nsettled block\n\n" for index in range(30))
 
-    async def scenario() -> tuple[int, int, float, float]:
+    async def scenario() -> tuple[int, int, float, float, list[RenderableType | None]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(80, 18)) as pilot:
             controller = app_instance._transcript_controller
@@ -4454,8 +4454,10 @@ def test_textual_stream_settlement_relayouts_only_at_live_retention_boundary(
 
             layout_passes = 0
             evictions = 0
+            displayed_updates: list[RenderableType | None] = []
             original_layout = Screen._refresh_layout
             original_evicted = app_instance.live_transcript_widget_evicted
+            original_display = App._display
 
             def track_layout(
                 screen: Screen[object],
@@ -4472,12 +4474,18 @@ def test_textual_stream_settlement_relayouts_only_at_live_retention_boundary(
                 evictions += 1
                 original_evicted(widget)
 
+            def track_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+                if self is app_instance:
+                    displayed_updates.append(renderable)
+                return original_display(self, screen, renderable)
+
             monkeypatch.setattr(Screen, "_refresh_layout", track_layout)
             monkeypatch.setattr(
                 app_instance,
                 "live_transcript_widget_evicted",
                 track_evicted,
             )
+            monkeypatch.setattr(App, "_display", track_display)
 
             renderer.end_token_stream_with_content(source)
             await app_instance.wait_for_stream_idle()
@@ -4490,13 +4498,122 @@ def test_textual_stream_settlement_relayouts_only_at_live_retention_boundary(
                 layout_passes,
                 float(transcript.scroll_y),
                 float(transcript.max_scroll_y),
+                displayed_updates,
             )
 
-    evictions, layout_passes, scroll_y, max_scroll_y = anyio.run(scenario)
+    evictions, layout_passes, scroll_y, max_scroll_y, displayed_updates = anyio.run(scenario)
 
     assert evictions == expected_evictions
     assert layout_passes == expected_layouts
     assert scroll_y == max_scroll_y
+    assert not any(update is not None for update in displayed_updates)
+
+
+def test_textual_repeated_live_retention_rollovers_emit_no_duplicate_frames(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[int, list[list[RenderableType | None]]]:
+        app_instance, renderer = create_textual_tui()
+        original_display = App._display
+        displayed_updates: list[RenderableType | None] = []
+        recorded_rollovers: list[list[RenderableType | None]] = []
+        evictions = 0
+        recording = False
+
+        def track_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+            if self is app_instance and recording:
+                displayed_updates.append(renderable)
+            return original_display(self, screen, renderable)
+
+        async with app_instance.run_test(size=(80, 18)) as pilot:
+            controller = app_instance._transcript_controller
+            controller._settled_capacity = 3
+            controller._durable_entry_capacity = 3
+            for index in range(3):
+                renderer.prompt_submitted(f"prior message {index}")
+            await pilot.pause()
+            await pilot.pause()
+            monkeypatch.setattr(App, "_display", track_display)
+
+            original_evicted = app_instance.live_transcript_widget_evicted
+
+            def track_evicted(widget: Widget) -> None:
+                nonlocal evictions
+                evictions += 1
+                original_evicted(widget)
+
+            monkeypatch.setattr(
+                app_instance,
+                "live_transcript_widget_evicted",
+                track_evicted,
+            )
+
+            for turn in range(2):
+                source = "".join(
+                    f"## Turn {turn} result {index}\n\nsettled block\n\n" for index in range(30)
+                )
+                renderer.token_delta(source)
+                await app_instance.wait_for_stream_idle()
+                await pilot.pause()
+                await pilot.pause()
+
+                displayed_updates.clear()
+                recording = True
+                renderer.end_token_stream_with_content(source)
+                await app_instance.wait_for_stream_idle()
+                await pilot.pause()
+                await pilot.pause()
+                recording = False
+                recorded_rollovers.append(displayed_updates.copy())
+
+        return evictions, recorded_rollovers
+
+    evictions, recorded_rollovers = anyio.run(scenario)
+
+    assert evictions == 2
+    assert len(recorded_rollovers) == 2
+    assert all(
+        not any(update is not None for update in rollover) for rollover in recorded_rollovers
+    )
+
+
+def test_textual_live_retention_emits_a_genuinely_visible_eviction(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> list[RenderableType | None]:
+        app_instance, renderer = create_textual_tui()
+        original_display = App._display
+        displayed_updates: list[RenderableType | None] = []
+
+        def track_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+            if self is app_instance:
+                displayed_updates.append(renderable)
+            return original_display(self, screen, renderable)
+
+        async with app_instance.run_test(size=(80, 100)) as pilot:
+            controller = app_instance._transcript_controller
+            controller._settled_capacity = 3
+            controller._durable_entry_capacity = 3
+            for index in range(3):
+                renderer.prompt_submitted(f"prior message {index}")
+            await pilot.pause()
+            await pilot.pause()
+
+            renderer.token_delta("visible answer")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+            monkeypatch.setattr(App, "_display", track_display)
+
+            renderer.end_token_stream_with_content("visible answer")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.pause()
+            return displayed_updates
+
+    displayed_updates = anyio.run(scenario)
+
+    assert any(isinstance(update, ChopsUpdate) for update in displayed_updates)
 
 
 def test_textual_first_visible_stream_frame_removes_working_indicator(
