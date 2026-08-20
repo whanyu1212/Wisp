@@ -24,12 +24,6 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one in-flight deployment at a time; do not cancel a running one, so a
-# partially-applied deploy never becomes the published state.
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
   build:
     name: Build site
@@ -68,6 +62,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # Serialize only publishing, not independent pull-request builds. Do not
+    # cancel a running deploy so a partially-applied deploy cannot take over.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
 
     environment:
       name: github-pages
