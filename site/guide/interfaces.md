@@ -30,6 +30,6 @@ ordering are shared. Input capabilities depend on the transport:
   approval response after the run starts; pass `--yes` only when unattended unsafe execution is
   intentional.
 
-Use [Staying in sync](./staying-in-sync) for queue and cancellation behavior,
-[CLI](../reference/cli) for flags and stream contracts, and
-[Architecture](../architecture/) for the shared runtime boundaries.
+Use [Staying in sync](./staying-in-sync) for queue and cancellation behavior, the
+[Python SDK guide](./sdk) for embedding lifecycle and examples, [CLI](../reference/cli) for flags
+and stream contracts, and [Architecture](../architecture/) for the shared runtime boundaries.

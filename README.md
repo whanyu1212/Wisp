@@ -121,7 +121,8 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 
 RPC mode and the in-process SDK expose the same command, event, session, trust, and approval
 contracts the built-in interfaces use. See
-[Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces).
+[Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces) and the
+[Python SDK guide](https://whanyu1212.github.io/Wisp/guide/sdk).
 
 ## Architecture
 
@@ -144,7 +145,8 @@ which is why it cannot drift from the guarantees above.
 |---|---|
 | [Guide](https://whanyu1212.github.io/Wisp/guide/) | Installation, quickstart, providers, tools, sessions, skills, TUI |
 | [Staying in sync](https://whanyu1212.github.io/Wisp/guide/staying-in-sync) | Steering, cancellation, approvals, transcripts |
-| [Reference](https://whanyu1212.github.io/Wisp/reference/) | CLI flags, configuration, and environment variables |
+| [Python SDK](https://whanyu1212.github.io/Wisp/guide/sdk) | In-process embedding, typed events, safety, sessions, and cleanup |
+| [Reference](https://whanyu1212.github.io/Wisp/reference/) | CLI, SDK, configuration, and environment variables |
 | [Architecture](https://whanyu1212.github.io/Wisp/architecture/) | Runtime layers and ownership boundaries |
 | [Contributing](https://whanyu1212.github.io/Wisp/contributing/) | Development setup and testing |
 

@@ -44,4 +44,5 @@ cd path/to/project
 wisp
 ```
 
-[Run your first prompt](./guide/quickstart) or read [how Wisp stays in sync](./guide/staying-in-sync).
+[Run your first prompt](./guide/quickstart), read [how Wisp stays in sync](./guide/staying-in-sync),
+or [embed Wisp with the Python SDK](./guide/sdk).

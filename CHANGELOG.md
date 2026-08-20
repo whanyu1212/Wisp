@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Added a dedicated Python SDK guide and API reference covering startup, event consumption,
+  command correlation, safety requests, live control, persisted sessions, subprocess RPC, and
+  cleanup.
 - Added deterministic, tested Python SDK examples for prompting, safety requests, live control,
   persisted-session workflows, and process-isolated JSONL RPC.
 - Defined and wheel-verified the supported Python SDK import surface, including the typed project

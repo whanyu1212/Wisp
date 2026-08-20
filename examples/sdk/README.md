@@ -1,7 +1,9 @@
 # Python SDK examples
 
 These examples exercise Wisp's supported public Python namespaces with deterministic fake providers.
-They need no API keys and make no model-provider network calls.
+They need no API keys and make no model-provider network calls. For lifecycle explanation and exact
+signatures, read the [SDK guide](https://whanyu1212.github.io/Wisp/guide/sdk) and
+[API reference](https://whanyu1212.github.io/Wisp/reference/sdk).
 
 Run them from a source checkout:
 

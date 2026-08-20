@@ -52,4 +52,5 @@ installation. `uvx`, local-source, and other package-manager installs are never 
 ## Next steps
 
 - [Quickstart](./quickstart) — connect a provider and run your first prompt.
+- [Python SDK](./sdk) — embed Wisp and consume typed events.
 - [Providers & auth](./providers) — credentials, custom endpoints, and the model catalog.
