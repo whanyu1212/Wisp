@@ -131,13 +131,10 @@ def history_entries_from_rpc_messages(
     pending_tool_calls: dict[str, tuple[RpcMessageToolCallSnapshot, str]] = {}
     for message in messages:
         if message.role == "system":
-            rendered.append(
-                HistoricalTranscriptMessage(
-                    role="system",
-                    content=_content_for_history(message) or "(empty system message)",
-                    entry_id=message.entry_id,
-                )
-            )
+            # Provider-facing instructions remain durable and available through
+            # RPC, but are not conversation turns and should not consume TUI
+            # transcript space when a session is hydrated or resumed.
+            continue
         elif message.role == "user":
             invocation = message.skill_invocation
             if invocation is not None:

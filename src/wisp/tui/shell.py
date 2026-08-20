@@ -2412,7 +2412,9 @@ class TuiShell:
         messages = hydration.messages if hydration is not None else pending.history_report.messages
         entries = history_entries_from_rpc_messages(messages)
         if hydration is not None:
-            expected_entry_ids = frozenset(message.entry_id for message in messages)
+            expected_entry_ids = frozenset(
+                message.entry_id for message in messages if message.role != "system"
+            )
             missing_entry_ids = expected_entry_ids - represented_history_entry_ids(entries)
             if missing_entry_ids:
                 self._fail_committed_session_hydration(
