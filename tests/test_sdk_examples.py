@@ -7,6 +7,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from pytest import MonkeyPatch
 
 from examples.sdk.control_requests import build_control_requests
 from examples.sdk.minimal import prompt_once
@@ -148,7 +149,20 @@ def test_persisted_session_example_resumes_clones_and_forks(tmp_path: Path) -> N
 
 
 @pytest.mark.process
-def test_subprocess_rpc_example_runs_offline(tmp_path: Path) -> None:
+def test_subprocess_rpc_example_runs_offline(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    inherited_home = tmp_path / "inherited-home"
+    settings_dir = inherited_home / ".wisp"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        '{"mcp_servers":{"inherited":{"command":"must-not-run"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(inherited_home))
+    monkeypatch.setenv("WISP_OPENAI_COMPATIBLE_CONFIG", "not-json")
+
     response = anyio.run(
         prompt_in_subprocess,
         tmp_path / "workspace",

@@ -17,9 +17,15 @@ async def prompt_in_subprocess(workspace: Path, session_dir: Path) -> str:
     """Run a fake-provider prompt in a child process and return its text."""
 
     workspace.mkdir(parents=True, exist_ok=True)
-    environment = dict(os.environ)
+    child_home = session_dir.parent / "home"
+    child_home.mkdir(parents=True, exist_ok=True)
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("WISP_")
+    }
     environment.update(
         {
+            "HOME": str(child_home),
+            "USERPROFILE": str(child_home),
             "WISP_PROVIDER": "fake",
             "WISP_SESSION_DIR": str(session_dir),
             "WISP_TRUST": "1",
