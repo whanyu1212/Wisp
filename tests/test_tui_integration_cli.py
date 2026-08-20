@@ -67,6 +67,7 @@ from wisp.tui.widgets import (
     _ROLE_LABELS,
     ComposerMeta,
     ComposerPanel,
+    ComposerRegion,
     HistoryNavigation,
     HistoryNavigationIntent,
     JumpToLatest,
@@ -74,6 +75,7 @@ from wisp.tui.widgets import (
     OperationIndicator,
     ProcessCard,
     SlashSuggest,
+    StartupNotice,
     StatusBar,
     StreamMessage,
     ToolCard,
@@ -1099,6 +1101,48 @@ def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> Non
     source, child_count = anyio.run(scenario)
     assert source == restored_markdown
     assert child_count == 0
+
+
+def test_textual_tui_hides_system_prompts_from_resumed_history() -> None:
+    system_prompt = "[WISP TOOL GUIDANCE]\nprovider-only instructions"
+    assistant_response = "Ready. What would you like me to test?"
+    messages = (
+        RpcMessageSnapshot(
+            entry_id="system-1",
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            role="system",
+            content=system_prompt,
+            content_original_bytes=len(system_prompt.encode()),
+        ),
+        RpcMessageSnapshot(
+            entry_id="user-1",
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            role="user",
+            content="test",
+            content_original_bytes=4,
+        ),
+        RpcMessageSnapshot(
+            entry_id="assistant-1",
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            role="assistant",
+            content=assistant_response,
+            content_original_bytes=len(assistant_response.encode()),
+        ),
+    )
+
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.replace_history_entries(
+                history_entries_from_rpc_messages(messages),
+                session_label="Restored session",
+            )
+            await pilot.pause()
+            return _transcript_texts(app_instance)
+
+    rendered = anyio.run(scenario)
+    assert rendered == ["resumed session: Restored session", "test", assistant_response]
+    assert system_prompt not in "\n".join(rendered)
 
 
 def test_textual_resumed_tool_heavy_history_does_not_trigger_live_reload_loop() -> None:
@@ -10295,7 +10339,20 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
 
 def test_textual_startup_is_prominent_and_preserves_early_resume_draft() -> None:
-    async def scenario() -> tuple[str, str, str, int, str, str, str]:
+    async def scenario() -> tuple[
+        str,
+        str,
+        str,
+        str,
+        bool,
+        bool,
+        str,
+        int,
+        bool,
+        bool,
+        str,
+        str,
+    ]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(72, 30)) as pilot:
             renderer.view_updated(
@@ -10307,15 +10364,23 @@ def test_textual_startup_is_prominent_and_preserves_early_resume_draft() -> None
             )
             await pilot.pause()
             tagline = app_instance.query_one("#transcript-empty-tagline", Label)
-            hint = app_instance.query_one("#transcript-empty-hint", Label)
+            notice = app_instance.query_one("#startup-notice", StartupNotice)
+            composer = app_instance.query_one("#composer", ComposerPanel)
             input_widget = app_instance.query_one("#input", Input)
+            starting_notice = notice.render().plain
+            notice_color = notice.styles.color.hex
+            normal_tagline = tagline.render().plain
+            notice_above_input = notice.region.bottom <= input_widget.region.y
+            notice_outside_composer = (
+                notice.region.bottom + 1 == composer.region.y
+                and not composer.region.contains_region(notice.region)
+            )
             input_widget.value = "/resume"
             input_widget.focus()
 
             await pilot.press("enter")
             await pilot.pause()
-            starting_tagline = tagline.render().plain
-            blocked_hint = hint.render().plain
+            blocked_notice = notice.render().plain
             preserved_draft = input_widget.value
             queued_while_starting = (
                 app_instance._input_controller.receive_stream.statistics().current_buffer_used
@@ -10329,37 +10394,151 @@ def test_textual_startup_is_prominent_and_preserves_early_resume_draft() -> None
                 )
             )
             await pilot.pause()
-            ready_tagline = tagline.render().plain
+            notice_hidden_when_ready = not notice.display
+            notice_timer_stopped = notice._timer is None
             await pilot.press("enter")
             await pilot.pause()
             submitted = await app_instance._input_controller.receive_stream.receive()
             return (
-                starting_tagline,
-                blocked_hint,
+                starting_notice,
+                blocked_notice,
+                notice_color,
+                normal_tagline,
+                notice_above_input,
+                notice_outside_composer,
                 preserved_draft,
                 queued_while_starting,
-                ready_tagline,
+                notice_hidden_when_ready,
+                notice_timer_stopped,
                 submitted.content,
                 input_widget.value,
             )
 
     (
-        starting_tagline,
-        blocked_hint,
+        starting_notice,
+        blocked_notice,
+        notice_color,
+        normal_tagline,
+        notice_above_input,
+        notice_outside_composer,
         preserved_draft,
         queued_while_starting,
-        ready_tagline,
+        notice_hidden_when_ready,
+        notice_timer_stopped,
         submitted,
         final_draft,
     ) = anyio.run(scenario)
 
-    assert starting_tagline == "Starting Wisp…"
-    assert blocked_hint == "Wisp is still starting — your draft is preserved."
+    assert starting_notice[0] in StartupNotice._FRAMES
+    assert starting_notice[2:] == "Starting Wisp… You can start typing while it gets ready."
+    assert blocked_notice[0] in StartupNotice._FRAMES
+    assert blocked_notice[2:] == "Wisp is still starting — your draft is preserved."
+    # Resolved `$warning` in the default theme (Textual's color round-trip
+    # shifts the source red channel down by one, as in the other style tests).
+    assert notice_color == "#EFC674"
+    assert normal_tagline == _EMPTY_TRANSCRIPT_TAGLINE
+    assert notice_above_input
+    assert notice_outside_composer
     assert preserved_draft == "/resume"
     assert queued_while_starting == 0
-    assert ready_tagline == _EMPTY_TRANSCRIPT_TAGLINE
+    assert notice_hidden_when_ready
+    assert notice_timer_stopped
     assert submitted == "/resume"
     assert final_draft == ""
+
+
+def test_textual_startup_notice_animates_only_its_leading_glyph() -> None:
+    async def scenario() -> tuple[set[str], set[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(status="starting", input_hint="wisp> ", input_ready=False)
+            )
+            await pilot.pause()
+            notice = app_instance.query_one("#startup-notice", StartupNotice)
+            notice.suspend_animation()
+            glyphs: set[str] = set()
+            labels: set[str] = set()
+            for _ in range(len(StartupNotice._FRAMES)):
+                rendered = notice.render().plain
+                glyphs.add(rendered[0])
+                labels.add(rendered[2:])
+                notice._tick()
+            return glyphs, labels
+
+    glyphs, labels = anyio.run(scenario)
+    assert glyphs == set(StartupNotice._FRAMES)
+    assert labels == {"Starting Wisp… You can start typing while it gets ready."}
+
+
+def test_textual_startup_notice_animates_when_starting_before_mount() -> None:
+    async def scenario() -> tuple[bool, int, int, str]:
+        app_instance, renderer = create_textual_tui()
+        # Production's run_shell() sets this snapshot before Textual composes
+        # and mounts the widgets. A post-mount transition does not exercise the
+        # same lifecycle and previously let the cold-start timer bug escape.
+        renderer.view_updated(
+            TuiViewSnapshot(status="starting", input_hint="wisp> ", input_ready=False)
+        )
+        async with app_instance.run_test() as pilot:
+            notice = app_instance.query_one("#startup-notice", StartupNotice)
+            ticks_before = notice._ticks
+            await pilot.pause(StartupNotice._INTERVAL * 3)
+            return (
+                notice._timer is not None,
+                ticks_before,
+                notice._ticks,
+                notice.render().plain[2:],
+            )
+
+    timer_running, ticks_before, ticks_after, label = anyio.run(scenario)
+    assert timer_running
+    assert ticks_after > ticks_before
+    assert label == "Starting Wisp… You can start typing while it gets ready."
+
+
+def test_textual_startup_notice_pauses_with_hidden_composer_and_stops_on_unmount() -> None:
+    async def scenario() -> tuple[bool, bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(status="starting", input_hint="wisp> ", input_ready=False)
+            )
+            await pilot.pause()
+            composer = app_instance.query_one("#composer-region", ComposerRegion)
+            notice = app_instance.query_one("#startup-notice", StartupNotice)
+            initially_running = notice._timer is not None
+            composer.hide()
+            paused_while_hidden = notice._timer is None
+            composer.show()
+            resumed_when_shown = notice._timer is not None
+            await composer.remove()
+            stopped_on_unmount = notice._timer is None
+            return initially_running, paused_while_hidden, resumed_when_shown, stopped_on_unmount
+
+    assert anyio.run(scenario) == (True, True, True, True)
+
+
+@pytest.mark.parametrize("height", [24, 14, 10, 8])
+def test_textual_startup_notice_stays_above_the_composer_on_short_screens(height: int) -> None:
+    async def scenario() -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(72, height)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(status="starting", input_hint="wisp> ", input_ready=False)
+            )
+            await pilot.pause()
+            region = app_instance.query_one("#composer-region", ComposerRegion)
+            composer = app_instance.query_one("#composer", ComposerPanel)
+            notice = app_instance.query_one("#startup-notice", StartupNotice)
+            footer = app_instance.query_one("#status")
+            return (
+                region.region.contains_region(notice.region),
+                notice.region.bottom + 1 == composer.region.y,
+                region.region.bottom <= footer.region.y,
+            )
+
+    assert anyio.run(scenario) == (True, True, True)
 
 
 def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
@@ -10699,7 +10878,7 @@ def test_textual_footer_shortcuts_are_contextual() -> None:
         TuiViewSnapshot(status="approval", input_hint="", input_mode="approval")
     )
 
-    assert startup.center == "starting Wisp…"
+    assert startup.center == ""
     assert idle.center == "↵ send · / commands"
     assert running.center == "esc cancel"
     assert approval.center == ""

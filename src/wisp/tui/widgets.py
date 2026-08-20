@@ -1623,15 +1623,6 @@ class TranscriptEmptyState(Vertical):
     )
 
     DEFAULT_CSS = """
-    TranscriptEmptyState.-starting #transcript-empty-tagline {
-        color: $accent;
-        text-style: bold;
-    }
-
-    TranscriptEmptyState.-starting #transcript-empty-actions {
-        display: none;
-    }
-
     TranscriptEmptyState.-compact #transcript-empty-actions {
         display: none;
     }
@@ -1648,20 +1639,13 @@ class TranscriptEmptyState(Vertical):
         compact_wordmark: str,
         tagline: str,
         hint: str,
-        *,
-        input_ready: bool = True,
     ) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
         self._compact_wordmark = compact_wordmark
         self._tagline = tagline
         self._hint = hint
-        self._input_ready = input_ready
-        self._current_tagline = tagline if input_ready else "Starting Wisp…"
-        self._current_hint = hint if input_ready else "You can type while Wisp starts."
         self._wordmark_label: Static | None = None
-        self._tagline_label: Label | None = None
-        self._hint_label: Label | None = None
         # Cells the drawn mark needs before Textual starts wrapping its rows.
         # Derived from the art itself so the fit check cannot drift from it.
         self._wordmark_width = max(
@@ -1679,46 +1663,10 @@ class TranscriptEmptyState(Vertical):
 
     def compose(self) -> ComposeResult:
         self._wordmark_label = Static(self._wordmark, id="transcript-empty-wordmark", markup=False)
-        self._tagline_label = Label(
-            self._current_tagline,
-            id="transcript-empty-tagline",
-            markup=False,
-        )
-        self._hint_label = Label(
-            self._current_hint,
-            id="transcript-empty-hint",
-            markup=False,
-        )
-        self.set_class(not self._input_ready, "-starting")
         yield self._centered(self._wordmark_label)
-        yield self._centered(self._tagline_label)
-        yield self._centered(self._hint_label)
+        yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
+        yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(Static(self._actions, id="transcript-empty-actions", markup=False))
-
-    def set_input_ready(self, ready: bool) -> None:
-        """Switch the disposable welcome panel between startup and ready copy."""
-
-        if self._input_ready == ready:
-            return
-        self._input_ready = ready
-        self._current_tagline = self._tagline if ready else "Starting Wisp…"
-        self._current_hint = self._hint if ready else "You can type while Wisp starts."
-        self.set_class(not ready, "-starting")
-        if self._tagline_label is not None:
-            self._tagline_label.update(self._current_tagline)
-        if self._hint_label is not None:
-            self._hint_label.update(self._current_hint)
-        self._refresh_responsive_layout()
-
-    def show_startup_submission_blocked(self) -> None:
-        """Confirm that an early Enter kept the draft instead of queueing it."""
-
-        if self._input_ready:
-            return
-        self._current_hint = "Wisp is still starting — your draft is preserved."
-        if self._hint_label is not None:
-            self._hint_label.update(self._current_hint)
-        self._refresh_responsive_layout()
 
     def _wrapped_rows(self, text: str, width: int) -> int:
         """Rows ``text`` occupies once wrapped into ``width`` cells.
@@ -1736,10 +1684,10 @@ class TranscriptEmptyState(Vertical):
     def _tier_footprint(self, classes: frozenset[str], *, width: int, mark_rows: int) -> int:
         """Rows this tier needs at ``width``, including inter-child margins."""
 
-        texts = [self._current_tagline, self._current_hint]
+        texts = [self._tagline, self._hint]
         if "-minimal" in classes:
             texts = []
-        if "-compact" not in classes and self._input_ready:
+        if "-compact" not in classes:
             texts.append(self._actions)
         rows = mark_rows
         for text in texts:
@@ -1999,7 +1947,6 @@ class Transcript(VerticalScroll):
         empty_compact_wordmark: str = "",
         empty_tagline: str = "",
         empty_hint: str = "",
-        empty_input_ready: bool = True,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
@@ -2010,7 +1957,6 @@ class Transcript(VerticalScroll):
         self._empty_compact_wordmark = empty_compact_wordmark
         self._empty_tagline = empty_tagline
         self._empty_hint = empty_hint
-        self._empty_input_ready = empty_input_ready
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
         self._has_retained_history = False
@@ -2051,22 +1997,8 @@ class Transcript(VerticalScroll):
                 self._empty_compact_wordmark,
                 self._empty_tagline,
                 self._empty_hint,
-                input_ready=self._empty_input_ready,
             )
             yield self._empty_state
-
-    def set_input_ready(self, ready: bool) -> None:
-        """Update startup presentation while the disposable empty state exists."""
-
-        self._empty_input_ready = ready
-        if self._empty_state is not None:
-            self._empty_state.set_input_ready(ready)
-
-    def show_startup_submission_blocked(self) -> None:
-        """Explain an ignored early Enter without adding transcript scrollback."""
-
-        if self._empty_state is not None:
-            self._empty_state.show_startup_submission_blocked()
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:
         """Mount output after permanently dismissing the initial empty state."""
@@ -3273,6 +3205,10 @@ class ProcessCard(ToolCard):
             self.entry_id = entry_id
 
 
+_ACTIVITY_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_ACTIVITY_SPINNER_INTERVAL = 0.08
+
+
 class WorkingIndicator(Static):
     """Command-scoped heartbeat shown in the *transcript*, not the footer.
 
@@ -3283,8 +3219,8 @@ class WorkingIndicator(Static):
     settlement. The footer stays stable (cwd / session / model) — quiet over noisy.
     """
 
-    _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    _INTERVAL = 0.08  # ~12.5 fps braille rotation
+    _FRAMES = _ACTIVITY_SPINNER_FRAMES
+    _INTERVAL = _ACTIVITY_SPINNER_INTERVAL  # ~12.5 fps braille rotation
 
     def __init__(self) -> None:
         super().__init__("", markup=False)
@@ -3352,6 +3288,102 @@ class WorkingIndicator(Static):
         self._rendered_width = width
 
 
+class StartupNotice(Static):
+    """Startup state shown immediately above the composer surface."""
+
+    _FRAMES = _ACTIVITY_SPINNER_FRAMES
+    _INTERVAL = _ACTIVITY_SPINNER_INTERVAL
+
+    def __init__(self, *, input_ready: bool = True, id: str | None = None) -> None:  # noqa: A002
+        super().__init__("", id=id, markup=False)
+        self._starting = not input_ready
+        self._draft_preserved = False
+        self._animation_suspended = False
+        self._animation_mounted = False
+        self._ticks = 0
+        self._timer: Timer | None = None
+        self._rendered_width: int | None = None
+        self.display = self._starting
+
+    def on_mount(self) -> None:
+        # Textual's public ``is_mounted`` flag is still false while on_mount is
+        # dispatched. Track this widget's animation lifecycle explicitly so a
+        # notice constructed in the starting state can register its cold-start
+        # timer instead of waiting for a state transition that may never occur.
+        self._animation_mounted = True
+        self._start_timer()
+        self._repaint()
+
+    def on_unmount(self) -> None:
+        self._animation_mounted = False
+        self._stop_timer()
+
+    def set_input_ready(self, ready: bool) -> None:
+        starting = not ready
+        if starting == self._starting:
+            return
+        self._starting = starting
+        self.display = starting
+        if starting:
+            self._draft_preserved = False
+            self._ticks = 0
+            self._start_timer()
+            self._repaint()
+        else:
+            self._stop_timer()
+
+    def show_draft_preserved(self) -> None:
+        """Confirm that an early Enter left the current editor draft intact."""
+
+        if not self._starting:
+            return
+        self._draft_preserved = True
+        self._repaint()
+
+    def suspend_animation(self) -> None:
+        """Pause animation while an overlay hides the composer."""
+
+        self._animation_suspended = True
+        self._stop_timer()
+
+    def resume_animation(self) -> None:
+        """Resume animation after the composer becomes visible again."""
+
+        self._animation_suspended = False
+        self._start_timer()
+        self._repaint()
+
+    def _tick(self) -> None:
+        self._ticks += 1
+        self._repaint()
+
+    def _start_timer(self) -> None:
+        if (
+            self._timer is None
+            and self._starting
+            and not self._animation_suspended
+            and self._animation_mounted
+        ):
+            self._timer = self.set_interval(self._INTERVAL, self._tick)
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _repaint(self) -> None:
+        spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
+        label = (
+            "Wisp is still starting — your draft is preserved."
+            if self._draft_preserved
+            else "Starting Wisp… You can start typing while it gets ready."
+        )
+        text = f"{spinner} {label}"
+        width = len(text)
+        self.update(text, layout=width != self._rendered_width)
+        self._rendered_width = width
+
+
 @dataclass(frozen=True)
 class _TextualFooterParts:
     """Semantic fields for Textual's single-row adaptive footer."""
@@ -3374,7 +3406,7 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
     cwd = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
     left = " · ".join(part for part in (cwd, activity) if part)
     center = (
-        "starting Wisp…"
+        ""
         if not snapshot.input_ready
         else "esc cancel"
         if snapshot.input_mode == "running"
@@ -3685,13 +3717,13 @@ class ComposerPanel(Vertical):
         self._input.styles.max_height = max(6, selected_height // 3)
 
     def hide(self) -> None:
-        """Hide all focusable composer content while an overlay owns the input slot."""
+        """Hide the writing surface and mark its editor unavailable to input routing."""
 
         self._input.display = False
         self.display = False
 
     def show(self) -> None:
-        """Restore the composer and its input after its overlay closes."""
+        """Restore the writing surface and its editor after an overlay closes."""
 
         self.display = True
         self._input.display = True
@@ -3705,6 +3737,56 @@ class ComposerPanel(Vertical):
 
         if event.control is self:
             self.focus()
+
+
+class ComposerRegion(Vertical):
+    """Composer slot containing external status chrome and the writing surface."""
+
+    def __init__(
+        self,
+        *,
+        placeholder: str = "",
+        input_ready: bool = True,
+        id: str | None = None,  # noqa: A002 - Textual's parameter name
+    ) -> None:
+        super().__init__(id=id)
+        self._startup = StartupNotice(input_ready=input_ready, id="startup-notice")
+        self._composer = ComposerPanel(placeholder=placeholder, id="composer")
+
+    def compose(self) -> ComposeResult:
+        yield self._startup
+        yield self._composer
+
+    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        self._startup.set_input_ready(snapshot.input_ready)
+        self._composer.set_snapshot(snapshot)
+
+    def show_startup_submission_blocked(self) -> None:
+        self._startup.show_draft_preserved()
+
+    def refresh_theme(self) -> None:
+        self._composer.refresh_theme()
+
+    def refresh_layout(self, *, height: int | None = None) -> None:
+        self._composer.refresh_layout(height=height)
+
+    def hide(self) -> None:
+        """Hide the complete input slot while an overlay owns its space."""
+
+        self._startup.suspend_animation()
+        self._composer.hide()
+        self.display = False
+
+    def show(self) -> None:
+        """Restore the complete input slot after its overlay closes."""
+
+        self.display = True
+        self._composer.show()
+        self._startup.resume_animation()
+
+    def focus(self, scroll_visible: bool = True) -> ComposerRegion:
+        self._composer.focus(scroll_visible=scroll_visible)
+        return self
 
 
 class StatusBar(Static):

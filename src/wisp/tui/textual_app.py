@@ -89,7 +89,7 @@ from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.update_prompt import UpdatePrompt
 from wisp.tui.update_types import UpdatePromptAction
 from wisp.tui.widgets import (
-    ComposerPanel,
+    ComposerRegion,
     DecisionPanel,
     HistoryNavigation,
     HistoryNavigationIntent,
@@ -408,6 +408,19 @@ class TextualTui(App[None]):
         margin-bottom: 1;
     }
 
+    #composer-region {
+        height: auto;
+    }
+
+    #startup-notice {
+        height: 1;
+        min-height: 1;
+        margin-bottom: 1;
+        padding: 0 2 0 3;
+        color: $warning;
+        text-style: bold;
+    }
+
     #input .text-area--placeholder {
         color: $foreground 60%;
     }
@@ -524,7 +537,7 @@ class TextualTui(App[None]):
         self._exit_unsent: list[str] = []
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
-        self._composer: ComposerPanel | None = None
+        self._composer: ComposerRegion | None = None
         self._transcript: Transcript | None = None
         self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
@@ -684,14 +697,13 @@ class TextualTui(App[None]):
             yield UpdatePrompt(id="update-prompt")
             yield ContextStatusOverlay(id="context-status")
             yield DiffViewer(id="diff-viewer")
-            # Transcript takes all remaining height (1fr). ComposerPanel is explicitly
-            # auto-height so the input and detached footer still hug the screen bottom.
+            # Transcript takes all remaining height (1fr). ComposerRegion is explicitly
+            # auto-height so the notice, input, and detached footer hug the screen bottom.
             yield Transcript(
                 empty_wordmark=_WORDMARK,
                 empty_compact_wordmark=_WORDMARK_COMPACT,
                 empty_tagline=_EMPTY_TRANSCRIPT_TAGLINE,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
-                empty_input_ready=self._shell_snapshot.input_ready,
                 id="transcript",
             )
             # A full-width transparent overlay row provides right alignment while
@@ -710,7 +722,11 @@ class TextualTui(App[None]):
             yield ConnectPanel(id="connect-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
-            yield ComposerPanel(placeholder=_input_placeholder("wisp> "), id="composer")
+            yield ComposerRegion(
+                placeholder=_input_placeholder("wisp> "),
+                input_ready=self._shell_snapshot.input_ready,
+                id="composer-region",
+            )
             # Textual uses a distinct one-row information hierarchy. The shared
             # Rich/prompt-toolkit renderers retain their existing two-line footer.
             yield StatusBar(id="status")
@@ -735,7 +751,7 @@ class TextualTui(App[None]):
         self._transcript = self.query_one("#transcript", Transcript)
         self._jump_to_latest = self.query_one("#jump-latest", JumpToLatest)
         self._status = self.query_one("#status", StatusBar)
-        self._composer = self.query_one("#composer", ComposerPanel)
+        self._composer = self.query_one("#composer-region", ComposerRegion)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._file_suggest = self.query_one("#file-suggest", FileSuggest)
@@ -1312,8 +1328,8 @@ class TextualTui(App[None]):
 
         if self._shell_snapshot.input_ready:
             return False
-        if self._transcript is not None:
-            self._transcript.show_startup_submission_blocked()
+        if self._composer is not None:
+            self._composer.show_startup_submission_blocked()
         return True
 
     def _submit_local_theme_command(self, text: str) -> bool:
@@ -2263,8 +2279,6 @@ class TextualTui(App[None]):
         self._visible_input_mode = snapshot.input_mode
         self._shell_snapshot = snapshot
         self._render_pending_submissions()
-        if self._transcript is not None:
-            self._transcript.set_input_ready(snapshot.input_ready)
         if self._status is not None:
             self._status.set_snapshot(snapshot)
         self._schedule_update_prompt()

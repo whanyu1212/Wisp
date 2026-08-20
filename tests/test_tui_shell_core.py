@@ -943,7 +943,7 @@ def test_tui_shell_resume_complete_history_buffers_all_pages_before_replacement(
                 command_id="select-session-1",
                 session_id="target",
                 session_path="/tmp/target.jsonl",
-                entry_count=2,
+                entry_count=3,
                 session_name="Target task",
             )
         )
@@ -984,7 +984,10 @@ def test_tui_shell_resume_complete_history_buffers_all_pages_before_replacement(
             RpcMessagesReported(
                 command_id=second_history_id,
                 session_id="target",
-                messages=(_rpc_message("user", "oldest", entry_id="oldest"),),
+                messages=(
+                    _rpc_message("system", "provider instructions", entry_id="system"),
+                    _rpc_message("user", "oldest", entry_id="oldest"),
+                ),
             )
         )
         await shell._handle_rpc_event(
@@ -1300,6 +1303,64 @@ def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> N
 
         assert renderer.prepended == [(HistoricalTranscriptMessage(role="user", content="older"),)]
         assert renderer.page_states == [True, False]
+
+    anyio.run(run)
+
+
+def test_tui_shell_advances_pagination_across_a_hidden_system_only_page() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.page_states: list[bool] = []
+            self.prepended: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def history_page_loaded(self, *, has_more: bool) -> None:
+            self.page_states.append(has_more)
+
+        def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.prepended.append(entries)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="newer",
+            )
+        )
+
+        assert callable(renderer.history_page_hook)
+        await renderer.history_page_hook()
+        first_command_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=first_command_id,
+                session_id="target",
+                messages=(_rpc_message("system", "provider instructions", entry_id="system"),),
+                truncated=True,
+                next_before_entry_id="system",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=first_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.prepended == [()]
+        assert renderer.page_states == [True, True]
+        await renderer.history_page_hook()
+        assert controller.messages_requests[-1][3] == "system"
 
     anyio.run(run)
 
@@ -2564,6 +2625,11 @@ def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
                     RpcMessagesReported(
                         command_id="messages-1",
                         messages=(
+                            _rpc_message(
+                                "system",
+                                "provider instructions",
+                                entry_id="system-1",
+                            ),
                             _rpc_message("user", "old prompt", entry_id="user-1"),
                             _rpc_message("assistant", "old answer", entry_id="assistant-1"),
                         ),
