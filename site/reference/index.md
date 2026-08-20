@@ -8,6 +8,7 @@ Exact surfaces — flags, fields, schemas. Narrative explanation lives in the
 [Guide](../guide/); design rationale lives in [Architecture](../architecture/).
 
 - [CLI](./cli) — commands, flags, exit codes.
+- [Python SDK](./sdk) — supported namespaces, controllers, commands, events, and lifecycle options.
 - [Configuration](./configuration) — settings files and precedence.
 - [Environment variables](./environment) — every `WISP_*` variable.
 

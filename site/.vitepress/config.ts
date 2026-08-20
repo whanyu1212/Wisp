@@ -82,6 +82,7 @@ export default withMermaid(
             text: 'Using Wisp',
             items: [
               { text: 'Interfaces', link: '/guide/interfaces' },
+              { text: 'Python SDK', link: '/guide/sdk' },
               { text: 'Providers & auth', link: '/guide/providers' },
               { text: 'Tools & safety', link: '/guide/tools-and-safety' },
               { text: 'Sessions', link: '/guide/sessions' },
@@ -98,6 +99,7 @@ export default withMermaid(
             items: [
               { text: 'Overview', link: '/reference/' },
               { text: 'CLI', link: '/reference/cli' },
+              { text: 'Python SDK', link: '/reference/sdk' },
               { text: 'Configuration', link: '/reference/configuration' },
               { text: 'Environment variables', link: '/reference/environment' },
             ],

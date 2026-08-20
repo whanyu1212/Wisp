@@ -18,4 +18,4 @@ first stable release is validated.
 
 Start with [Installation](./installation) and the [Quickstart](./quickstart). Then read
 [Staying in sync](./staying-in-sync) for the exact steering, follow-up, cancellation, and approval
-behavior available through each interface.
+behavior available through each interface. Embedders can continue with the [Python SDK](./sdk).
