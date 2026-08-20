@@ -13,20 +13,23 @@ provider, session, approval, or RPC policy.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import cast
 
 from rich.console import RenderableType
 from textual import events, on, work
-from textual._compositor import Compositor, CompositorMap
+from textual._compositor import ChopsUpdate, Compositor, CompositorMap, LayoutUpdate
 from textual.app import App, ComposeResult
 from textual.await_remove import AwaitRemove
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
+from textual.geometry import Offset, Size
 from textual.screen import Screen
+from textual.strip import Strip
 from textual.widget import AwaitMount, Widget
 from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 
@@ -208,6 +211,115 @@ def _merge_history_navigation(
     )
 
 
+@dataclass
+class _DisplayedFrame:
+    """Exact terminal cells last handed to Textual's display driver."""
+
+    size: Size
+    rows: list[Strip]
+
+    @classmethod
+    def from_layout(
+        cls,
+        update: LayoutUpdate,
+        *,
+        size: Size,
+    ) -> tuple[LayoutUpdate, _DisplayedFrame | None]:
+        """Materialize one full layout without consuming its row iterables twice."""
+
+        if update.region != size.region:
+            return update, None
+        materialized: list[Iterable[Strip]] = [tuple(line) for line in update.strips]
+        rows = [Strip.join(line).discard_meta().simplify() for line in materialized]
+        if len(rows) != size.height or any(row.cell_count != size.width for row in rows):
+            return LayoutUpdate(materialized, update.region), None
+        return LayoutUpdate(materialized, update.region), cls(size=size, rows=rows)
+
+    def filter_chops(
+        self,
+        update: ChopsUpdate,
+        *,
+        allow_suppression: bool,
+    ) -> tuple[ChopsUpdate | None, bool]:
+        """Drop exact duplicate spans and advance the cached terminal frame.
+
+        The boolean reports whether every update span could be reconstructed. An
+        unfamiliar Textual update shape invalidates the cache and passes through
+        unchanged rather than risking stale terminal cells.
+        """
+
+        candidate_rows = self.rows.copy()
+        retained_spans: list[tuple[int, int, int]] = []
+        try:
+            for y, x1, x2 in update.spans:
+                if not (0 <= y < self.size.height and 0 <= x1 < x2 <= self.size.width):
+                    return update, False
+                patch = _chops_span_strip(update, y=y, x1=x1, x2=x2)
+                if patch is None:
+                    return update, False
+                patch = patch.discard_meta().simplify()
+                previous = candidate_rows[y].crop(x1, x2)
+                safe_to_compare = not _strip_has_control(previous) and not _strip_has_control(patch)
+                if not allow_suppression or not safe_to_compare or patch != previous:
+                    retained_spans.append((y, x1, x2))
+                candidate_rows[y] = (
+                    Strip.join(
+                        (
+                            candidate_rows[y].crop(0, x1),
+                            patch,
+                            candidate_rows[y].crop(x2, self.size.width),
+                        )
+                    )
+                    .discard_meta()
+                    .simplify()
+                )
+        except (IndexError, TypeError, ValueError):
+            return update, False
+
+        self.rows = candidate_rows
+        if not retained_spans:
+            return None, True
+        if len(retained_spans) == len(update.spans):
+            return update, True
+        return ChopsUpdate(update.chops, retained_spans, update.chop_ends), True
+
+
+def _chops_span_strip(
+    update: ChopsUpdate,
+    *,
+    y: int,
+    x1: int,
+    x2: int,
+) -> Strip | None:
+    """Reconstruct one complete dirty span from Textual's sparse row chops."""
+
+    line = update.chops[y]
+    ends = update.chop_ends[y]
+    cursor = x1
+    pieces: list[Strip] = []
+    for end, (start, strip) in zip(ends, line.items(), strict=True):
+        if end <= x1:
+            continue
+        if start >= x2:
+            break
+        overlap_start = max(start, x1)
+        overlap_end = min(end, x2)
+        if overlap_start > cursor or strip is None:
+            return None
+        pieces.append(strip.crop(overlap_start - start, overlap_end - start))
+        cursor = overlap_end
+    if cursor != x2:
+        return None
+    patch = Strip.join(pieces)
+    return patch if patch.cell_count == x2 - x1 else None
+
+
+def _strip_has_control(strip: Strip) -> bool:
+    """Return whether replaying an equal strip may still have a side effect."""
+
+    return any(segment.control for segment in strip)
+
+
 class _StableScrollCompositor(Compositor):
     """Retain the prior visible map while Textual rebuilds scroll hit-testing state.
 
@@ -242,6 +354,10 @@ class _WispScreen(Screen[object]):
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
 
+    _displayed_frame: _DisplayedFrame | None
+    _displayed_cursor_position: Offset | None
+    _displayed_screen: Screen[object] | None
+
     # Wisp owns a typed, RPC-backed palette. Keep Textual's framework ctrl+p
     # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
@@ -252,11 +368,40 @@ class TextualTui(App[None]):
         return _WispScreen()
 
     def _display(self, screen: Screen[object], renderable: RenderableType | None) -> None:
-        """Hide the transient history-window frame before its anchor is restored."""
+        """Hide unstable history frames and omit exact duplicate terminal cells."""
 
         if getattr(self, "_history_prepend_paint_suppressed", False):
             return
-        super()._display(screen, renderable)
+        if renderable is None or self.is_inline or self._batch_count:
+            super()._display(screen, renderable)
+            return
+
+        displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
+        next_frame: _DisplayedFrame | None = None
+        prepared: RenderableType | None = renderable
+        cursor_position = screen.outer_size.clamp_offset(self.cursor_position)
+        if isinstance(renderable, LayoutUpdate):
+            prepared, next_frame = _DisplayedFrame.from_layout(
+                renderable,
+                size=screen.outer_size,
+            )
+        elif isinstance(renderable, ChopsUpdate):
+            if isinstance(displayed_frame, _DisplayedFrame) and (
+                displayed_frame.size == screen.outer_size
+            ):
+                filtered, cache_valid = displayed_frame.filter_chops(
+                    renderable,
+                    allow_suppression=cursor_position == self._displayed_cursor_position,
+                )
+                prepared = cast(RenderableType | None, filtered)
+                next_frame = displayed_frame if cache_valid else None
+        else:
+            next_frame = None
+
+        super()._display(screen, prepared)
+        self._displayed_frame = next_frame
+        self._displayed_cursor_position = cursor_position
+        self._displayed_screen = screen
 
     CSS = """
     Screen {
@@ -552,6 +697,9 @@ class TextualTui(App[None]):
 
     def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
         super().__init__()
+        self._displayed_frame = None
+        self._displayed_cursor_position = None
+        self._displayed_screen = None
         # Textual's native wheel handler reads sensitivity from the app, not the
         # scroll view. Two rows keeps terminal wheel input responsive without
         # making short transcript navigation jumpy.
