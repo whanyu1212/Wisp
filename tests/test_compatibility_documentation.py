@@ -51,10 +51,13 @@ def test_same_version_wire_additions_are_recorded() -> None:
         "## Schema v23", maxsplit=1
     )[0]
     schema_v5 = _CHANGELOG.split("## Schema v5", maxsplit=1)[1].split("## Schema v4", maxsplit=1)[0]
+    schema_v4 = _CHANGELOG.split("## Schema v4", maxsplit=1)[1].split("## Schema v3", maxsplit=1)[0]
 
     assert "`output_has_exit_status`" in schema_v24
     assert "optional `effort`" in schema_v5
     assert "`project.config.applied`" in schema_v5
+    for field in ("exit_code", "before_text", "created", "summary", "truncated"):
+        assert f"`{field}`" in schema_v4
 
 
 def test_schema_v32_records_message_context_observations() -> None:

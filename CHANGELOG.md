@@ -336,8 +336,9 @@ project configuration is applied.
 
 ## Schema v4 — archival, unsupported
 
-Adds bounded presentation metadata to `tool.execution.ended` and `tool.result`, including process
-exit status and write-result context. Current typed parsers no longer accept v4 payloads.
+Adds bounded presentation metadata to `tool.execution.ended` and `tool.result`: `exit_code`,
+`before_text`, `created`, `summary`, and `truncated`. Current typed parsers no longer accept v4
+payloads.
 
 ## Schema v3 — archival, unsupported
 
