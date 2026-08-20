@@ -19,6 +19,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream
 
 from wisp.tui.compact_echo import CompactEchoLog
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 from wisp.tui.prompt_history import PromptHistory, PromptHistoryEntry
 
 _INPUT_BUFFER_CAPACITY = 100
@@ -32,6 +33,9 @@ class TextualInputSurface(Protocol):
 
     def write_input_error(self, message: str) -> None:
         """Surface a recoverable input-queue failure to the user."""
+
+    def buffer_submission(self, submission: TuiSubmission) -> None:
+        """Keep an accepted prompt visible until the shell classifies it."""
 
 
 class TextualInputController:
@@ -52,15 +56,15 @@ class TextualInputController:
         compact_echoes: CompactEchoLog | None = None,
     ) -> None:
         self._surface = surface
-        self._send, self._receive = anyio.create_memory_object_stream[str | BaseException](
-            queue_capacity
-        )
-        self._on_submit: Callable[[], None] | None = None
+        self._send, self._receive = anyio.create_memory_object_stream[
+            TuiSubmission | BaseException
+        ](queue_capacity)
+        self._on_submit: Callable[[], str | None] | None = None
         self._prompt_history = prompt_history or PromptHistory()
         self._compact_echoes = compact_echoes or CompactEchoLog()
 
     @property
-    def receive_stream(self) -> MemoryObjectReceiveStream[str | BaseException]:
+    def receive_stream(self) -> MemoryObjectReceiveStream[TuiSubmission | BaseException]:
         """Expose the queue for deterministic frontend integration tests."""
 
         return self._receive
@@ -89,12 +93,12 @@ class TextualInputController:
 
         return self._compact_echoes.order_length
 
-    def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
-        """Set the callback run immediately before each queued input line."""
+    def set_submit_hook(self, on_submit: Callable[[], str | None]) -> None:
+        """Set the callback that captures the mode of each accepted line."""
 
         self._on_submit = on_submit
 
-    async def receive(self) -> str:
+    async def receive(self) -> TuiSubmission:
         """Wait for one queued prompt or re-raise its terminal input signal."""
 
         value = await self._receive.receive()
@@ -102,23 +106,32 @@ class TextualInputController:
             raise value
         return value
 
-    def submit_line(self, text: str, *, clear_editor: bool) -> bool:
-        """Queue a line, optionally clearing the editor before the attempt.
+    def submit_line(
+        self,
+        text: str,
+        *,
+        clear_editor: bool,
+        display: str | None = None,
+    ) -> bool:
+        """Queue a typed submission and clear its editor only after acceptance."""
 
-        The submit hook intentionally fires before the queue attempt, preserving
-        the renderer's existing at-accept input-mode snapshot even if the bounded
-        queue subsequently rejects the line.
-        """
-
-        if clear_editor:
-            self._surface.clear_prompt_editor()
-        if self._on_submit is not None:
-            self._on_submit()
+        input_mode = self._on_submit() if self._on_submit is not None else None
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content=text,
+            display=text if display is None else display,
+            input_mode=input_mode or "idle",
+        )
         try:
-            self._send.send_nowait(text)
+            self._send.send_nowait(submission)
         except anyio.WouldBlock:
             self._surface.write_input_error("input buffer full; command dropped")
             return False
+        if clear_editor:
+            buffer_submission = getattr(self._surface, "buffer_submission", None)
+            if callable(buffer_submission):
+                buffer_submission(submission)
+            self._surface.clear_prompt_editor()
         return True
 
     def signal(

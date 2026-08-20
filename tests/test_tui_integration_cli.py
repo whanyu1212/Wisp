@@ -47,6 +47,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
 )
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecycle
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
@@ -10293,6 +10294,74 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     assert final_children == ["LineMessage"]
 
 
+def test_textual_startup_is_prominent_and_preserves_early_resume_draft() -> None:
+    async def scenario() -> tuple[str, str, str, int, str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(72, 30)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="starting",
+                    input_hint="wisp> ",
+                    input_ready=False,
+                )
+            )
+            await pilot.pause()
+            tagline = app_instance.query_one("#transcript-empty-tagline", Label)
+            hint = app_instance.query_one("#transcript-empty-hint", Label)
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "/resume"
+            input_widget.focus()
+
+            await pilot.press("enter")
+            await pilot.pause()
+            starting_tagline = tagline.render().plain
+            blocked_hint = hint.render().plain
+            preserved_draft = input_widget.value
+            queued_while_starting = (
+                app_instance._input_controller.receive_stream.statistics().current_buffer_used
+            )
+
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="idle",
+                    input_hint="wisp> ",
+                    input_ready=True,
+                )
+            )
+            await pilot.pause()
+            ready_tagline = tagline.render().plain
+            await pilot.press("enter")
+            await pilot.pause()
+            submitted = await app_instance._input_controller.receive_stream.receive()
+            return (
+                starting_tagline,
+                blocked_hint,
+                preserved_draft,
+                queued_while_starting,
+                ready_tagline,
+                submitted.content,
+                input_widget.value,
+            )
+
+    (
+        starting_tagline,
+        blocked_hint,
+        preserved_draft,
+        queued_while_starting,
+        ready_tagline,
+        submitted,
+        final_draft,
+    ) = anyio.run(scenario)
+
+    assert starting_tagline == "Starting Wisp…"
+    assert blocked_hint == "Wisp is still starting — your draft is preserved."
+    assert preserved_draft == "/resume"
+    assert queued_while_starting == 0
+    assert ready_tagline == _EMPTY_TRANSCRIPT_TAGLINE
+    assert submitted == "/resume"
+    assert final_draft == ""
+
+
 def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
     # Regression: Textual centers these siblings as a block, not independently,
     # so every child is given the same explicit width. That width has to fit the
@@ -10612,6 +10681,14 @@ def test_textual_input_is_pinned_to_the_bottom() -> None:
 
 
 def test_textual_footer_shortcuts_are_contextual() -> None:
+    startup = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="starting",
+            input_hint="wisp> ",
+            input_mode="idle",
+            input_ready=False,
+        )
+    )
     idle = _textual_footer_parts(
         TuiViewSnapshot(status="idle", input_hint="wisp> ", input_mode="idle")
     )
@@ -10622,6 +10699,7 @@ def test_textual_footer_shortcuts_are_contextual() -> None:
         TuiViewSnapshot(status="approval", input_hint="", input_mode="approval")
     )
 
+    assert startup.center == "starting Wisp…"
     assert idle.center == "↵ send · / commands"
     assert running.center == "esc cancel"
     assert approval.center == ""
@@ -11167,3 +11245,87 @@ def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) ->
     assert captured[0].config.session_dir == tmp_path
     assert captured[0].continue_latest is True
     assert captured[0].renderer is TuiRendererKind.fullscreen
+
+
+def test_textual_pending_preview_is_bounded_and_summarizes_older_prompts() -> None:
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        submissions = tuple(
+            TuiSubmission(
+                id=new_submission_id(),
+                content=f"queued {index}",
+                display=f"queued {index}",
+                input_mode="running",
+            )
+            for index in range(12)
+        )
+        async with app_instance.run_test(size=(48, 20)) as pilot:
+            for submission in submissions:
+                app_instance.buffer_submission(submission)
+            await pilot.pause()
+            return app_instance.query_one("#pending-input", Static).render().plain
+
+    preview = anyio.run(scenario)
+    assert "… 9 earlier queued" in preview
+    assert "queued 0" not in preview
+    assert all(f"queued {index}" in preview for index in range(9, 12))
+
+
+def test_textual_submission_moves_from_pending_preview_to_transcript_once() -> None:
+    async def scenario() -> tuple[str, list[str], str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "visible during handoff"
+            await pilot.press("enter")
+            await pilot.pause()
+            submission = await app_instance._input_controller.receive_stream.receive()
+            assert isinstance(submission, TuiSubmission)
+            pending_before = app_instance.query_one("#pending-input", Static).render().plain
+            renderer.prompt_submitted(submission)
+            await pilot.pause()
+            pending_after = app_instance.query_one("#pending-input", Static).render().plain
+            return pending_before, _transcript_texts(app_instance), pending_after
+
+    pending_before, transcript, pending_after = anyio.run(scenario)
+    assert "visible during handoff" in pending_before
+    assert "visible during handoff" not in pending_after
+    assert sum("visible during handoff" in line for line in transcript) == 1
+
+
+def test_textual_failed_current_turn_restores_unstarted_follow_ups_in_order() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        shell.state.status = TuiStatus.running
+
+        async with app_instance.run_test() as pilot:
+            for content in ("first follow up", "second follow up"):
+                submission = TuiSubmission(
+                    id=new_submission_id(),
+                    content=content,
+                    display=content,
+                    input_mode="running",
+                )
+                app_instance.buffer_submission(submission)
+                await shell._handle_input_line(_InputLine(submission, _InputMode.running))
+            await pilot.pause()
+            pending_before = app_instance.query_one("#pending-input", Static).render().plain
+            await shell._finish_current_prompt(
+                RpcCommandFinished(
+                    command_id="prompt-1",
+                    command_type="prompt",
+                    ok=False,
+                    error="failed",
+                )
+            )
+            await pilot.pause()
+            restored = app_instance.query_one("#input", Input).text_for_submission()
+            return pending_before, restored
+
+    pending_before, restored = anyio.run(scenario)
+    assert "first follow up" in pending_before
+    assert "second follow up" in pending_before
+    assert restored == "first follow up\nsecond follow up"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.tui_support import *
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 
 
 def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
@@ -35,6 +36,43 @@ def test_live_fullscreen_tui_registers_transcript_scroll_keybindings() -> None:
 
     assert (Keys.PageUp,) in {binding.keys for binding in renderer._key_bindings.bindings}
     assert (Keys.PageDown,) in {binding.keys for binding in renderer._key_bindings.bindings}
+
+
+def test_live_fullscreen_tui_renders_pending_prompt_in_separate_bounded_region() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer._terminal_size = lambda: (20, 32)
+    renderer.state.pending_submissions = (
+        TuiSubmission(
+            id=new_submission_id(),
+            content="x" * 200,
+            display="x" * 200,
+            input_mode="running",
+        ).pending_view(),
+    )
+
+    pending = "".join(fragment for _style, fragment in renderer._pending_fragments())
+    transcript = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+
+    assert "Queued follow-ups" in pending
+    assert "…" in pending
+    assert max(len(line) for line in pending.splitlines()) <= 30
+    assert "Queued follow-ups" not in transcript
+
+
+def test_live_fullscreen_tui_reserves_transcript_rows_for_pending_preview() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer._terminal_size = lambda: (24, 60)
+    without_pending = renderer._transcript_view_entries()
+    renderer.state.pending_submissions = (
+        TuiSubmission(
+            id=new_submission_id(),
+            content="queued",
+            display="queued",
+            input_mode="running",
+        ).pending_view(),
+    )
+
+    assert renderer._transcript_view_entries() < without_pending
 
 
 def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:

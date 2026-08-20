@@ -31,9 +31,38 @@ from wisp.tui.history import (
     history_from_rpc_messages,
     represented_history_entry_ids,
 )
+from wisp.tui.input_types import PendingSubmissionView, new_submission_id
 from wisp.tui.theme import WISP_THEMES
 
 pytestmark = pytest.mark.tui
+
+
+def test_line_renderer_bounds_new_pending_submission_preview() -> None:
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, width=24)
+    renderer = LineTuiRenderer(console)
+    pending = PendingSubmissionView(
+        id=new_submission_id(),
+        display=(
+            "a first line that is much wider than the terminal\n"
+            "a second visible line\n"
+            "a third line that must stay hidden"
+        ),
+    )
+    snapshot = TuiViewSnapshot(
+        status="running",
+        input_hint="wisp(running)> ",
+        pending_submissions=(pending,),
+    )
+
+    renderer.view_updated(snapshot)
+    renderer.view_updated(snapshot)
+
+    rendered = output.getvalue()
+    assert rendered.count("Queued follow-ups") == 1
+    assert "a third line that must stay hidden" not in rendered
+    assert "a first line that is much wider than the terminal" not in rendered
+    assert len(rendered.splitlines()) == 3
 
 
 def test_renderers_clear_session_for_new_session() -> None:

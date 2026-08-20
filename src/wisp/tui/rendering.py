@@ -50,6 +50,11 @@ from wisp.tui.history import (
     HistoryHydrationPolicy,
     historical_tool_status,
 )
+from wisp.tui.input_types import (
+    PendingSubmissionView,
+    TuiSubmission,
+    pending_submission_preview_lines,
+)
 from wisp.tui.skills import format_skill_invocation, skill_catalog_text, skill_invocation_text
 from wisp.update_check import UpdateAvailable
 
@@ -70,7 +75,9 @@ class TuiViewSnapshot:
     input_hint: str
     mode: AgentMode = "build"
     input_mode: str = "idle"
+    input_ready: bool = True
     queued_follow_ups: int = 0
+    pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
     cwd: str = ""
     provider: str | None = None
@@ -96,9 +103,15 @@ class TuiRenderer(Protocol):
 
     def command_error(self, message: str) -> None: ...
 
-    def prompt_submitted(self, prompt: str) -> None: ...
+    def prompt_submitted(self, prompt: str | TuiSubmission) -> None: ...
 
     def prompt_accepted(self, prompt: str) -> None: ...
+
+    def resolve_submission(self, submission_id: int) -> None: ...
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool: ...
+
+    def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None: ...
 
     def prompt_history_request(self) -> None: ...
 
@@ -200,9 +213,22 @@ class LineTuiRenderer:
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
         self._overflow_recovery_failed = False
+        self._pending_submission_ids: set[int] = set()
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
-        pass
+        current_ids = {int(submission.id) for submission in snapshot.pending_submissions}
+        for submission in snapshot.pending_submissions:
+            if int(submission.id) not in self._pending_submission_ids:
+                preview = pending_submission_preview_lines(
+                    (submission,),
+                    width=self.console.width,
+                )
+                self.console.print(
+                    "\n".join(preview),
+                    markup=False,
+                    highlight=False,
+                )
+        self._pending_submission_ids = current_ids
 
     def startup(self) -> None:
         self.console.print("[bold cyan]Wisp TUI MVP[/bold cyan]")
@@ -228,11 +254,21 @@ class LineTuiRenderer:
     def command_error(self, message: str) -> None:
         self.console.print(f"[red]{_markup_escape(message)}[/red]")
 
-    def prompt_submitted(self, prompt: str) -> None:
+    def prompt_submitted(self, prompt: str | TuiSubmission) -> None:
         pass
 
     def prompt_accepted(self, prompt: str) -> None:
         pass
+
+    def resolve_submission(self, submission_id: int) -> None:
+        self._pending_submission_ids.discard(submission_id)
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        return False
+
+    def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
+        for submission in submissions:
+            self.console.print(f"unsent follow-up: {submission.content}", markup=False)
 
     def prompt_history_request(self) -> None:
         self.notice("Searchable prompt history is available in the Textual TUI.")
@@ -534,6 +570,7 @@ class FullscreenTuiState:
     mode: AgentMode = "build"
     input_mode: str = "idle"
     queued_follow_ups: int = 0
+    pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
     cwd: str = ""
     provider: str | None = None
@@ -581,6 +618,7 @@ class FullscreenTuiRenderer:
         self.state.mode = snapshot.mode
         self.state.input_mode = snapshot.input_mode
         self.state.queued_follow_ups = snapshot.queued_follow_ups
+        self.state.pending_submissions = snapshot.pending_submissions
         self.state.last_session = snapshot.last_session
         self.state.cwd = snapshot.cwd
         self.state.provider = snapshot.provider
@@ -615,11 +653,29 @@ class FullscreenTuiRenderer:
         self._append("error", message, style="red")
         self._refresh()
 
-    def prompt_submitted(self, prompt: str) -> None:
-        self._append("user", prompt, style="bold")
+    def prompt_submitted(self, prompt: str | TuiSubmission) -> None:
+        display = prompt.display if isinstance(prompt, TuiSubmission) else prompt
+        self._append("user", display, style="bold")
 
     def prompt_accepted(self, prompt: str) -> None:
         pass
+
+    def resolve_submission(self, submission_id: int) -> None:
+        self.state.pending_submissions = tuple(
+            submission
+            for submission in self.state.pending_submissions
+            if int(submission.id) != submission_id
+        )
+        self._refresh()
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        return False
+
+    def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
+        for submission in submissions:
+            self._append("unsent follow-up", submission.content, style="yellow")
+        if submissions:
+            self._refresh()
 
     def prompt_history_request(self) -> None:
         self.notice("Searchable prompt history is available in the Textual TUI.")
@@ -1024,12 +1080,25 @@ class FullscreenTuiRenderer:
 
     def _layout(self) -> Layout:
         layout = Layout(name="wisp")
-        layout.split_column(
+        sections = [
             Layout(name="header", size=3),
             Layout(name="transcript", ratio=1),
-            Layout(name="editor", size=3),
-            Layout(name="footer", size=2),
+        ]
+        if self.state.pending_submissions:
+            preview_rows = len(
+                pending_submission_preview_lines(
+                    self.state.pending_submissions,
+                    width=max(1, self.console.width - 4),
+                )
+            )
+            sections.append(Layout(name="pending", size=preview_rows + 2))
+        sections.extend(
+            [
+                Layout(name="editor", size=3),
+                Layout(name="footer", size=2),
+            ]
         )
+        layout.split_column(*sections)
         layout["header"].update(
             Panel(
                 Text("Wisp", style="bold cyan"),
@@ -1044,6 +1113,14 @@ class FullscreenTuiRenderer:
                 border_style="cyan",
             )
         )
+        if self.state.pending_submissions:
+            layout["pending"].update(
+                Panel(
+                    Text("\n".join(self._pending_preview_lines()), style="dim"),
+                    title="Queue",
+                    border_style="yellow",
+                )
+            )
         layout["editor"].update(Panel(self._input_text(), title="Editor", border_style="green"))
         layout["footer"].update(self._footer_text())
         return layout
@@ -1171,6 +1248,7 @@ class FullscreenTuiRenderer:
             input_hint=self.state.input_hint,
             input_mode=self.state.input_mode,
             queued_follow_ups=self.state.queued_follow_ups,
+            pending_submissions=self.state.pending_submissions,
             last_session=self.state.last_session,
             cwd=self.state.cwd,
             provider=self.state.provider,
@@ -1181,6 +1259,12 @@ class FullscreenTuiRenderer:
 
     def _input_text(self) -> Text:
         return Text(self.state.input_hint)
+
+    def _pending_preview_lines(self) -> tuple[str, ...]:
+        return pending_submission_preview_lines(
+            self.state.pending_submissions,
+            width=max(1, self.console.width - 4),
+        )
 
 
 def format_tui_footer_lines(

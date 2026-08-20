@@ -8,6 +8,7 @@ import anyio
 import pytest
 
 from wisp.tui.compact_echo import CompactEchoLog
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.textual_input import TextualInputController
 
 
@@ -15,6 +16,7 @@ from wisp.tui.textual_input import TextualInputController
 class _Surface:
     clear_count: int = 0
     errors: list[str] = field(default_factory=list)
+    buffered: list[TuiSubmission] = field(default_factory=list)
 
     def clear_prompt_editor(self) -> None:
         self.clear_count += 1
@@ -22,29 +24,41 @@ class _Surface:
     def write_input_error(self, message: str) -> None:
         self.errors.append(message)
 
+    def buffer_submission(self, submission: TuiSubmission) -> None:
+        self.buffered.append(submission)
+
 
 def test_submission_clears_only_ordinary_editor_and_runs_hook_before_enqueue() -> None:
     surface = _Surface()
     controller = TextualInputController(surface)
     hook_calls: list[str] = []
 
-    def hook() -> None:
+    def hook() -> str:
         with pytest.raises(anyio.WouldBlock):
             controller.receive_stream.receive_nowait()
         hook_calls.append("before enqueue")
+        return "running"
 
     controller.set_submit_hook(hook)
 
     assert controller.submit_line("typed prompt", clear_editor=True)
-    controller.set_submit_hook(lambda: hook_calls.append("decision submit"))
+
+    def decision_hook() -> str:
+        hook_calls.append("decision submit")
+        return "approval"
+
+    controller.set_submit_hook(decision_hook)
     assert controller.submit_line("decision answer", clear_editor=False)
     assert surface.clear_count == 1
     assert hook_calls == ["before enqueue", "decision submit"]
 
-    async def receive() -> tuple[str, str]:
+    async def receive() -> tuple[TuiSubmission, TuiSubmission]:
         return await controller.receive(), await controller.receive()
 
-    assert anyio.run(receive) == ("typed prompt", "decision answer")
+    typed, decision = anyio.run(receive)
+    assert (typed.content, typed.input_mode) == ("typed prompt", "running")
+    assert (decision.content, decision.input_mode) == ("decision answer", "approval")
+    assert surface.buffered == [typed]
 
 
 def test_full_submission_queue_reports_error_after_running_submit_hook() -> None:
@@ -57,7 +71,8 @@ def test_full_submission_queue_reports_error_after_running_submit_hook() -> None
     assert not controller.submit_line("dropped", clear_editor=True)
 
     assert hooks == [None, None]
-    assert surface.clear_count == 2  # preserves existing typed-submission behavior
+    assert surface.clear_count == 1
+    assert [submission.content for submission in surface.buffered] == ["first"]
     assert surface.errors == ["input buffer full; command dropped"]
 
 
