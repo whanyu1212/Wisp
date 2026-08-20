@@ -21,7 +21,7 @@ For lifecycle guidance and complete examples, start with the [Python SDK guide](
 | `wisp.config` | Immutable runtime configuration |
 | `wisp.sessions` | JSONL session store, entries, replay models, and typed session errors |
 | `wisp.runtime` | Static extension/runtime contracts and registries |
-| `wisp.providers` | Provider contracts, provider events, built-in providers, and deterministic fake providers |
+| `wisp.providers` | Provider event/tool types, built-in providers, and deterministic fake providers |
 | `wisp.tools` | Tool, context, result, safety, approval, and policy contracts |
 
 Import supported names from these namespaces, not private implementation modules. Package-level
@@ -329,9 +329,10 @@ See [Configuration](./configuration) for every persisted field and precedence ru
 - `wisp.runtime.ExtensionAPI` and `WispRuntime` describe static extension composition. The current
   `InProcessWisp` startup methods do not accept a caller-built runtime; see
   [#402](https://github.com/whanyu1212/Wisp/issues/402).
-- `wisp.providers.FakeProvider` and `ScriptedProvider` are deterministic provider implementations.
-  They are public for tests and examples, but arbitrary provider injection into `InProcessWisp` is
-  not yet public.
+- `wisp.providers.FakeProvider` and `ScriptedProvider` are deterministic provider implementations;
+  the package also exports provider event and tool-call types. The structural provider protocol is
+  not currently a supported package export, and arbitrary provider injection into `InProcessWisp`
+  is not yet public; both belong to [#402](https://github.com/whanyu1212/Wisp/issues/402).
 - `wisp.tools.Tool`, `ToolContext`, and `ToolResult` are the core custom-tool contracts. Tool
   registration is demonstrated in the
   [static extension example](https://github.com/whanyu1212/Wisp/tree/main/examples/extensions).
