@@ -7,10 +7,16 @@ Every outbound `WispEvent` carries a `schema_version`. Consumers should branch o
 versions they do not support; Wisp's typed RPC client does this automatically. The current typed
 contract lives in `src/wisp/events.py`.
 
-This log starts at schema v27. Earlier history is in the git log.
+The event history below covers every explicit schema version in the merged contract. The first
+versioned event contract was v2; earlier events were unversioned, so there is no schema v1 to infer.
 
 ## Unreleased
 
+- Defined package, Python API, event-schema, session-migration, deprecation, and removal policies;
+  completed the consumer-focused event history from the first versioned contract through v34.
+- Recorded `wisp.agent.messages.SessionEntry(...)` as deprecated. Migrate to
+  `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`; the
+  compatibility factory remains available and emits `DeprecationWarning` when called.
 - Added a dedicated Python SDK guide and API reference covering startup, event consumption,
   command correlation, safety requests, live control, persisted sessions, subprocess RPC, and
   cleanup.
@@ -162,34 +168,39 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
 ## Schema v34 — current
 
 Adds `next_after_entry_id` to `rpc.messages` results so clients can paginate forward from a known
-transcript entry.
+transcript entry. Consumers using forward pagination must accept the cursor; older pagination logic
+can continue using `next_before_entry_id`.
 
 ## Schema v33
 
 Adds optional `failure_code`, `retryable`, and `recovery_hint` metadata to failed tool results so
-clients can present structured recovery guidance.
+clients can present structured recovery guidance. Consumers that copy tool-result fields should
+accept the new optional metadata.
 
 ## Schema v32
 
 Adds `trailing_estimated_tokens`, `effective_tokens`, and `accounting_method` to context budget
-snapshots so clients can distinguish provider usage from local estimates.
+snapshots, plus the provider-derived `context_observation` on `message.completed`. Clients can use
+these fields to distinguish provider usage from local estimates; context displays should prefer
+`effective_tokens` when present instead of assuming the raw estimate is authoritative.
 
 ## Schema v31
 
-Adds `package:wisp` as a skill catalog source for package-owned skills. RPC clients that
-exhaustively validate skill sources must accept the new value.
+Adds `package:wisp` as a skill catalog source for package-owned skills and
+`utf8_bytes_div_4_v2` as a Unicode-aware `ContextEstimate.method`. Consumers that exhaustively
+validate skill sources or context-estimation methods must accept the new values.
 
 ## Schema v30
 
 Adds the `rpc.mcp` event carrying configured server connection status, registered tool names, and
 sanitized startup failures. RPC clients can issue `get_mcp_status`; consumers that exhaustively
-match event types must handle or ignore `rpc.mcp`.
+match event types must handle or deliberately ignore `rpc.mcp`.
 
 ## Schema v29
 
 Adds `rpc.skills` and `skill.catalog.updated` events carrying typed skill descriptors, isolated
 discovery diagnostics, and project-trust state. RPC clients can issue `get_skills` for the active
-immutable catalog; TUI clients should replace their cached snapshot when `skill.catalog.updated`
+immutable catalog; clients should replace their cached snapshot when `skill.catalog.updated`
 arrives.
 
 ## Schema v28
@@ -201,8 +212,145 @@ provider-visible expansion.
 ## Schema v27
 
 Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so RPC `get_state`
-reports the active agent mode. The field is stripped for consumers reading at an older schema
-version.
+reports the active agent mode. Consumers that model state exhaustively must accept both values; the
+field is stripped when serializing an older schema.
+
+## Schema v26
+
+Adds automatic-compaction policy to project-configuration and session-statistics events. Consumers
+that present configuration or statistics should accept the optional compaction policy fields.
+
+## Schema v25
+
+Adds managed-process state, captured streams, truncation flags, dropped-byte counts, and process
+errors to `tool.execution.ended` and `tool.result`. Tool consumers should use this metadata for
+resumable process presentation and must not attach it to pre-v25 payloads.
+
+## Schema v24
+
+Adds `rpc.session.tree.unreverted` for undoing the latest session-tree navigation. Also adds
+`output_has_exit_status` to tool execution/result events and persisted tool-result snapshots so
+consumers can distinguish Wisp's synthetic completion envelope from genuine output. Exhaustive event
+consumers must handle or deliberately ignore the new result event and accept the provenance flag.
+
+## Schema v23
+
+Adds `rpc.commands`, a typed catalog of commands supported by the active RPC host. Clients can issue
+`get_commands` instead of maintaining an interface-specific command list.
+
+## Schema v22
+
+Adds optional tool-result presentation snapshots to messages returned by `rpc.messages`. Transcript
+consumers should use the structured result metadata instead of reconstructing historical tool state
+from text.
+
+## Schema v21
+
+Adds durable session names to state, session summaries, selection and derivation results, plus the
+`rpc.session.name_changed` event. Consumers that copy these snapshots should accept nullable name
+fields and the new event.
+
+## Schema v20
+
+Adds `rpc.session.tree` and `rpc.session.tree.navigated` events for inspecting and selecting the
+active path through append-only session history. Consumers that expose branching should preserve
+entry IDs and parent relationships from these events.
+
+## Schema v19
+
+Adds `rpc.session.cloned` and `rpc.session.forked` results. Session clients should correlate these
+results by `command_id` and use the returned source and destination identities.
+
+## Schema v18
+
+Adds `rpc.sessions` and `rpc.session.selected` for cataloging and selecting persisted sessions.
+Consumers should treat the selected session identity and path as authoritative host state.
+
+## Schema v17
+
+Adds paginated `rpc.messages` transcript snapshots, including optional structured `tool_calls` on
+message entries. Clients should consume the typed message entries and pagination metadata rather
+than reading an active session file concurrently.
+
+## Schema v16
+
+Adds `rpc.state`, reporting the active provider, model, session, run state, and pending queue counts.
+Long-lived clients should refresh their local state from this snapshot after startup or uncertain
+transitions.
+
+## Schema v15
+
+Adds `queue.items.removed`, the result of removing pending steering or follow-up work. Queue clients
+must handle the result separately from unsolicited queue snapshots.
+
+## Schema v14
+
+Adds `queue.message.injected` when steering or a follow-up enters the active run. Consumers that show
+live input should distinguish injected work from pending queue contents.
+
+## Schema v13
+
+Adds `queue.updated` snapshots with steering and follow-up contents and drain modes. Queue-aware
+clients should replace their cached queue state with each snapshot.
+
+## Schema v12
+
+Adds list-price `cost` accounting to completed messages, compactions, and session statistics.
+Consumers should treat cost as optional and retain the accompanying currency and model provenance.
+
+## Schema v11
+
+Adds overflow-triggered compaction and retry metadata. Compaction consumers must accept `overflow`
+as a reason and use `will_retry` and the completion explanation when deciding what happens next.
+
+## Schema v10
+
+Adds threshold-triggered automatic compaction and its trigger budget. Compaction consumers must
+accept `threshold` as a reason and preserve the budget snapshot that caused it.
+
+## Schema v9
+
+Adds `context.estimated` and `session.stats` events with context budgets and aggregate usage.
+Consumers that need these reports must not expect them on v8 or older payloads.
+
+## Schema v8
+
+Adds manual `compaction.started` and `compaction.completed` lifecycle events. Consumers must handle
+or deliberately ignore both event types and correlate completed compactions by session.
+
+## Schema v7
+
+Adds `context.pressure` and `context.overflow` events. Consumers that surface context limits should
+handle warning and terminal-overflow signals separately.
+
+## Schema v6
+
+Adds optional provider-reported token usage to `message.completed`. Usage consumers must tolerate
+missing values because not every provider response reports every token category.
+
+## Schema v5 — oldest readable
+
+Adds `model.provider_auto_switched` so RPC clients can observe a model selection that also changes
+the provider, and adds optional `effort` to `project.config.applied`. Consumers must update both
+provider and model when the switch event is emitted and accept the effective effort after trusted
+project configuration is applied.
+
+## Schema v4 — archival, unsupported
+
+Adds bounded presentation metadata to `tool.execution.ended` and `tool.result`: `exit_code`,
+`before_text`, `created`, `summary`, and `truncated`. Current typed parsers no longer accept v4
+payloads.
+
+## Schema v3 — archival, unsupported
+
+Adds `provider.retrying` before response streaming starts, carrying attempt, delay, reason, and
+optional status code. Current typed parsers no longer accept v3 payloads.
+
+## Schema v2 — first versioned contract, archival, unsupported
+
+Replaces the unversioned `token.delta` and `assistant.message` stream with explicit turn, message,
+and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
+v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
 Events at schema v5 through v34 remain readable.
 

@@ -50,7 +50,9 @@ half-written one.
 Records form a parent-linked tree, and an append-only active-leaf record selects the root-to-leaf
 path used by continuation — abandoned or cancelled work stays in the audit log without entering model
 context. Legacy unversioned and v1 linear session files remain readable and are never rewritten on
-load.
+load. Current files use session-entry schema v6, while embedded event payloads and compaction
+records keep their own independent versions. See [Compatibility & versioning](../reference/compatibility)
+for the complete readable ranges and migration guarantees.
 
 The typed session API can derive a new session without rewriting its source:
 

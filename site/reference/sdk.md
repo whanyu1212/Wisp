@@ -264,9 +264,9 @@ transport.
 | `wisp_event_from_dict(data)` | Validate one event dictionary and return `KnownWispEvent`. |
 
 Use the parser functions at protocol boundaries rather than selecting a model from an untrusted
-`type` value manually. Unsupported future schemas raise `ValueError`. The complete readable-history
-and deprecation policy is being documented separately as part of
-[#407](https://github.com/whanyu1212/Wisp/issues/407).
+`type` value manually. Unsupported future schemas raise `ValueError`. See
+[Compatibility & versioning](./compatibility) for readable history, consumer actions, and the
+deprecation policy.
 
 ### Event groups
 
