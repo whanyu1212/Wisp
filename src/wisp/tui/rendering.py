@@ -219,8 +219,12 @@ class LineTuiRenderer:
         current_ids = {int(submission.id) for submission in snapshot.pending_submissions}
         for submission in snapshot.pending_submissions:
             if int(submission.id) not in self._pending_submission_ids:
+                preview = pending_submission_preview_lines(
+                    (submission,),
+                    width=self.console.width,
+                )
                 self.console.print(
-                    f"queued follow-up: {submission.display}",
+                    "\n".join(preview),
                     markup=False,
                     highlight=False,
                 )
