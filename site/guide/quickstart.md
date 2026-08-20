@@ -8,7 +8,7 @@ Wisp runs from the project you want it to understand. It requires Python 3.12 or
 recommended persistent installation is:
 
 ```bash
-uv tool install "wisp-ai==0.1.0rc3"
+uv tool install "wisp-ai==0.1.0rc4"
 wisp --version
 ```
 
