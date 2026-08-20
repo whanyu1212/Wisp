@@ -46,6 +46,17 @@ def test_changelog_covers_every_explicit_event_schema() -> None:
     ]
 
 
+def test_same_version_wire_additions_are_recorded() -> None:
+    schema_v24 = _CHANGELOG.split("## Schema v24", maxsplit=1)[1].split(
+        "## Schema v23", maxsplit=1
+    )[0]
+    schema_v5 = _CHANGELOG.split("## Schema v5", maxsplit=1)[1].split("## Schema v4", maxsplit=1)[0]
+
+    assert "`output_has_exit_status`" in schema_v24
+    assert "optional `effort`" in schema_v5
+    assert "`project.config.applied`" in schema_v5
+
+
 def test_schema_v32_records_message_context_observations() -> None:
     schema_v32 = _CHANGELOG.split("## Schema v32", maxsplit=1)[1].split(
         "## Schema v31", maxsplit=1

@@ -228,8 +228,10 @@ resumable process presentation and must not attach it to pre-v25 payloads.
 
 ## Schema v24
 
-Adds `rpc.session.tree.unreverted` for undoing the latest session-tree navigation. Exhaustive event
-consumers must handle or deliberately ignore the new result event.
+Adds `rpc.session.tree.unreverted` for undoing the latest session-tree navigation. Also adds
+`output_has_exit_status` to tool execution/result events and persisted tool-result snapshots so
+consumers can distinguish Wisp's synthetic completion envelope from genuine output. Exhaustive event
+consumers must handle or deliberately ignore the new result event and accept the provenance flag.
 
 ## Schema v23
 
@@ -328,7 +330,9 @@ missing values because not every provider response reports every token category.
 ## Schema v5 — oldest readable
 
 Adds `model.provider_auto_switched` so RPC clients can observe a model selection that also changes
-the provider. Consumers must update both provider and model when this event is emitted.
+the provider, and adds optional `effort` to `project.config.applied`. Consumers must update both
+provider and model when the switch event is emitted and accept the effective effort after trusted
+project configuration is applied.
 
 ## Schema v4 — archival, unsupported
 
