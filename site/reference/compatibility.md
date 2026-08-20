@@ -73,9 +73,13 @@ assert event.schema_version <= EVENT_SCHEMA_VERSION
 ```
 
 `wisp_event_from_json()` and `wisp_event_from_dict()` reject non-integer, pre-v5, and future schema
-versions. Reading a version means that events and fields valid at that point in history can be
-validated; it does not make a later event type or field valid under an earlier version. For example,
-`rpc.messages` starts at v17 and its forward cursor starts at v34.
+versions. They also enforce introduction versions for many later event types and fields, but they are
+not a complete historical-conformance checker: some early additions are structurally valid under an
+older readable version. Wisp itself emits only the current schema, so it does not originate such
+mixed-version payloads. Consumers auditing third-party or hand-written events should use the
+[event-schema history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#schema-v34--current)
+as the authoritative introduction record. For example, `rpc.messages` starts at v17 and its forward
+cursor starts at v34.
 
 A wire-visible change requires the next monotonically increasing event schema when it:
 

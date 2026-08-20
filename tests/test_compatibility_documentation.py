@@ -56,6 +56,7 @@ def test_documented_readable_event_range_matches_runtime() -> None:
     assert f"Events at schema v{minimum} through v{maximum} remain readable." in _CHANGELOG
     assert f"read **v{minimum} through v{maximum}**" in _POLICY
     assert f"currently **v{EVENT_SCHEMA_VERSION}**" in _POLICY
+    assert "not a complete historical-conformance checker" in _POLICY
 
 
 def test_every_readable_event_version_round_trips_through_json() -> None:
