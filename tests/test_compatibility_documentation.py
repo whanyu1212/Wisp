@@ -46,6 +46,15 @@ def test_changelog_covers_every_explicit_event_schema() -> None:
     ]
 
 
+def test_schema_v32_records_message_context_observations() -> None:
+    schema_v32 = _CHANGELOG.split("## Schema v32", maxsplit=1)[1].split(
+        "## Schema v31", maxsplit=1
+    )[0]
+
+    assert "`context_observation`" in schema_v32
+    assert "`message.completed`" in schema_v32
+
+
 def test_schema_v31_records_the_unicode_context_estimator() -> None:
     schema_v31 = _CHANGELOG.split("## Schema v31", maxsplit=1)[1].split(
         "## Schema v30", maxsplit=1

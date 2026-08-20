@@ -180,8 +180,9 @@ accept the new optional metadata.
 ## Schema v32
 
 Adds `trailing_estimated_tokens`, `effective_tokens`, and `accounting_method` to context budget
-snapshots so clients can distinguish provider usage from local estimates. Context displays should
-prefer `effective_tokens` when present instead of assuming the raw estimate is authoritative.
+snapshots, plus the provider-derived `context_observation` on `message.completed`. Clients can use
+these fields to distinguish provider usage from local estimates; context displays should prefer
+`effective_tokens` when present instead of assuming the raw estimate is authoritative.
 
 ## Schema v31
 
