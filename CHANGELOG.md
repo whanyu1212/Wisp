@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Kept complete resumed Textual histories covered until composer layout and tail positioning settle,
+  preventing a transient viewport jump when the loading surface closes.
+
 ## 0.1.0rc4 — 2026-08-20
 
 - Preserved accepted and pending TUI input across RPC handoff, startup, failure, and cancellation,

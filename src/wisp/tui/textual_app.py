@@ -105,6 +105,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    TranscriptEmptyState,
     WorkingIndicator,
 )
 from wisp.update_check import UpdateAvailable
@@ -146,6 +147,12 @@ _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
     OverlayOperation.session_catalog: "Loading sessions…",
     OverlayOperation.session_switch: "Switching session…",
 }
+_TRANSCRIPT_COVERING_OPERATIONS = frozenset(
+    {
+        OverlayOperation.history_hydration,
+        OverlayOperation.session_switch,
+    }
+)
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -607,6 +614,7 @@ class TextualTui(App[None]):
         self._history_removing_widgets: set[Widget] = set()
         self._history_layout_generation = 0
         self._transcript_epoch = 0
+        self._session_operation_generation = 0
         self._stream = MarkdownStreamController(self)
 
     def clear_prompt_editor(self) -> None:
@@ -2502,6 +2510,7 @@ class TextualTui(App[None]):
     def _start_session_operation(self, operation: OverlayOperation) -> None:
         """Show typed session work without giving the indicator lifecycle ownership."""
 
+        self._session_operation_generation += 1
         overlays = self._overlay_controller
         if overlays is not None:
             overlays.start_operation(operation)
@@ -2509,19 +2518,102 @@ class TextualTui(App[None]):
         if indicator is not None:
             indicator.show_operation(
                 _SESSION_OPERATION_LABELS[operation],
-                cover_transcript=operation
-                in {
-                    OverlayOperation.history_hydration,
-                    OverlayOperation.session_switch,
-                },
+                cover_transcript=operation in _TRANSCRIPT_COVERING_OPERATIONS,
             )
 
     def _finish_session_operation(self, operation: OverlayOperation) -> None:
-        """Hide only after the active typed session operation completed."""
+        """Hide a typed operation only after any covered transcript has settled."""
 
         overlays = self._overlay_controller
-        if overlays is None or not overlays.finish_operation(operation):
+        if overlays is None:
             return
+        if operation not in _TRANSCRIPT_COVERING_OPERATIONS:
+            if overlays.finish_operation(operation):
+                self._hide_operation_indicator()
+            return
+        if not overlays.prepare_operation_finish(operation):
+            return
+        transcript = self._transcript
+        if (
+            transcript is None
+            or not transcript.is_running
+            or all(isinstance(child, TranscriptEmptyState) for child in transcript.children)
+        ):
+            if overlays.finish_operation(operation):
+                self._hide_operation_indicator()
+            return
+        generation = self._session_operation_generation
+        self.run_worker(
+            self._settle_covered_session_operation(
+                operation,
+                transcript,
+                generation=generation,
+                epoch=self._transcript_epoch,
+            ),
+            group="session-operation-finish",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _settle_covered_session_operation(
+        self,
+        operation: OverlayOperation,
+        transcript: Transcript,
+        *,
+        generation: int,
+        epoch: int,
+    ) -> None:
+        """Restore final layout and tail position before uncovering history."""
+
+        await transcript.wait_for_refresh()
+        if not self._covered_session_operation_is_current(
+            operation,
+            transcript,
+            generation=generation,
+            epoch=epoch,
+        ):
+            return
+        if transcript.is_following:
+            transcript.return_to_latest()
+            # ``return_to_latest`` defers its tail scroll until the next refresh so it
+            # can use post-composer geometry. Keep the opaque operation surface through
+            # both that callback and the repaint at the corrected offset.
+            await transcript.wait_for_refresh()
+            await transcript.wait_for_refresh()
+        else:
+            # A failed or displaced switch may leave the reader in the previous
+            # transcript. Preserve that explicit scroll intent instead of forcing it
+            # to the tail merely because the operation surface is closing.
+            await transcript.wait_for_refresh()
+        if not self._covered_session_operation_is_current(
+            operation,
+            transcript,
+            generation=generation,
+            epoch=epoch,
+        ):
+            return
+        overlays = self._overlay_controller
+        if overlays is not None and overlays.finish_operation(operation):
+            self._hide_operation_indicator()
+
+    def _covered_session_operation_is_current(
+        self,
+        operation: OverlayOperation,
+        transcript: Transcript,
+        *,
+        generation: int,
+        epoch: int,
+    ) -> bool:
+        overlays = self._overlay_controller
+        return (
+            overlays is not None
+            and overlays.active_operation is operation
+            and generation == self._session_operation_generation
+            and epoch == self._transcript_epoch
+            and transcript is self._transcript
+        )
+
+    def _hide_operation_indicator(self) -> None:
         indicator = self._operation_indicator
         if indicator is not None:
             indicator.hide()
