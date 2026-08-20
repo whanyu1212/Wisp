@@ -86,6 +86,9 @@ jobs:
           pushd "$RUNNER_TEMP"
           uv run --isolated --no-project --with "$wheel" \
             python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          PYTHONPATH="$GITHUB_WORKSPACE" \
+            uv run --isolated --no-project --with "$wheel" \
+            python -m examples.sdk.minimal
           popd
 
   test:
