@@ -14,6 +14,7 @@ from pytest import MonkeyPatch
 from rich.cells import cell_len
 from rich.console import RenderableType
 from textual import events
+from textual._compositor import ChopsUpdate, LayoutUpdate
 from textual.app import App
 from textual.content import Content
 from textual.screen import Screen
@@ -5248,6 +5249,59 @@ def test_textual_wheel_burst_is_preserved_while_history_page_loads() -> None:
     assert requests == 1
     assert pending_rows == 6.0
     assert 0 < scroll_y < max_scroll_y
+
+
+@pytest.mark.parametrize("navigation", ["wheel", "page_up"])
+def test_textual_transcript_scroll_repaints_only_the_transcript_viewport(
+    navigation: str,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Reader navigation must not repaint unchanged composer and status rows."""
+
+    async def scenario() -> tuple[int, list[RenderableType | None]]:
+        app_instance, _renderer = create_textual_tui()
+        app_type = type(app_instance)
+        original_display = app_type._display
+        displayed_updates: list[RenderableType | None] = []
+        recording = False
+
+        def record_display(self, screen, renderable):  # type: ignore[no-untyped-def]
+            if self is app_instance and recording and renderable is not None:
+                displayed_updates.append(renderable)
+            return original_display(self, screen, renderable)
+
+        monkeypatch.setattr(app_type, "_display", record_display)
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            for index in range(100):
+                app_instance.write_message(f"message {index}", role="user")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+
+            recording = True
+            if navigation == "wheel":
+                await pilot._post_mouse_events(
+                    [events.MouseScrollUp],
+                    widget=transcript,
+                    times=1,
+                )
+            else:
+                await pilot.press("pageup")
+            await pilot.pause()
+            recording = False
+            return transcript.region.bottom, displayed_updates
+
+    transcript_bottom, displayed_updates = anyio.run(scenario)
+
+    assert displayed_updates
+    assert not any(isinstance(update, LayoutUpdate) for update in displayed_updates)
+    assert all(isinstance(update, ChopsUpdate) for update in displayed_updates)
+    assert all(
+        y < transcript_bottom
+        for update in displayed_updates
+        if isinstance(update, ChopsUpdate)
+        for y, _x1, _x2 in update.spans
+    )
 
 
 def test_textual_wheel_rearms_history_without_scrolling_down_first() -> None:

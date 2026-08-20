@@ -20,6 +20,7 @@ from pathlib import Path
 
 from rich.console import RenderableType
 from textual import events, on, work
+from textual._compositor import Compositor, CompositorMap
 from textual.app import App, ComposeResult
 from textual.await_remove import AwaitRemove
 from textual.binding import Binding
@@ -207,12 +208,48 @@ def _merge_history_navigation(
     )
 
 
+class _StableScrollCompositor(Compositor):
+    """Retain the prior visible map while Textual rebuilds scroll hit-testing state.
+
+    Textual's scroll fast path stores the newly visible geometry separately and
+    invalidates its complete map. Rebuilding that complete map for mouse hit testing
+    then clears the visible map. On the next scroll, ``reflow_visible`` consequently
+    compares against an empty map and marks the complete screen dirty, repainting the
+    unchanged composer and status bar along with the transcript.
+
+    Keep the previous visible geometry through that complete-map read. It remains the
+    correct baseline for the next visible reflow, which can then emit only the changed
+    transcript rows.
+    """
+
+    @property
+    def full_map(self) -> CompositorMap:
+        visible_map = self._visible_map
+        full_map = super().full_map
+        if visible_map is not None and self._visible_map is None:
+            self._visible_map = visible_map
+        return full_map
+
+
+class _WispScreen(Screen[object]):
+    """Default screen with stable compositor state between transcript scrolls."""
+
+    def __init__(self) -> None:
+        super().__init__(id="_default")
+        self._compositor = _StableScrollCompositor()
+
+
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
 
     # Wisp owns a typed, RPC-backed palette. Keep Textual's framework ctrl+p
     # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
+
+    def get_default_screen(self) -> Screen[object]:
+        """Use the compositor that keeps routine transcript scrolling local."""
+
+        return _WispScreen()
 
     def _display(self, screen: Screen[object], renderable: RenderableType | None) -> None:
         """Hide the transient history-window frame before its anchor is restored."""
