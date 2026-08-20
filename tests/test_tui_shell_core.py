@@ -2905,6 +2905,10 @@ def test_tui_shell_hydrates_rpc_command_catalog_before_accepting_input() -> None
         def __init__(self) -> None:
             super().__init__(_console()[0])
             self.command_catalogs: list[TuiCommandCatalog] = []
+            self.snapshots: list[TuiViewSnapshot] = []
+
+        def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+            self.snapshots.append(snapshot)
 
         def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
             self.command_catalogs.append(catalog)
@@ -2958,6 +2962,8 @@ def test_tui_shell_hydrates_rpc_command_catalog_before_accepting_input() -> None
         assert renderer.command_catalogs[0].descriptors[0].title == "Runtime help"
         assert renderer.command_catalogs[0].get("/assist").name == "help"
         assert tuple(item.name for item in shell.command_catalog.descriptors) == ("help",)
+        assert renderer.snapshots[0].input_ready is False
+        assert any(snapshot.input_ready for snapshot in renderer.snapshots)
 
     anyio.run(run)
 
@@ -4570,6 +4576,7 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
         assert "input closed; finishing current prompt" in rendered
         assert "waiting for current prompt" not in rendered
@@ -4607,6 +4614,7 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
 
     anyio.run(run)

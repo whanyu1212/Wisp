@@ -49,6 +49,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     HistoryHydrationPolicy,
 )
+from wisp.tui.input_types import TuiSubmission
 from wisp.tui.process_lifecycle import (
     ProcessCallIdentity,
     ProcessLifecycle,
@@ -298,8 +299,9 @@ class TextualTuiRenderer:
         self._tool_arguments.clear()
         self.app.fail_pending_tool_calls(detail)
 
-    def _capture_submitted_input_mode(self) -> None:
+    def _capture_submitted_input_mode(self) -> str:
         self._submitted_input_mode = self._visible_input_mode
+        return self._visible_input_mode
 
     def consume_submitted_input_mode(self, fallback: str) -> str:
         """Return and clear the mode captured when the last line was accepted."""
@@ -324,16 +326,34 @@ class TextualTuiRenderer:
     def command_error(self, message: str) -> None:
         self.app.write_error(message)
 
-    def prompt_submitted(self, prompt: str) -> None:
+    def prompt_submitted(self, prompt: str | TuiSubmission) -> None:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
-        widget = self.app.write_user(self.app.compact_echo_for(prompt))
-        self._prompt_widgets.append((prompt, widget))
+        content = prompt.content if isinstance(prompt, TuiSubmission) else prompt
+        if isinstance(prompt, TuiSubmission):
+            display = prompt.display
+            if prompt.display != prompt.content:
+                self.app.compact_echo_for(prompt.content)
+        else:
+            display = self.app.compact_echo_for(prompt)
+        if isinstance(prompt, TuiSubmission):
+            self.app.resolve_submission(int(prompt.id))
+        widget = self.app.write_user(display)
+        self._prompt_widgets.append((content, widget))
         del self._prompt_widgets[:-100]
-        self._history.record_live_message("user", prompt, widget=widget)
+        self._history.record_live_message("user", content, widget=widget)
 
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
+
+    def resolve_submission(self, submission_id: int) -> None:
+        self.app.resolve_submission(submission_id)
+
+    def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+        return self.app.restore_submissions(submissions)
+
+    def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
+        self.app.report_unsent_submissions(submissions)
 
     def discard_live_prompt(self, prompt: str) -> None:
         self._pop_prompt_widget(prompt)

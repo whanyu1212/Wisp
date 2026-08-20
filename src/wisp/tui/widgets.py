@@ -83,6 +83,7 @@ from wisp.tui.diff_presentation import (
 )
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.file_index import ProjectSnapshot
+from wisp.tui.input_types import PendingSubmissionView, pending_submission_preview_lines
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_highlighting import (
@@ -1622,6 +1623,15 @@ class TranscriptEmptyState(Vertical):
     )
 
     DEFAULT_CSS = """
+    TranscriptEmptyState.-starting #transcript-empty-tagline {
+        color: $accent;
+        text-style: bold;
+    }
+
+    TranscriptEmptyState.-starting #transcript-empty-actions {
+        display: none;
+    }
+
     TranscriptEmptyState.-compact #transcript-empty-actions {
         display: none;
     }
@@ -1638,13 +1648,20 @@ class TranscriptEmptyState(Vertical):
         compact_wordmark: str,
         tagline: str,
         hint: str,
+        *,
+        input_ready: bool = True,
     ) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
         self._compact_wordmark = compact_wordmark
         self._tagline = tagline
         self._hint = hint
+        self._input_ready = input_ready
+        self._current_tagline = tagline if input_ready else "Starting Wisp…"
+        self._current_hint = hint if input_ready else "You can type while Wisp starts."
         self._wordmark_label: Static | None = None
+        self._tagline_label: Label | None = None
+        self._hint_label: Label | None = None
         # Cells the drawn mark needs before Textual starts wrapping its rows.
         # Derived from the art itself so the fit check cannot drift from it.
         self._wordmark_width = max(
@@ -1662,10 +1679,46 @@ class TranscriptEmptyState(Vertical):
 
     def compose(self) -> ComposeResult:
         self._wordmark_label = Static(self._wordmark, id="transcript-empty-wordmark", markup=False)
+        self._tagline_label = Label(
+            self._current_tagline,
+            id="transcript-empty-tagline",
+            markup=False,
+        )
+        self._hint_label = Label(
+            self._current_hint,
+            id="transcript-empty-hint",
+            markup=False,
+        )
+        self.set_class(not self._input_ready, "-starting")
         yield self._centered(self._wordmark_label)
-        yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
-        yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
+        yield self._centered(self._tagline_label)
+        yield self._centered(self._hint_label)
         yield self._centered(Static(self._actions, id="transcript-empty-actions", markup=False))
+
+    def set_input_ready(self, ready: bool) -> None:
+        """Switch the disposable welcome panel between startup and ready copy."""
+
+        if self._input_ready == ready:
+            return
+        self._input_ready = ready
+        self._current_tagline = self._tagline if ready else "Starting Wisp…"
+        self._current_hint = self._hint if ready else "You can type while Wisp starts."
+        self.set_class(not ready, "-starting")
+        if self._tagline_label is not None:
+            self._tagline_label.update(self._current_tagline)
+        if self._hint_label is not None:
+            self._hint_label.update(self._current_hint)
+        self._refresh_responsive_layout()
+
+    def show_startup_submission_blocked(self) -> None:
+        """Confirm that an early Enter kept the draft instead of queueing it."""
+
+        if self._input_ready:
+            return
+        self._current_hint = "Wisp is still starting — your draft is preserved."
+        if self._hint_label is not None:
+            self._hint_label.update(self._current_hint)
+        self._refresh_responsive_layout()
 
     def _wrapped_rows(self, text: str, width: int) -> int:
         """Rows ``text`` occupies once wrapped into ``width`` cells.
@@ -1683,10 +1736,10 @@ class TranscriptEmptyState(Vertical):
     def _tier_footprint(self, classes: frozenset[str], *, width: int, mark_rows: int) -> int:
         """Rows this tier needs at ``width``, including inter-child margins."""
 
-        texts = [self._tagline, self._hint]
+        texts = [self._current_tagline, self._current_hint]
         if "-minimal" in classes:
             texts = []
-        if "-compact" not in classes:
+        if "-compact" not in classes and self._input_ready:
             texts.append(self._actions)
         rows = mark_rows
         for text in texts:
@@ -1694,6 +1747,11 @@ class TranscriptEmptyState(Vertical):
         return rows
 
     def on_resize(self, event: events.Resize) -> None:
+        self._refresh_responsive_layout()
+
+    def _refresh_responsive_layout(self) -> None:
+        """Fit the active startup or ready copy to the current viewport."""
+
         height = self.size.height
         width = self.size.width
 
@@ -1941,6 +1999,7 @@ class Transcript(VerticalScroll):
         empty_compact_wordmark: str = "",
         empty_tagline: str = "",
         empty_hint: str = "",
+        empty_input_ready: bool = True,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
@@ -1951,6 +2010,7 @@ class Transcript(VerticalScroll):
         self._empty_compact_wordmark = empty_compact_wordmark
         self._empty_tagline = empty_tagline
         self._empty_hint = empty_hint
+        self._empty_input_ready = empty_input_ready
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
         self._has_retained_history = False
@@ -1991,8 +2051,22 @@ class Transcript(VerticalScroll):
                 self._empty_compact_wordmark,
                 self._empty_tagline,
                 self._empty_hint,
+                input_ready=self._empty_input_ready,
             )
             yield self._empty_state
+
+    def set_input_ready(self, ready: bool) -> None:
+        """Update startup presentation while the disposable empty state exists."""
+
+        self._empty_input_ready = ready
+        if self._empty_state is not None:
+            self._empty_state.set_input_ready(ready)
+
+    def show_startup_submission_blocked(self) -> None:
+        """Explain an ignored early Enter without adding transcript scrollback."""
+
+        if self._empty_state is not None:
+            self._empty_state.show_startup_submission_blocked()
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:
         """Mount output after permanently dismissing the initial empty state."""
@@ -3300,7 +3374,9 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
     cwd = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
     left = " · ".join(part for part in (cwd, activity) if part)
     center = (
-        "esc cancel"
+        "starting Wisp…"
+        if not snapshot.input_ready
+        else "esc cancel"
         if snapshot.input_mode == "running"
         else "↵ send · / commands"
         if snapshot.input_mode == "idle"
@@ -3547,6 +3623,29 @@ class ComposerMeta(Static):
         self.update(rendered)
 
 
+class PendingInputPreview(Static):
+    """Bounded composer-attached view of accepted prompts waiting to start."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002
+        super().__init__(id=id, markup=False)
+        self._submissions: tuple[PendingSubmissionView, ...] = ()
+        self.display = False
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._render_preview()
+
+    def set_submissions(self, submissions: tuple[PendingSubmissionView, ...]) -> None:
+        if submissions == self._submissions:
+            return
+        self._submissions = submissions
+        self.display = bool(submissions)
+        self._render_preview()
+
+    def _render_preview(self) -> None:
+        width = self.content_size.width or self.size.width or None
+        self.update("\n".join(pending_submission_preview_lines(self._submissions, width=width)))
+
+
 class ComposerPanel(Vertical):
     """Focusable composer body that groups the editor and its metadata."""
 
@@ -3557,10 +3656,12 @@ class ComposerPanel(Vertical):
         id: str | None = None,  # noqa: A002 - Textual's parameter name
     ) -> None:
         super().__init__(id=id)
+        self._pending = PendingInputPreview(id="pending-input")
         self._input = PromptEditor(placeholder=placeholder, id="input")
         self._metadata = ComposerMeta(id="composer-meta")
 
     def compose(self) -> ComposeResult:
+        yield self._pending
         yield self._input
         yield self._metadata
 
@@ -3568,6 +3669,7 @@ class ComposerPanel(Vertical):
         self.refresh_layout()
 
     def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        self._pending.set_submissions(snapshot.pending_submissions)
         self._metadata.set_snapshot(snapshot)
 
     def refresh_theme(self) -> None:

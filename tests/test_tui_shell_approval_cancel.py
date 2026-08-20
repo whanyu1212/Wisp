@@ -620,6 +620,7 @@ def test_tui_shell_reports_prompt_send_failure() -> None:
         rendered = output.getvalue()
         assert "failed to send prompt" in rendered
         assert "[red]closed pipe[/red]" in rendered
+        assert "unsent follow-up: hello" in rendered
 
     anyio.run(run)
 
