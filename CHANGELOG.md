@@ -14,6 +14,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 - Defined package, Python API, event-schema, session-migration, deprecation, and removal policies;
   completed the consumer-focused event history from the first versioned contract through v34.
+- Recorded `wisp.agent.messages.SessionEntry(...)` as deprecated. Migrate to
+  `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`; the
+  compatibility factory remains available and emits `DeprecationWarning` when called.
 - Added a dedicated Python SDK guide and API reference covering startup, event consumption,
   command correlation, safety requests, live control, persisted sessions, subprocess RPC, and
   cleanup.

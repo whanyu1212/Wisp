@@ -46,6 +46,12 @@ def test_changelog_covers_every_explicit_event_schema() -> None:
     ]
 
 
+def test_changelog_records_the_documented_public_deprecation() -> None:
+    assert "`wisp.agent.messages.SessionEntry(...)` as deprecated" in _CHANGELOG
+    assert "`MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry`" in _CHANGELOG
+    assert "emits `DeprecationWarning`" in _CHANGELOG
+
+
 def test_documented_readable_event_range_matches_runtime() -> None:
     readable_versions = get_args(WispEvent.model_fields["schema_version"].annotation)
     minimum = min(readable_versions)
