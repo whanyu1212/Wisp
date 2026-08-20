@@ -185,8 +185,9 @@ prefer `effective_tokens` when present instead of assuming the raw estimate is a
 
 ## Schema v31
 
-Adds `package:wisp` as a skill catalog source for package-owned skills. RPC clients that
-exhaustively validate skill sources must accept the new value.
+Adds `package:wisp` as a skill catalog source for package-owned skills and
+`utf8_bytes_div_4_v2` as a Unicode-aware `ContextEstimate.method`. Consumers that exhaustively
+validate skill sources or context-estimation methods must accept the new values.
 
 ## Schema v30
 

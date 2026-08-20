@@ -46,6 +46,15 @@ def test_changelog_covers_every_explicit_event_schema() -> None:
     ]
 
 
+def test_schema_v31_records_the_unicode_context_estimator() -> None:
+    schema_v31 = _CHANGELOG.split("## Schema v31", maxsplit=1)[1].split(
+        "## Schema v30", maxsplit=1
+    )[0]
+
+    assert "`utf8_bytes_div_4_v2`" in schema_v31
+    assert "`ContextEstimate.method`" in schema_v31
+
+
 def test_changelog_records_the_documented_public_deprecation() -> None:
     assert "`wisp.agent.messages.SessionEntry(...)` as deprecated" in _CHANGELOG
     assert "`MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry`" in _CHANGELOG
