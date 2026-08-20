@@ -11,6 +11,12 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0rc4 — 2026-08-20
+
+- Preserved accepted and pending TUI input across RPC handoff, startup, failure, and cancellation,
+  keeping early drafts editable instead of silently queueing or losing them.
+- Added an animated startup notice above the composer and hid provider-facing system prompts from
+  TUI history while preserving persistence, RPC, provider context, and complete-history pagination.
 - Excluded `cryptography` versions before 50.0.0 from runtime dependency resolution to avoid the
   PKCS#7 decryption vulnerability fixed in 50.0.0.
 

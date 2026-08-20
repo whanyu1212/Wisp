@@ -39,7 +39,7 @@ RPC and SDK clients can steer live runs, the TUI queues interactive follow-ups, 
 are one-shot.
 
 ```bash
-uv tool install "wisp-ai==0.1.0rc3"
+uv tool install "wisp-ai==0.1.0rc4"
 cd path/to/project
 wisp
 ```
