@@ -134,7 +134,8 @@ request. Completion and results arrive through `events()`.
 | `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
 
 `configure()` accepts `provider: str | None`, `model: str | None`, `effort: str | None`,
-`auto_compaction_enabled: bool | None`, and `mode: AgentMode | None`. `effort=None` leaves the
+`auto_compaction_enabled: bool | None`, and `mode: Literal["build", "plan"] | None`. Pass the
+string `"build"` for normal operation or `"plan"` for read-only planning. `effort=None` leaves the
 current setting untouched; use `clear_effort=True` to restore the provider default.
 
 #### Live queues and cancellation
