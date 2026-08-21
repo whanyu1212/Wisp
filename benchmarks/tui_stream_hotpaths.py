@@ -27,10 +27,14 @@ from textual.widget import Widget
 
 from benchmarks.support import environment
 from benchmarks.tui_long_session import append_benchmark_messages
-from wisp.events import ToolCallRequested
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.events import RpcMessageSnapshot, ToolCallRequested
+from wisp.sessions.jsonl import (
+    MAX_SESSION_MESSAGE_PAGE_LIMIT,
+    JsonlSession,
+    JsonlSessionStore,
+)
 from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
-from wisp.tui.history import history_entries_from_rpc_messages
+from wisp.tui.history import HistoricalTranscriptEntry, history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
     StreamMessage,
@@ -378,6 +382,32 @@ async def run_benchmark(
     )
 
 
+def _newest_history_entries(
+    session: JsonlSession,
+    *,
+    retained_history_entries: int,
+) -> tuple[HistoricalTranscriptEntry, ...]:
+    """Read bounded pages until enough converted history entries are available."""
+
+    messages: tuple[RpcMessageSnapshot, ...] = ()
+    before_entry_id: str | None = None
+    while True:
+        page = session.read_message_page(
+            limit=MAX_SESSION_MESSAGE_PAGE_LIMIT,
+            before_entry_id=before_entry_id,
+        )
+        messages = (*page.messages, *messages)
+        available_entries = history_entries_from_rpc_messages(messages)
+        if len(available_entries) >= retained_history_entries:
+            return available_entries[-retained_history_entries:]
+        before_entry_id = page.next_before_entry_id
+        if before_entry_id is None:
+            raise RuntimeError(
+                "Streaming hotpath fixture produced only "
+                f"{len(available_entries)} of {retained_history_entries} requested history entries"
+            )
+
+
 async def _run_sample(
     config: BenchmarkConfig,
     *,
@@ -389,14 +419,10 @@ async def _run_sample(
         store = JsonlSessionStore(Path(temporary_directory))
         session = store.create()
         await append_benchmark_messages(session, config.message_count)
-        page = session.read_message_page(limit=config.message_count)
-        available_entries = history_entries_from_rpc_messages(page.messages)
-        entries = available_entries[-retained_history_entries:]
-        if len(entries) != retained_history_entries:
-            raise RuntimeError(
-                "Streaming hotpath fixture produced only "
-                f"{len(entries)} of {retained_history_entries} requested history entries"
-            )
+        entries = _newest_history_entries(
+            session,
+            retained_history_entries=retained_history_entries,
+        )
         collector = _HotpathCollector()
         app, renderer = create_textual_tui(diagnostics=collector)
         assert isinstance(renderer, TextualTuiRenderer)

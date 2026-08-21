@@ -173,6 +173,27 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert '"display_frame_fail_open_count":' in report.to_json()
 
 
+def test_tui_stream_hotpaths_pages_sessions_larger_than_the_read_limit() -> None:
+    report = anyio.run(
+        run_benchmark,
+        BenchmarkConfig(
+            message_count=501,
+            retained_history_entries=(4,),
+            stream_chunks=1,
+            stream_interval_seconds=0.001,
+            heartbeat_interval_seconds=0.001,
+            viewport_width=80,
+            viewport_height=12,
+            runs=1,
+            pending_tool_cards=0,
+        ),
+    )
+
+    sample = report.samples[0]
+    assert sample.retained_history_entries == 4
+    assert sample.source_complete
+
+
 def test_tui_stream_hotpaths_profile_is_readable_and_rejects_matrix(tmp_path: Path) -> None:
     profile_path = tmp_path / "stream.prof"
     config = BenchmarkConfig(
