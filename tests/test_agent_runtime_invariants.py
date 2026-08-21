@@ -28,7 +28,9 @@ from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
     ToolCall,
@@ -262,6 +264,37 @@ def test_live_clean_turn_satisfies_turn_terminals() -> None:
     events = anyio.run(run)
     assert_turn_terminals(events)
     assert_tool_result_pairing(events)
+
+
+def test_live_startless_provider_failure_settles_the_started_turn() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderRetrying(
+                    attempt=2,
+                    max_attempts=2,
+                    delay_seconds=0.0,
+                    reason="network",
+                ),
+                ProviderResponseFailed(message="request never opened"),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=_NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run)
+    assert_turn_terminals(events)
+    assert_tool_result_pairing(events)
+    assert not any(event.type == "message.started" for event in events)
+    assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
 
 
 def test_live_sequential_tool_round_pairs_ended_and_ready() -> None:

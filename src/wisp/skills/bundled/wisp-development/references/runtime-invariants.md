@@ -23,8 +23,12 @@ Later slices must preserve:
   the previous pair has closed (Google fallback IDs are `call-{name}-{index}`
   per response). Denied approval ends in an error result. Optional approval
   is request then resolution then result.
-- Provider stream order already enforced by the loop: retries → one start →
-  deltas/tool calls → one completed/failed.
+- Provider stream order already enforced by the loop: optional retries, then
+  either one start → deltas/tool calls → one completed/failed, or a startless
+  `ProviderResponseFailed` when the request never opened. OpenAI's
+  request-creation path can yield that failure with no `ProviderResponseStarted`;
+  `_ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
+  successful completion still require a prior start.
 - Request-boundary decisions: `stop` wins; `messages` is a fresh replacement
   that discards native continuation; `context_rebase` keeps cursor/tool tail
   and rejects stale snapshots; `extra_messages` are plain user messages;
