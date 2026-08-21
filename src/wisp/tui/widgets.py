@@ -2015,9 +2015,33 @@ class Transcript(VerticalScroll):
 
         self._content_driven_scroll_update = True
         try:
-            return super()._size_updated(size, virtual_size, container_size, layout=False)
+            changed = super()._size_updated(size, virtual_size, container_size, layout=False)
         finally:
             self._content_driven_scroll_update = False
+        if changed:
+            self._clamp_scroll_target_to_content()
+        return changed
+
+    def _clamp_scroll_target_to_content(self) -> None:
+        """Discard a scroll target that shrinking content left beyond the last row.
+
+        Textual steps the wheel from ``scroll_target_y`` rather than ``scroll_y``, and
+        re-validates only ``scroll_y`` when content shrinks. A target left above the
+        new ``max_scroll_y`` therefore silently absorbs every wheel event: each one
+        subtracts a step from the stale target, still clamps back to the same row, and
+        reports that nothing scrolled — so the transcript appears frozen until the
+        accumulated overshoot is spent.
+
+        Content shrinking under a parked viewport is routine here (a process card
+        collapsing captured output is enough), so re-clamp the target whenever the
+        measured geometry can no longer reach it.
+        """
+
+        max_scroll_y = self.max_scroll_y
+        if self.scroll_target_y > max_scroll_y:
+            # Assign without animating or repainting: this corrects bookkeeping for a
+            # position the reader already occupies rather than moving them.
+            self.set_reactive(Transcript.scroll_target_y, float(max_scroll_y))
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
