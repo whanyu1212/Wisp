@@ -19,7 +19,16 @@ The scenario creates a temporary JSONL session, reads every production history p
 converts and mounts the complete transcript through the Textual hydration path, streams
 an assistant response, and scrolls while a managed CPU-active shell process runs. It
 reports JSON with page-read, conversion, complete-mount, first-wheel response, stream,
-final scroll-state, and process-cleanup measurements. After those measurements it runs a dedicated
+final scroll-state, and process-cleanup measurements. The wheel metric dispatches through Textual's
+screen event path and waits for the resulting viewport and display update without using
+`Pilot.pause()`, whose test-only full-widget drain would inflate long-transcript timings.
+`first_wheel_up_ms` preserves the cold response sample, while `wheel_up_ms` records up to 20
+consecutive production-style responses so periodic compositor-map rebuilds remain visible.
+`wheel_up_complete_arrangement_count` counts whole-tree compositor arrangements across those
+responses. Textual arranges only visible widgets on its scroll fast path, so a non-zero count means
+scrolling re-lays out every mounted widget — latency that grows with session length. Unlike the
+timings it is machine-independent, so it is asserted directly. After
+those measurements it runs a dedicated
 paged-history prepend fixture, reporting whether the probe ran plus suppressed and escaped
 display-update counts. Row-coverage fields compare persisted messages
 with represented row IDs, while `hydrated_entry_count`, `mounted_widget_count`, and

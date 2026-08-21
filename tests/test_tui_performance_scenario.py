@@ -37,7 +37,14 @@ def test_tui_long_session_scenario_reports_complete_history_hydration() -> None:
     # the benchmark to one machine's absolute Textual timings.
     assert 0 <= report.first_wheel_up_ms < 1_000
     assert report.first_wheel_up_rows > 0
-    assert report.first_wheel_up_attempts in {1, 2}
+    assert report.first_wheel_up_attempts == 1
+    assert report.wheel_up_ms
+    assert report.wheel_up_ms[0] == report.first_wheel_up_ms
+    assert all(0 <= duration < 1_000 for duration in report.wheel_up_ms)
+    # Scrolling must stay on Textual's visible-only fast path. A complete arrangement
+    # re-lays out every mounted widget, so any occurrence here is latency that grows
+    # with session length — the exact regression this scenario exists to catch.
+    assert report.wheel_up_complete_arrangement_count == 0
     assert report.stream_following_tail_ms >= 0
     assert 0 <= report.stream_page_up_ms < 1_000
     assert report.stream_scrolled_back_ms >= 0

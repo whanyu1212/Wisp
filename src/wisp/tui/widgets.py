@@ -1799,11 +1799,25 @@ class OperationIndicator(Vertical):
     def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
         super().__init__(id=id)
         self._label = Label("", id="operation-indicator-label", markup=False)
+        self._spinner = LoadingIndicator(id="operation-indicator-spinner")
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="operation-indicator-panel"):
-            yield LoadingIndicator(id="operation-indicator-spinner")
+            yield self._spinner
             yield self._label
+
+    def on_mount(self) -> None:
+        # `LoadingIndicator` arms a 16 Hz auto-refresh on its own mount and never
+        # disarms it. This surface starts hidden (`display: none`), so that timer
+        # would animate an invisible spinner for the whole session — and each tick
+        # asks `is_on_screen`, a widget geometry lookup that rebuilds the compositor's
+        # complete map across every mounted widget. Run the spinner only while shown.
+        self._set_spinner_running(False)
+
+    def _set_spinner_running(self, running: bool) -> None:
+        """Animate the spinner only while the operation surface is visible."""
+
+        self._spinner.auto_refresh = 1 / 16 if running else None
 
     @property
     def is_open(self) -> bool:
@@ -1817,6 +1831,7 @@ class OperationIndicator(Vertical):
         self.set_class(cover_transcript, "-covers-transcript")
         self.update_operation(label)
         self.display = True
+        self._set_spinner_running(True)
 
     def update_operation(self, label: str) -> None:
         """Update an active operation label without changing spinner or coverage state."""
@@ -1827,6 +1842,7 @@ class OperationIndicator(Vertical):
         """Hide the operation surface through the generic overlay protocol."""
 
         self.display = False
+        self._set_spinner_running(False)
 
 
 class JumpToLatest(Static):
@@ -2050,7 +2066,7 @@ class Transcript(VerticalScroll):
         # mistake "the window shrank underneath a parked reader" for "the reader
         # returned to the tail" (it can land exactly on the new max_scroll_y).
         previous = self._follow
-        super().watch_scroll_y(old_value, new_value)
+        self._scroll_without_dirtying_hidden_scrollbar(old_value, new_value)
         if not self._content_driven_scroll_update:
             if new_value < old_value:
                 self._discard_pending_newer_navigation()
@@ -2069,6 +2085,29 @@ class Transcript(VerticalScroll):
             self._history_navigation = HistoryNavigation()
         else:
             self._request_more_history_if_needed()
+
+    def _scroll_without_dirtying_hidden_scrollbar(self, old_value: float, new_value: float) -> None:
+        """Apply Textual's scroll bookkeeping without repainting an unarranged scrollbar.
+
+        The transcript styles its scrollbar `scrollbar-size-vertical: 0`, so the bar is
+        never arranged into the compositor map. Textual's own ``watch_scroll_y`` still
+        assigns ``vertical_scrollbar.position``, whose reactive repaints the bar. The
+        compositor then sees a dirty widget missing from the arrangement, reads it as
+        newly added, and invalidates the complete map — so the next widget geometry
+        lookup re-arranges *every* mounted widget. On a resumed session that is thousands
+        of widgets rebuilt per scroll tick, to lay out a bar that paints nothing.
+
+        Skip only that assignment. Anchor checking and the scroll refresh still run, so
+        follow behaviour, anchoring, and painting are unchanged.
+        """
+
+        if self.show_vertical_scrollbar and not self.styles.scrollbar_size_vertical:
+            if self._anchored and self._anchor_released:
+                self._check_anchor()
+            if round(old_value) != round(new_value):
+                self._refresh_scroll()
+            return
+        super().watch_scroll_y(old_value, new_value)
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record one completed history page and its continuation state."""
