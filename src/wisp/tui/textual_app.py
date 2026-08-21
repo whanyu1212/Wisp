@@ -76,6 +76,7 @@ from wisp.tui.overlay import (
     TextualOverlayController,
     TranscriptViewportState,
 )
+from wisp.tui.presentation_clock import PresentationClock
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
@@ -242,6 +243,41 @@ class _DisplayedFrame:
             return LayoutUpdate(materialized, update.region), None
         return LayoutUpdate(materialized, update.region), cls(size=size, rows=rows)
 
+    def filter_layout(
+        self,
+        update: LayoutUpdate,
+        *,
+        size: Size,
+        allow_suppression: bool,
+    ) -> tuple[RenderableType | None, _DisplayedFrame | None, bool]:
+        """Reduce a full settled layout to changed rows when its shape is exact."""
+
+        prepared, next_frame = self.from_layout(update, size=size)
+        if next_frame is None or self.size != size or not allow_suppression:
+            return prepared, next_frame, not allow_suppression
+
+        chops: list[dict[int, Strip]] = []
+        chop_ends: list[list[int]] = []
+        spans: list[tuple[int, int, int]] = []
+        fail_open = False
+        for y, (line, previous, current) in enumerate(
+            zip(prepared.strips, self.rows, next_frame.rows, strict=True)
+        ):
+            output = Strip.join(line)
+            safe_to_compare = not _strip_has_control(previous) and not _strip_has_control(output)
+            if not safe_to_compare:
+                fail_open = True
+            if not safe_to_compare or current != previous:
+                chops.append({0: output})
+                chop_ends.append([size.width])
+                spans.append((y, 0, size.width))
+            else:
+                chops.append({})
+                chop_ends.append([])
+        if not spans:
+            return None, next_frame, fail_open
+        return ChopsUpdate(chops, spans, chop_ends), next_frame, fail_open
+
     def filter_chops(
         self,
         update: ChopsUpdate,
@@ -406,10 +442,19 @@ class TextualTui(App[None]):
         fail_open = False
         cursor_position = screen.outer_size.clamp_offset(self.cursor_position)
         if isinstance(renderable, LayoutUpdate):
-            prepared, next_frame = _DisplayedFrame.from_layout(
-                renderable,
-                size=screen.outer_size,
-            )
+            if isinstance(displayed_frame, _DisplayedFrame) and (
+                displayed_frame.size == screen.outer_size
+            ):
+                prepared, next_frame, fail_open = displayed_frame.filter_layout(
+                    renderable,
+                    size=screen.outer_size,
+                    allow_suppression=cursor_position == self._displayed_cursor_position,
+                )
+            else:
+                prepared, next_frame = _DisplayedFrame.from_layout(
+                    renderable,
+                    size=screen.outer_size,
+                )
             if next_frame is not None:
                 frame_cache = "updated"
         elif isinstance(renderable, ChopsUpdate):
@@ -788,6 +833,7 @@ class TextualTui(App[None]):
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
+        self.presentation_clock = PresentationClock(self.set_interval)
         self._displayed_frame = None
         self._displayed_cursor_position = None
         self._displayed_screen = None
