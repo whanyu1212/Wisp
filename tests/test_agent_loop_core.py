@@ -13,6 +13,7 @@ import anyio
 import pytest
 
 import wisp.agent.loop as agent_loop_module
+from tests.agent_runtime import assert_settled_tool_calls, assert_turn_terminals
 from wisp.agent.context import observe_context
 from wisp.agent.execution import (
     ContextOverflowSnapshot,
@@ -372,6 +373,8 @@ def test_prepared_tool_batch_overlaps_execution_and_publishes_source_order() -> 
         "call-1",
         "call-2",
     ]
+    assert_turn_terminals(events)
+    assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
 def test_configured_parallel_batch_isolates_tool_owned_failure() -> None:
@@ -1604,6 +1607,7 @@ def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> No
 
     assert [event.type for event in collected].count("turn.completed") == 1
     assert [event.type for event in collected].count("error") == 1
+    assert_turn_terminals(collected)
 
 
 def test_request_boundary_hook_stops_clean_turn_after_earlier_tool_round() -> None:
@@ -1967,6 +1971,7 @@ def test_pure_loop_does_not_complete_unstarted_turn_with_nonzero_offset() -> Non
     events = anyio.run(run)
 
     assert [event.type for event in events] == ["error"]
+    assert_turn_terminals(events)
 
 
 @pytest.mark.parametrize(

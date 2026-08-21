@@ -46,6 +46,7 @@ def test_loads_instruction_body_without_frontmatter(tmp_path: Path) -> None:
             "wisp-development",
             (
                 "references/architecture.md",
+                "references/runtime-invariants.md",
                 "references/extension-api.md",
                 "references/safety.md",
                 "references/authoring.md",

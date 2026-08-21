@@ -8,6 +8,11 @@ import anyio
 import pytest
 
 import wisp.agent.harness as agent_harness_module
+from tests.agent_runtime import (
+    assert_settled_tool_calls,
+    assert_tool_result_pairing,
+    assert_turn_terminals,
+)
 from wisp.agent.execution import (
     PreparedToolExecution,
     RequestBoundaryDecision,
@@ -699,6 +704,8 @@ def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> No
     assert provider.closed
     assert harness.is_running is False
     assert harness.cancel() is False
+    assert_turn_terminals(events)
+    assert_tool_result_pairing(events)
 
 
 def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
@@ -1216,6 +1223,8 @@ def test_harness_cancellation_drains_prepared_batch_results_in_source_order() ->
         ("tool", "call-1"),
         ("tool", "call-2"),
     ]
+    assert_turn_terminals(events)
+    assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
 def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> None:
