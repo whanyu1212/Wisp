@@ -307,6 +307,8 @@ and may change without notice.
 ## Next steps
 
 - [SDK API reference](../reference/sdk) — exact public controllers, options, commands, and events.
+- [SDK capability audit](../reference/sdk-capability-audit) — pinned Pi comparison, intentional
+  differences, and roadmap ownership.
 - [Canonical examples](https://github.com/whanyu1212/Wisp/tree/main/examples/sdk) — deterministic,
   executable workflows covered by tests.
 - [Interfaces](./interfaces) — compare SDK behavior with TUI, print, JSON, and RPC modes.

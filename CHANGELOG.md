@@ -12,6 +12,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Added a capability audit pinned to Pi SDK v0.84.2, recording shipped Wisp behavior, intentional
+  safety and protocol differences, and explicit ownership for remaining SDK roadmap gaps.
 - Defined package, Python API, event-schema, session-migration, deprecation, and removal policies;
   completed the consumer-focused event history from the first versioned contract through v34.
 - Recorded `wisp.agent.messages.SessionEntry(...)` as deprecated. Migrate to
