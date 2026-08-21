@@ -436,6 +436,7 @@ class TextualTui(App[None]):
         displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
         next_frame: _DisplayedFrame | None = None
         prepared: RenderableType | None = renderable
+        diagnostic_renderable: RenderableType | None = renderable
         emitted_spans: int | None = None
         suppressed_spans = 0
         frame_cache: DisplayFrameCacheOutcome = "unavailable"
@@ -457,6 +458,7 @@ class TextualTui(App[None]):
                 )
             if next_frame is not None:
                 frame_cache = "updated"
+            diagnostic_renderable = prepared
         elif isinstance(renderable, ChopsUpdate):
             if isinstance(displayed_frame, _DisplayedFrame) and (
                 displayed_frame.size == screen.outer_size
@@ -484,7 +486,7 @@ class TextualTui(App[None]):
         self._displayed_screen = screen
         if diagnostics_enabled:
             self._record_display_diagnostic(
-                renderable,
+                diagnostic_renderable,
                 emitted_spans=emitted_spans,
                 suppressed_spans=suppressed_spans,
                 frame_cache=frame_cache,

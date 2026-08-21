@@ -5,8 +5,9 @@ from dataclasses import dataclass, field
 import anyio
 import pytest
 from rich.segment import Segment
-from textual._compositor import ChopsUpdate
+from textual._compositor import ChopsUpdate, LayoutUpdate
 from textual.app import App
+from textual.geometry import Region
 from textual.strip import Strip
 
 from wisp.events import ToolCallRequested
@@ -151,6 +152,55 @@ def test_pending_tool_tick_stays_a_chops_update() -> None:
     assert updates
     assert any(update.kind == "chops" for update in updates)
     assert all(update.kind != "layout" for update in updates)
+
+
+def test_display_diagnostics_report_filtered_layout_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics = _Diagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+
+    def discard_display(
+        _app: App[object],
+        _screen: object,
+        _renderable: object,
+    ) -> None:
+        return
+
+    monkeypatch.setattr(App, "_display", discard_display)
+
+    async def scenario() -> None:
+        async with app.run_test():
+            screen = app.screen
+            size = screen.outer_size
+            blank = Strip([Segment(" " * size.width)], size.width)
+            changed = Strip([Segment("x" + " " * (size.width - 1))], size.width)
+            app._displayed_screen = screen
+            app._displayed_cursor_position = size.clamp_offset(app.cursor_position)
+            app._displayed_frame = _DisplayedFrame(
+                size=size,
+                rows=[blank for _ in range(size.height)],
+            )
+            diagnostics.display.clear()
+            app._display(
+                screen,
+                LayoutUpdate([[blank] for _ in range(size.height)], size.region),
+            )
+            app._display(
+                screen,
+                LayoutUpdate(
+                    [[changed], *([blank] for _ in range(size.height - 1))],
+                    Region(0, 0, size.width, size.height),
+                ),
+            )
+
+    anyio.run(scenario)
+
+    duplicate, changed = diagnostics.display
+    assert duplicate.kind == "none"
+    assert duplicate.emitted_spans == 0
+    assert changed.kind == "chops"
+    assert changed.input_spans == changed.emitted_spans == 1
 
 
 def test_tui_diagnostic_sink_failures_do_not_interrupt_rendering() -> None:
