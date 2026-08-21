@@ -204,7 +204,7 @@ def test_tool_cards_resolve_by_id_and_terminal_states_do_not_leak() -> None:
     controller.fail_pending_tool_calls("cancelled")
     assert controller.pending_tool_count == 0
     assert first._status == "cancelled"
-    assert first._timer is None
+    assert not first._clock_registered
 
 
 def test_live_process_reuse_detaches_historical_card_ownership() -> None:

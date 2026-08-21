@@ -18,6 +18,7 @@ from rich.console import (
 )
 from rich.segment import Segment
 from rich.style import Style as RichStyle
+from rich.syntax import Syntax
 from textual import events
 from textual.visual import RenderOptions
 
@@ -462,6 +463,190 @@ def test_assistant_ansi_fence_never_emits_raw_escape_sequences(native_ansi: bool
         assert style.color is not None
     else:
         assert style is None or style.color is None
+
+
+def test_streaming_markdown_reuses_stable_blocks_with_one_shot_visual_parity() -> None:
+    chunks = (
+        "# Heading\n\n",
+        "Paragraph with **bold**, `code`, and [a link](https://example.com).\n\n",
+        "Setext heading\n--------------\n\n",
+        "> quote\n>\n> - nested one\n> - nested two\n\n",
+        "A | B\n-- | --\n1 | 2\n\n",
+        "```python\nprint('closed fence')\n```\n\n",
+        "~~~ansi\n\x1b[31mred\x1b[0m\n~~~\n\n",
+        "Trailing paragraph with ~~strikethrough~~.",
+    )
+
+    async def scenario() -> tuple[list[Segment], list[Segment], int, int, str]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 40)):
+            transcript = app.query_one("#transcript", Transcript)
+            streamed = StreamMessage()
+            one_shot = StreamMessage()
+            await transcript.mount(streamed, one_shot)
+            cumulative_work = 0
+            full_rebuild_work = 0
+            source = ""
+            for chunk in chunks:
+                source += chunk
+                full_rebuild_work += len(source)
+                await streamed.append_markdown(chunk)
+                cumulative_work += streamed.last_markdown_processed_chars
+            await one_shot.replace_markdown(source)
+            return (
+                _segments(app, streamed),
+                _segments(app, one_shot),
+                cumulative_work,
+                full_rebuild_work,
+                streamed.source,
+            )
+
+    streamed, one_shot, processed_chars, full_rebuild_chars, source = anyio.run(scenario)
+
+    assert streamed == one_shot
+    assert source == "".join(chunks)
+    assert processed_chars < full_rebuild_chars
+
+
+@pytest.mark.parametrize(
+    ("reference", "definition"),
+    [
+        ("target", "[target]: https://example.com/reference\n"),
+        ("target", "> [target]: https://example.com/reference\n"),
+        ("target", "- [target]: https://example.com/reference\n"),
+        (r"foo\]", "[foo\\]]: https://example.com/reference\n"),
+    ],
+)
+def test_streaming_markdown_falls_back_for_late_reference_definitions(
+    reference: str,
+    definition: str,
+) -> None:
+    initial = f"[linked text][{reference}]\n\nMiddle paragraph.\n\n"
+
+    async def scenario() -> tuple[bool, int, int, str]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.append_markdown(initial)
+            await stream.append_markdown("Tail paragraph.\n\n")
+            assert stream.last_markdown_reused_chars > 0
+            await stream.append_markdown(definition)
+            segments = _segments(app, stream)
+            link_style = _style_for(segments, "linked text")
+            return (
+                stream.last_markdown_incremental,
+                stream.last_markdown_processed_chars,
+                len(stream.source),
+                str(link_style.meta.get("@click", "")),
+            )
+
+    incremental, processed_chars, source_chars, action = anyio.run(scenario)
+
+    assert not incremental
+    assert processed_chars == source_chars
+    assert action == "open_markdown_link('https://example.com/reference')"
+
+
+def test_streaming_markdown_caches_closed_fence_highlighting_by_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    syntax_renders = 0
+    original_render = Syntax.__rich_console__
+
+    def count_syntax_render(
+        syntax: Syntax,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        nonlocal syntax_renders
+        syntax_renders += 1
+        yield from original_render(syntax, console, options)
+
+    monkeypatch.setattr(Syntax, "__rich_console__", count_syntax_render)
+
+    async def scenario() -> tuple[int, int, int, int]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.append_markdown("```python\nprint('cached')\n```\n\n")
+            _segments(app, stream, width=80)
+            first = syntax_renders
+            await stream.append_markdown("Following paragraph.\n\n")
+            _segments(app, stream, width=80)
+            cached = syntax_renders
+            await stream.append_markdown("Another paragraph.\n\n")
+            _segments(app, stream, width=80)
+            reused = syntax_renders
+            _segments(app, stream, width=40)
+            resized = syntax_renders
+            return first, cached, reused, resized
+
+    first, cached, reused, resized = anyio.run(scenario)
+
+    assert first == 1
+    assert cached == 2
+    assert reused == cached
+    assert resized == reused + 1
+
+
+def test_streaming_markdown_releases_incremental_caches_after_settlement() -> None:
+    async def scenario() -> tuple[int, int, bool]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.append_markdown("```python\nprint('cached')\n```\n\nFollowing.\n")
+            _segments(app, stream, width=80)
+            cached_before = len(stream._code_block_render_cache)
+            stream.release_streaming_markdown_caches()
+            visual = stream._selection_visual
+            assert isinstance(visual, _SelectableMarkdownVisual)
+            renderable = visual._markdown_renderable
+            assert isinstance(renderable, _SafeAssistantMarkdown)
+            return (
+                cached_before,
+                len(stream._code_block_render_cache),
+                renderable.markdown.code_block_render_cache is None,
+            )
+
+    cached_before, cached_after, render_cache_released = anyio.run(scenario)
+
+    assert cached_before == 1
+    assert cached_after == 0
+    assert render_cache_released
+
+
+def test_streaming_markdown_reuses_theme_configuration_until_style_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_builds = 0
+    original_build = StreamMessage._build_markdown_render_config
+
+    def count_config_build(stream: StreamMessage) -> object:
+        nonlocal config_builds
+        config_builds += 1
+        return original_build(stream)
+
+    monkeypatch.setattr(StreamMessage, "_build_markdown_render_config", count_config_build)
+
+    async def scenario() -> tuple[int, int]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)) as pilot:
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.append_markdown("First paragraph.\n\n")
+            await stream.append_markdown("Second paragraph.\n\n")
+            before_theme_change = config_builds
+            app.theme = "wisp-light"
+            await pilot.pause()
+            return before_theme_change, config_builds
+
+    before_theme_change, after_theme_change = anyio.run(scenario)
+
+    assert before_theme_change == 1
+    assert after_theme_change > before_theme_change
 
 
 def test_assistant_markdown_treats_rich_markup_and_controls_as_text() -> None:

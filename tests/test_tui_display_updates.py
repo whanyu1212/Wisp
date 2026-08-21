@@ -32,6 +32,54 @@ def test_displayed_frame_materializes_a_full_layout() -> None:
     assert frame.rows == [_strip("abc"), _strip("def")]
 
 
+def test_displayed_frame_reduces_full_layout_to_changed_rows() -> None:
+    frame = _DisplayedFrame(size=Size(4, 2), rows=[_strip("same"), _strip("keep")])
+    update = LayoutUpdate([[_strip("same")], [_strip("news")]], Region(0, 0, 4, 2))
+
+    filtered, next_frame, fail_open = frame.filter_layout(
+        update,
+        size=Size(4, 2),
+        allow_suppression=True,
+    )
+
+    assert isinstance(filtered, ChopsUpdate)
+    assert filtered.spans == [(1, 0, 4)]
+    assert next_frame is not None
+    assert next_frame.rows == [_strip("same"), _strip("news")]
+    assert not fail_open
+
+
+def test_displayed_frame_drops_duplicate_full_layout() -> None:
+    frame = _DisplayedFrame(size=Size(4, 1), rows=[_strip("same")])
+    update = LayoutUpdate([[_strip("same")]], Region(0, 0, 4, 1))
+
+    filtered, next_frame, fail_open = frame.filter_layout(
+        update,
+        size=Size(4, 1),
+        allow_suppression=True,
+    )
+
+    assert filtered is None
+    assert next_frame is not None
+    assert next_frame.rows == [_strip("same")]
+    assert not fail_open
+
+
+def test_displayed_frame_preserves_full_layout_when_cursor_moved() -> None:
+    frame = _DisplayedFrame(size=Size(4, 1), rows=[_strip("same")])
+    update = LayoutUpdate([[_strip("same")]], Region(0, 0, 4, 1))
+
+    filtered, next_frame, fail_open = frame.filter_layout(
+        update,
+        size=Size(4, 1),
+        allow_suppression=False,
+    )
+
+    assert isinstance(filtered, LayoutUpdate)
+    assert next_frame is not None
+    assert fail_open
+
+
 def test_displayed_frame_drops_only_exact_duplicate_rows() -> None:
     frame = _DisplayedFrame(size=Size(4, 2), rows=[_strip("same"), _strip("keep")])
     update = _update(_strip("same"), _strip("news"))

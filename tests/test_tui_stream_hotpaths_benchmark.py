@@ -20,6 +20,7 @@ from benchmarks.tui_stream_hotpaths import (
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import (
     StreamMessage,
+    ToolCard,
     _AssistantMarkdown,
     _SafeAssistantMarkdown,
 )
@@ -71,7 +72,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
-    original_source_render = StreamMessage._render_source
+    original_show_markdown = StreamMessage._show_markdown
+    original_tool_card_build_body = ToolCard._build_body
 
     report = anyio.run(
         run_benchmark,
@@ -92,7 +94,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert Widget.refresh is original_refresh
     assert Widget.get_content_height is original_content_height
     assert _SafeAssistantMarkdown.__rich_console__ is original_markdown_render
-    assert StreamMessage._render_source is original_source_render
+    assert StreamMessage._show_markdown is original_show_markdown
+    assert ToolCard._build_body is original_tool_card_build_body
     assert len(report.samples) == 1
     sample = report.samples[0]
     assert sample.run == 1
@@ -116,13 +119,23 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.content_height_call_count == sum(sample.content_height_calls.values())
     assert sample.content_height_call_count > 0
     assert sample.content_height_calls["StreamMessage"] > 0
+    assert sample.tool_card_body_build_count == 0
     assert sample.markdown_renders.total == (
         sample.markdown_renders.active + sample.markdown_renders.settled
     )
     assert sample.markdown_renders.active > 0
     assert sample.markdown_renders.active < sample.markdown_source_rebuild_count * 2
-    assert sample.markdown_source_rebuild_count >= sample.stream_update_count
-    assert sample.markdown_source_chars_processed >= sample.markdown_source_rebuild_count
+    assert sample.markdown_source_rebuild_count == sample.markdown_drain_success_count
+    assert sample.markdown_source_rebuild_count == sample.stream_update_count
+    chunks = tuple(
+        f"## Stream section {index}\n\n- benchmark item {index}\n\n"
+        for index in range(report.config.stream_chunks)
+    )
+    cumulative_full_rebuild_chars = sum(
+        len("".join(chunks[: index + 1])) for index in range(len(chunks))
+    )
+    assert sample.markdown_source_chars_processed >= len("".join(chunks))
+    assert sample.markdown_source_chars_processed < cumulative_full_rebuild_chars
     assert sample.markdown_drains.sample_count == sample.markdown_drain_success_count
     assert sample.markdown_drain_failure_count == 0
     assert sample.markdown_drains.sample_count >= 1
@@ -166,6 +179,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert '"stream_cpu_ms":' in report.to_json()
     assert '"layout_requests":' in report.to_json()
     assert '"layout_passes_per_stream_update":' in report.to_json()
+    assert '"tool_card_body_build_count": 0' in report.to_json()
     assert '"markdown_renders":' in report.to_json()
     assert '"markdown_source_chars_processed":' in report.to_json()
     assert '"markdown_drains":' in report.to_json()
@@ -238,7 +252,7 @@ def test_tui_stream_hotpaths_restores_textual_methods_after_stream_failure(
     original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
-    original_source_render = StreamMessage._render_source
+    original_show_markdown = StreamMessage._show_markdown
 
     def fail_stream(_renderer: TextualTuiRenderer, _delta: str) -> None:
         raise RuntimeError("benchmark stream failed")
@@ -265,4 +279,4 @@ def test_tui_stream_hotpaths_restores_textual_methods_after_stream_failure(
     assert Widget.refresh is original_refresh
     assert Widget.get_content_height is original_content_height
     assert _SafeAssistantMarkdown.__rich_console__ is original_markdown_render
-    assert StreamMessage._render_source is original_source_render
+    assert StreamMessage._show_markdown is original_show_markdown

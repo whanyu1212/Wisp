@@ -17,6 +17,7 @@ from textual import events
 from textual._compositor import ChopsUpdate, LayoutUpdate
 from textual.app import App
 from textual.content import Content
+from textual.geometry import Size
 from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Header, Label, OptionList, Static
@@ -85,6 +86,8 @@ from wisp.tui.widgets import (
     WorkingIndicator,
     _composer_metadata_fields,
     _format_textual_footer_line,
+    _SafeAssistantMarkdown,
+    _SelectableMarkdownVisual,
     _textual_footer_parts,
 )
 from wisp.tui.widgets import (
@@ -2351,7 +2354,7 @@ def test_textual_interrupted_process_poll_does_not_claim_process_cancellation() 
             )
             await pilot.pause()
             card = app_instance.query_one(ProcessCard)
-            return card.render().plain, card._status, card._timer is None
+            return card.render().plain, card._status, not card._clock_registered
 
     rendered, status, timer_stopped = anyio.run(scenario)
 
@@ -4233,6 +4236,36 @@ def test_textual_stream_completion_retries_a_failed_incremental_markdown_build(
     source, needs_reconciliation = anyio.run(scenario)
     assert source == "same final content"
     assert needs_reconciliation is False
+
+
+def test_textual_stream_completion_releases_incremental_markdown_caches() -> None:
+    async def scenario() -> tuple[int, int, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            renderer.token_delta("```python\nprint('cached')\n```\n\n")
+            await app_instance.wait_for_stream_idle()
+            renderer.token_delta("Following paragraph.\n\n")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            stream = app_instance.query_one(StreamMessage)
+            cached_before = len(stream._code_block_render_cache)
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            visual = stream._selection_visual
+            assert isinstance(visual, _SelectableMarkdownVisual)
+            renderable = visual._markdown_renderable
+            assert isinstance(renderable, _SafeAssistantMarkdown)
+            return (
+                cached_before,
+                len(stream._code_block_render_cache),
+                renderable.markdown.code_block_render_cache is None,
+            )
+
+    cached_before, cached_after, render_cache_released = anyio.run(scenario)
+
+    assert cached_before == 1
+    assert cached_after == 0
+    assert render_cache_released
 
 
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
@@ -6510,7 +6543,7 @@ def test_format_duration_scales_units() -> None:
 
 
 def test_textual_pending_tool_card_ticks_a_live_counter() -> None:
-    # A running card shows a live whole-second counter (per-card timer) until it
+    # A running card shows a live whole-second counter from the shared clock until it
     # resolves. Advance ticks directly and assert the counter climbs.
     async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
@@ -6532,10 +6565,121 @@ def test_textual_pending_tool_card_ticks_a_live_counter() -> None:
     assert ticked.endswith("· 3.0s")  # three 1s ticks
 
 
+def test_textual_pending_presentations_share_one_app_clock() -> None:
+    async def scenario() -> tuple[int, bool, bool, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(ToolCallRequested(call_id="a", name="read", arguments={}))
+            renderer.event(ToolCallRequested(call_id="b", name="grep", arguments={}))
+            await pilot.pause()
+            cards = [
+                child
+                for child in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(child, ToolCard)
+            ]
+            active = (
+                app_instance.presentation_clock.subscriber_count,
+                app_instance.presentation_clock.is_running,
+                all(card._clock_registered for card in cards),
+            )
+            renderer.cancelled()
+            await pilot.pause()
+            return (*active, app_instance.presentation_clock.subscriber_count)
+
+    subscribers, clock_running, cards_registered, settled_subscribers = anyio.run(scenario)
+    assert subscribers == 3  # one heartbeat plus two pending cards
+    assert clock_running
+    assert cards_registered
+    assert settled_subscribers == 0
+
+
+def test_textual_tool_card_tick_reuses_stable_body(monkeypatch: MonkeyPatch) -> None:
+    body_builds: list[int] = []
+    original_build_body = ToolCard._build_body
+
+    def record_build_body(self: ToolCard, *, width: int) -> Content:
+        body_builds.append(width)
+        return original_build_body(self, width=width)
+
+    monkeypatch.setattr(ToolCard, "_build_body", record_build_body)
+
+    async def scenario() -> tuple[list[int], str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={}))
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            body_builds.clear()
+            card._tick()
+            return body_builds, card.render().plain
+
+    builds, rendered = anyio.run(scenario)
+    assert builds == []
+    assert rendered.endswith("· 1.0s")
+
+
+def test_textual_tool_card_tick_layout_only_when_duration_width_changes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    layouts: list[bool] = []
+    original_update = ToolCard.update
+
+    def record_update(self: ToolCard, content: object = "", *, layout: bool = True) -> None:
+        layouts.append(layout)
+        original_update(self, content, layout=layout)
+
+    monkeypatch.setattr(ToolCard, "update", record_update)
+
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={}))
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            layouts.clear()
+            card._tick()
+            unchanged_width_layout = layouts[-1]
+            card._elapsed = 9.0
+            card._tick()
+            changed_width_layout = layouts[-1]
+            return unchanged_width_layout, changed_width_layout
+
+    assert anyio.run(scenario) == (False, True)
+
+
+def test_textual_tool_card_resize_rebuilds_only_for_a_new_width(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    body_builds: list[int] = []
+    original_build_body = ToolCard._build_body
+
+    def record_build_body(self: ToolCard, *, width: int) -> Content:
+        body_builds.append(width)
+        return original_build_body(self, width=width)
+
+    monkeypatch.setattr(ToolCard, "_build_body", record_build_body)
+
+    async def scenario() -> list[int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={}))
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            body_builds.clear()
+            card.on_resize(events.Resize(card.size, card.virtual_size))
+            card.on_resize(
+                events.Resize(Size(card.size.width - 1, card.size.height), card.virtual_size)
+            )
+            return body_builds
+
+    assert len(anyio.run(scenario)) == 1
+
+
 def test_textual_cancel_drains_pending_tool_cards() -> None:
     # A prompt that ends without results (cancel/failure/stream death) must not
     # leave tool cards spinning forever. cancelled() marks every pending card
-    # cancelled, stops its timer, and clears both the app and renderer registries.
+    # cancelled, leaves the shared clock, and clears both app and renderer registries.
     async def scenario() -> tuple[list[str], list[bool], int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -6551,7 +6695,7 @@ def test_textual_cancel_drains_pending_tool_cards() -> None:
             await pilot.pause()
             return (
                 [c.render().plain for c in cards],
-                [c._timer is None for c in cards],
+                [not c._clock_registered for c in cards],
                 app_instance._transcript_controller.pending_tool_count,
                 len(renderer._tool_started),
             )
@@ -7195,25 +7339,23 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
 def test_textual_history_prepend_never_displays_unanchored_intermediate_frame(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def scenario() -> tuple[float, list[float]]:
+    async def scenario() -> tuple[float, list[float], list[type[object]]]:
         app_instance, renderer = create_textual_tui()
         transcript: Transcript | None = None
         anchor: Widget | None = None
         recording = False
         displayed_anchor_positions: list[float] = []
+        displayed_update_types: list[type[object]] = []
 
         def record_display(
             _app: App[object],
             _screen: Screen,
             _renderable: RenderableType | None,
         ) -> None:
-            if (
-                recording
-                and transcript is not None
-                and anchor is not None
-                and anchor.parent is transcript
-            ):
-                displayed_anchor_positions.append(float(anchor.region.y))
+            if recording:
+                displayed_update_types.append(type(_renderable))
+                if transcript is not None and anchor is not None and anchor.parent is transcript:
+                    displayed_anchor_positions.append(float(anchor.region.y))
 
         monkeypatch.setattr(App, "_display", record_display)
         async with app_instance.run_test(size=(60, 12)) as pilot:
@@ -7247,11 +7389,13 @@ def test_textual_history_prepend_never_displays_unanchored_intermediate_frame(
             await pilot.pause()
             await pilot.pause()
             await pilot.pause()
-            return anchor_y_before, displayed_anchor_positions
+            return anchor_y_before, displayed_anchor_positions, displayed_update_types
 
-    anchor_y_before, displayed_anchor_positions = anyio.run(scenario)
+    anchor_y_before, displayed_anchor_positions, displayed_update_types = anyio.run(scenario)
 
     assert displayed_anchor_positions
+    assert set(displayed_update_types) <= {ChopsUpdate, type(None)}
+    assert LayoutUpdate not in displayed_update_types
     assert all(abs(anchor_y - anchor_y_before) <= 1 for anchor_y in displayed_anchor_positions), (
         displayed_anchor_positions
     )
@@ -10669,7 +10813,7 @@ def test_textual_startup_is_prominent_and_preserves_early_resume_draft() -> None
             )
             await pilot.pause()
             notice_hidden_when_ready = not notice.display
-            notice_timer_stopped = notice._timer is None
+            notice_timer_stopped = not notice._clock_registered
             await pilot.press("enter")
             await pilot.pause()
             submitted = await app_instance._input_controller.receive_stream.receive()
@@ -10759,7 +10903,7 @@ def test_textual_startup_notice_animates_when_starting_before_mount() -> None:
             ticks_before = notice._ticks
             await pilot.pause(StartupNotice._INTERVAL * 3)
             return (
-                notice._timer is not None,
+                notice._clock_registered,
                 ticks_before,
                 notice._ticks,
                 notice.render().plain[2:],
@@ -10781,13 +10925,13 @@ def test_textual_startup_notice_pauses_with_hidden_composer_and_stops_on_unmount
             await pilot.pause()
             composer = app_instance.query_one("#composer-region", ComposerRegion)
             notice = app_instance.query_one("#startup-notice", StartupNotice)
-            initially_running = notice._timer is not None
+            initially_running = notice._clock_registered
             composer.hide()
-            paused_while_hidden = notice._timer is None
+            paused_while_hidden = not notice._clock_registered
             composer.show()
-            resumed_when_shown = notice._timer is not None
+            resumed_when_shown = notice._clock_registered
             await composer.remove()
-            stopped_on_unmount = notice._timer is None
+            stopped_on_unmount = not notice._clock_registered
             return initially_running, paused_while_hidden, resumed_when_shown, stopped_on_unmount
 
     assert anyio.run(scenario) == (True, True, True, True)
