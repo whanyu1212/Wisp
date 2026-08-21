@@ -64,6 +64,7 @@ class ScenarioReport:
     session_size_bytes: int
     newest_page_read_ms: float
     warm_newest_page_read_ms: float
+    cached_newest_page_read_ms: float
     older_page_read_ms: tuple[float, ...]
     complete_history_convert_ms: float
     complete_history_mount_ms: float
@@ -326,6 +327,11 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         session = store.load(session.path)
         newest_page, newest_page_read_ms = _read_page(session, limit=config.page_size)
         _warm_newest_page, warm_newest_page_read_ms = _read_page(session, limit=config.page_size)
+        # A fresh handle has no in-process index, so this is what a resume pays: it
+        # measures the newest-page cache rather than the warm index above.
+        _cached_page, cached_newest_page_read_ms = _read_page(
+            store.load(session.path), limit=config.page_size
+        )
         older_pages: list[tuple[SessionMessagePage, float]] = []
         cursor = newest_page.next_before_entry_id
         while cursor is not None:
@@ -549,6 +555,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             session_size_bytes=session.path.stat().st_size,
             newest_page_read_ms=newest_page_read_ms,
             warm_newest_page_read_ms=warm_newest_page_read_ms,
+            cached_newest_page_read_ms=cached_newest_page_read_ms,
             older_page_read_ms=tuple(duration for _page, duration in older_pages),
             complete_history_convert_ms=complete_history_convert_ms,
             complete_history_mount_ms=complete_history_mount_ms,

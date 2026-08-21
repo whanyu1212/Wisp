@@ -8,7 +8,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -86,6 +86,10 @@ MESSAGE_CONTENT_BYTE_LIMIT = 64 * 1024
 TOOL_ARGUMENTS_BYTE_LIMIT = 64 * 1024
 MESSAGE_TOOL_CALL_LIMIT = 16
 MESSAGE_PAGE_TEXT_BYTE_LIMIT = 512 * 1024
+# Bumping this retires every existing newest-page cache. The cache is a pure
+# accelerator, so a retired one costs a slow read, never a wrong one.
+SESSION_PAGE_CACHE_SCHEMA_VERSION = 1
+SESSION_PAGE_CACHE_SUFFIX = ".page-cache"
 _FileSignature = tuple[int, int, int, int]
 
 
@@ -827,14 +831,27 @@ class JsonlSession:
         _validate_message_page_limit(limit)
         with self._file_state.lock:
             with self._interprocess_lock(prepare_parent=False):
-                if self._validate_session_file() is None:
+                info = self._validate_session_file()
+                if info is None:
                     raise SessionNotFoundError(f"Session file does not exist: {self.path}")
+                cached_page = self._cached_newest_page(
+                    info,
+                    limit=limit,
+                    before_entry_id=before_entry_id,
+                    after_entry_id=after_entry_id,
+                    entry_ids=entry_ids,
+                    complete_structure=complete_structure,
+                    full_content=full_content,
+                )
+                if cached_page is not None:
+                    return cached_page
                 self._refresh_entry_index()
                 if self._message_page_index is None:
                     assert self._entry_index is not None
                     self._message_page_index = _message_page_index_from_entries(
                         self._entry_index.values()
                     )
+                    self._publish_page_cache(self._message_page_index)
                 return _message_page_from_index(
                     self._message_page_index,
                     session_id=self.session_id,
@@ -1291,6 +1308,88 @@ class JsonlSession:
             return existing
         raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
+    def _publish_page_cache(self, index: _MessagePageIndex) -> None:
+        """Record the newest active-path messages so the next process can skip this.
+
+        Written only after a complete read has resolved the tree, so the cache always
+        describes a fully validated active path. Signed with the session file's
+        identity and size/mtime, which is what makes a later read able to trust it.
+        """
+
+        info = self._validate_session_file()
+        if info is None:
+            return
+        newest = index.messages[-MAX_SESSION_MESSAGE_PAGE_LIMIT:]
+        if not newest:
+            return
+        _write_page_cache(
+            self.path,
+            _session_file_signature(info),
+            newest,
+            len(index.messages),
+        )
+
+    def _cached_newest_page(
+        self,
+        info: os.stat_result,
+        *,
+        limit: int,
+        before_entry_id: str | None,
+        after_entry_id: str | None,
+        entry_ids: tuple[str, ...],
+        complete_structure: bool,
+        full_content: bool,
+    ) -> SessionMessagePage | None:
+        """Serve the newest page from the sidecar cache, or ``None`` to read fully.
+
+        Resuming a session otherwise parses every persisted entry before it can
+        return the newest page, because the active path is only known once the whole
+        tree is resolved. That cost scales with total session size rather than with
+        the page requested. The cache short-circuits exactly that one request shape;
+        anything else, and any doubt at all about the cache, reads normally.
+        """
+
+        if self._entry_index is not None:
+            # The index this process already built is authoritative and cheaper than
+            # re-reading a file; the cache only exists to avoid building it at all.
+            return None
+        signature = _session_file_signature(info)
+        restored = _read_page_cache(self.path, signature)
+        if restored is None:
+            return None
+        cached, total_message_count = restored
+        if not _serves_newest_page(
+            limit=limit,
+            before_entry_id=before_entry_id,
+            after_entry_id=after_entry_id,
+            entry_ids=entry_ids,
+            full_content=full_content,
+            cached_count=len(cached),
+        ):
+            return None
+        # `_message_page_from_index` derives `truncated` (and therefore the backward
+        # cursor) from how much active path it was given. The cache holds only the
+        # newest slice, so pad the positions with the count the complete read saw:
+        # otherwise a session with older history would report that it has none.
+        selected = cached[-limit:]
+        offset = total_message_count - len(selected)
+        return _message_page_from_index(
+            _MessagePageIndex(
+                active_leaf_id=None,
+                messages=selected,
+                positions={entry.id: offset + index for index, entry in enumerate(selected)},
+            ),
+            session_id=self.session_id,
+            path=self.path,
+            limit=limit,
+            before_entry_id=None,
+            after_entry_id=None,
+            entry_ids=(),
+            complete_structure=complete_structure,
+            full_content=False,
+            truncated_override=total_message_count > len(selected),
+        )
+
     def _refresh_entry_index(self) -> None:
         self._recover_incomplete_tail_locked()
         info = self._validate_session_file()
@@ -1461,6 +1560,63 @@ class JsonlSession:
                 os.close(fd)
             if signature is not None:
                 _unlink_if_same_file(temp_path, signature)
+
+
+def _write_page_cache(
+    path: Path,
+    signature: _FileSignature,
+    messages: tuple[MessageSessionEntry, ...],
+    total_message_count: int,
+) -> None:
+    """Publish the newest-page cache beside its session, atomically and privately.
+
+    Best effort by definition: the cache only saves work on a later read, so any
+    failure to write one is dropped rather than surfaced. A partially written cache
+    would be worse than none, so it is staged and renamed like the session file.
+    """
+
+    cache_path = _page_cache_path(path)
+    header = json.dumps(
+        {
+            "cache_schema_version": SESSION_PAGE_CACHE_SCHEMA_VERSION,
+            "entry_schema_version": SESSION_ENTRY_SCHEMA_VERSION,
+            "signature": list(signature),
+            "message_count": len(messages),
+            "total_message_count": total_message_count,
+        },
+        sort_keys=True,
+    )
+    lines = [header, *(session_entry_to_json(entry) for entry in messages)]
+    data = "".join(f"{line}\n" for line in lines).encode()
+    temp_path = cache_path.with_name(f".{cache_path.name}.{uuid4().hex}.tmp")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    staged: tuple[int, int] | None = None
+    try:
+        fd = os.open(temp_path, flags, PRIVATE_FILE_MODE)
+        info = os.fstat(fd)
+        staged = (info.st_dev, info.st_ino)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return
+        if os.name == "posix":
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+        _write_all(fd, data)
+        _sync_file(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temp_path, cache_path)
+        staged = None
+    except OSError:
+        return
+    finally:
+        if fd != -1:
+            with suppress(OSError):
+                os.close(fd)
+        if staged is not None:
+            with suppress(OSError):
+                _unlink_if_same_file(temp_path, staged)
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -1777,6 +1933,93 @@ def _session_file_signature(info: os.stat_result) -> _FileSignature:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
+def _page_cache_path(path: Path) -> Path:
+    return path.with_suffix(f"{path.suffix}{SESSION_PAGE_CACHE_SUFFIX}")
+
+
+def _serves_newest_page(
+    *,
+    limit: int,
+    before_entry_id: str | None,
+    after_entry_id: str | None,
+    entry_ids: tuple[str, ...],
+    full_content: bool,
+    cached_count: int,
+) -> bool:
+    """Return whether a request is exactly the newest page a cache can answer.
+
+    The cache holds only the newest slice of the active path, so it can satisfy an
+    uncursored read no deeper than that slice. Every other shape — a cursor, an
+    exact-id lookup, full content, or a larger limit — needs the resolved tree and
+    must fall through to a complete read.
+    """
+
+    return (
+        before_entry_id is None
+        and after_entry_id is None
+        and not entry_ids
+        and not full_content
+        and limit <= cached_count
+    )
+
+
+def _read_page_cache(
+    path: Path, signature: _FileSignature
+) -> tuple[tuple[MessageSessionEntry, ...], int] | None:
+    """Return cached newest-page messages, or ``None`` whenever anything is off.
+
+    Every failure mode — missing, unreadable, truncated, corrupt, stale, or written
+    by a different schema — resolves to ``None`` so the caller performs the ordinary
+    complete read. The cache can make a session load faster; it must never change
+    what the session says.
+    """
+
+    cache_path = _page_cache_path(path)
+    try:
+        info = cache_path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return None
+        raw = cache_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except (OSError, UnicodeDecodeError):
+        return None
+    lines = raw.splitlines()
+    if not lines:
+        return None
+    try:
+        header = json.loads(lines[0])
+    except ValueError:
+        return None
+    if not isinstance(header, dict):
+        return None
+    if header.get("cache_schema_version") != SESSION_PAGE_CACHE_SCHEMA_VERSION:
+        return None
+    if header.get("entry_schema_version") != SESSION_ENTRY_SCHEMA_VERSION:
+        return None
+    if tuple(header.get("signature") or ()) != signature:
+        return None
+    messages: list[MessageSessionEntry] = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        try:
+            entry = session_entry_from_json(line)
+        except SessionError:
+            return None
+        if not isinstance(entry, MessageSessionEntry):
+            return None
+        messages.append(entry)
+    if len(messages) != header.get("message_count"):
+        # A partially written cache is indistinguishable from a complete one without
+        # this check, and would silently serve a short page.
+        return None
+    total = header.get("total_message_count")
+    if not isinstance(total, int) or total < len(messages):
+        return None
+    return tuple(messages), total
+
+
 def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
     """Read current leaf state from the last validated transition in constant time."""
 
@@ -1826,7 +2069,16 @@ def _message_page_from_index(
     entry_ids: tuple[str, ...] = (),
     complete_structure: bool = False,
     full_content: bool = False,
+    truncated_override: bool | None = None,
 ) -> SessionMessagePage:
+    """Build one page from a resolved active path.
+
+    ``truncated_override`` states that older active-path history exists beyond the
+    messages supplied. Only the newest-page cache needs it: it holds a slice rather
+    than the whole path, so the usual ``len(candidates) > limit`` test would report
+    a complete session and strand the reader with no way to page back.
+    """
+
     _validate_message_page_limit(limit)
     if before_entry_id is not None and after_entry_id is not None:
         raise ValueError("message page cursors are mutually exclusive")
@@ -1865,6 +2117,8 @@ def _message_page_from_index(
             candidates = active_messages[:cursor_index]
         truncated = len(candidates) > limit
         selected = candidates[-limit:]
+        if truncated_override is not None:
+            truncated = truncated_override
     structural_argument_bytes = (
         _complete_structure_argument_bytes(selected) if complete_structure else 0
     )

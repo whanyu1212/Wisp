@@ -24,6 +24,9 @@ def test_tui_long_session_scenario_reports_complete_history_hydration() -> None:
     assert report.session_size_bytes > 0
     assert report.newest_page_read_ms >= 0
     assert report.warm_newest_page_read_ms >= 0
+    # A fresh session handle reads the newest page from the sidecar cache instead of
+    # rebuilding the whole entry index, so resume does not pay for total session size.
+    assert report.cached_newest_page_read_ms >= 0
     assert len(report.older_page_read_ms) == 2
     assert report.complete_history_convert_ms >= 0
     assert report.complete_history_mount_ms >= 0

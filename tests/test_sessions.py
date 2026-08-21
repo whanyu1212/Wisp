@@ -5,7 +5,7 @@ import json
 import os
 import stat
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +65,7 @@ from wisp.sessions.jsonl import (
     SessionMessagePage,
     SessionNotFoundError,
     SessionSummary,
+    _page_cache_path,
 )
 from wisp.sessions.replay import SessionReplayError, SessionTreeState
 
@@ -3452,3 +3453,167 @@ def test_limited_session_read_stops_after_requested_entry(
     assert len(entries) == 1
     assert entries[0].session_id == "session-id"
     assert tracking_file.next_calls == 1
+
+
+def _cached_page_store(tmp_path: Path, count: int = 6) -> tuple[JsonlSession, Path]:
+    """Build a session whose newest page has been cached by a prior complete read."""
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        for index in range(count):
+            await session.append_message(Message(role="user", content=f"ask {index}"))
+            await session.append_message(Message(role="assistant", content=f"reply {index}"))
+
+    anyio.run(write)
+    session.read_message_page(limit=2)
+    return session, _page_cache_path(session.path)
+
+
+def _reloaded(session: JsonlSession) -> JsonlSession:
+    """Return a session object with no in-process index, as a fresh process has."""
+
+    return JsonlSessionStore(session.path.parent).load(session.path)
+
+
+def test_session_newest_page_cache_matches_a_complete_read(tmp_path: Path) -> None:
+    session, cache_path = _cached_page_store(tmp_path)
+    assert cache_path.is_file()
+
+    expected = _reloaded(session).read_message_page(limit=2, complete_structure=True)
+    cache_path_stat = cache_path.stat()
+    cached = _reloaded(session).read_message_page(limit=2, complete_structure=True)
+
+    # The cached read must be indistinguishable from the complete one, cursors and
+    # truncation included -- a page that under-reports older history would strand
+    # the reader with no way to page back.
+    assert [message.entry_id for message in cached.messages] == [
+        message.entry_id for message in expected.messages
+    ]
+    assert [message.content for message in cached.messages] == [
+        message.content for message in expected.messages
+    ]
+    assert cached.truncated == expected.truncated is True
+    assert cached.next_before_entry_id == expected.next_before_entry_id
+    assert cache_path.stat().st_mtime_ns == cache_path_stat.st_mtime_ns
+
+
+def test_session_newest_page_cache_is_private(tmp_path: Path) -> None:
+    _session, cache_path = _cached_page_store(tmp_path)
+
+    assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param(lambda path: path.write_text("", encoding="utf-8"), id="empty"),
+        pytest.param(lambda path: path.write_text("not json\n", encoding="utf-8"), id="garbage"),
+        pytest.param(
+            lambda path: path.write_text(
+                path.read_text(encoding="utf-8").rsplit("\n", 2)[0] + "\n",
+                encoding="utf-8",
+            ),
+            id="truncated",
+        ),
+        pytest.param(lambda path: path.unlink(), id="missing"),
+    ],
+)
+def test_session_unusable_page_cache_falls_back_to_a_complete_read(
+    tmp_path: Path,
+    corrupt: Callable[[Path], object],
+) -> None:
+    session, cache_path = _cached_page_store(tmp_path)
+    expected = _reloaded(session).read_message_page(limit=2)
+
+    corrupt(cache_path)
+    page = _reloaded(session).read_message_page(limit=2)
+
+    assert [message.entry_id for message in page.messages] == [
+        message.entry_id for message in expected.messages
+    ]
+    assert page.truncated == expected.truncated
+    assert page.next_before_entry_id == expected.next_before_entry_id
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["cache_schema_version", "entry_schema_version", "signature", "total_message_count"],
+)
+def test_session_page_cache_header_mismatch_falls_back(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    session, cache_path = _cached_page_store(tmp_path)
+    expected = _reloaded(session).read_message_page(limit=2)
+
+    lines = cache_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    header[field] = 0 if field != "signature" else [0, 0, 0, 0]
+    cache_path.write_text("\n".join([json.dumps(header), *lines[1:]]) + "\n", encoding="utf-8")
+
+    page = _reloaded(session).read_message_page(limit=2)
+
+    assert [message.entry_id for message in page.messages] == [
+        message.entry_id for message in expected.messages
+    ]
+
+
+def test_session_page_cache_is_ignored_after_the_session_changes(
+    tmp_path: Path,
+) -> None:
+    session, cache_path = _cached_page_store(tmp_path)
+    assert cache_path.is_file()
+
+    async def extend() -> str:
+        appended = await session.append_message(Message(role="user", content="newest"))
+        return appended.id
+
+    newest_id = anyio.run(extend)
+    page = _reloaded(session).read_message_page(limit=2)
+
+    # The stale cache must not hide the appended message.
+    assert page.messages[-1].entry_id == newest_id
+    assert page.messages[-1].content == "newest"
+
+
+def test_session_page_cache_never_answers_an_older_page(tmp_path: Path) -> None:
+    session, _cache_path = _cached_page_store(tmp_path)
+    newest = _reloaded(session).read_message_page(limit=2)
+    assert newest.next_before_entry_id is not None
+
+    reloaded = _reloaded(session)
+    older = reloaded.read_message_page(limit=2, before_entry_id=newest.next_before_entry_id)
+
+    # A cursored read needs the resolved tree, so it must have taken the full path.
+    assert [message.content for message in older.messages] == ["ask 4", "reply 4"]
+
+
+def test_session_page_cache_does_not_serve_a_stale_active_path(tmp_path: Path) -> None:
+    """A branch switch changes the active path without changing message contents."""
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> tuple[str, str]:
+        await session.append_message(Message(role="user", content="root"))
+        kept = await session.append_message(Message(role="assistant", content="kept"))
+        await session.append_message(Message(role="user", content="abandoned"))
+        abandoned = await session.append_message(
+            Message(role="assistant", content="abandoned answer")
+        )
+        return kept.id, abandoned.id
+
+    kept_id, abandoned_id = anyio.run(write)
+    before = _reloaded(session).read_message_page(limit=4)
+    assert "abandoned answer" in [message.content for message in before.messages]
+
+    async def switch() -> None:
+        await session.select_active_leaf(kept_id, expected_active_leaf_id=abandoned_id)
+        await session.append_message(Message(role="user", content="branch"))
+
+    anyio.run(switch)
+    after = _reloaded(session).read_message_page(limit=4)
+
+    contents = [message.content for message in after.messages]
+    assert "abandoned answer" not in contents
+    assert contents[-1] == "branch"
