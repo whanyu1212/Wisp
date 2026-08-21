@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import anyio
@@ -24,13 +24,20 @@ from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionMessagePage
 from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
     represented_history_entry_ids,
 )
-from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.textual_app import (
+    TextualTui,
+    TextualTuiRenderer,
+    _transcript_child_layout_pending,
+    create_textual_tui,
+)
 from wisp.tui.widgets import Transcript
 
 _WORKER_TIMEOUT_SECONDS = 60.0
@@ -75,9 +82,58 @@ class ScenarioReport:
     final_following: bool
     final_unseen_output_count: int
     process_state: str
+    display_updates: dict[str, int]
+    display_frame_fail_open_count: int
+    history_prepend_probe_exercised: bool
+    history_prepend_suppressed_update_count: int
+    history_prepend_escaped_update_count: int
+    first_uncovered_at_tail: bool
+    first_uncovered_has_pending_layout: bool
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
+
+
+@dataclass
+class _ScenarioDiagnostics:
+    app: TextualTui | None = None
+    watch_uncovered_frame: bool = False
+    display_updates: dict[str, int] = field(default_factory=dict)
+    display_frame_fail_open_count: int = 0
+    history_prepend_suppressed_update_count: int = 0
+    history_prepend_escaped_update_count: int = 0
+    first_uncovered_at_tail: bool | None = None
+    first_uncovered_has_pending_layout: bool | None = None
+
+    def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
+        return
+
+    def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:
+        self.display_updates[diagnostic.kind] = self.display_updates.get(diagnostic.kind, 0) + 1
+        if diagnostic.fail_open:
+            self.display_frame_fail_open_count += 1
+        if diagnostic.history_prepend_suppressed:
+            self.history_prepend_suppressed_update_count += 1
+        if diagnostic.history_prepend_unsettled and not diagnostic.history_prepend_suppressed:
+            self.history_prepend_escaped_update_count += 1
+        if not self.watch_uncovered_frame or self.first_uncovered_at_tail is not None:
+            return
+        emitted_frame = diagnostic.kind == "layout" or (
+            diagnostic.kind == "chops" and diagnostic.emitted_spans > 0
+        )
+        app = self.app
+        if not emitted_frame or app is None:
+            return
+        indicator = app._operation_indicator
+        transcript = app.transcript
+        if indicator is None or indicator.is_open or transcript is None:
+            return
+        self.first_uncovered_at_tail = (
+            transcript.is_following and transcript.scroll_y == transcript.max_scroll_y
+        )
+        self.first_uncovered_has_pending_layout = any(
+            _transcript_child_layout_pending(child) for child in transcript.children
+        )
 
 
 def _milliseconds(start_ns: int) -> float:
@@ -215,18 +271,33 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             raise RuntimeError("Complete history conversion did not represent every message row")
         complete_history_convert_ms = _milliseconds(started)
 
-        app, renderer = create_textual_tui()
+        diagnostics = _ScenarioDiagnostics()
+        app, renderer = create_textual_tui(diagnostics=diagnostics)
+        diagnostics.app = app
         assert isinstance(renderer, TextualTuiRenderer)
         supervisor = ProcessSupervisor()
         process_id: str | None = None
         try:
             async with app.run_test(size=(100, 12)) as pilot:
+                renderer.history_hydration_started()
+                await pilot.pause()
                 complete_history_mount_ms = await _hydrate_history(
                     app,
                     renderer,
                     pilot,
                     history_entries,
                 )
+                diagnostics.watch_uncovered_frame = True
+                renderer.history_hydration_finished()
+                await _wait_for(
+                    pilot,
+                    lambda: (
+                        app._operation_indicator is not None
+                        and not app._operation_indicator.is_open
+                    ),
+                )
+                await pilot.pause()
+                diagnostics.watch_uncovered_frame = False
                 transcript = app.query_one("#transcript", Transcript)
                 mounted_widget_count = len(transcript.children)
                 retained_entry_count = renderer.retained_history_entry_count
@@ -348,6 +419,46 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 final_unseen_output_count = app._transcript_controller.unseen_output_count
                 settled_live_widget_count = app._transcript_controller.settled_widget_count
 
+                suppressed_before = diagnostics.history_prepend_suppressed_update_count
+                escaped_before = diagnostics.history_prepend_escaped_update_count
+                renderer.replace_history_entries(
+                    tuple(
+                        HistoricalTranscriptMessage(
+                            role="assistant",
+                            content=f"stability current {index}",
+                        )
+                        for index in range(30)
+                    ),
+                    session_label="Display stability probe",
+                )
+                await app.wait_for_history_render()
+                transcript = app.query_one("#transcript", Transcript)
+                transcript.scroll_to(y=8, animate=False)
+                await pilot.pause()
+                renderer.prepend_history_entries(
+                    tuple(
+                        HistoricalTranscriptMessage(
+                            role="user",
+                            content=f"stability older {index}",
+                        )
+                        for index in range(12)
+                    )
+                )
+                with anyio.fail_after(5):
+                    while (
+                        app._history_prepend_anchor is not None
+                        or app._history_prepend_paint_suppressed
+                    ):
+                        await pilot.pause()
+                await pilot.pause()
+                history_prepend_probe_exercised = True
+                history_prepend_suppressed_update_count = (
+                    diagnostics.history_prepend_suppressed_update_count - suppressed_before
+                )
+                history_prepend_escaped_update_count = (
+                    diagnostics.history_prepend_escaped_update_count - escaped_before
+                )
+
         finally:
             if process_id is not None:
                 await supervisor.cancel(process_id)
@@ -384,6 +495,15 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             final_following=final_following,
             final_unseen_output_count=final_unseen_output_count,
             process_state=process_state,
+            display_updates=dict(sorted(diagnostics.display_updates.items())),
+            display_frame_fail_open_count=diagnostics.display_frame_fail_open_count,
+            history_prepend_probe_exercised=history_prepend_probe_exercised,
+            history_prepend_suppressed_update_count=history_prepend_suppressed_update_count,
+            history_prepend_escaped_update_count=history_prepend_escaped_update_count,
+            first_uncovered_at_tail=diagnostics.first_uncovered_at_tail is True,
+            first_uncovered_has_pending_layout=(
+                diagnostics.first_uncovered_has_pending_layout is True
+            ),
         )
 
 

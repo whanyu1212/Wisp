@@ -47,4 +47,12 @@ def test_tui_long_session_scenario_reports_complete_history_hydration() -> None:
     assert not report.final_following
     assert report.final_unseen_output_count == 1
     assert report.process_state in {"cancelled", "completed"}
+    assert report.display_updates
+    assert report.display_frame_fail_open_count >= 0
+    assert report.history_prepend_probe_exercised
+    assert report.history_prepend_suppressed_update_count > 0
+    assert report.history_prepend_escaped_update_count == 0
+    assert report.first_uncovered_at_tail
+    assert not report.first_uncovered_has_pending_layout
     assert '"session_entry_count": 12' in report.to_json()
+    assert '"first_uncovered_at_tail": true' in report.to_json()

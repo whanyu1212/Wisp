@@ -52,6 +52,13 @@ from wisp.tui.commands import (
 from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
 from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
+from wisp.tui.diagnostics import (
+    DisplayFrameCacheOutcome,
+    DisplayUpdateDiagnostic,
+    DisplayUpdateKind,
+    TuiDiagnosticsSink,
+    record_display_update,
+)
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.diff_viewer import DiffViewer
 from wisp.tui.file_index import (
@@ -240,26 +247,30 @@ class _DisplayedFrame:
         update: ChopsUpdate,
         *,
         allow_suppression: bool,
-    ) -> tuple[ChopsUpdate | None, bool]:
+    ) -> tuple[ChopsUpdate | None, bool, bool]:
         """Drop exact duplicate spans and advance the cached terminal frame.
 
-        The boolean reports whether every update span could be reconstructed. An
+        The second result reports whether every update span could be reconstructed.
+        The third reports whether exact comparison was bypassed for any span. An
         unfamiliar Textual update shape invalidates the cache and passes through
         unchanged rather than risking stale terminal cells.
         """
 
         candidate_rows = self.rows.copy()
         retained_spans: list[tuple[int, int, int]] = []
+        fail_open = not allow_suppression
         try:
             for y, x1, x2 in update.spans:
                 if not (0 <= y < self.size.height and 0 <= x1 < x2 <= self.size.width):
-                    return update, False
+                    return update, False, True
                 patch = _chops_span_strip(update, y=y, x1=x1, x2=x2)
                 if patch is None:
-                    return update, False
+                    return update, False, True
                 patch = patch.discard_meta().simplify()
                 previous = candidate_rows[y].crop(x1, x2)
                 safe_to_compare = not _strip_has_control(previous) and not _strip_has_control(patch)
+                if not safe_to_compare:
+                    fail_open = True
                 if not allow_suppression or not safe_to_compare or patch != previous:
                     retained_spans.append((y, x1, x2))
                 candidate_rows[y] = (
@@ -274,14 +285,14 @@ class _DisplayedFrame:
                     .simplify()
                 )
         except (IndexError, TypeError, ValueError):
-            return update, False
+            return update, False, True
 
         self.rows = candidate_rows
         if not retained_spans:
-            return None, True
+            return None, True, fail_open
         if len(retained_spans) == len(update.spans):
-            return update, True
-        return ChopsUpdate(update.chops, retained_spans, update.chop_ends), True
+            return update, True, fail_open
+        return ChopsUpdate(update.chops, retained_spans, update.chop_ends), True, fail_open
 
 
 def _chops_span_strip(
@@ -370,38 +381,112 @@ class TextualTui(App[None]):
     def _display(self, screen: Screen[object], renderable: RenderableType | None) -> None:
         """Hide unstable history frames and omit exact duplicate terminal cells."""
 
+        diagnostics_enabled = self._diagnostics is not None
         if getattr(self, "_history_prepend_paint_suppressed", False):
+            if diagnostics_enabled:
+                self._record_display_diagnostic(
+                    renderable,
+                    emitted_spans=0,
+                    frame_cache="retained",
+                    history_prepend_suppressed=True,
+                )
             return
         if renderable is None or self.is_inline or self._batch_count:
             super()._display(screen, renderable)
+            if diagnostics_enabled:
+                self._record_display_diagnostic(renderable)
             return
 
         displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
         next_frame: _DisplayedFrame | None = None
         prepared: RenderableType | None = renderable
+        emitted_spans: int | None = None
+        suppressed_spans = 0
+        frame_cache: DisplayFrameCacheOutcome = "unavailable"
+        fail_open = False
         cursor_position = screen.outer_size.clamp_offset(self.cursor_position)
         if isinstance(renderable, LayoutUpdate):
             prepared, next_frame = _DisplayedFrame.from_layout(
                 renderable,
                 size=screen.outer_size,
             )
+            if next_frame is not None:
+                frame_cache = "updated"
         elif isinstance(renderable, ChopsUpdate):
             if isinstance(displayed_frame, _DisplayedFrame) and (
                 displayed_frame.size == screen.outer_size
             ):
-                filtered, cache_valid = displayed_frame.filter_chops(
+                filtered, cache_valid, fail_open = displayed_frame.filter_chops(
                     renderable,
                     allow_suppression=cursor_position == self._displayed_cursor_position,
                 )
                 prepared = cast(RenderableType | None, filtered)
-                next_frame = displayed_frame if cache_valid else None
-        else:
-            next_frame = None
+                if diagnostics_enabled:
+                    emitted_spans = len(filtered.spans) if filtered is not None else 0
+                if cache_valid:
+                    if emitted_spans is not None:
+                        suppressed_spans = len(renderable.spans) - emitted_spans
+                    next_frame = displayed_frame
+                    frame_cache = "retained"
+                else:
+                    frame_cache = "fail-open"
+            else:
+                fail_open = True
 
         super()._display(screen, prepared)
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
         self._displayed_screen = screen
+        if diagnostics_enabled:
+            self._record_display_diagnostic(
+                renderable,
+                emitted_spans=emitted_spans,
+                suppressed_spans=suppressed_spans,
+                frame_cache=frame_cache,
+                fail_open=fail_open,
+            )
+
+    def _record_display_diagnostic(
+        self,
+        renderable: RenderableType | None,
+        *,
+        emitted_spans: int | None = None,
+        suppressed_spans: int = 0,
+        frame_cache: DisplayFrameCacheOutcome = "unavailable",
+        fail_open: bool = False,
+        history_prepend_suppressed: bool = False,
+    ) -> None:
+        """Report update shape without retaining terminal content or affecting display."""
+
+        kind: DisplayUpdateKind = (
+            "none"
+            if renderable is None
+            else (
+                "layout"
+                if isinstance(renderable, LayoutUpdate)
+                else "chops"
+                if isinstance(renderable, ChopsUpdate)
+                else "other"
+            )
+        )
+        input_spans = len(renderable.spans) if isinstance(renderable, ChopsUpdate) else 0
+        record_display_update(
+            self._diagnostics,
+            DisplayUpdateDiagnostic(
+                kind=kind,
+                input_spans=input_spans,
+                emitted_spans=input_spans if emitted_spans is None else emitted_spans,
+                suppressed_spans=suppressed_spans,
+                frame_cache=frame_cache,
+                fail_open=fail_open,
+                history_prepend_suppressed=history_prepend_suppressed,
+                history_prepend_unsettled=(
+                    history_prepend_suppressed
+                    or getattr(self, "_prepending_history", False)
+                    or getattr(self, "_history_prepend_anchor", None) is not None
+                ),
+            ),
+        )
 
     CSS = """
     Screen {
@@ -695,8 +780,14 @@ class TextualTui(App[None]):
         Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
 
-    def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        protected_paths: tuple[str, ...] | None = None,
+        diagnostics: TuiDiagnosticsSink | None = None,
+    ) -> None:
         super().__init__()
+        self._diagnostics = diagnostics
         self._displayed_frame = None
         self._displayed_cursor_position = None
         self._displayed_screen = None
@@ -800,7 +891,7 @@ class TextualTui(App[None]):
         self._history_layout_generation = 0
         self._transcript_epoch = 0
         self._session_operation_generation = 0
-        self._stream = MarkdownStreamController(self)
+        self._stream = MarkdownStreamController(self, diagnostics=diagnostics)
 
     def clear_prompt_editor(self) -> None:
         """Clear the editor when an input-controller transition requests it."""
@@ -4160,16 +4251,19 @@ def _with_adopted(base: tuple[str, ...], adopted: tuple[str, ...]) -> tuple[str,
 
 
 def create_textual_tui(
-    *, protected_paths: tuple[str, ...] | None = None
+    *,
+    protected_paths: tuple[str, ...] | None = None,
+    diagnostics: TuiDiagnosticsSink | None = None,
 ) -> tuple[TextualTui, TuiRenderer]:
     """Create a Textual app and renderer pair for `TuiShell`.
 
     ``protected_paths`` is the caller's already-resolved policy, forwarded to the
     `@`-picker so it hides exactly what the agent's tools deny. See
-    ``_file_index_context`` for why re-deriving it here would be wrong.
+    ``_file_index_context`` for why re-deriving it here would be wrong. ``diagnostics``
+    is an internal, privacy-safe benchmark hook; normal product startup leaves it disabled.
     """
 
-    app = TextualTui(protected_paths=protected_paths)
+    app = TextualTui(protected_paths=protected_paths, diagnostics=diagnostics)
     return app, TextualTuiRenderer(app)
 
 

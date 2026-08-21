@@ -19,7 +19,9 @@ The scenario creates a temporary JSONL session, reads every production history p
 converts and mounts the complete transcript through the Textual hydration path, streams
 an assistant response, and scrolls while a managed CPU-active shell process runs. It
 reports JSON with page-read, conversion, complete-mount, first-wheel response, stream,
-final scroll-state, and process-cleanup measurements. Row-coverage fields compare persisted messages
+final scroll-state, and process-cleanup measurements. After those measurements it runs a dedicated
+paged-history prepend fixture, reporting whether the probe ran plus suppressed and escaped
+display-update counts. Row-coverage fields compare persisted messages
 with represented row IDs, while `hydrated_entry_count`, `mounted_widget_count`, and
 `persisted_rows_per_widget` expose the reduction from logical process grouping. The fixture includes
 repeated process polls so a regression to one widget per persisted row is visible. With no `--messages` argument it
@@ -46,11 +48,13 @@ uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
   --output profiles/tui-stream-hotpaths.json
 ```
 
-The default matrix retains exactly 60, 75, and 300 history entries. The 60-entry production
-window means every condition mounts 60 history widgets; the latter two retain additional entries
-to isolate retained-history pressure from mounted-widget growth before starting the same command
-lifecycle that keeps Wisp's 80 ms working indicator at the transcript tail while streaming 100
-chunks at 20 ms intervals. It rotates condition order between runs and reports
+The default matrix retains exactly 60, 75, and 300 converted history entries. The production
+window bounds mounted history while process observations may collapse several persisted rows into
+one card. Larger conditions retain additional entries to isolate retained-history pressure from
+mounted-widget growth. Each sample starts the same command lifecycle that keeps Wisp's 80 ms
+working indicator at the transcript tail, mounts three concurrent pending tool cards, and streams
+100 chunks at 20 ms intervals. Use `--pending-tool-cards 0` to compare with older captures that did
+not include timer pressure. The benchmark rotates condition order between runs and reports
 individual samples plus per-condition medians. `event_loop_delay` comes from a separate 10 ms
 absolute-deadline heartbeat. `layout_passes` wraps Textual's private `_refresh_layout` seam and
 `compositor_renders` wraps `_compositor_refresh` only during the streaming phase. These timings
@@ -77,8 +81,13 @@ uv run python -m benchmarks.tui_stream_renderers --messages 2000 --runs 3
 The harness rotates mode order between runs and restores its temporary plain-render patch after
 each scenario.
 
-The instrumentation is installed and restored inside the benchmark process; production TUI code
-is unchanged. In addition to paced wall time, each sample reports `stream_cpu_ms`, which uses
+The private Textual method patches are installed and restored inside the benchmark process. The
+production TUI accepts an optional synchronous diagnostics sink, but the normal app supplies none,
+retains no samples, and performs no diagnostic I/O. Samples contain counts, durations, sizes, and
+success flags only—never Markdown source, prompts, tool payloads, paths, credentials, or session
+identifiers. Sink failures are isolated from rendering.
+
+In addition to paced wall time, each sample reports `stream_cpu_ms`, which uses
 process CPU time to exclude intentional sleeps without pretending CPU cost is a latency metric.
 `layout_requests` attributes `layout=True` refresh requests by concrete widget class, while
 `layout_passes_per_stream_update` shows whether paced writes trigger additional settlement layouts.
@@ -87,13 +96,22 @@ process CPU time to exclude intentional sleeps without pretending CPU cost is a 
 renders. `markdown_source_chars_processed` sums the full source length at each rebuild, exposing
 repeated whole-document work as the response grows; compare it only with identical streamed content.
 `markdown_renders` splits visual renders between the mutable streaming widget (`active`) and
-`StreamMessage` widgets mounted before streaming (`settled`). A zero settled count is valid when
-Textual reuses prior measurements during the measured phase.
+`StreamMessage` widgets mounted before streaming (`settled`). `markdown_drains` measures the
+coalesced source-to-renderable write already used by production pacing. `display_updates` counts
+attempted `LayoutUpdate`, `ChopsUpdate`, and other display-boundary calls. Chop-span totals separate
+input, terminal-emitted, and exact duplicate spans suppressed by `_DisplayedFrame`.
+`display_frame_fail_open_count` records partial updates safely passed through without exact-cell
+suppression because the cache or update shape was unavailable, cursor movement disabled comparison,
+or control segments could have side effects. History-prepend suppression and escaped-update counts
+distinguish hidden intermediate compositor work from a paint attempted while prepend state was still
+unsettled. A zero
+settled Markdown count is valid when Textual reuses prior measurements during the measured phase.
 
 Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
 Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
-rather than promoting one run to a portable threshold. Counts provide attribution evidence, not
-portable performance thresholds.
+rather than promoting one run to a portable threshold. An attempted update is a call into the app's
+display boundary; an emitted update still contains terminal spans after filtering. Counts provide
+attribution evidence, not portable performance thresholds.
 
 Compare absolute timings only on the same machine. `warm_newest_page_read_ms` and
 `older_page_read_ms` measure cache-backed paging after the cold initial read.

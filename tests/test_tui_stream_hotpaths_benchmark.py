@@ -98,7 +98,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.run == 1
     assert sample.retained_history_entries == 4
     assert sample.mounted_history_entries == 4
-    assert sample.mounted_widget_count == 6
+    assert sample.mounted_widget_count == 6 + report.config.pending_tool_cards
     assert sample.stream_total_ms >= 0
     assert sample.stream_cpu_ms >= 0
     assert (
@@ -123,6 +123,18 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.markdown_renders.active < sample.markdown_source_rebuild_count * 2
     assert sample.markdown_source_rebuild_count >= sample.stream_update_count
     assert sample.markdown_source_chars_processed >= sample.markdown_source_rebuild_count
+    assert sample.markdown_drains.sample_count == sample.markdown_drain_success_count
+    assert sample.markdown_drain_failure_count == 0
+    assert sample.markdown_drains.sample_count >= 1
+    assert sample.displayed_frame_count >= 1
+    assert sample.input_chop_spans >= sample.emitted_chop_spans
+    assert sample.input_chop_spans == (sample.emitted_chop_spans + sample.suppressed_chop_spans)
+    assert sample.display_frame_fail_open_count >= 0
+    assert sample.history_prepend_suppressed_update_count == 0
+    assert sample.history_prepend_escaped_update_count == 0
+    assert sample.layout_passes_per_displayed_frame == (
+        sample.layout_passes.sample_count / sample.displayed_frame_count
+    )
     assert sample.event_loop_delay.sample_count >= 1
     assert sample.layout_passes.sample_count >= 1
     assert sample.compositor_renders.sample_count >= 1
@@ -141,6 +153,14 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert summary.active_markdown_render_median == sample.markdown_renders.active
     assert summary.settled_markdown_render_median == sample.markdown_renders.settled
     assert summary.markdown_source_chars_processed_median == sample.markdown_source_chars_processed
+    assert summary.markdown_drain_p95_median_ms == sample.markdown_drains.p95_ms
+    assert summary.displayed_frame_count_median == sample.displayed_frame_count
+    assert summary.suppressed_chop_spans_median == sample.suppressed_chop_spans
+    assert summary.display_frame_fail_open_count_median == sample.display_frame_fail_open_count
+    assert (
+        summary.history_prepend_escaped_update_count_median
+        == sample.history_prepend_escaped_update_count
+    )
     assert '"retained_history_entries": 4' in report.to_json()
     assert '"mounted_history_entries": 4' in report.to_json()
     assert '"stream_cpu_ms":' in report.to_json()
@@ -148,6 +168,9 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert '"layout_passes_per_stream_update":' in report.to_json()
     assert '"markdown_renders":' in report.to_json()
     assert '"markdown_source_chars_processed":' in report.to_json()
+    assert '"markdown_drains":' in report.to_json()
+    assert '"display_updates":' in report.to_json()
+    assert '"display_frame_fail_open_count":' in report.to_json()
 
 
 def test_tui_stream_hotpaths_profile_is_readable_and_rejects_matrix(tmp_path: Path) -> None:
