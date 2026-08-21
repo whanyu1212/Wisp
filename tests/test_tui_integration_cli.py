@@ -8625,7 +8625,9 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
     the mounted window from retained history rather than re-reading the session.
     """
 
-    async def scenario() -> tuple[list[float], int, int, int, int, bool, list[str], int]:
+    async def scenario() -> tuple[
+        list[float], int, int, int, int, bool, list[str], tuple[bool, ...]
+    ]:
         app_instance, renderer = create_textual_tui()
         process_id = "583470d9b9b848299792314292a8ca8f"
         prefix = tuple(
@@ -8680,7 +8682,7 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
             positions = [transcript.scroll_y]
             window = renderer._history._window
             window_start = window._start
-            shift_count = 0
+            shifted_at: list[bool] = []
             # Reaching `scroll_y == 0` only exhausts the *mounted* slice. Keep
             # scrolling until no older retained history remains, so this covers
             # every window shift rather than just the first one.
@@ -8694,9 +8696,11 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
                     assert delivered
                     await pilot.pause()
                     positions.append(transcript.scroll_y)
-                    if window._start != window_start:
-                        shift_count += 1
-                        window_start = window._start
+                    # Record, per sampled position, whether this same wheel-up moved
+                    # the mounted window. A downward jump is only legitimate on an
+                    # iteration that actually shifted.
+                    shifted_at.append(window._start != window_start)
+                    window_start = window._start
 
             card = app_instance.query_one(ProcessCard)
             return (
@@ -8707,7 +8711,7 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
                 len(card.lifecycle_presentation.history_updates),
                 transcript.can_page_to_older_history,
                 _transcript_texts(app_instance),
-                shift_count,
+                tuple(shifted_at),
             )
 
     (
@@ -8718,7 +8722,7 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
         update_count,
         can_page_older,
         oldest_texts,
-        shift_count,
+        shifted_at,
     ) = anyio.run(scenario)
 
     assert positions[0] > 0
@@ -8727,9 +8731,10 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
     # Wheel-up never scrolls the reader back down *within* a mounted slice. A window
     # shift is the one exception: mounting older entries above the viewport moves the
     # anchor down the virtual canvas to keep the same content in view, so `scroll_y`
-    # legitimately jumps up. Allow only that, and only once per shift.
-    reversals = [delta for delta in deltas if delta < 0]
-    assert len(reversals) <= shift_count
+    # legitimately jumps up. Permit a negative delta only on the very iteration that
+    # shifted, so an unused allowance can never excuse a within-slice reversal.
+    assert len(deltas) == len(shifted_at)
+    assert all(delta >= 0 or shifted for delta, shifted in zip(deltas, shifted_at, strict=True))
     assert sum(delta == 0 for delta in deltas) <= 1
     assert any(delta > 0 for delta in deltas)
     assert history_requests == 0
@@ -8741,7 +8746,7 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
     # oldest is reachable -- and `history_requests == 0` proves each shift was served
     # from retained history rather than by re-reading the durable session.
     assert can_page_older is False
-    assert shift_count > 0
+    assert any(shifted_at)
     # The oldest retained entry is now mounted, behind the resumed-session marker.
     assert oldest_texts[0] == "resumed session: Complete process session"
     assert oldest_texts[1] == "prefix 0"
