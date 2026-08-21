@@ -11,14 +11,18 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import anyio
 import textual
 from textual import events
+from textual._compositor import Compositor, CompositorMap
+from textual.geometry import Size
 from textual.pilot import Pilot
+from textual.widget import Widget
 
 from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
@@ -72,6 +76,8 @@ class ScenarioReport:
     first_wheel_up_ms: float
     first_wheel_up_rows: float
     first_wheel_up_attempts: int
+    wheel_up_ms: tuple[float, ...]
+    wheel_up_complete_arrangement_count: int
     scroll_while_process_ms: float
     stream_following_tail_ms: float
     stream_page_up_ms: float
@@ -162,6 +168,75 @@ async def _wait_for(pilot: Pilot[None], predicate: Callable[[], bool]) -> None:
             return
         await pilot.pause()
     raise RuntimeError("Textual benchmark scenario did not settle")
+
+
+@contextmanager
+def _count_complete_arrangements() -> Iterator[Callable[[], int]]:
+    """Count whole-tree compositor arrangements performed inside the block.
+
+    Textual arranges only the visible widgets on its scroll fast path. Anything that
+    invalidates the complete compositor map forces the next widget geometry lookup to
+    re-arrange *every* mounted widget instead, so this count — unlike a wall-clock
+    timing — grows with transcript size and is stable across machines. Routine
+    scrolling must not trigger it at all.
+    """
+
+    count = 0
+    original = Compositor._arrange_root
+
+    def counting_arrange_root(
+        self: Compositor, root: Widget, size: Size, visible_only: bool = True
+    ) -> tuple[CompositorMap, set[Widget]]:
+        nonlocal count
+        if not visible_only:
+            count += 1
+        return original(self, root, size, visible_only=visible_only)
+
+    Compositor._arrange_root = counting_arrange_root  # type: ignore[method-assign]
+    try:
+        yield lambda: count
+    finally:
+        Compositor._arrange_root = original  # type: ignore[method-assign]
+
+
+async def _measure_wheel_up_response(
+    transcript: Transcript,
+    diagnostics: _ScenarioDiagnostics,
+) -> tuple[float, float]:
+    """Measure production-style wheel dispatch through the first displayed response.
+
+    ``Pilot._post_mouse_events`` surrounds dispatch with ``Pilot.pause()``. That test
+    helper drains every mounted widget, so its cost scales with transcript size even
+    when the production scroll path does not. Dispatch through the screen as Textual's
+    runtime does, then yield only to the event loop until both the viewport and display
+    boundary have observed the scroll.
+    """
+
+    initial_scroll_y = transcript.scroll_y
+    initial_display_updates = sum(diagnostics.display_updates.values())
+    origin = transcript.region.offset
+    event = events.MouseScrollUp(
+        widget=transcript,
+        x=origin.x,
+        y=origin.y,
+        delta_x=0,
+        delta_y=0,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=origin.x,
+        screen_y=origin.y,
+    )
+    started = time.perf_counter_ns()
+    transcript.screen._forward_event(event)
+    with anyio.fail_after(5):
+        while (
+            transcript.scroll_y >= initial_scroll_y
+            or sum(diagnostics.display_updates.values()) <= initial_display_updates
+        ):
+            await anyio.sleep(0)
+    return _milliseconds(started), initial_scroll_y - transcript.scroll_y
 
 
 async def append_benchmark_messages(session: JsonlSession, count: int) -> None:
@@ -307,21 +382,24 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
                 transcript.return_to_latest()
                 await pilot.pause()
-                initial_scroll_y = transcript.scroll_y
-                started = time.perf_counter_ns()
-                first_wheel_up_attempts = 0
-                while transcript.scroll_y >= initial_scroll_y and first_wheel_up_attempts < 2:
-                    first_wheel_up_attempts += 1
-                    await pilot._post_mouse_events(
-                        [events.MouseScrollUp],
-                        widget=transcript,
-                        times=1,
+                first_wheel_up_attempts = 1
+                with _count_complete_arrangements() as complete_arrangements:
+                    first_wheel_up_ms, first_wheel_up_rows = await _measure_wheel_up_response(
+                        transcript,
+                        diagnostics,
                     )
-                    await pilot.pause()
-                first_wheel_up_ms = _milliseconds(started)
-                first_wheel_up_rows = initial_scroll_y - transcript.scroll_y
-                if first_wheel_up_rows <= 0:
-                    raise RuntimeError("Complete history did not respond to upward wheel input")
+                    wheel_up_ms = [first_wheel_up_ms]
+                    for _ in range(19):
+                        if transcript.scroll_y <= 0:
+                            break
+                        duration_ms, rows = await _measure_wheel_up_response(
+                            transcript,
+                            diagnostics,
+                        )
+                        if rows <= 0:
+                            raise RuntimeError("Complete history stopped responding to wheel input")
+                        wheel_up_ms.append(duration_ms)
+                    wheel_up_complete_arrangement_count = complete_arrangements()
                 transcript.return_to_latest()
                 await pilot.pause()
 
@@ -485,6 +563,8 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             first_wheel_up_ms=first_wheel_up_ms,
             first_wheel_up_rows=first_wheel_up_rows,
             first_wheel_up_attempts=first_wheel_up_attempts,
+            wheel_up_ms=tuple(wheel_up_ms),
+            wheel_up_complete_arrangement_count=wheel_up_complete_arrangement_count,
             scroll_while_process_ms=scroll_while_process_ms,
             stream_following_tail_ms=stream_following_tail_ms,
             stream_page_up_ms=stream_page_up_ms,
