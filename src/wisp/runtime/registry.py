@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
@@ -31,36 +31,93 @@ class UnknownToolError(KeyError):
 
 
 class ProviderRegistry:
-    """Registry of model providers available to the agent runtime."""
+    """Registry of model providers available to the agent runtime.
+
+    A provider may be registered as a name plus a factory instead of an instance.
+    Each provider module imports its vendor SDK at module scope, and those imports
+    dominate cold start — roughly 1.4 s for the full set — even though a run uses
+    at most one provider. Deferring construction until :meth:`get` keeps that cost
+    off startup without changing what callers observe.
+    """
 
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
+        self._factories: dict[str, Callable[[], Provider]] = {}
 
     def register(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a provider by its declared name."""
 
-        if not replace and provider.name in self._providers:
-            msg = f"Provider already registered: {provider.name}"
-            raise ValueError(msg)
+        self._reserve(provider.name, replace=replace)
+        self._factories.pop(provider.name, None)
         self._providers[provider.name] = provider
 
-    def get(self, name: str) -> Provider:
-        """Return a registered provider by name."""
+    def register_factory(
+        self,
+        name: str,
+        factory: Callable[[], Provider],
+        *,
+        replace: bool = True,
+    ) -> None:
+        """Register a provider to be constructed the first time it is requested.
 
-        try:
-            return self._providers[name]
-        except KeyError as exc:
-            raise UnknownProviderError(name) from exc
+        ``name`` must match the ``name`` the constructed provider declares; it is the
+        identity every caller sees until something actually needs the provider.
+        """
+
+        self._reserve(name, replace=replace)
+        self._providers.pop(name, None)
+        self._factories[name] = factory
+
+    def _reserve(self, name: str, *, replace: bool) -> None:
+        if not replace and name in self._names():
+            msg = f"Provider already registered: {name}"
+            raise ValueError(msg)
+
+    def _names(self) -> tuple[str, ...]:
+        # Registration order across both maps, without constructing anything.
+        ordered = dict.fromkeys((*self._providers, *self._factories))
+        return tuple(ordered)
+
+    def get(self, name: str) -> Provider:
+        """Return a registered provider, constructing it on first use."""
+
+        provider = self._providers.get(name)
+        if provider is not None:
+            return provider
+        factory = self._factories.get(name)
+        if factory is None:
+            raise UnknownProviderError(name)
+        provider = factory()
+        if provider.name != name:
+            msg = f"Provider factory for {name!r} produced provider {provider.name!r}"
+            raise ValueError(msg)
+        self._providers[name] = provider
+        self._factories.pop(name, None)
+        return provider
 
     def names(self) -> tuple[str, ...]:
         """Return registered provider names in registration order."""
 
-        return tuple(self._providers.keys())
+        return self._names()
+
+    def constructed(self) -> dict[str, Provider]:
+        """Return only the providers that already exist, constructing nothing."""
+
+        return dict(self._providers)
+
+    def is_deferred(self, name: str) -> bool:
+        """Return whether ``name`` is registered but not yet constructed."""
+
+        return name in self._factories
 
     def all(self) -> tuple[Provider, ...]:
-        """Return registered providers in registration order."""
+        """Return registered providers in registration order.
 
-        return tuple(self._providers.values())
+        Constructs every deferred provider, so prefer :meth:`names` when only the
+        registered identities are needed.
+        """
+
+        return tuple(self.get(name) for name in self._names())
 
     def replace_all(self, providers: Iterable[Provider]) -> None:
         """Atomically replace provider instances while preserving this registry.
@@ -72,6 +129,7 @@ class ProviderRegistry:
 
         replacements = {provider.name: provider for provider in providers}
         self._providers = replacements
+        self._factories = {}
 
 
 class ToolRegistry:

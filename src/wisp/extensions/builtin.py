@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from wisp.auth.storage import JsonAuthStore
 from wisp.openai_compatible import OpenAICompatibleSettings
-from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
-from wisp.providers.deepseek import DeepSeekProvider
+from wisp.providers.base import Provider
 from wisp.providers.fake import FakeProvider
-from wisp.providers.google import GoogleProvider
-from wisp.providers.openai import OpenAIProvider
-from wisp.providers.openai_codex import OpenAICodexProvider
-from wisp.providers.openai_compatible import OpenAICompatibleProvider
-from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
@@ -60,30 +54,66 @@ def activate(
     """Register Wisp's baseline capabilities."""
 
     auth_resolver = StoredProviderAuthResolver(auth_store) if auth_store is not None else None
+    # Every provider below imports a vendor SDK at module scope, and those imports
+    # dominate cold start (~1.4 s for the set) even though a run selects at most one.
+    # Registering factories keeps the names available while deferring each import to
+    # the first request for that provider. `FakeProvider` has no SDK, so it stays
+    # eager and keeps the offline path free of indirection.
     api.register_provider(FakeProvider())
-    api.register_provider(OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
-    api.register_provider(XAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
-    api.register_provider(DeepSeekProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+
+    def _openai() -> Provider:
+        from wisp.providers.openai import OpenAIProvider
+
+        return OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    def _xai() -> Provider:
+        from wisp.providers.xai import XAIProvider
+
+        return XAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    def _deepseek() -> Provider:
+        from wisp.providers.deepseek import DeepSeekProvider
+
+        return DeepSeekProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    def _openai_codex() -> Provider:
+        from wisp.providers.openai_codex import OpenAICodexProvider
+
+        return OpenAICodexProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    def _anthropic() -> Provider:
+        from wisp.providers.anthropic import AnthropicProvider
+
+        return AnthropicProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    def _google() -> Provider:
+        from wisp.providers.google import GoogleProvider
+
+        return GoogleProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+
+    api.register_provider_factory("openai", _openai)
+    api.register_provider_factory("xai", _xai)
+    api.register_provider_factory("deepseek", _deepseek)
     if openai_compatible is not None:
-        api.register_provider(
-            OpenAICompatibleProvider(
-                provider_name=openai_compatible.provider_name,
-                base_url=openai_compatible.base_url,
-                default_model=openai_compatible.default_model,
-                requires_api_key=openai_compatible.requires_api_key,
-                ca_bundle=openai_compatible.ca_bundle,
+        settings = openai_compatible
+
+        def _openai_compatible() -> Provider:
+            from wisp.providers.openai_compatible import OpenAICompatibleProvider
+
+            return OpenAICompatibleProvider(
+                provider_name=settings.provider_name,
+                base_url=settings.base_url,
+                default_model=settings.default_model,
+                requires_api_key=settings.requires_api_key,
+                ca_bundle=settings.ca_bundle,
                 auth_resolver=auth_resolver,
                 retry_policy=retry_policy,
             )
-        )
-    api.register_provider(
-        OpenAICodexProvider(
-            auth_resolver=auth_resolver,
-            retry_policy=retry_policy,
-        )
-    )
-    api.register_provider(AnthropicProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
-    api.register_provider(GoogleProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+
+        api.register_provider_factory(settings.provider_name, _openai_compatible)
+    api.register_provider_factory("openai-codex", _openai_codex)
+    api.register_provider_factory("anthropic", _anthropic)
+    api.register_provider_factory("google", _google)
     for tool in builtin_tools(process_supervisor=process_supervisor):
         api.register_tool(
             tool,
