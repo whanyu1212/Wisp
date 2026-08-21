@@ -85,6 +85,8 @@ from wisp.tui.widgets import (
     WorkingIndicator,
     _composer_metadata_fields,
     _format_textual_footer_line,
+    _SafeAssistantMarkdown,
+    _SelectableMarkdownVisual,
     _textual_footer_parts,
 )
 from wisp.tui.widgets import (
@@ -4233,6 +4235,36 @@ def test_textual_stream_completion_retries_a_failed_incremental_markdown_build(
     source, needs_reconciliation = anyio.run(scenario)
     assert source == "same final content"
     assert needs_reconciliation is False
+
+
+def test_textual_stream_completion_releases_incremental_markdown_caches() -> None:
+    async def scenario() -> tuple[int, int, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            renderer.token_delta("```python\nprint('cached')\n```\n\n")
+            await app_instance.wait_for_stream_idle()
+            renderer.token_delta("Following paragraph.\n\n")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            stream = app_instance.query_one(StreamMessage)
+            cached_before = len(stream._code_block_render_cache)
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            visual = stream._selection_visual
+            assert isinstance(visual, _SelectableMarkdownVisual)
+            renderable = visual._markdown_renderable
+            assert isinstance(renderable, _SafeAssistantMarkdown)
+            return (
+                cached_before,
+                len(stream._code_block_render_cache),
+                renderable.markdown.code_block_render_cache is None,
+            )
+
+    cached_before, cached_after, render_cache_released = anyio.run(scenario)
+
+    assert cached_before == 1
+    assert cached_after == 0
+    assert render_cache_released
 
 
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:

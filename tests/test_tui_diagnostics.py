@@ -60,6 +60,9 @@ def test_tui_diagnostics_report_only_numeric_stream_metadata() -> None:
     assert sample.appended_chars == len(source)
     assert sample.appended_bytes == len(source.encode("utf-8"))
     assert sample.resulting_source_chars == len(source)
+    assert sample.processed_source_chars == len(source)
+    assert sample.reused_source_chars == 0
+    assert sample.incremental
     assert sample.render_seconds >= 0
     assert sample.succeeded
     assert diagnostics.display

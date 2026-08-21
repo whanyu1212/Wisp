@@ -12,6 +12,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Reused completed Markdown blocks and closed code-fence highlighting while assistant responses
+  stream, reducing repeated parsing and syntax-highlighting work without changing final rendering.
 - Added privacy-safe, opt-in TUI hotpath diagnostics and reproducible benchmark probes for Markdown
   drain cost, display update shape, duplicate-cell suppression, fail-open repaint paths, history
   prepend suppression, pending tool-card pressure, and covered-history reveal.

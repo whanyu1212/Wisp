@@ -27,6 +27,9 @@ class MarkdownDrainDiagnostic:
     appended_chars: int
     appended_bytes: int
     resulting_source_chars: int
+    processed_source_chars: int
+    reused_source_chars: int
+    incremental: bool
     succeeded: bool
 
 
