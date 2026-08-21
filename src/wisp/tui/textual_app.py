@@ -2887,38 +2887,65 @@ class TextualTui(App[None]):
         generation: int,
         epoch: int,
     ) -> None:
-        """Restore final layout and tail position before uncovering history."""
+        """Keep history covered until consecutive frames prove its layout is ready."""
 
-        await transcript.wait_for_refresh()
-        if not self._covered_session_operation_is_current(
+        previous_ready_geometry: tuple[float, float, int, int] | None = None
+        while self._covered_session_operation_is_current(
             operation,
             transcript,
             generation=generation,
             epoch=epoch,
         ):
-            return
-        if transcript.is_following:
-            transcript.return_to_latest()
-            # ``return_to_latest`` defers its tail scroll until the next refresh so it
-            # can use post-composer geometry. Keep the opaque operation surface through
-            # both that callback and the repaint at the corrected offset.
+            # A hydration operation can finish while Textual is still resolving the
+            # final bounded mount batch. Await the currently published batch on every
+            # pass; resolved awaitables are cheap, while a newly published batch must
+            # settle before its child geometry can be trusted.
+            await self.wait_for_history_render()
             await transcript.wait_for_refresh()
-            await transcript.wait_for_refresh()
-        else:
-            # A failed or displaced switch may leave the reader in the previous
-            # transcript. Preserve that explicit scroll intent instead of forcing it
-            # to the tail merely because the operation surface is closing.
-            await transcript.wait_for_refresh()
-        if not self._covered_session_operation_is_current(
-            operation,
-            transcript,
-            generation=generation,
-            epoch=epoch,
-        ):
-            return
-        overlays = self._overlay_controller
-        if overlays is not None and overlays.finish_operation(operation):
-            self._hide_operation_indicator()
+            if not self._covered_session_operation_is_current(
+                operation,
+                transcript,
+                generation=generation,
+                epoch=epoch,
+            ):
+                return
+
+            layout_ready = (
+                self._history_render_depth == 0
+                and transcript.scrollable_content_region.height > 0
+                and not any(
+                    _transcript_child_layout_pending(child) for child in transcript.children
+                )
+            )
+            at_required_offset = (
+                not transcript.is_following or transcript.scroll_y == transcript.max_scroll_y
+            )
+            if not layout_ready or not at_required_offset:
+                previous_ready_geometry = None
+                if layout_ready and transcript.is_following:
+                    # The composer is already restored by prepare_operation_finish().
+                    # Follow only after its final viewport geometry is measurable.
+                    # Re-arm on each frame because later Markdown measurement may
+                    # move the tail after an earlier deferred callback ran.
+                    transcript.follow_tail()
+                continue
+
+            ready_geometry = (
+                float(transcript.scroll_y),
+                float(transcript.max_scroll_y),
+                transcript.scrollable_content_region.height,
+                transcript.virtual_size.height,
+            )
+            if ready_geometry == previous_ready_geometry:
+                overlays = self._overlay_controller
+                if overlays is not None and overlays.finish_operation(operation):
+                    self._hide_operation_indicator()
+                return
+
+            # Equality may first become true in the deferred tail callback, before
+            # the corrected offset has reached the terminal. Require one more frame
+            # with unchanged viewport and virtual geometry before removing the cover.
+            previous_ready_geometry = ready_geometry
 
     def _covered_session_operation_is_current(
         self,
