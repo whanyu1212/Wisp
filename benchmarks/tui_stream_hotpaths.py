@@ -27,8 +27,14 @@ from textual.widget import Widget
 
 from benchmarks.support import environment
 from benchmarks.tui_long_session import append_benchmark_messages
-from wisp.sessions.jsonl import JsonlSessionStore
-from wisp.tui.history import history_entries_from_rpc_messages
+from wisp.events import RpcMessageSnapshot, ToolCallRequested
+from wisp.sessions.jsonl import (
+    MAX_SESSION_MESSAGE_PAGE_LIMIT,
+    JsonlSession,
+    JsonlSessionStore,
+)
+from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
+from wisp.tui.history import HistoricalTranscriptEntry, history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
     StreamMessage,
@@ -74,6 +80,7 @@ class BenchmarkConfig:
     viewport_width: int = 100
     viewport_height: int = 12
     runs: int = 5
+    pending_tool_cards: int = 3
 
 
 @dataclass(frozen=True)
@@ -102,6 +109,18 @@ class StreamHotpathSample:
     markdown_renders: MarkdownRenderCounts
     markdown_source_rebuild_count: int
     markdown_source_chars_processed: int
+    markdown_drains: TimingDistribution
+    markdown_drain_success_count: int
+    markdown_drain_failure_count: int
+    display_updates: dict[str, int]
+    displayed_frame_count: int
+    input_chop_spans: int
+    emitted_chop_spans: int
+    suppressed_chop_spans: int
+    display_frame_fail_open_count: int
+    history_prepend_suppressed_update_count: int
+    history_prepend_escaped_update_count: int
+    layout_passes_per_displayed_frame: float
     event_loop_delay: TimingDistribution
     layout_passes: TimingDistribution
     compositor_renders: TimingDistribution
@@ -124,6 +143,11 @@ class StreamHotpathSummary:
     active_markdown_render_median: float
     settled_markdown_render_median: float
     markdown_source_chars_processed_median: float
+    markdown_drain_p95_median_ms: float
+    displayed_frame_count_median: float
+    suppressed_chop_spans_median: float
+    display_frame_fail_open_count_median: float
+    history_prepend_escaped_update_count_median: float
     event_loop_p95_median_ms: float
     event_loop_max_median_ms: float
     layout_total_median_ms: float
@@ -143,8 +167,9 @@ class StreamHotpathReport:
 
 @dataclass
 class _HotpathCollector:
-    target_screen: Screen[object]
-    settled_stream_messages: set[StreamMessage]
+    target_screen: Screen[object] | None = None
+    settled_stream_messages: set[StreamMessage] = field(default_factory=set)
+    collecting: bool = False
     layout_ms: list[float] = field(default_factory=list)
     compositor_ms: list[float] = field(default_factory=list)
     layout_requests: dict[str, int] = field(default_factory=dict)
@@ -156,6 +181,44 @@ class _HotpathCollector:
     settled_markdown_renders: int = 0
     markdown_source_rebuild_count: int = 0
     markdown_source_chars_processed: int = 0
+    markdown_drain_ms: list[float] = field(default_factory=list)
+    markdown_drain_success_count: int = 0
+    markdown_drain_failure_count: int = 0
+    display_updates: dict[str, int] = field(default_factory=dict)
+    displayed_frame_count: int = 0
+    input_chop_spans: int = 0
+    emitted_chop_spans: int = 0
+    suppressed_chop_spans: int = 0
+    display_frame_fail_open_count: int = 0
+    history_prepend_suppressed_update_count: int = 0
+    history_prepend_escaped_update_count: int = 0
+
+    def record_markdown_drain(self, diagnostic: MarkdownDrainDiagnostic) -> None:
+        if not self.collecting:
+            return
+        self.markdown_drain_ms.append(diagnostic.render_seconds * 1_000)
+        if diagnostic.succeeded:
+            self.markdown_drain_success_count += 1
+        else:
+            self.markdown_drain_failure_count += 1
+
+    def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:
+        if not self.collecting:
+            return
+        self.display_updates[diagnostic.kind] = self.display_updates.get(diagnostic.kind, 0) + 1
+        self.input_chop_spans += diagnostic.input_spans
+        self.emitted_chop_spans += diagnostic.emitted_spans
+        self.suppressed_chop_spans += diagnostic.suppressed_spans
+        if diagnostic.kind == "layout" or (
+            diagnostic.kind == "chops" and diagnostic.emitted_spans > 0
+        ):
+            self.displayed_frame_count += 1
+        if diagnostic.fail_open:
+            self.display_frame_fail_open_count += 1
+        if diagnostic.history_prepend_suppressed:
+            self.history_prepend_suppressed_update_count += 1
+        if diagnostic.history_prepend_unsettled and not diagnostic.history_prepend_suppressed:
+            self.history_prepend_escaped_update_count += 1
 
 
 def _nearest_rank(ordered: Sequence[float], percentile: float) -> float:
@@ -169,8 +232,8 @@ def _milliseconds(started_ns: int) -> float:
     return (time.perf_counter_ns() - started_ns) / 1_000_000
 
 
-def _is_on_target_screen(widget: Widget, target_screen: Screen[object]) -> bool:
-    return widget.is_mounted and widget.screen is target_screen
+def _is_on_target_screen(widget: Widget, target_screen: Screen[object] | None) -> bool:
+    return target_screen is not None and widget.is_mounted and widget.screen is target_screen
 
 
 @contextmanager
@@ -319,6 +382,32 @@ async def run_benchmark(
     )
 
 
+def _newest_history_entries(
+    session: JsonlSession,
+    *,
+    retained_history_entries: int,
+) -> tuple[HistoricalTranscriptEntry, ...]:
+    """Read bounded pages until enough converted history entries are available."""
+
+    messages: tuple[RpcMessageSnapshot, ...] = ()
+    before_entry_id: str | None = None
+    while True:
+        page = session.read_message_page(
+            limit=MAX_SESSION_MESSAGE_PAGE_LIMIT,
+            before_entry_id=before_entry_id,
+        )
+        messages = (*page.messages, *messages)
+        available_entries = history_entries_from_rpc_messages(messages)
+        if len(available_entries) >= retained_history_entries:
+            return available_entries[-retained_history_entries:]
+        before_entry_id = page.next_before_entry_id
+        if before_entry_id is None:
+            raise RuntimeError(
+                "Streaming hotpath fixture produced only "
+                f"{len(available_entries)} of {retained_history_entries} requested history entries"
+            )
+
+
 async def _run_sample(
     config: BenchmarkConfig,
     *,
@@ -330,9 +419,12 @@ async def _run_sample(
         store = JsonlSessionStore(Path(temporary_directory))
         session = store.create()
         await append_benchmark_messages(session, config.message_count)
-        page = session.read_message_page(limit=retained_history_entries)
-        entries = history_entries_from_rpc_messages(page.messages)
-        app, renderer = create_textual_tui()
+        entries = _newest_history_entries(
+            session,
+            retained_history_entries=retained_history_entries,
+        )
+        collector = _HotpathCollector()
+        app, renderer = create_textual_tui(diagnostics=collector)
         assert isinstance(renderer, TextualTuiRenderer)
         async with app.run_test(size=(config.viewport_width, config.viewport_height)) as pilot:
             renderer.replace_history_entries(entries, session_label="Streaming hotpath benchmark")
@@ -351,14 +443,22 @@ async def _run_sample(
             # before delivering tokens, leaving this 80 ms heartbeat mounted at
             # the transcript tail for the complete streaming phase.
             renderer.running()
+            for index in range(config.pending_tool_cards):
+                renderer.event(
+                    ToolCallRequested(
+                        call_id=f"benchmark-pending-{index}",
+                        name="read",
+                        arguments={"path": f"benchmark-{index}.txt"},
+                    )
+                )
             await pilot.pause()
             indicator = app.query_one(WorkingIndicator)
             if indicator.parent is not transcript or transcript.children[-1] is not indicator:
                 raise RuntimeError("Working indicator did not settle at the transcript tail")
             mounted_widget_count = len(transcript.children)
-            # This fixture has exactly one session marker and one working indicator
-            # outside its mounted historical messages.
-            mounted_history_entries = mounted_widget_count - 2
+            # This fixture has exactly one session marker, one working indicator,
+            # and the configured pending tool cards outside mounted history.
+            mounted_history_entries = mounted_widget_count - 2 - config.pending_tool_cards
             if mounted_history_entries < 1 or mounted_history_entries > retained_count:
                 raise RuntimeError(
                     "Streaming hotpath fixture mounted an invalid history count: "
@@ -377,8 +477,10 @@ async def _run_sample(
                     mounted_history_entries=mounted_history_entries,
                     mounted_widget_count=mounted_widget_count,
                     profile_output=profile_output,
+                    collector=collector,
                 )
             finally:
+                renderer.cancelled()
                 app.hide_working_indicator()
                 await pilot.pause()
 
@@ -396,12 +498,11 @@ async def _measure_stream(
     mounted_history_entries: int,
     mounted_widget_count: int,
     profile_output: Path | None,
+    collector: _HotpathCollector,
 ) -> StreamHotpathSample:
     settled_stream_messages = set(transcript.query(StreamMessage))
-    collector = _HotpathCollector(
-        target_screen=app.screen,
-        settled_stream_messages=settled_stream_messages,
-    )
+    collector.target_screen = app.screen
+    collector.settled_stream_messages = settled_stream_messages
     for widget in settled_stream_messages:
         visual = widget._selection_visual
         if visual is not None and isinstance(visual._markdown_renderable, _SafeAssistantMarkdown):
@@ -420,6 +521,7 @@ async def _measure_stream(
     started = time.perf_counter_ns()
     started_cpu = time.process_time_ns()
     try:
+        collector.collecting = True
         with _measure_textual_hotpaths(collector):
             if profiler is not None:
                 profiler.enable()
@@ -434,6 +536,7 @@ async def _measure_stream(
                 if profiler is not None:
                     profiler.disable()
     finally:
+        collector.collecting = False
         stream_cpu_ms = (time.process_time_ns() - started_cpu) / 1_000_000
         heartbeat_stopped.set()
         await heartbeat_task
@@ -465,6 +568,22 @@ async def _measure_stream(
         ),
         markdown_source_rebuild_count=collector.markdown_source_rebuild_count,
         markdown_source_chars_processed=collector.markdown_source_chars_processed,
+        markdown_drains=TimingDistribution.from_samples(collector.markdown_drain_ms),
+        markdown_drain_success_count=collector.markdown_drain_success_count,
+        markdown_drain_failure_count=collector.markdown_drain_failure_count,
+        display_updates=dict(sorted(collector.display_updates.items())),
+        displayed_frame_count=collector.displayed_frame_count,
+        input_chop_spans=collector.input_chop_spans,
+        emitted_chop_spans=collector.emitted_chop_spans,
+        suppressed_chop_spans=collector.suppressed_chop_spans,
+        display_frame_fail_open_count=collector.display_frame_fail_open_count,
+        history_prepend_suppressed_update_count=(collector.history_prepend_suppressed_update_count),
+        history_prepend_escaped_update_count=collector.history_prepend_escaped_update_count,
+        layout_passes_per_displayed_frame=(
+            len(collector.layout_ms) / collector.displayed_frame_count
+            if collector.displayed_frame_count
+            else 0.0
+        ),
         event_loop_delay=TimingDistribution.from_samples(heartbeat_delays),
         layout_passes=TimingDistribution.from_samples(collector.layout_ms),
         compositor_renders=TimingDistribution.from_samples(collector.compositor_ms),
@@ -525,6 +644,21 @@ def _summarize(
                 markdown_source_chars_processed_median=statistics.median(
                     sample.markdown_source_chars_processed for sample in selected
                 ),
+                markdown_drain_p95_median_ms=statistics.median(
+                    sample.markdown_drains.p95_ms for sample in selected
+                ),
+                displayed_frame_count_median=statistics.median(
+                    sample.displayed_frame_count for sample in selected
+                ),
+                suppressed_chop_spans_median=statistics.median(
+                    sample.suppressed_chop_spans for sample in selected
+                ),
+                display_frame_fail_open_count_median=statistics.median(
+                    sample.display_frame_fail_open_count for sample in selected
+                ),
+                history_prepend_escaped_update_count_median=statistics.median(
+                    sample.history_prepend_escaped_update_count for sample in selected
+                ),
                 event_loop_p95_median_ms=statistics.median(
                     sample.event_loop_delay.p95_ms for sample in selected
                 ),
@@ -562,6 +696,8 @@ def _validate_config(config: BenchmarkConfig, *, profile_output: Path | None) ->
         )
     if config.stream_interval_seconds <= 0 or config.heartbeat_interval_seconds <= 0:
         raise ValueError("stream and heartbeat intervals must be positive")
+    if config.pending_tool_cards < 0:
+        raise ValueError("pending tool cards must not be negative")
     if profile_output is not None and (
         config.runs != 1 or len(config.retained_history_entries) != 1
     ):
@@ -600,6 +736,11 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         default=BenchmarkConfig.heartbeat_interval_seconds,
     )
     parser.add_argument("--runs", type=int, default=BenchmarkConfig.runs)
+    parser.add_argument(
+        "--pending-tool-cards",
+        type=int,
+        default=BenchmarkConfig.pending_tool_cards,
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--profile-output", type=Path)
     return parser.parse_args(arguments)
@@ -615,6 +756,7 @@ async def _main(arguments: Sequence[str] | None = None) -> None:
             stream_interval_seconds=parsed.stream_interval_seconds,
             heartbeat_interval_seconds=parsed.heartbeat_interval_seconds,
             runs=parsed.runs,
+            pending_tool_cards=parsed.pending_tool_cards,
         ),
         profile_output=parsed.profile_output,
     )

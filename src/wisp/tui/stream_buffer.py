@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING
 
 from textual.widget import AwaitMount
 
+from wisp.tui.diagnostics import (
+    MarkdownDrainDiagnostic,
+    TuiDiagnosticsSink,
+    record_markdown_drain,
+)
 from wisp.tui.widgets import StreamMessage
 
 if TYPE_CHECKING:
@@ -85,8 +90,14 @@ class MarkdownStreamController:
     # previous full-source rebuild.
     _DRAIN_IMMEDIATE_BYTES = 4 * 1024
 
-    def __init__(self, app: TextualTui) -> None:
+    def __init__(
+        self,
+        app: TextualTui,
+        *,
+        diagnostics: TuiDiagnosticsSink | None = None,
+    ) -> None:
         self._app = app
+        self._diagnostics = diagnostics
         self._turn: _StreamTurn | None = None
         # Flushed turns finalize asynchronously after `_turn` is cleared so a new
         # stream may begin. Retain their identities until completion so transcript
@@ -328,6 +339,9 @@ class MarkdownStreamController:
                 self._app.note_transcript_update(turn.widget)
                 return
             self._anchor_stream_tail(turn, transcript)
+            render_started: float | None = None
+            render_seconds: float | None = None
+            succeeded = False
             try:
                 # The first provider fragment can arrive in the same event-loop
                 # tick as the StreamMessage mount. Wait until its app/theme context
@@ -336,7 +350,10 @@ class MarkdownStreamController:
                 render_started = time.perf_counter()
                 await turn.widget.append_markdown(text)
                 render_seconds = time.perf_counter() - render_started
+                succeeded = True
             except Exception as error:
+                if render_started is not None:
+                    render_seconds = time.perf_counter() - render_started
                 # Keep the authoritative full source and repair the widget during
                 # finalization instead of allowing one incremental parser/layout
                 # failure to terminate the app or strand all later fragments.
@@ -351,6 +368,17 @@ class MarkdownStreamController:
                 turn.last_render_seconds = render_seconds
                 self._retire_working_indicator(turn)
                 self._app.note_transcript_update(turn.widget)
+            if render_seconds is not None and self._diagnostics is not None:
+                record_markdown_drain(
+                    self._diagnostics,
+                    MarkdownDrainDiagnostic(
+                        render_seconds=render_seconds,
+                        appended_chars=len(text),
+                        appended_bytes=len(text.encode("utf-8")),
+                        resulting_source_chars=len(turn.widget.source),
+                        succeeded=succeeded,
+                    ),
+                )
         finally:
             turn.drain_running = False
             turn.drain_scheduled = False

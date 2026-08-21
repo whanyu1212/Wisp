@@ -36,9 +36,10 @@ def test_displayed_frame_drops_only_exact_duplicate_rows() -> None:
     frame = _DisplayedFrame(size=Size(4, 2), rows=[_strip("same"), _strip("keep")])
     update = _update(_strip("same"), _strip("news"))
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert cache_valid
+    assert not fail_open
     assert isinstance(filtered, ChopsUpdate)
     assert filtered.spans == [(1, 0, 4)]
     assert frame.rows == [_strip("same"), _strip("news")]
@@ -52,9 +53,10 @@ def test_displayed_frame_reconstructs_a_sparse_partial_span() -> None:
         [[2, 4]],
     )
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert cache_valid
+    assert not fail_open
     assert filtered is None
     assert frame.rows == [_strip("same")]
 
@@ -63,9 +65,10 @@ def test_displayed_frame_preserves_duplicate_rows_when_cursor_moved() -> None:
     frame = _DisplayedFrame(size=Size(4, 1), rows=[_strip("same")])
     update = _update(_strip("same"))
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=False)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=False)
 
     assert cache_valid
+    assert fail_open
     assert filtered is update
 
 
@@ -73,9 +76,10 @@ def test_displayed_frame_preserves_style_only_changes() -> None:
     frame = _DisplayedFrame(size=Size(3, 1), rows=[_strip("abc", style=Style(color="red"))])
     update = _update(_strip("abc", style=Style(color="blue")))
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert cache_valid
+    assert not fail_open
     assert filtered is update
     assert frame.rows == [_strip("abc", style=Style(color="blue"))]
 
@@ -87,9 +91,10 @@ def test_displayed_frame_drops_interaction_metadata_only_changes() -> None:
     )
     update = _update(_strip("abc", style=Style(meta={"offset": (0, 20)})))
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert cache_valid
+    assert not fail_open
     assert filtered is None
 
 
@@ -101,9 +106,10 @@ def test_displayed_frame_preserves_equal_control_segments() -> None:
     frame = _DisplayedFrame(size=Size(3, 1), rows=[control])
     update = _update(control)
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert cache_valid
+    assert fail_open
     assert filtered is update
 
 
@@ -111,7 +117,8 @@ def test_displayed_frame_fails_open_for_incomplete_chops() -> None:
     frame = _DisplayedFrame(size=Size(4, 1), rows=[_strip("same")])
     update = ChopsUpdate([{0: _strip("sa")}], [(0, 0, 4)], [[2]])
 
-    filtered, cache_valid = frame.filter_chops(update, allow_suppression=True)
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
 
     assert not cache_valid
+    assert fail_open
     assert filtered is update

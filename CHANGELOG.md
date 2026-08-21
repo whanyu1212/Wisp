@@ -12,6 +12,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Added privacy-safe, opt-in TUI hotpath diagnostics and reproducible benchmark probes for Markdown
+  drain cost, display update shape, duplicate-cell suppression, fail-open repaint paths, history
+  prepend suppression, pending tool-card pressure, and covered-history reveal.
 - Added a capability audit pinned to Pi SDK v0.84.2, recording shipped Wisp behavior, intentional
   safety and protocol differences, and explicit ownership for remaining SDK roadmap gaps.
 - Defined package, Python API, event-schema, session-migration, deprecation, and removal policies;
