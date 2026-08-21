@@ -20,6 +20,7 @@ from weakref import WeakKeyDictionary
 
 import textual
 from rich.console import Console, ConsoleOptions, RenderResult
+from textual.content import Content
 from textual.geometry import Region, Size
 from textual.pilot import Pilot
 from textual.screen import Screen
@@ -38,6 +39,7 @@ from wisp.tui.history import HistoricalTranscriptEntry, history_entries_from_rpc
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
     StreamMessage,
+    ToolCard,
     Transcript,
     WorkingIndicator,
     _AssistantMarkdown,
@@ -107,6 +109,7 @@ class StreamHotpathSample:
     layout_passes_per_stream_update: float
     content_height_call_count: int
     content_height_calls: dict[str, int]
+    tool_card_body_build_count: int
     markdown_renders: MarkdownRenderCounts
     markdown_source_rebuild_count: int
     markdown_source_chars_processed: int
@@ -175,6 +178,7 @@ class _HotpathCollector:
     compositor_ms: list[float] = field(default_factory=list)
     layout_requests: dict[str, int] = field(default_factory=dict)
     content_height_calls: dict[str, int] = field(default_factory=dict)
+    tool_card_body_build_count: int = 0
     markdown_owners: WeakKeyDictionary[_SafeAssistantMarkdown, StreamMessage] = field(
         default_factory=WeakKeyDictionary
     )
@@ -247,6 +251,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
     original_show_markdown = StreamMessage._show_markdown
+    original_tool_card_build_body = ToolCard._build_body
 
     def refresh_layout(
         screen: Screen[object], size: Size | None = None, scroll: bool = False
@@ -312,6 +317,11 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
                 collector.active_markdown_renders += 1
         yield from original_markdown_render(markdown, console, options)
 
+    def build_tool_card_body(card: ToolCard, *, width: int) -> Content:
+        if _is_on_target_screen(card, collector.target_screen):
+            collector.tool_card_body_build_count += 1
+        return original_tool_card_build_body(card, width=width)
+
     def show_markdown(widget: StreamMessage, markdown: _AssistantMarkdown) -> None:
         if _is_on_target_screen(widget, collector.target_screen):
             collector.markdown_source_rebuild_count += 1
@@ -328,6 +338,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
         patch.object(Widget, "get_content_height", get_content_height),
         patch.object(_SafeAssistantMarkdown, "__rich_console__", render_markdown),
         patch.object(StreamMessage, "_show_markdown", show_markdown),
+        patch.object(ToolCard, "_build_body", build_tool_card_body),
     ):
         yield
 
@@ -562,6 +573,7 @@ async def _measure_stream(
         ),
         content_height_call_count=sum(collector.content_height_calls.values()),
         content_height_calls=dict(sorted(collector.content_height_calls.items())),
+        tool_card_body_build_count=collector.tool_card_body_build_count,
         markdown_renders=MarkdownRenderCounts(
             active=collector.active_markdown_renders,
             settled=collector.settled_markdown_renders,

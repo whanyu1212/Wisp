@@ -20,6 +20,7 @@ from benchmarks.tui_stream_hotpaths import (
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import (
     StreamMessage,
+    ToolCard,
     _AssistantMarkdown,
     _SafeAssistantMarkdown,
 )
@@ -72,6 +73,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
     original_show_markdown = StreamMessage._show_markdown
+    original_tool_card_build_body = ToolCard._build_body
 
     report = anyio.run(
         run_benchmark,
@@ -93,6 +95,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert Widget.get_content_height is original_content_height
     assert _SafeAssistantMarkdown.__rich_console__ is original_markdown_render
     assert StreamMessage._show_markdown is original_show_markdown
+    assert ToolCard._build_body is original_tool_card_build_body
     assert len(report.samples) == 1
     sample = report.samples[0]
     assert sample.run == 1
@@ -116,6 +119,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.content_height_call_count == sum(sample.content_height_calls.values())
     assert sample.content_height_call_count > 0
     assert sample.content_height_calls["StreamMessage"] > 0
+    assert sample.tool_card_body_build_count == 0
     assert sample.markdown_renders.total == (
         sample.markdown_renders.active + sample.markdown_renders.settled
     )
@@ -175,6 +179,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert '"stream_cpu_ms":' in report.to_json()
     assert '"layout_requests":' in report.to_json()
     assert '"layout_passes_per_stream_update":' in report.to_json()
+    assert '"tool_card_body_build_count": 0' in report.to_json()
     assert '"markdown_renders":' in report.to_json()
     assert '"markdown_source_chars_processed":' in report.to_json()
     assert '"markdown_drains":' in report.to_json()

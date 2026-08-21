@@ -18,7 +18,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import ClassVar
+from typing import ClassVar, Protocol, cast
 
 from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
@@ -40,7 +40,6 @@ from textual.message import Message
 from textual.selection import Selection
 from textual.strip import Strip
 from textual.style import Style
-from textual.timer import Timer
 from textual.visual import RenderOptions, RichVisual
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
@@ -86,6 +85,7 @@ from wisp.tui.file_index import ProjectSnapshot
 from wisp.tui.incremental_markdown import IncrementalMarkdownState
 from wisp.tui.input_types import PendingSubmissionView, pending_submission_preview_lines
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.presentation_clock import PresentationClock
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_highlighting import (
     PromptHighlight,
@@ -421,6 +421,18 @@ class PromptEditor(TextArea):
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+
+class _PresentationClockApp(Protocol):
+    """Narrow app surface used by widgets sharing the presentation clock."""
+
+    presentation_clock: PresentationClock
+
+
+def _presentation_clock(widget: Widget) -> PresentationClock:
+    """Return the app-owned presentation clock for a mounted Wisp widget."""
+
+    return cast(_PresentationClockApp, widget.app).presentation_clock
 
 
 def _format_duration(seconds: float) -> str:
@@ -2705,32 +2717,37 @@ class ToolCard(Static):
         # the true wall-clock duration derived from event timestamps (see
         # `set_state(elapsed=…)`), so the number that rests on screen is honest.
         self._elapsed: float | None = None
-        self._timer: Timer | None = None
+        self._elapsed_started_at: float | None = None
+        self._clock_registered = False
+        self._rendered_width: int | None = None
+        self._stable_action: Content | None = None
+        self._stable_action_suffix = Content()
+        self._cached_body = Content()
         self._track_elapsed = track_elapsed
         self.set_state("pending")
 
     def on_mount(self) -> None:
-        # A pending card ticks a running counter; a card that mounts already
-        # resolved (e.g. rebuilt from history) has no timer to start.
+        # A pending card joins the shared running counter; a card that mounts
+        # already resolved (e.g. rebuilt from history) has no clock work to start.
         if self._role == "tool":
             self._start_timer(force=True)
 
     def _start_timer(self, *, force: bool = False) -> None:
-        if (
-            not self._track_elapsed
-            or self._timer is not None
-            or (not force and not self.is_mounted)
-        ):
+        if not self._track_elapsed or self._clock_registered or (not force and not self.is_mounted):
             return
         if self._elapsed is None:
             self._elapsed = 0.0
-        self._timer = self.set_interval(self._TICK, self._tick)
+        self._elapsed_started_at = time.monotonic() - self._elapsed
+        _presentation_clock(self).subscribe(self, interval=self._TICK)
+        self._clock_registered = True
         self._repaint()
 
     def on_resize(self, event: events.Resize) -> None:
-        """Rewrap the tree when a terminal resize changes available width."""
+        """Rewrap only when resize changes this card's effective content width."""
 
-        self._repaint()
+        width = max(8, event.size.width)
+        if width != self._rendered_width:
+            self._repaint(width=width)
 
     def update_call(self, name: str, arguments: object) -> None:
         """Enrich a historical result when its paged-in call arrives later."""
@@ -2744,15 +2761,34 @@ class ToolCard(Static):
         self._stop_timer()
 
     def _stop_timer(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
+        if self._clock_registered:
+            _presentation_clock(self).unsubscribe(self)
+            self._clock_registered = False
+        self._elapsed_started_at = None
+
+    def presentation_clock_tick(self, now: float) -> None:
+        """Advance whole-second elapsed presentation from the shared app clock."""
+
+        started_at = self._elapsed_started_at
+        if started_at is None:
+            return
+        elapsed = float(int(max(0.0, now - started_at)))
+        if elapsed <= (self._elapsed or 0.0):
+            return
+        previous = self._elapsed or 0.0
+        self._elapsed = elapsed
+        self._repaint(
+            layout=cell_len(_format_duration(previous)) != cell_len(_format_duration(elapsed)),
+            rebuild_stable=False,
+        )
 
     def _tick(self) -> None:
         previous = self._elapsed or 0.0
         self._elapsed = previous + self._TICK
         self._repaint(
-            layout=len(_format_duration(previous)) != len(_format_duration(self._elapsed))
+            layout=cell_len(_format_duration(previous))
+            != cell_len(_format_duration(self._elapsed)),
+            rebuild_stable=False,
         )
 
     def set_state(
@@ -2771,7 +2807,7 @@ class ToolCard(Static):
         repaint; a Textual ``Content`` is a pre-styled renderable (e.g. a colored
         diff) composed directly. ``elapsed`` is the true wall-clock duration (from
         the request/result event timestamps); passing it freezes the live counter
-        at the honest value and stops the per-card timer. ``full_output`` is the
+        at the honest value and leaves the shared presentation clock. ``full_output`` is the
         tool's full (tool-bounded) output, retained so the reader can expand past the
         collapsed detail; ``truncated`` says the tool itself capped that output. The
         role CSS class is swapped rather than added so the rail reflects only the
@@ -2895,33 +2931,60 @@ class ToolCard(Static):
             self.card = card
             self.presentation = presentation
 
-    def _repaint(self, *, layout: bool = True) -> None:
-        # Build the whole tree as Content, appending every untrusted value as literal
-        # text. Trusted bullets and branches are also literal chrome; semantic state
-        # is explicit in the action words and available to styling via the role class.
-        width = max(8, self.content_size.width or self.size.width or 80)
-        action = self._action_content()
-        if self._elapsed is not None:
-            action += Content.styled(f" · {_format_duration(self._elapsed)}", "$text-muted")
-        # Label the affordance so a reader does not have to infer what a bare
-        # triangle means. Enter is the primary binding; Space remains supported.
-        if self._can_expand():
-            label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
-            action += Content.styled(label, "$text-muted")
-        if isinstance(self._detail, DiffPresentation):
-            action += Content.styled(" · v view diff", "$text-muted")
+    def _repaint(
+        self,
+        *,
+        layout: bool = True,
+        rebuild_stable: bool = True,
+        width: int | None = None,
+    ) -> None:
+        """Paint the card, retaining width-dependent detail across elapsed ticks."""
+
+        selected_width = max(
+            8,
+            width if width is not None else self.content_size.width or self.size.width or 80,
+        )
+        width_changed = selected_width != self._rendered_width
+        if rebuild_stable or self._stable_action is None:
+            self._stable_action = self._action_content()
+            suffix = Content()
+            # Label the affordance so a reader does not have to infer what a bare
+            # triangle means. Enter is the primary binding; Space remains supported.
+            if self._can_expand():
+                label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
+                suffix += Content.styled(label, "$text-muted")
+            if isinstance(self._detail, DiffPresentation):
+                suffix += Content.styled(" · v view diff", "$text-muted")
+            self._stable_action_suffix = suffix
+        if rebuild_stable or width_changed:
+            self._cached_body = self._build_body(width=selected_width)
+
+        assert self._stable_action is not None
+        elapsed = (
+            Content.styled(f" · {_format_duration(self._elapsed)}", "$text-muted")
+            if self._elapsed is not None
+            else Content()
+        )
+        action = self._stable_action + elapsed + self._stable_action_suffix
         content = _tree_line(
             action,
-            width=width,
+            width=selected_width,
             first_prefix="• ",
             continuation_prefix="  ",
         )
+        content += self._cached_body
+        self._rendered_width = selected_width
+        self.update(content, layout=layout)
 
+    def _build_body(self, *, width: int) -> Content:
+        """Build detail, diff, and supplement content only on structural changes."""
+
+        body = Content()
         if isinstance(self._detail, DiffPresentation):
             # Structured edit/write cards retain diff rows for both states; unlike
             # generic tools, expansion must never replace review evidence with the
             # raw "Applied" or "Wrote" acknowledgement kept in _full_output.
-            content += Content("\n") + _render_diff_presentation(
+            body += Content("\n") + _render_diff_presentation(
                 self._detail,
                 width=max(12, width),
                 expanded=self._expanded,
@@ -2929,28 +2992,24 @@ class ToolCard(Static):
         elif self._expanded and self._full_output:
             # Expanded: show the full (tool-bounded) output in place of the collapsed
             # detail, so the reader sees what the preview/summary stood in for.
-            content += Content("\n") + _tree_detail(self._full_output, width=width)
+            body += Content("\n") + _tree_detail(self._full_output, width=width)
         elif isinstance(self._detail, Content):
             # A pre-styled renderable is composed directly, preserving literal text.
-            content += Content("\n") + _tree_detail(self._detail, width=width)
+            body += Content("\n") + _tree_detail(self._detail, width=width)
         elif self._detail:
-            content += Content("\n") + _tree_detail(self._detail, width=width)
+            body += Content("\n") + _tree_detail(self._detail, width=width)
 
         supplement = self._expanded_supplement(width=width)
         if supplement:
-            content += Content("\n") + supplement
+            body += Content("\n") + supplement
 
         if self._truncated:
             # The tool capped its own output before it ever reached here, so what the
-            # card shows — collapsed preview or expanded full output — isn't the whole
-            # story. Say so honestly regardless of expand state: a capped output that
-            # fits the preview budget (so there's nothing extra to expand) would
-            # otherwise present as complete, which is exactly the case this marks.
-            content += Content("\n") + Content.styled(
+            # card shows isn't complete even when no additional output can expand.
+            body += Content("\n") + Content.styled(
                 "    ⋯ output truncated at the tool's limit", "$warning"
             )
-
-        self.update(content, layout=layout)
+        return body
 
     def _action_content(self) -> Content:
         return _format_tool_call_action_from_rendered(
@@ -3229,15 +3288,24 @@ class WorkingIndicator(Static):
         self._ticks = 0
         self._label = "Working…"
         self._show_elapsed = True
-        self._timer: Timer | None = None
+        self._animation_mounted = False
+        self._clock_registered = False
         self._rendered_width: int | None = None
 
     def on_mount(self) -> None:
+        self._animation_mounted = True
         self._start_timer()
         self._repaint()
 
     def on_unmount(self) -> None:
+        self._animation_mounted = False
         self._stop_timer()
+
+    def presentation_clock_tick(self, now: float) -> None:
+        """Advance the heartbeat from the app-owned clock."""
+
+        del now
+        self._tick()
 
     def _tick(self) -> None:
         self._ticks += 1
@@ -3252,7 +3320,7 @@ class WorkingIndicator(Static):
         self._repaint()
 
     def show_working(self) -> None:
-        if self._timer is None:
+        if not self._clock_registered:
             self._start_timer()
         self._label = "Working…"
         self._show_elapsed = True
@@ -3261,20 +3329,21 @@ class WorkingIndicator(Static):
     def show_activity(self, label: str, *, show_elapsed: bool = True) -> None:
         """Relabel this command heartbeat without resetting its elapsed time."""
 
-        if self._timer is None:
+        if not self._clock_registered:
             self._start_timer()
         self._label = label
         self._show_elapsed = show_elapsed
         self._repaint()
 
     def _start_timer(self) -> None:
-        if self._timer is None:
-            self._timer = self.set_interval(self._INTERVAL, self._tick)
+        if not self._clock_registered and self._animation_mounted:
+            _presentation_clock(self).subscribe(self, interval=self._INTERVAL)
+            self._clock_registered = True
 
     def _stop_timer(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
+        if self._clock_registered:
+            _presentation_clock(self).unsubscribe(self)
+            self._clock_registered = False
 
     def _repaint(self) -> None:
         spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
@@ -3302,7 +3371,7 @@ class StartupNotice(Static):
         self._animation_suspended = False
         self._animation_mounted = False
         self._ticks = 0
-        self._timer: Timer | None = None
+        self._clock_registered = False
         self._rendered_width: int | None = None
         self.display = self._starting
 
@@ -3310,7 +3379,7 @@ class StartupNotice(Static):
         # Textual's public ``is_mounted`` flag is still false while on_mount is
         # dispatched. Track this widget's animation lifecycle explicitly so a
         # notice constructed in the starting state can register its cold-start
-        # timer instead of waiting for a state transition that may never occur.
+        # clock instead of waiting for a state transition that may never occur.
         self._animation_mounted = True
         self._start_timer()
         self._repaint()
@@ -3354,23 +3423,30 @@ class StartupNotice(Static):
         self._start_timer()
         self._repaint()
 
+    def presentation_clock_tick(self, now: float) -> None:
+        """Advance startup animation from the app-owned clock."""
+
+        del now
+        self._tick()
+
     def _tick(self) -> None:
         self._ticks += 1
         self._repaint()
 
     def _start_timer(self) -> None:
         if (
-            self._timer is None
+            not self._clock_registered
             and self._starting
             and not self._animation_suspended
             and self._animation_mounted
         ):
-            self._timer = self.set_interval(self._INTERVAL, self._tick)
+            _presentation_clock(self).subscribe(self, interval=self._INTERVAL)
+            self._clock_registered = True
 
     def _stop_timer(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
+        if self._clock_registered:
+            _presentation_clock(self).unsubscribe(self)
+            self._clock_registered = False
 
     def _repaint(self) -> None:
         spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
