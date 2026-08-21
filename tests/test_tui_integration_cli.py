@@ -8619,7 +8619,11 @@ def test_textual_complete_history_refresh_wait_uses_running_transcript() -> None
 
 
 def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() -> None:
-    """Complete hydration removes the process-row boundary that trapped wheel-up."""
+    """Hydration removes the process-row boundary that trapped wheel-up.
+
+    Wheel-up must reach the oldest retained entry without reversing, paging through
+    the mounted window from retained history rather than re-reading the session.
+    """
 
     async def scenario() -> tuple[list[float], int, int, int, int, bool]:
         app_instance, renderer = create_textual_tui()
@@ -8714,7 +8718,11 @@ def test_textual_complete_process_history_scrolls_to_oldest_without_reversing() 
     assert poll_count == 89
     assert represented_row_count == 178
     assert update_count == 89
-    assert can_page_older is False
+    # This fixture's 149 entries exceed the mounted-window bound, so older entries stay
+    # retained but unmounted and remain reachable. `history_requests == 0` above is the
+    # load-bearing assertion: paging back is served from retained history, never by
+    # re-reading the durable session.
+    assert can_page_older is True
 
 
 def test_textual_resumed_process_timeline_loads_selected_persisted_output() -> None:
