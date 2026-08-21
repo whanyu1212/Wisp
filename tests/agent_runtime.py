@@ -52,7 +52,12 @@ def assert_turn_terminals(events: Sequence[object]) -> None:
 
 
 def assert_tool_result_pairing(events: Sequence[object]) -> None:
-    """Require Ended/Ready pairing when a tool terminal is present.
+    """Require Ended/Ready pairing for each tool execution occurrence.
+
+    Uniqueness is per unmatched occurrence, not per run. Gemini may omit
+    function-call IDs; the Google adapter then derives `call-{name}-{index}`
+    from the current response, so later rounds can legitimately reuse a
+    `call_id` after the previous pair has closed.
 
     Does not require a terminal merely because `ToolCallRequested` or
     `ToolExecutionStarted` was emitted. Sequential cancellation may stop after
@@ -60,29 +65,25 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
     settlement.
     """
 
-    ended_at: dict[str, int] = {}
-    ready_at: dict[str, int] = {}
+    pending_ended_at: dict[str, int] = {}
     for index, event in enumerate(events):
         if isinstance(event, ToolExecutionEnded):
-            assert event.call_id not in ended_at, (
-                f"ToolExecutionEnded for {event.call_id} appeared more than once"
+            assert event.call_id not in pending_ended_at, (
+                f"ToolExecutionEnded for {event.call_id} appeared more than once "
+                "before its ToolResultReady"
             )
-            ended_at[event.call_id] = index
+            pending_ended_at[event.call_id] = index
         elif isinstance(event, ToolResultReady):
-            assert event.call_id not in ready_at, (
-                f"ToolResultReady for {event.call_id} appeared more than once"
+            assert event.call_id in pending_ended_at, (
+                f"ToolResultReady without ToolExecutionEnded: {event.call_id}"
             )
-            ready_at[event.call_id] = index
-    only_ended = sorted(set(ended_at) - set(ready_at))
-    only_ready = sorted(set(ready_at) - set(ended_at))
-    assert not only_ended, f"ToolExecutionEnded without ToolResultReady: {', '.join(only_ended)}"
-    assert not only_ready, f"ToolResultReady without ToolExecutionEnded: {', '.join(only_ready)}"
-    for call_id, ended_index in ended_at.items():
-        ready_index = ready_at[call_id]
-        assert ready_index == ended_index + 1, (
-            f"ToolResultReady for {call_id} must immediately follow ToolExecutionEnded "
-            f"(ended at {ended_index}, ready at {ready_index})"
-        )
+            ended_index = pending_ended_at.pop(event.call_id)
+            assert index == ended_index + 1, (
+                f"ToolResultReady for {event.call_id} must immediately follow "
+                f"ToolExecutionEnded (ended at {ended_index}, ready at {index})"
+            )
+    unmatched = sorted(pending_ended_at)
+    assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
 
 
 def assert_settled_tool_calls(events: Sequence[object], call_ids: Sequence[str]) -> None:

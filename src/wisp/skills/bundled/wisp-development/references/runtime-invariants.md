@@ -17,10 +17,12 @@ Later slices must preserve:
   that terminal must not emit a second one.
 - Unstarted turns (including nonzero `turn_offset` before the first
   `TurnStarted`) emit no matching `TurnCompleted`.
-- At most one `ToolExecutionEnded` and one `ToolResultReady` per `call_id`.
-  When either exists, both exist and `Ended` immediately precedes `Ready`.
-  Denied approval ends in an error result. Optional approval is request then
-  resolution then result.
+- Each tool execution occurrence has one `ToolExecutionEnded` and one
+  `ToolResultReady` when a terminal is present; `Ended` immediately precedes
+  `Ready`. The same `call_id` may be reused across sequential rounds after
+  the previous pair has closed (Google fallback IDs are `call-{name}-{index}`
+  per response). Denied approval ends in an error result. Optional approval
+  is request then resolution then result.
 - Provider stream order already enforced by the loop: retries → one start →
   deltas/tool calls → one completed/failed.
 - Request-boundary decisions: `stop` wins; `messages` is a fresh replacement

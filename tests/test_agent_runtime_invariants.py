@@ -113,6 +113,22 @@ def test_assert_tool_result_pairing_rejects_ended_without_ready() -> None:
         assert_tool_result_pairing((_ended(),))
 
 
+def test_assert_tool_result_pairing_allows_reused_call_id_across_rounds() -> None:
+    events = (
+        TurnStarted(turn=1),
+        _ended("call-lookup-0"),
+        _ready("call-lookup-0"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        _ended("call-lookup-0"),
+        _ready("call-lookup-0"),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="tool_calls"),
+    )
+    assert_turn_terminals(events)
+    assert_tool_result_pairing(events)
+    assert_settled_tool_calls(events, ("call-lookup-0",))
+
+
 def test_assert_tool_result_pairing_rejects_duplicate_ended() -> None:
     with pytest.raises(AssertionError, match="appeared more than once"):
         assert_tool_result_pairing((_ended(), _ended(), _ready()))
