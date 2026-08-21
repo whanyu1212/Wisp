@@ -13,7 +13,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-_REFERENCE_DEFINITION_RE = re.compile(r"(?m)^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(?:\S|$)")
+# Match conservatively anywhere on a line: CommonMark reference definitions may
+# be nested behind block-quote or list container markers. False positives only
+# choose the safe complete-parse path; false negatives can stale an earlier link.
+_REFERENCE_DEFINITION_RE = re.compile(r"(?m)\[[^\]\n]+\]:[ \t]*(?:\S|$)")
 
 
 class _ParsedMarkdown(Protocol):
