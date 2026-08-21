@@ -9,6 +9,7 @@ Exact surfaces — flags, fields, schemas. Narrative explanation lives in the
 
 - [CLI](./cli) — commands, flags, exit codes.
 - [Python SDK](./sdk) — supported namespaces, controllers, commands, events, and lifecycle options.
+- [SDK capability audit](./sdk-capability-audit) — pinned comparison and roadmap dispositions.
 - [Compatibility & versioning](./compatibility) — package, API, event, and session guarantees.
 - [Configuration](./configuration) — settings files and precedence.
 - [Environment variables](./environment) — every `WISP_*` variable.
