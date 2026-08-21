@@ -19,7 +19,8 @@ Later slices must preserve:
   `TurnStarted`) emit no matching `TurnCompleted`.
 - Each tool execution occurrence has one `ToolExecutionEnded` and one
   `ToolResultReady` when a terminal is present; `Ended` immediately precedes
-  `Ready`. The same `call_id` may be reused across sequential rounds after
+  `Ready`, and Ready is a payload projection of Ended (shared result fields
+  match). The same `call_id` may be reused across sequential rounds after
   the previous pair has closed (Google fallback IDs are `call-{name}-{index}`
   per response). Denied approval ends in an error result. Optional approval
   is request then resolution then result.
@@ -61,8 +62,8 @@ Prepared batches do synthesize one terminal result per requested call. Helpers
 split the rules on purpose:
 
 - `assert_turn_terminals` — every started turn has exactly one terminal.
-- `assert_tool_result_pairing` — Ended/Ready pairing when a tool terminal is
-  present; requested-but-unsettled calls are allowed.
+- `assert_tool_result_pairing` — Ended/Ready pairing and payload projection
+  when a tool terminal is present; requested-but-unsettled calls are allowed.
 - `assert_settled_tool_calls` — only on paths that promise settlement
   (prepared batches, truncated batches). Listed `call_ids` are counted by
   occurrence, so a reused fallback ID from two rounds needs two terminals.

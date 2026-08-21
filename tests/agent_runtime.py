@@ -60,30 +60,49 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
     from the current response, so later rounds can legitimately reuse a
     `call_id` after the previous pair has closed.
 
+    Ready must be a payload projection of its Ended event: shared result
+    fields (`name`, `output`, `is_error`, failure/process metadata) match.
+    The harness records Ended in the transcript while continuation consumes
+    Ready, so ID-and-adjacency-only pairing would miss divergent histories.
+
     Does not require a terminal merely because `ToolCallRequested` or
     `ToolExecutionStarted` was emitted. Sequential cancellation may stop after
     those events; use `assert_settled_tool_calls` only on paths that promise
     settlement.
     """
 
-    pending_ended_at: dict[str, int] = {}
+    pending_ended: dict[str, tuple[int, ToolExecutionEnded]] = {}
     for index, event in enumerate(events):
         if isinstance(event, ToolExecutionEnded):
-            assert event.call_id not in pending_ended_at, (
+            assert event.call_id not in pending_ended, (
                 f"ToolExecutionEnded for {event.call_id} appeared more than once "
                 "before its ToolResultReady"
             )
-            pending_ended_at[event.call_id] = index
+            pending_ended[event.call_id] = (index, event)
         elif isinstance(event, ToolResultReady):
-            assert event.call_id in pending_ended_at, (
+            assert event.call_id in pending_ended, (
                 f"ToolResultReady without ToolExecutionEnded: {event.call_id}"
             )
-            ended_index = pending_ended_at.pop(event.call_id)
+            ended_index, ended = pending_ended.pop(event.call_id)
             assert index == ended_index + 1, (
                 f"ToolResultReady for {event.call_id} must immediately follow "
                 f"ToolExecutionEnded (ended at {ended_index}, ready at {index})"
             )
-    unmatched = sorted(pending_ended_at)
+            ended_payload = ended._result_payload()
+            ready_payload = event._result_payload()
+            if ended_payload != ready_payload:
+                mismatched = ", ".join(
+                    sorted(
+                        key
+                        for key in ended_payload.keys() | ready_payload.keys()
+                        if ended_payload.get(key) != ready_payload.get(key)
+                    )
+                )
+                raise AssertionError(
+                    f"ToolResultReady payload for {event.call_id} does not match "
+                    f"ToolExecutionEnded ({mismatched})"
+                )
+    unmatched = sorted(pending_ended)
     assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
 
 

@@ -141,6 +141,18 @@ def test_assert_tool_result_pairing_rejects_nonadjacent_projection() -> None:
         assert_tool_result_pairing((_ended(), ErrorEvent(message="gap"), _ready()))
 
 
+def test_assert_tool_result_pairing_rejects_mismatched_payload() -> None:
+    ended = _ended()
+    ready = ToolResultReady(
+        call_id=ended.call_id,
+        name=ended.name,
+        output="different-output",
+        is_error=ended.is_error,
+    )
+    with pytest.raises(AssertionError, match="does not match"):
+        assert_tool_result_pairing((ended, ready))
+
+
 def test_assert_settled_tool_calls_rejects_missing_listed_call() -> None:
     events = (*_completed_turn(), _ended("call-1"), _ready("call-1"))
     with pytest.raises(AssertionError, match="missing terminal tool results"):
