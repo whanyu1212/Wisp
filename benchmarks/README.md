@@ -92,9 +92,11 @@ process CPU time to exclude intentional sleeps without pretending CPU cost is a 
 `layout_requests` attributes `layout=True` refresh requests by concrete widget class, while
 `layout_passes_per_stream_update` shows whether paced writes trigger additional settlement layouts.
 `content_height_calls` attributes Textual height measurements by concrete widget class.
-`markdown_source_rebuild_count` counts source-to-renderable rebuilds separately from Rich visual
-renders. `markdown_source_chars_processed` sums the full source length at each rebuild, exposing
-repeated whole-document work as the response grows; compare it only with identical streamed content.
+`markdown_source_rebuild_count` counts successful source-to-renderable builds separately from Rich
+visual renders. `markdown_source_chars_processed` sums the raw source slices parsed and
+sanitized by those builds. Stable completed Markdown blocks are represented by retained tokens, so
+this total exposes whether the mutable tail remains bounded instead of charging the complete growing
+document on every drain; compare it only with identical streamed content.
 `markdown_renders` splits visual renders between the mutable streaming widget (`active`) and
 `StreamMessage` widgets mounted before streaming (`settled`). `markdown_drains` measures the
 coalesced source-to-renderable write already used by production pacing. `display_updates` counts

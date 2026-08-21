@@ -40,6 +40,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     Transcript,
     WorkingIndicator,
+    _AssistantMarkdown,
     _SafeAssistantMarkdown,
 )
 
@@ -245,7 +246,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
     original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
-    original_source_render = StreamMessage._render_source
+    original_show_markdown = StreamMessage._show_markdown
 
     def refresh_layout(
         screen: Screen[object], size: Size | None = None, scroll: bool = False
@@ -311,11 +312,11 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
                 collector.active_markdown_renders += 1
         yield from original_markdown_render(markdown, console, options)
 
-    def render_source(widget: StreamMessage) -> None:
+    def show_markdown(widget: StreamMessage, markdown: _AssistantMarkdown) -> None:
         if _is_on_target_screen(widget, collector.target_screen):
             collector.markdown_source_rebuild_count += 1
-            collector.markdown_source_chars_processed += len(widget.source)
-        original_source_render(widget)
+            collector.markdown_source_chars_processed += widget.last_markdown_processed_chars
+        original_show_markdown(widget, markdown)
         visual = widget._selection_visual
         if visual is not None and isinstance(visual._markdown_renderable, _SafeAssistantMarkdown):
             collector.markdown_owners[visual._markdown_renderable] = widget
@@ -326,7 +327,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
         patch.object(Widget, "refresh", refresh),
         patch.object(Widget, "get_content_height", get_content_height),
         patch.object(_SafeAssistantMarkdown, "__rich_console__", render_markdown),
-        patch.object(StreamMessage, "_render_source", render_source),
+        patch.object(StreamMessage, "_show_markdown", show_markdown),
     ):
         yield
 

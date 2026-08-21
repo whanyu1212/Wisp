@@ -87,7 +87,7 @@ class MarkdownStreamController:
     # This bounds *repaints*, never throughput: fragments accumulate in
     # `turn.pending` between drains. A first-write burst still cuts the initial
     # wait short, while later bursts respect the cooldown established by the
-    # previous full-source rebuild.
+    # previous Markdown update.
     _DRAIN_IMMEDIATE_BYTES = 4 * 1024
 
     def __init__(
@@ -376,6 +376,13 @@ class MarkdownStreamController:
                         appended_chars=len(text),
                         appended_bytes=len(text.encode("utf-8")),
                         resulting_source_chars=len(turn.widget.source),
+                        processed_source_chars=(
+                            turn.widget.last_markdown_processed_chars if succeeded else 0
+                        ),
+                        reused_source_chars=(
+                            turn.widget.last_markdown_reused_chars if succeeded else 0
+                        ),
+                        incremental=(turn.widget.last_markdown_incremental if succeeded else False),
                         succeeded=succeeded,
                     ),
                 )
@@ -421,6 +428,7 @@ class MarkdownStreamController:
                 # has made the authoritative response visible.
                 self._retire_working_indicator(turn)
             self._last_completed_write_count = turn.write_count
+            turn.widget.release_streaming_markdown_caches()
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
         finally:
