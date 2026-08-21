@@ -8383,6 +8383,159 @@ def test_textual_multi_batch_history_hydration_unmasks_only_a_settled_tail(
     )
 
 
+def test_textual_session_operation_stays_covered_while_markdown_layout_is_pending(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        layout_pending = True
+        original_layout_pending = _transcript_child_layout_pending
+
+        def controlled_layout_pending(child: Widget) -> bool:
+            return layout_pending or original_layout_pending(child)
+
+        monkeypatch.setattr(
+            "wisp.tui.textual_app._transcript_child_layout_pending",
+            controlled_layout_pending,
+        )
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_switch_started("pending-layout")
+            await renderer.hydrate_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"message {index}")
+                    for index in range(80)
+                ),
+                session_label="Pending layout",
+            )
+            renderer.session_switch_finished()
+            for _ in range(5):
+                await pilot.pause()
+            remained_covered = indicator.is_open
+
+            layout_pending = False
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            return remained_covered, not indicator.is_open
+
+    remained_covered, eventually_uncovered = anyio.run(scenario)
+
+    assert remained_covered
+    assert eventually_uncovered
+
+
+def test_textual_session_operation_waits_for_the_composed_tail(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        release_tail = False
+
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_switch_started("delayed-tail")
+            await renderer.hydrate_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"message {index}")
+                    for index in range(120)
+                ),
+                session_label="Delayed tail",
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            transcript._follow = True
+            original_follow_tail = transcript.follow_tail
+
+            def delayed_follow_tail() -> None:
+                if release_tail:
+                    original_follow_tail()
+
+            monkeypatch.setattr(transcript, "follow_tail", delayed_follow_tail)
+            renderer.session_switch_finished()
+            for _ in range(5):
+                await pilot.pause()
+            remained_covered = indicator.is_open
+            remained_displaced = transcript.scroll_y < transcript.max_scroll_y
+
+            release_tail = True
+            original_follow_tail()
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            return (
+                remained_covered,
+                remained_displaced,
+                transcript.scroll_y == transcript.max_scroll_y,
+            )
+
+    remained_covered, remained_displaced, uncovered_at_tail = anyio.run(scenario)
+
+    assert remained_covered
+    assert remained_displaced
+    assert uncovered_at_tail
+
+
+def test_textual_session_operation_finishes_with_a_zero_height_viewport() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+
+        async with app_instance.run_test(size=(60, 6)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_switch_started("short-terminal")
+            await renderer.hydrate_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="message"),),
+                session_label="Short terminal",
+            )
+            renderer.session_switch_finished()
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            editor = app_instance.query_one("#input", Input)
+            return transcript.scrollable_content_region.height, indicator.is_open, editor.has_focus
+
+    viewport_height, indicator_open, editor_focused = anyio.run(scenario)
+
+    assert viewport_height == 0
+    assert not indicator_open
+    assert editor_focused
+
+
+def test_textual_session_operation_preserves_a_displaced_reader() -> None:
+    async def scenario() -> tuple[float, float, bool]:
+        app_instance, renderer = create_textual_tui()
+
+        async with app_instance.run_test(size=(80, 20)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_switch_started("displaced-reader")
+            await renderer.hydrate_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"message {index}")
+                    for index in range(120)
+                ),
+                session_label="Displaced reader",
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=10, animate=False)
+            await pilot.pause()
+            before = float(transcript.scroll_y)
+
+            renderer.session_switch_finished()
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            return before, float(transcript.scroll_y), transcript.is_following
+
+    before, after, following = anyio.run(scenario)
+
+    assert after == before
+    assert not following
+
+
 def test_textual_stale_history_settlement_cannot_finish_a_replacement_operation() -> None:
     async def scenario() -> tuple[bool, bool, bool]:
         app_instance, renderer = create_textual_tui()
