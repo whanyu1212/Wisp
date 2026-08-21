@@ -26,6 +26,11 @@ strict terminal-event ordering. When an event field or meaning changes, inspect 
 persistence paths, bump the relevant schema version, and test serialization through
 `model_dump_json()` and `wisp_event_from_json()`.
 
+Agent-loop and harness lifecycle rules that later refactors must preserve — one terminal per started
+turn, Ended/Ready pairing, request-boundary decisions, queue FIFO — are listed in
+`references/runtime-invariants.md`. Sequential execute cancellation is not a synthetic tool-result
+contract; named assertions live in `tests/agent_runtime.py`.
+
 Sessions persist messages and selected raw event types through independent paths. Check
 `PERSISTED_SESSION_EVENT_TYPES` before deciding whether a session schema also changes.
 
