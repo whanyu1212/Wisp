@@ -14,6 +14,7 @@ and pressure later slices to change production behavior.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 
 from wisp.events import ToolExecutionEnded, ToolResultReady, TurnCompleted, TurnStarted
@@ -87,13 +88,22 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
 
 
 def assert_settled_tool_calls(events: Sequence[object], call_ids: Sequence[str]) -> None:
-    """Require an Ended/Ready pair for each listed call.
+    """Require an Ended/Ready pair for each listed call occurrence.
 
-    Use for prepared-batch and truncated-batch paths that synthesize a terminal
-    result per requested call. Do not use for sequential execute cancellation.
+    `call_ids` is a bag, not a set: two entries with the same fallback ID
+    require two Ended/Ready pairs. Use for prepared-batch and truncated-batch
+    paths that synthesize a terminal result per requested call. Do not use for
+    sequential execute cancellation.
     """
 
     assert_tool_result_pairing(events)
-    ended = {event.call_id for event in events if isinstance(event, ToolExecutionEnded)}
-    missing = [call_id for call_id in call_ids if call_id not in ended]
+    ended_counts = Counter(
+        event.call_id for event in events if isinstance(event, ToolExecutionEnded)
+    )
+    expected_counts = Counter(call_ids)
+    missing = [
+        f"{call_id} ({ended_counts[call_id]}/{expected})"
+        for call_id, expected in expected_counts.items()
+        if ended_counts[call_id] < expected
+    ]
     assert not missing, f"missing terminal tool results for call_ids: {', '.join(missing)}"

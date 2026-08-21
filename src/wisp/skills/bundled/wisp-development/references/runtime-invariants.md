@@ -60,4 +60,5 @@ split the rules on purpose:
 - `assert_tool_result_pairing` — Ended/Ready pairing when a tool terminal is
   present; requested-but-unsettled calls are allowed.
 - `assert_settled_tool_calls` — only on paths that promise settlement
-  (prepared batches, truncated batches).
+  (prepared batches, truncated batches). Listed `call_ids` are counted by
+  occurrence, so a reused fallback ID from two rounds needs two terminals.

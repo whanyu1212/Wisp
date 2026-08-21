@@ -145,6 +145,26 @@ def test_assert_settled_tool_calls_rejects_missing_listed_call() -> None:
         assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
+def test_assert_settled_tool_calls_counts_reused_call_id_occurrences() -> None:
+    events = (*_completed_turn(), _ended("call-lookup-0"), _ready("call-lookup-0"))
+    with pytest.raises(AssertionError, match="missing terminal tool results"):
+        assert_settled_tool_calls(events, ("call-lookup-0", "call-lookup-0"))
+
+
+def test_assert_settled_tool_calls_accepts_matching_reused_occurrences() -> None:
+    events = (
+        TurnStarted(turn=1),
+        _ended("call-lookup-0"),
+        _ready("call-lookup-0"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        _ended("call-lookup-0"),
+        _ready("call-lookup-0"),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="tool_calls"),
+    )
+    assert_settled_tool_calls(events, ("call-lookup-0", "call-lookup-0"))
+
+
 class _NeverToolExecutor:
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         raise AssertionError(f"Unexpected tool call: {tool_call.name}")
