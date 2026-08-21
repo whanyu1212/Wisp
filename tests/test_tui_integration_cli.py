@@ -8478,6 +8478,32 @@ def test_textual_session_operation_waits_for_the_composed_tail(
     assert uncovered_at_tail
 
 
+def test_textual_session_operation_finishes_with_a_zero_height_viewport() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+
+        async with app_instance.run_test(size=(60, 6)) as pilot:
+            indicator = app_instance.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_switch_started("short-terminal")
+            await renderer.hydrate_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="message"),),
+                session_label="Short terminal",
+            )
+            renderer.session_switch_finished()
+            with anyio.fail_after(5):
+                while indicator.is_open:
+                    await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            editor = app_instance.query_one("#input", Input)
+            return transcript.scrollable_content_region.height, indicator.is_open, editor.has_focus
+
+    viewport_height, indicator_open, editor_focused = anyio.run(scenario)
+
+    assert viewport_height == 0
+    assert not indicator_open
+    assert editor_focused
+
+
 def test_textual_session_operation_preserves_a_displaced_reader() -> None:
     async def scenario() -> tuple[float, float, bool]:
         app_instance, renderer = create_textual_tui()

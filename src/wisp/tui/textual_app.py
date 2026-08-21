@@ -2910,15 +2910,15 @@ class TextualTui(App[None]):
             ):
                 return
 
-            layout_ready = (
-                self._history_render_depth == 0
-                and transcript.scrollable_content_region.height > 0
-                and not any(
-                    _transcript_child_layout_pending(child) for child in transcript.children
-                )
+            viewport_height = transcript.scrollable_content_region.height
+            layout_ready = self._history_render_depth == 0 and (
+                viewport_height <= 0
+                or not any(_transcript_child_layout_pending(child) for child in transcript.children)
             )
             at_required_offset = (
-                not transcript.is_following or transcript.scroll_y == transcript.max_scroll_y
+                viewport_height <= 0
+                or not transcript.is_following
+                or transcript.scroll_y == transcript.max_scroll_y
             )
             if not layout_ready or not at_required_offset:
                 previous_ready_geometry = None
