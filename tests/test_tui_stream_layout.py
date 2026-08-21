@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import anyio
 import pytest
+from textual import events
 from textual.containers import VerticalScroll
 from textual.geometry import Region, Size
 from textual.widget import Widget
 
 from wisp.tui.textual_app import TextualTui
-from wisp.tui.widgets import StreamMessage, Transcript
+from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
 
 pytestmark = pytest.mark.tui
 
@@ -109,3 +110,57 @@ def test_stream_message_still_reflows_after_terminal_resize() -> None:
 
     assert narrow_height > wide_height
     assert retained_source == source
+
+
+def test_shrinking_content_does_not_leave_an_unreachable_scroll_target() -> None:
+    """Wheel scrolling must keep working after content shrinks under the reader.
+
+    Textual steps the wheel from ``scroll_target_y``, but re-validates only
+    ``scroll_y`` when content shrinks. A target stranded above the new
+    ``max_scroll_y`` silently absorbs every wheel event -- each subtracts a step,
+    clamps back to the same row, and reports that nothing scrolled -- so the
+    transcript freezes until the overshoot is spent.
+    """
+
+    async def scenario() -> tuple[float, int, float, float]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            transcript = app.query_one("#transcript", Transcript)
+            filler = [LineMessage(f"line {index}", role="assistant") for index in range(80)]
+            for message in filler:
+                await transcript.mount(message)
+            surplus = [LineMessage(f"surplus {index}", role="assistant") for index in range(80)]
+            for message in surplus:
+                await transcript.mount(message)
+            await pilot.pause()
+
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            parked_target = transcript.scroll_target_y
+
+            # Collapse the content under the parked viewport, as a process card does
+            # when it replaces captured output with a bounded preview.
+            for message in surplus:
+                message.remove()
+            await pilot.pause()
+
+            before_scroll_y = transcript.scroll_y
+            await pilot._post_mouse_events([events.MouseScrollUp], widget=transcript, times=1)
+            for _ in range(20):
+                await pilot.pause()
+                if transcript.scroll_y != before_scroll_y:
+                    break
+            return (
+                parked_target,
+                transcript.max_scroll_y,
+                transcript.scroll_target_y,
+                before_scroll_y - transcript.scroll_y,
+            )
+
+    parked_target, max_scroll_y, scroll_target_y, rows_scrolled = anyio.run(scenario)
+
+    # The fixture must actually strand the target, or this proves nothing.
+    assert parked_target > max_scroll_y
+    # The stranded target is discarded, so the very next wheel event scrolls.
+    assert scroll_target_y <= max_scroll_y
+    assert rows_scrolled > 0
