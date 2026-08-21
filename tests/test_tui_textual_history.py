@@ -1024,6 +1024,7 @@ def test_history_controller_transfers_resumed_process_card_to_live_ownership() -
     controller.transfer_widget_to_live(cast(Widget, process_widget))
 
     assert controller._widgets == {}
+    assert controller._widget_entry_ids == {}
     assert process_widget in surface.widgets
 
 

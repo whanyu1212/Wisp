@@ -220,6 +220,7 @@ class TextualHistoryController:
         self._boundary_tool_calls: dict[str, _BoundaryToolCall] = {}
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
+        self._widget_entry_ids: dict[Widget, set[int]] = {}
         self._retained_process_groups: dict[int, _HistoricalProcessGroup] = {}
         self._retained_process_group_exclusions: frozenset[int] | None = None
         self._retained_process_groups_dirty = True
@@ -321,9 +322,7 @@ class TextualHistoryController:
     def transfer_widget_to_live(self, widget: Widget) -> None:
         """Detach historical aliases when a resumed process card becomes live-owned."""
 
-        transferred_entry_ids = {
-            entry_id for entry_id, candidate in self._widgets.items() if candidate is widget
-        }
+        transferred_entry_ids = set(self._widget_entry_ids.get(widget, ()))
         if transferred_entry_ids:
             self._transferred_history_entry_ids.setdefault(widget, set()).update(
                 transferred_entry_ids
@@ -335,11 +334,7 @@ class TextualHistoryController:
                 for entry_id in sorted(transferred_entry_ids)
                 if entry_id in retained_by_id
             )
-        self._widgets = {
-            entry_id: candidate
-            for entry_id, candidate in self._widgets.items()
-            if candidate is not widget
-        }
+        self._forget_projected_widget(widget)
 
     def forget_live_widget(self, widget: Widget) -> None:
         """Allow an evicted live entry to reappear through durable history paging."""
@@ -701,6 +696,7 @@ class TextualHistoryController:
         self._boundary_tool_calls.clear()
         self._window.clear()
         self._widgets.clear()
+        self._widget_entry_ids.clear()
         self._retained_process_groups.clear()
         self._retained_process_group_exclusions = None
         self._retained_process_groups_dirty = True
@@ -866,10 +862,44 @@ class TextualHistoryController:
                 )
         if mounted is None:
             return
-        self._widgets[item.id] = mounted
+        self._remember_widget(item.id, mounted)
         if process_group is not None:
             for member_id in process_group.member_entry_ids:
-                self._widgets[member_id] = mounted
+                self._remember_widget(member_id, mounted)
+
+    def _remember_widget(self, entry_id: int, widget: Widget) -> None:
+        """Project one retained entry onto a widget with a reverse alias index."""
+
+        prior = self._widgets.get(entry_id)
+        if prior is widget:
+            return
+        if prior is not None:
+            prior_ids = self._widget_entry_ids[prior]
+            prior_ids.discard(entry_id)
+            if not prior_ids:
+                del self._widget_entry_ids[prior]
+        self._widgets[entry_id] = widget
+        self._widget_entry_ids.setdefault(widget, set()).add(entry_id)
+
+    def _forget_widget_entry(self, entry_id: int) -> Widget | None:
+        """Remove one projected entry ID while preserving its remaining aliases."""
+
+        widget = self._widgets.pop(entry_id, None)
+        if widget is None:
+            return None
+        aliases = self._widget_entry_ids[widget]
+        aliases.discard(entry_id)
+        if not aliases:
+            del self._widget_entry_ids[widget]
+        return widget
+
+    def _forget_projected_widget(self, widget: Widget) -> set[int]:
+        """Remove every retained entry alias for one projected widget."""
+
+        aliases = self._widget_entry_ids.pop(widget, set())
+        for entry_id in aliases:
+            self._widgets.pop(entry_id, None)
+        return aliases
 
     def _reconcile(self) -> None:
         """Apply only the changed edges of the retained history window."""
@@ -891,27 +921,15 @@ class TextualHistoryController:
             has_newer=not self._window.is_at_latest or not self._window.latest_is_retained,
         )
         for item_id, widget in tuple(self._widgets.items()):
-            if item_id not in self._widgets:
+            if item_id not in self._widgets or item_id in visible_ids:
                 continue
-            if item_id not in visible_ids:
-                aliases = [
-                    other_id
-                    for other_id, other_widget in self._widgets.items()
-                    if other_widget is widget
-                ]
-                if any(other_id in visible_ids for other_id in aliases):
-                    del self._widgets[item_id]
-                    reposition_widgets.add(widget)
-                    continue
-                if len(aliases) > 1:
-                    if item_id != min(aliases):
-                        del self._widgets[item_id]
-                        continue
-                    for alias in aliases:
-                        del self._widgets[alias]
-                else:
-                    del self._widgets[item_id]
-                self._surface.remove_historical_widget(widget)
+            aliases = self._widget_entry_ids[widget]
+            if not aliases.isdisjoint(visible_ids):
+                self._forget_widget_entry(item_id)
+                reposition_widgets.add(widget)
+                continue
+            self._forget_projected_widget(widget)
+            self._surface.remove_historical_widget(widget)
 
         for index, item in enumerate(visible):
             if item.id in live_owned_history_entry_ids:
@@ -948,7 +966,7 @@ class TextualHistoryController:
             if process_group is not None and item.id != process_group.first_entry_id:
                 first_widget = self._widgets.get(process_group.first_entry_id)
                 if first_widget is not None:
-                    self._widgets[item.id] = first_widget
+                    self._remember_widget(item.id, first_widget)
                 continue
             before = next(
                 (
@@ -980,17 +998,13 @@ class TextualHistoryController:
                     }
                     for widget in superseded:
                         self._surface.remove_historical_widget(widget)
-                    if superseded:
-                        self._widgets = {
-                            entry_id: widget
-                            for entry_id, widget in self._widgets.items()
-                            if widget not in superseded
-                        }
+                    for superseded_widget in superseded:
+                        self._forget_projected_widget(superseded_widget)
             if mounted is not None:
-                self._widgets[item.id] = mounted
+                self._remember_widget(item.id, mounted)
                 if process_group is not None:
                     for member_id in process_group.member_entry_ids:
-                        self._widgets[member_id] = mounted
+                        self._remember_widget(member_id, mounted)
 
     def _historical_process_groups(
         self,
