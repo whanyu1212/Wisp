@@ -63,3 +63,32 @@ def test_tui_long_session_scenario_reports_complete_history_hydration() -> None:
     assert not report.first_uncovered_has_pending_layout
     assert '"session_entry_count": 12' in report.to_json()
     assert '"first_uncovered_at_tail": true' in report.to_json()
+
+
+def test_tui_long_session_hydration_mounts_a_bounded_window() -> None:
+    """Resume must mount a bounded window, not one widget per retained entry.
+
+    Mount cost is linear in *mounted* widgets, so mounting the whole transcript made
+    resume scale with session length. Durable history stays complete and every entry
+    stays retained; only the mounted slice is bounded.
+    """
+
+    report = anyio.run(
+        run_scenario,
+        ScenarioConfig(
+            message_count=400,
+            page_size=100,
+            stream_chunks=2,
+            stream_interval_seconds=0.001,
+        ),
+    )
+
+    # Enough entries that a regression to complete mounting is unambiguous.
+    assert report.hydrated_entry_count > TUI_TRANSCRIPT_WINDOW_SIZE * 2
+    # Durable history is neither truncated nor dropped from memory.
+    assert report.represented_row_count == report.persisted_message_count
+    assert report.retained_entry_count == report.hydrated_entry_count
+    # The mounted slice stays bounded regardless of how much history was retained.
+    assert report.mounted_widget_count <= TUI_TRANSCRIPT_WINDOW_SIZE + 1
+    # Scrolling still never leaves Textual's visible-only fast path (#427).
+    assert report.wheel_up_complete_arrangement_count == 0

@@ -278,10 +278,18 @@ def _messages(
 
 
 def test_history_controller_hydrates_complete_history_in_bounded_batches() -> None:
+    """Hydration retains every entry but mounts only the bounded tail window.
+
+    Mount cost is linear in mounted widgets, so mounting one widget per retained
+    entry made resume scale with session length. Durable history stays complete in
+    memory; older entries mount on demand when the reader pages back.
+    """
+
     async def scenario() -> tuple[
         list[str],
         list[tuple[int, int]],
         list[int],
+        int,
         int,
         int,
         int,
@@ -307,6 +315,7 @@ def test_history_controller_hydrates_complete_history_in_bounded_batches() -> No
             surface.render_waits,
             surface.refresh_waits,
             surface.follow_requests,
+            controller.retained_entry_count,
         )
 
     (
@@ -318,13 +327,19 @@ def test_history_controller_hydrates_complete_history_in_bounded_batches() -> No
         render_waits,
         refresh_waits,
         follow_requests,
+        retained_entry_count,
     ) = anyio.run(scenario)
 
-    assert labels == [f"assistant: message {index}" for index in range(300)]
-    assert progress == [(0, 300), (128, 300), (256, 300), (300, 300)]
-    assert batch_mount_counts == [128, 128, 44, 1]
-    assert render_starts == render_finishes == render_waits == 4
-    assert refresh_waits == 5
+    # Every entry is retained, so paging back never re-reads the durable session.
+    assert retained_entry_count == 300
+    # Only the newest window is mounted, and it fits in a single mount batch.
+    assert labels == [
+        f"assistant: message {index}" for index in range(300 - TUI_TRANSCRIPT_WINDOW_SIZE, 300)
+    ]
+    assert progress == [(0, TUI_TRANSCRIPT_WINDOW_SIZE), (TUI_TRANSCRIPT_WINDOW_SIZE,) * 2]
+    assert batch_mount_counts == [TUI_TRANSCRIPT_WINDOW_SIZE, 1]
+    assert render_starts == render_finishes == render_waits == 2
+    assert refresh_waits == 3
     assert follow_requests == 1
 
 

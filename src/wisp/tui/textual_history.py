@@ -404,14 +404,19 @@ class TextualHistoryController:
         """Prepare and mount a complete transcript after atomic setup."""
 
         retained = self._retain(entries)
-        capacity = max(1, len(retained))
+        # Retain every converted entry so durable history stays complete and reachable
+        # in memory, but keep the ordinary mounted-window bound. Mount cost is linear
+        # in *mounted* widgets (~4.3 ms each), so mounting the whole transcript made
+        # resume scale with session length: a real 5,397-message session mounted 2,371
+        # widgets in ~10.3 s. Mounting only the tail window costs ~0.3 s and is flat in
+        # session length; older entries mount on demand through the existing window
+        # paging below, without re-reading the durable session.
         self._window = TranscriptWindow(
-            capacity=capacity,
-            shift=capacity,
-            retained_capacity=capacity,
+            retained_capacity=max(self._retained_capacity, len(retained)),
         )
         self._complete_history_retained = True
         self._window.replace(retained)
+        self._window.show_latest()
         visible = self._window.visible
         process_groups = self._historical_process_groups(visible)
         roots = tuple(
@@ -443,7 +448,12 @@ class TextualHistoryController:
             finally:
                 self._surface.finish_history_render()
             await self._surface.wait_for_complete_history_batch()
-        self._surface.set_history_window_available(has_older=False, has_newer=False)
+        # Older entries are retained but not mounted, so the reader can page back into
+        # them. Everything newer is already mounted and the durable tail is retained.
+        self._surface.set_history_window_available(
+            has_older=not self._window.is_at_oldest,
+            has_newer=False,
+        )
         self._surface.return_transcript_to_latest()
         await self._surface.wait_for_history_refresh()
         await self._surface.wait_for_history_refresh()
