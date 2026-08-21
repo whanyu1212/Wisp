@@ -8,15 +8,15 @@ rendering correctness.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-# Match conservatively anywhere on a line: CommonMark reference definitions may
-# be nested behind block-quote or list container markers. False positives only
-# choose the safe complete-parse path; false negatives can stale an earlier link.
-_REFERENCE_DEFINITION_RE = re.compile(r"(?m)\[[^\]\n]+\]:[ \t]*(?:\S|$)")
+# Every CommonMark reference definition contains an adjacent closing bracket and
+# colon, including escaped closing brackets and definitions nested in containers.
+# False positives only choose the safe complete-parse path; false negatives can
+# stale an earlier link, so keep this detector deliberately broad.
+_REFERENCE_DEFINITION_MARKER = "]:"
 
 
 class _ParsedMarkdown(Protocol):
@@ -66,7 +66,7 @@ class IncrementalMarkdownState:
         if self._stable_source_chars > len(source):
             self.reset()
         mutable_source = source[self._stable_source_chars :]
-        if _REFERENCE_DEFINITION_RE.search(mutable_source):
+        if _REFERENCE_DEFINITION_MARKER in mutable_source:
             # A late reference definition can change links in an already stable
             # prefix. Keep such uncommon documents on Rich's complete parse path.
             self._full_rebuild_only = True

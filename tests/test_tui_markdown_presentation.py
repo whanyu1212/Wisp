@@ -509,17 +509,19 @@ def test_streaming_markdown_reuses_stable_blocks_with_one_shot_visual_parity() -
 
 
 @pytest.mark.parametrize(
-    "definition",
+    ("reference", "definition"),
     [
-        "[target]: https://example.com/reference\n",
-        "> [target]: https://example.com/reference\n",
-        "- [target]: https://example.com/reference\n",
+        ("target", "[target]: https://example.com/reference\n"),
+        ("target", "> [target]: https://example.com/reference\n"),
+        ("target", "- [target]: https://example.com/reference\n"),
+        (r"foo\]", "[foo\\]]: https://example.com/reference\n"),
     ],
 )
 def test_streaming_markdown_falls_back_for_late_reference_definitions(
+    reference: str,
     definition: str,
 ) -> None:
-    initial = "[linked text][target]\n\nMiddle paragraph.\n\n"
+    initial = f"[linked text][{reference}]\n\nMiddle paragraph.\n\n"
 
     async def scenario() -> tuple[bool, int, int, str]:
         app = TextualTui()
