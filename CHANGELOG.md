@@ -12,6 +12,15 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+## 0.1.0rc5 — 2026-08-22
+
+- Loaded provider and MCP SDKs only when selected or configured, reducing CLI and TUI startup time
+  without changing the typed provider exports, registration order, or runtime behavior.
+- Mounted a bounded history window when resuming long sessions and discarded unreachable scroll
+  targets after transcript content shrinks, keeping complete retained history navigable while
+  avoiding long mount stalls and frozen wheel input.
+- Coalesced Textual presentation timers and settled display updates, and centralized tool and process
+  card identity across live and historical views, reducing redundant transcript work.
 - Reused completed Markdown blocks and closed code-fence highlighting while assistant responses
   stream, reducing repeated parsing and syntax-highlighting work without changing final rendering.
 - Added privacy-safe, opt-in TUI hotpath diagnostics and reproducible benchmark probes for Markdown
