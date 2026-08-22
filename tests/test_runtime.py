@@ -50,6 +50,14 @@ class _ClosableFakeProvider(FakeProvider):
         self.close_count += 1
 
 
+class _NamedFakeProvider(FakeProvider):
+    """A fake provider that reports a caller-chosen name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+
 def test_provider_registry_registers_and_resolves_provider() -> None:
     registry = ProviderRegistry()
     provider = FakeProvider()
@@ -58,6 +66,55 @@ def test_provider_registry_registers_and_resolves_provider() -> None:
 
     assert registry.get("fake") is provider
     assert registry.names() == ("fake",)
+
+
+def test_provider_registry_defers_construction_until_first_use() -> None:
+    registry = ProviderRegistry()
+    constructed: list[str] = []
+
+    def factory() -> FakeProvider:
+        constructed.append("fake")
+        return FakeProvider()
+
+    registry.register_factory("fake", factory)
+
+    assert registry.names() == ("fake",)
+    assert constructed == []
+
+    provider = registry.get("fake")
+
+    assert constructed == ["fake"]
+    assert registry.get("fake") is provider
+
+
+def test_provider_registry_keeps_registration_order_across_construction() -> None:
+    """Order must not depend on which providers happen to be constructed.
+
+    A deferred provider moves between the registry's two maps when it is first
+    requested, so ordering derived from those maps would shift under the caller.
+    """
+
+    registry = ProviderRegistry()
+    registry.register_factory("first", lambda: _NamedFakeProvider("first"))
+    registry.register(_NamedFakeProvider("second"))
+    registry.register_factory("third", lambda: _NamedFakeProvider("third"))
+
+    assert registry.names() == ("first", "second", "third")
+
+    registry.get("third")
+
+    assert registry.names() == ("first", "second", "third")
+
+
+def test_provider_registry_rejects_a_factory_that_renames_its_provider() -> None:
+    registry = ProviderRegistry()
+    registry.register_factory("declared", lambda: _NamedFakeProvider("actual"))
+
+    with pytest.raises(ValueError, match="produced provider 'actual'"):
+        registry.get("declared")
+
+    # The registration survives, so a corrected factory is still reachable.
+    assert registry.names() == ("declared",)
 
 
 def test_provider_registry_raises_for_unknown_provider() -> None:

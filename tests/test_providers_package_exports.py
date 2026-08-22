@@ -9,6 +9,9 @@ not be caught by any other test in this suite.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import wisp.providers as providers_package
 from wisp.providers import (
     AnthropicProvider,
@@ -44,3 +47,44 @@ def test_all_built_in_provider_names_are_listed_in_dunder_all() -> None:
         "OpenAICompatibleProvider",
         "XAIProvider",
     } <= set(providers_package.__all__)
+
+
+def test_importing_the_cli_does_not_load_provider_sdks() -> None:
+    """Importing Wisp must not pay for every vendor SDK.
+
+    Each provider module imports its SDK at module scope, and those imports
+    dominate cold start (~1.2 s) even though a run selects at most one provider.
+    A subprocess is required because the SDKs may already be imported by an
+    earlier test in this process.
+    """
+
+    program = (
+        "import sys; import wisp.cli; "
+        "print(','.join(m for m in ('google.genai', 'anthropic', 'openai') "
+        "if m in sys.modules))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == ""
+
+
+def test_provider_classes_remain_importable_from_the_package() -> None:
+    """Deferring the imports must not remove the embedder-facing export surface."""
+
+    program = (
+        "from wisp.providers import AnthropicProvider, GoogleProvider, OpenAIProvider; "
+        "print(AnthropicProvider.name, GoogleProvider.name, OpenAIProvider.name)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.split() == ["anthropic", "google", "openai"]

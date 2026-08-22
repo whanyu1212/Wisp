@@ -42,6 +42,22 @@ class ExtensionAPI:
 
         self._providers.register(provider, replace=replace)
 
+    def register_provider_factory(
+        self,
+        name: str,
+        factory: Callable[[], Provider],
+        *,
+        replace: bool = True,
+    ) -> None:
+        """Register a provider constructed on first use.
+
+        Prefer this for providers whose module imports a vendor SDK: the import is
+        then paid only by a run that selects the provider, instead of by every
+        process at startup.
+        """
+
+        self._providers.register_factory(name, factory, replace=replace)
+
     def register_tool(
         self,
         tool: Tool,
