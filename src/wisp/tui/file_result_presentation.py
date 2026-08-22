@@ -63,8 +63,6 @@ class FileResultPresentation:
     def expand_label(self) -> str:
         count = self.retained_count if self.truncated else self.total_count
         if self.kind == "grep":
-            if self.truncated and count == 0 and self.can_expand:
-                return "show context"
             noun = "match" if count == 1 else "matches"
         elif self.kind == "find":
             noun = "file" if count == 1 else "files"
@@ -186,11 +184,11 @@ def _build_grep(
             )
         return None
     total_count = _summary_count(summary)
-    raw_context_lines = arguments.get("context")
-    context_lines = (
-        raw_context_lines if type(raw_context_lines) is int and raw_context_lines >= 0 else 0
-    )
-    if not _grep_context_is_consistent(grouped, context_lines=context_lines):
+    # Context records cannot be distinguished from newline-containing POSIX
+    # filename fragments in the flattened legacy format. Match-only output is
+    # count-validated below; context layouts remain literal until the runtime
+    # transports explicit record metadata.
+    if any(row.kind == "context" for rows in grouped.values() for row in rows):
         if truncated:
             return FileResultPresentation(
                 kind="grep",
@@ -218,26 +216,6 @@ def _build_grep(
     )
 
 
-def _grep_context_is_consistent(
-    grouped: Mapping[str, list[FileResultRow]],
-    *,
-    context_lines: int,
-) -> bool:
-    for rows in grouped.values():
-        match_lines = tuple(row.line_number for row in rows if row.kind == "match")
-        context_rows = tuple(row for row in rows if row.kind == "context")
-        if not context_rows:
-            continue
-        if not match_lines or context_lines == 0:
-            return False
-        if any(
-            all(abs(row.line_number - match_line) > context_lines for match_line in match_lines)
-            for row in context_rows
-        ):
-            return False
-    return True
-
-
 def _build_find(
     output: str,
     summary: str,
@@ -251,7 +229,11 @@ def _build_find(
             truncated=truncated,
             total_count=0,
         )
-    retained_paths = _result_lines(output, strip_truncation_marker=truncated)
+    retained_paths = _result_lines(
+        output,
+        preserve_empty_records=True,
+        strip_truncation_marker=truncated,
+    )
     # Byte truncation appends its marker on a fresh line even when it cut through
     # the preceding filename. Persisted events do not record that boundary, so the
     # terminal record is not safe to present as a real path. That includes a record
@@ -260,7 +242,7 @@ def _build_find(
     if truncated and retained_paths:
         retained_paths = retained_paths[:-1]
     paths = retained_paths
-    if not paths:
+    if not paths or any(not path for path in paths):
         return None
     total_count = _summary_count(summary)
     # POSIX filenames may contain newlines, while the built-in find transport is
@@ -379,11 +361,17 @@ def _result_lines(
     output: str,
     *,
     keep_empty: bool = False,
+    preserve_empty_records: bool = False,
     strip_truncation_marker: bool = False,
 ) -> tuple[str, ...]:
     normalized = output.replace("\r\n", "\n").replace("\r", "\n")
     if not normalized:
         return ()
+    if preserve_empty_records:
+        lines = normalized.split("\n")
+        if strip_truncation_marker and _is_truncation_marker(lines[-1]):
+            lines.pop()
+        return tuple(lines)
     if keep_empty:
         # Tool output preserves the source's final line terminator. Remove exactly
         # that delimiter without collapsing preceding blank source rows: ``a\n`` is

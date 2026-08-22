@@ -146,17 +146,17 @@ def test_resolved_card_keeps_semantic_call_arguments_in_header() -> None:
 def test_file_result_card_expands_from_summary_to_grouped_rows() -> None:
     detail = render_tool_result(
         "grep",
-        {"pattern": "TODO", "path": "src", "context": 1},
-        "src/a.py:4:TODO first\nsrc/a.py-5-context",
+        {"pattern": "TODO", "path": "src"},
+        "src/a.py:4:TODO first",
         is_error=False,
         exit_code=None,
         summary="grep: 1 match",
     )
-    card = ToolCard("grep", {"pattern": "TODO", "path": "src", "context": 1})
+    card = ToolCard("grep", {"pattern": "TODO", "path": "src"})
     card.set_state(
         "done",
         detail=detail,
-        full_output="grep: 1 match\nsrc/a.py:4:TODO first\nsrc/a.py-5-context",
+        full_output="grep: 1 match\nsrc/a.py:4:TODO first",
     )
 
     collapsed = _rendered(card)
@@ -168,7 +168,6 @@ def test_file_result_card_expands_from_summary_to_grouped_rows() -> None:
     expanded = _rendered(card)
     assert "src/a.py · 1 match" in expanded
     assert "4 │ TODO first" in expanded
-    assert "5 │ context" in expanded
     assert "▾ collapse (Enter)" in expanded
 
     card._repaint(width=40)

@@ -9,24 +9,24 @@ from wisp.tui.file_result_presentation import (
 )
 
 
-def test_grep_groups_rows_by_file_and_distinguishes_context() -> None:
+def test_grep_groups_matches_by_file() -> None:
     presentation = build_file_result_presentation(
         "grep",
-        {"pattern": "TODO", "context": 1},
-        "src/a.py-9-before\nsrc/a.py:10:TODO first\n--\nsrc/b.py:4:TODO second",
+        {"pattern": "TODO"},
+        "src/a.py:10:TODO first\nsrc/b.py:4:TODO second",
         "grep: 2 matches",
     )
 
     assert presentation is not None
     assert [group.path for group in presentation.groups] == ["src/a.py", "src/b.py"]
-    assert [row.kind for row in presentation.groups[0].rows] == ["context", "match"]
+    assert [row.kind for row in presentation.groups[0].rows] == ["match"]
     assert presentation.groups[0].match_count == 1
-    assert presentation.groups[0].rows[1].highlight_ranges == ((0, 4),)
+    assert presentation.groups[0].rows[0].highlight_ranges == ((0, 4),)
 
     collapsed = render_file_result_presentation(presentation, width=80, expanded=False)
     expanded = render_file_result_presentation(presentation, width=80, expanded=True)
     assert collapsed.plain == "grep: 2 matches"
-    assert "src/a.py · 1 match\n 9 │ before\n10 │ TODO first" in expanded.plain
+    assert "src/a.py · 1 match\n10 │ TODO first" in expanded.plain
     assert "src/b.py · 1 match\n4 │ TODO second" in expanded.plain
     todo_start = expanded.plain.index("TODO first")
     assert any(
@@ -125,6 +125,24 @@ def test_find_with_newline_filename_uses_literal_fallback() -> None:
     )
 
     assert presentation is None
+
+
+def test_find_with_leading_or_trailing_newline_filename_uses_literal_fallback() -> None:
+    leading = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "\nfoo",
+        "find: 1 file",
+    )
+    trailing = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "foo\n",
+        "find: 1 file",
+    )
+
+    assert leading is None
+    assert trailing is None
 
 
 def test_read_uses_requested_offset_for_line_number_gutter() -> None:
@@ -288,6 +306,17 @@ def test_grep_context_shaped_newline_filename_uses_literal_fallback() -> None:
         "grep",
         {"pattern": "actual", "context": 1},
         "foo-1-\nbar:2:actual",
+        "grep: 1 match",
+    )
+
+    assert presentation is None
+
+
+def test_grep_same_path_context_shaped_filename_uses_literal_fallback() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "actual", "context": 1},
+        "foo-2-\nfoo:1:actual",
         "grep: 1 match",
     )
 
