@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Sequence
 
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
@@ -125,16 +125,11 @@ class ProviderRegistry:
 
         return tuple(self.get(name) for name in self._names())
 
-    def deferred_factory(self, name: str) -> Callable[[], Provider] | None:
-        """Return the factory for a still-unconstructed provider, if any."""
-
-        return self._factories.get(name)
-
     def replace_all(
         self,
         providers: Iterable[Provider],
         *,
-        deferred: Mapping[str, Callable[[], Provider]] | None = None,
+        order: Sequence[str] | None = None,
     ) -> None:
         """Atomically replace provider instances while preserving this registry.
 
@@ -144,15 +139,13 @@ class ProviderRegistry:
         """
 
         replacements = {provider.name: provider for provider in providers}
-        # A provider neither side has constructed transfers as its factory, so the
-        # adopting runtime keeps the deferral instead of building a client that a
-        # refresh may never need.
-        factories = dict(deferred or {})
-        for name in factories:
-            replacements.pop(name, None)
         self._providers = replacements
-        self._factories = factories
-        self._order = [*replacements, *(n for n in factories if n not in replacements)]
+        self._factories = {}
+        # `names()` promises registration order, which the caller knows and this
+        # mapping does not; fall back to the replacement order when none is given.
+        ordered = [name for name in (order or ()) if name in replacements]
+        ordered.extend(name for name in replacements if name not in ordered)
+        self._order = ordered
 
 
 class ToolRegistry:

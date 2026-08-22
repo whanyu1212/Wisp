@@ -117,6 +117,33 @@ def test_provider_registry_rejects_a_factory_that_renames_its_provider() -> None
     assert registry.names() == ("declared",)
 
 
+def test_configuration_refresh_adopts_a_candidate_that_never_built_its_provider() -> None:
+    """A deferred candidate still owns its configuration.
+
+    Skipping names the candidate has not constructed would silently retain the live
+    runtime's stale adapter across a trusted refresh, ignoring the candidate's new
+    auth path or retry policy.
+    """
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        # The live runtime has already selected and built a provider; the candidate
+        # carries the new configuration but has not constructed anything yet.
+        stale = live.providers.get("anthropic")
+        assert candidate.providers.constructed().get("anthropic") is None
+
+        adopted = {
+            provider.name: provider for provider in live.providers_for_configuration(candidate)
+        }
+
+        assert adopted["anthropic"] is not stale
+
+    anyio.run(scenario)
+
+
 def test_provider_registry_raises_for_unknown_provider() -> None:
     registry = ProviderRegistry()
 
