@@ -210,8 +210,21 @@ def test_truncated_expand_label_counts_only_retained_paths() -> None:
 
     assert presentation is not None
     assert presentation.total_count == 3
-    assert presentation.retained_count == 2
-    assert presentation.expand_label == "show 2 files"
+    assert presentation.retained_count == 1
+    assert presentation.expand_label == "show 1 file"
+
+
+def test_truncated_find_omits_a_potentially_partial_terminal_path() -> None:
+    presentation = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "src/complete.py\nsrc/partial-na\n[truncated]",
+        "find: 3 files (+ more)",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    assert presentation.paths == ("src/complete.py",)
 
 
 def test_truncated_context_only_grep_uses_context_expand_label() -> None:
