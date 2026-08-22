@@ -15,7 +15,7 @@ emit an event schema much newer than v34.
 future packages are not defined here.
 
 Package releases use semantic versioning expressed with Python's PEP 440 spelling. For example,
-`0.1.0rc4` is the fourth release candidate for `0.1.0`.
+`0.1.0rc5` is the fifth release candidate for `0.1.0`.
 
 - Patch releases preserve the documented public API. They may correct behavior that contradicts a
   documented contract; consumers that relied on the defect may observe the correction.

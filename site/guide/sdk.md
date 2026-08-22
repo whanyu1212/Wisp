@@ -19,7 +19,7 @@ Wisp requires Python 3.12 or newer. Add the release candidate to an application 
 than installing it only as a command-line tool:
 
 ```bash
-uv add "wisp-ai==0.1.0rc4"
+uv add "wisp-ai==0.1.0rc5"
 ```
 
 The supported embedding imports start here:
