@@ -73,6 +73,17 @@ def test_grep_ambiguous_flat_record_uses_generic_fallback() -> None:
     assert presentation is None
 
 
+def test_grep_unbounded_line_number_uses_generic_fallback() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "value"},
+        f"src/a.py:{'9' * 5_000}:value",
+        "grep: 1 match",
+    )
+
+    assert presentation is None
+
+
 def test_grep_with_newline_filename_uses_literal_fallback() -> None:
     presentation = build_file_result_presentation(
         "grep",
@@ -260,7 +271,7 @@ def test_truncated_context_only_grep_uses_context_expand_label() -> None:
     presentation = build_file_result_presentation(
         "grep",
         {"pattern": "match"},
-        "src/a.py-1-before\n[truncated]",
+        "src/a.py-1-before\nsrc/a.py-2-nearer\n[truncated]",
         "grep: 1 match (+ more)",
         truncated=True,
     )
@@ -281,7 +292,21 @@ def test_truncated_result_reports_only_counts_known_from_summary() -> None:
 
     assert presentation is not None
     expanded = render_file_result_presentation(presentation, width=80, expanded=True)
-    assert expanded.plain.endswith("… at least 3 more matches")
+    assert expanded.plain.endswith("… at least 4 more matches")
+
+
+def test_truncated_grep_omits_a_filename_shaped_terminal_record() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "match"},
+        "foo:123:bar\n[truncated]",
+        "grep: 1 match (+ more)",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    assert presentation.groups == ()
+    assert presentation.can_expand is False
 
 
 def test_truncated_result_uses_neutral_footer_without_hidden_count() -> None:

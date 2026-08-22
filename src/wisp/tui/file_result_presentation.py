@@ -157,7 +157,13 @@ def _build_grep(
     grouped: dict[str, list[FileResultRow]] = {}
     highlight_pattern = _grep_highlight_pattern(arguments)
     ignore_case = arguments.get("ignore_case") is True
-    for line in _result_lines(output, strip_truncation_marker=truncated):
+    retained_lines = _result_lines(output, strip_truncation_marker=truncated)
+    # As with find paths, byte truncation can cut the real record delimiter away
+    # and leave a delimiter-shaped filename prefix. Persisted output carries no
+    # boundary metadata, so the terminal record is not safe to structure.
+    if truncated and retained_lines:
+        retained_lines = retained_lines[:-1]
+    for line in retained_lines:
         if line == "--":
             continue
         parsed = _parse_grep_record(
@@ -292,7 +298,12 @@ def _parse_grep_record(
     path = line[: match.start()]
     if not path:
         return None
-    number = int(match.group("number"))
+    try:
+        number = int(match.group("number"))
+    except ValueError:
+        # Python rejects unbounded decimal conversions; malformed or
+        # filename-shaped records should remain an ordinary literal fallback.
+        return None
     text = line[match.end() :]
     kind: FileRowKind = "match" if match.group("separator") == ":" else "context"
     ranges = (
