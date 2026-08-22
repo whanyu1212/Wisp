@@ -107,6 +107,17 @@ def test_read_uses_requested_offset_for_line_number_gutter() -> None:
     assert "src/app.py\n20 │ first\n21 │ second" in expanded.plain
 
 
+def test_read_without_call_metadata_does_not_fabricate_source_locations() -> None:
+    presentation = build_file_result_presentation(
+        "read",
+        {},
+        "first\nsecond\n",
+        "read 2 lines from src/app.py",
+    )
+
+    assert presentation is None
+
+
 def test_read_preserves_trailing_blank_source_rows() -> None:
     presentation = build_file_result_presentation(
         "read",
@@ -201,6 +212,20 @@ def test_truncated_expand_label_counts_only_retained_paths() -> None:
     assert presentation.total_count == 3
     assert presentation.retained_count == 2
     assert presentation.expand_label == "show 2 files"
+
+
+def test_truncated_context_only_grep_uses_context_expand_label() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "match"},
+        "src/a.py-1-before\n[truncated]",
+        "grep: 1 match (+ more)",
+        truncated=True,
+    )
+
+    assert presentation is not None and presentation.can_expand
+    assert presentation.retained_count == 0
+    assert presentation.expand_label == "show context"
 
 
 def test_truncated_result_reports_only_counts_known_from_summary() -> None:

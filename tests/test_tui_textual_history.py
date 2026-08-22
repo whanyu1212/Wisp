@@ -751,6 +751,44 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert cards[0].status == "cancelled"
 
 
+def test_history_controller_defers_read_locations_until_boundary_call_arrives() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    result = HistoricalToolCard(
+        card_id="history:result",
+        name="read",
+        arguments={},
+        output="first\nsecond\n",
+        is_error=False,
+        tool_call_id="call-1",
+        call_missing=True,
+        summary="read 2 lines from src/app.py",
+    )
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:call-1",
+        name="read",
+        arguments={"path": "src/app.py", "offset": 500},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="call-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((result,), session_label="First")
+
+    card = surface.historical_cards[result.card_id]
+    assert isinstance(card.detail, Content)
+    assert card.detail.plain == result.summary
+
+    controller.prepend_entries((missing_call,))
+
+    assert isinstance(card.detail, FileResultPresentation)
+    group = card.detail.groups[0]
+    assert group.path == "src/app.py"
+    assert [row.line_number for row in group.rows] == [500, 501]
+
+
 def test_history_controller_pairs_split_process_call_before_grouping() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

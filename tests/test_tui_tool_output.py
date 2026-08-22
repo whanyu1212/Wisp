@@ -396,7 +396,7 @@ def test_render_tool_result_keeps_markup_like_summary_literal() -> None:
 
     rendered = render_tool_result(
         "read",
-        {},
+        {"path": "ignored.txt"},
         "ignored",
         is_error=False,
         exit_code=None,

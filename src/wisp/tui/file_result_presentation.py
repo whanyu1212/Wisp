@@ -63,6 +63,8 @@ class FileResultPresentation:
     def expand_label(self) -> str:
         count = self.retained_count if self.truncated else self.total_count
         if self.kind == "grep":
+            if self.truncated and count == 0 and self.can_expand:
+                return "show context"
             noun = "match" if count == 1 else "matches"
         elif self.kind == "find":
             noun = "file" if count == 1 else "files"
@@ -233,7 +235,9 @@ def _build_read(
             total_count=_read_summary_count(summary),
         )
     raw_path = arguments.get("path")
-    path = raw_path if isinstance(raw_path, str) and raw_path else "(output)"
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = raw_path
     raw_offset = arguments.get("offset")
     offset = raw_offset if type(raw_offset) is int and raw_offset > 0 else 1
     rows = tuple(
