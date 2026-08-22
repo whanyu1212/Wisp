@@ -216,6 +216,30 @@ def test_direct_registry_override_of_deferred_provider_survives_refresh() -> Non
     anyio.run(scenario)
 
 
+def test_candidate_extension_override_remains_extension_owned_after_adoption() -> None:
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        override = _ClosableFakeProvider("openai")
+        candidate.providers.register(override)
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+        assert live.providers.get("openai") is override
+
+        next_candidate = await build_runtime()
+        await live.adopt_provider_configuration(next_candidate)
+        await next_candidate.aclose()
+
+        assert live.providers.get("openai") is override
+        await live.aclose()
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
 def test_live_only_deferred_provider_remains_owned_across_refreshes() -> None:
     def runtime_with_deferred(name: str, provider: _ClosableFakeProvider) -> WispRuntime:
         registry = ProviderRegistry()

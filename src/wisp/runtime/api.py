@@ -280,10 +280,17 @@ class WispRuntime:
             adopted_provider = adopted_by_name.get(name)
             if adopted_provider is None or id(adopted_provider) not in retained_ids:
                 continue
-            if candidate_constructed.get(name) is not adopted_provider:
+            candidate_registration_unchanged = candidate.providers.registration_token(
+                name
+            ) is candidate._configured_registrations.get(name)
+            if (
+                candidate_constructed.get(name) is not adopted_provider
+                or not candidate_registration_unchanged
+            ):
                 # The candidate stayed deferred because a live extension override
-                # won, or its own provider was otherwise masked. It owns no adopted
-                # instance to transfer; leave any constructed candidate to be closed.
+                # won, its provider was otherwise masked, or the selected instance is
+                # itself an extension override. None is configured ownership to
+                # transfer; extension-owned instances remain outside runtime cleanup.
                 continue
             transferred[name] = adopted_provider
         adopted = {**retained, **transferred}
