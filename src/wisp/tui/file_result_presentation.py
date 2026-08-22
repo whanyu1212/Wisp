@@ -152,10 +152,15 @@ def _build_grep(
             total_count=0,
         )
 
+    total_count = _summary_count(summary)
     grouped: dict[str, list[FileResultRow]] = {}
     highlight_pattern = _grep_highlight_pattern(arguments)
     ignore_case = arguments.get("ignore_case") is True
-    retained_lines = _result_lines(output, strip_truncation_marker=truncated)
+    retained_lines = _result_lines(
+        output,
+        keep_empty=True,
+        strip_truncation_marker=truncated,
+    )
     # As with find paths, byte truncation can cut the real record delimiter away
     # and leave a delimiter-shaped filename prefix. Persisted output carries no
     # boundary metadata, so the terminal record is not safe to structure.
@@ -170,6 +175,13 @@ def _build_grep(
             ignore_case=ignore_case,
         )
         if parsed is None:
+            if truncated:
+                return FileResultPresentation(
+                    kind="grep",
+                    summary=summary,
+                    truncated=True,
+                    total_count=total_count,
+                )
             return None
         path, row = parsed
         grouped.setdefault(path, []).append(row)
@@ -180,10 +192,9 @@ def _build_grep(
                 kind="grep",
                 summary=summary,
                 truncated=True,
-                total_count=_summary_count(summary),
+                total_count=total_count,
             )
         return None
-    total_count = _summary_count(summary)
     # Context records cannot be distinguished from newline-containing POSIX
     # filename fragments in the flattened legacy format. Match-only output is
     # count-validated below; context layouts remain literal until the runtime

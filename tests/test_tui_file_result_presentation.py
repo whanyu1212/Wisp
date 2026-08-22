@@ -95,6 +95,17 @@ def test_grep_with_newline_filename_uses_literal_fallback() -> None:
     assert presentation is None
 
 
+def test_grep_with_leading_newline_filename_uses_literal_fallback() -> None:
+    leading = build_file_result_presentation(
+        "grep",
+        {"pattern": "match"},
+        "\nfoo:1:match",
+        "grep: 1 match",
+    )
+
+    assert leading is None
+
+
 def test_find_uses_two_columns_only_when_the_width_can_hold_them() -> None:
     presentation = build_file_result_presentation(
         "find",
