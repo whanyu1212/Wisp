@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
@@ -106,6 +106,11 @@ class ProviderRegistry:
 
         return self._names()
 
+    def is_registered(self, name: str) -> bool:
+        """Return whether a provider name is registered without constructing it."""
+
+        return name in self._order
+
     def constructed(self) -> dict[str, Provider]:
         """Return only the providers that already exist, constructing nothing."""
 
@@ -125,7 +130,12 @@ class ProviderRegistry:
 
         return tuple(self.get(name) for name in self._names())
 
-    def replace_all(self, providers: Iterable[Provider]) -> None:
+    def replace_all(
+        self,
+        providers: Iterable[Provider],
+        *,
+        order: Sequence[str] | None = None,
+    ) -> None:
         """Atomically replace provider instances while preserving this registry.
 
         Runtime extension APIs retain a reference to this registry. Replacing its
@@ -136,7 +146,11 @@ class ProviderRegistry:
         replacements = {provider.name: provider for provider in providers}
         self._providers = replacements
         self._factories = {}
-        self._order = list(replacements)
+        # `names()` promises registration order, which the caller knows and this
+        # mapping does not; fall back to the replacement order when none is given.
+        ordered = [name for name in (order or ()) if name in replacements]
+        ordered.extend(name for name in replacements if name not in ordered)
+        self._order = ordered
 
 
 class ToolRegistry:

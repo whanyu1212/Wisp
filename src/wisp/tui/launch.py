@@ -10,7 +10,7 @@ from pathlib import Path
 
 from wisp.config import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownToolError
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tui.rendering import TuiRendererKind
 
@@ -73,7 +73,8 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
         openai_compatible=options.config.openai_compatible,
     )
     try:
-        runtime.providers.get(options.config.provider)
+        if not runtime.providers.is_registered(options.config.provider):
+            raise UnknownProviderError(options.config.provider)
         for tool_name in set(options.allowed_tools):
             try:
                 runtime.tools.get(tool_name)
