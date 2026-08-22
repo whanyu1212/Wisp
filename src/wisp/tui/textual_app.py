@@ -686,7 +686,7 @@ class TextualTui(App[None]):
        only rail so keyboard navigation remains visible. */
     ToolCard {
         color: $text-muted;
-        border-bottom: solid $panel;
+        margin-bottom: 1;
     }
 
     ToolCard.message--tool,
