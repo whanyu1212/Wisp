@@ -146,13 +146,13 @@ def test_resolved_card_keeps_semantic_call_arguments_in_header() -> None:
 def test_file_result_card_expands_from_summary_to_grouped_rows() -> None:
     detail = render_tool_result(
         "grep",
-        {"pattern": "TODO", "path": "src"},
+        {"pattern": "TODO", "path": "src", "context": 1},
         "src/a.py:4:TODO first\nsrc/a.py-5-context",
         is_error=False,
         exit_code=None,
         summary="grep: 1 match",
     )
-    card = ToolCard("grep", {"pattern": "TODO", "path": "src"})
+    card = ToolCard("grep", {"pattern": "TODO", "path": "src", "context": 1})
     card.set_state(
         "done",
         detail=detail,

@@ -186,6 +186,19 @@ def _build_grep(
             )
         return None
     total_count = _summary_count(summary)
+    raw_context_lines = arguments.get("context")
+    context_lines = (
+        raw_context_lines if type(raw_context_lines) is int and raw_context_lines >= 0 else 0
+    )
+    if not _grep_context_is_consistent(grouped, context_lines=context_lines):
+        if truncated:
+            return FileResultPresentation(
+                kind="grep",
+                summary=summary,
+                truncated=True,
+                total_count=total_count,
+            )
+        return None
     retained_match_count = sum(row.kind == "match" for rows in grouped.values() for row in rows)
     # Newlines are valid inside POSIX filenames but also delimit grep records. An
     # impossible match count signals that the flattened output is ambiguous.
@@ -203,6 +216,26 @@ def _build_grep(
         truncated=truncated,
         total_count=total_count,
     )
+
+
+def _grep_context_is_consistent(
+    grouped: Mapping[str, list[FileResultRow]],
+    *,
+    context_lines: int,
+) -> bool:
+    for rows in grouped.values():
+        match_lines = tuple(row.line_number for row in rows if row.kind == "match")
+        context_rows = tuple(row for row in rows if row.kind == "context")
+        if not context_rows:
+            continue
+        if not match_lines or context_lines == 0:
+            return False
+        if any(
+            all(abs(row.line_number - match_line) > context_lines for match_line in match_lines)
+            for row in context_rows
+        ):
+            return False
+    return True
 
 
 def _build_find(

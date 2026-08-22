@@ -12,7 +12,7 @@ from wisp.tui.file_result_presentation import (
 def test_grep_groups_rows_by_file_and_distinguishes_context() -> None:
     presentation = build_file_result_presentation(
         "grep",
-        {"pattern": "TODO"},
+        {"pattern": "TODO", "context": 1},
         "src/a.py-9-before\nsrc/a.py:10:TODO first\n--\nsrc/b.py:4:TODO second",
         "grep: 2 matches",
     )
@@ -267,18 +267,31 @@ def test_truncated_find_omits_a_marker_shaped_terminal_path() -> None:
     assert presentation is None
 
 
-def test_truncated_context_only_grep_uses_context_expand_label() -> None:
+def test_truncated_context_without_retained_match_uses_safe_summary() -> None:
     presentation = build_file_result_presentation(
         "grep",
-        {"pattern": "match"},
+        {"pattern": "match", "context": 2},
         "src/a.py-1-before\nsrc/a.py-2-nearer\n[truncated]",
         "grep: 1 match (+ more)",
         truncated=True,
     )
 
-    assert presentation is not None and presentation.can_expand
+    assert presentation is not None and not presentation.can_expand
     assert presentation.retained_count == 0
-    assert presentation.expand_label == "show context"
+    assert render_file_result_presentation(presentation, width=80, expanded=True).plain == (
+        "grep: 1 match (+ more)"
+    )
+
+
+def test_grep_context_shaped_newline_filename_uses_literal_fallback() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "actual", "context": 1},
+        "foo-1-\nbar:2:actual",
+        "grep: 1 match",
+    )
+
+    assert presentation is None
 
 
 def test_truncated_result_reports_only_counts_known_from_summary() -> None:
