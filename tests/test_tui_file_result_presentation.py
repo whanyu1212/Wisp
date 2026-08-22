@@ -180,23 +180,15 @@ def test_partial_truncation_markers_are_not_presented_as_file_data() -> None:
     )
 
 
-def test_find_preserves_literal_truncation_marker_paths() -> None:
+def test_find_preserves_literal_truncation_marker_path_when_complete() -> None:
     complete = build_file_result_presentation(
         "find",
         {"pattern": "*"},
         "[truncated]",
         "find: 1 file",
     )
-    capped = build_file_result_presentation(
-        "find",
-        {"pattern": "*"},
-        "[truncated]\n[truncated]",
-        "find: 1 file (+ more)",
-        truncated=True,
-    )
 
     assert complete is not None and complete.paths == ("[truncated]",)
-    assert capped is not None and capped.paths == ("[truncated]",)
 
 
 def test_truncated_expand_label_counts_only_retained_paths() -> None:
@@ -225,6 +217,21 @@ def test_truncated_find_omits_a_potentially_partial_terminal_path() -> None:
 
     assert presentation is not None
     assert presentation.paths == ("src/complete.py",)
+
+
+def test_truncated_find_omits_a_marker_shaped_terminal_path() -> None:
+    bounded = truncate_text("[truncated]-long-name.txt", max_bytes=23, max_lines=100)
+    assert bounded.text == "[truncated]\n[truncated]"
+
+    presentation = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        bounded.text,
+        "find: 1 file (+ more)",
+        truncated=bounded.truncated,
+    )
+
+    assert presentation is None
 
 
 def test_truncated_context_only_grep_uses_context_expand_label() -> None:

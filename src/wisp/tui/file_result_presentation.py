@@ -206,10 +206,10 @@ def _build_find(
     retained_paths = _result_lines(output, strip_truncation_marker=truncated)
     # Byte truncation appends its marker on a fresh line even when it cut through
     # the preceding filename. Persisted events do not record that boundary, so the
-    # terminal record is not safe to present as a real path. A literal file named
-    # ``[truncated]`` is complete and remains distinguishable from the synthetic
-    # marker because _result_lines removes only the final marker.
-    if truncated and retained_paths and retained_paths[-1] not in _TRUNCATION_MARKERS:
+    # terminal record is not safe to present as a real path. That includes a record
+    # equal to ``[truncated]``: it may be a real filename, but it may also be the
+    # exact retained prefix of a longer filename.
+    if truncated and retained_paths:
         retained_paths = retained_paths[:-1]
     paths = retained_paths
     if not paths:
