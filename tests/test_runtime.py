@@ -278,6 +278,32 @@ def test_live_only_deferred_provider_remains_owned_across_refreshes() -> None:
     anyio.run(scenario)
 
 
+def test_runtime_closes_late_built_provider_after_extension_replaces_it() -> None:
+    async def scenario() -> None:
+        registry = ProviderRegistry()
+        configured = _ClosableFakeProvider("configured")
+        registry.register_factory("configured", lambda: configured)
+        tools = ToolRegistry()
+        events = EventBus()
+        runtime = WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+        assert runtime.providers.get("configured") is configured
+        override = _ClosableFakeProvider("configured")
+        runtime.providers.register(override)
+        await runtime.aclose()
+
+        assert configured.close_count == 1
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
 def test_runtime_closes_configured_provider_constructed_after_capture() -> None:
     async def scenario() -> None:
         registry = ProviderRegistry()

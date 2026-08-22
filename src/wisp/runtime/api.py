@@ -177,18 +177,15 @@ class WispRuntime:
         client (which a never-built provider does not hold).
         """
 
-        constructed = self.providers.constructed()
         items: list[tuple[str, Provider]] = []
         for name in self._configured_names:
             provider = self._configured_providers.get(name)
-            registration_unchanged = self.providers.registration_token(
-                name
-            ) is self._configured_registrations.get(name)
-            if provider is None and registration_unchanged:
-                # A provider built from its configured factory after the initial
-                # snapshot remains configuration-owned. A direct registry or API
-                # replacement changes the token and therefore remains extension-owned.
-                provider = constructed.get(name)
+            configured_registration = self._configured_registrations.get(name)
+            if provider is None and configured_registration is not None:
+                # Resolve by the captured registration rather than the name's current
+                # value. This recovers a late-built configured provider even after an
+                # extension replaced that name, without claiming the override.
+                provider = self.providers.constructed_for_registration(configured_registration)
             if provider is not None:
                 items.append((name, provider))
         return tuple(items)

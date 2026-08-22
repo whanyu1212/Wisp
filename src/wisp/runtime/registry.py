@@ -47,6 +47,7 @@ class ProviderRegistry:
         # when a deferred factory constructs its provider. Runtime ownership can then
         # distinguish direct registry overrides from ordinary lazy construction.
         self._registration_tokens: dict[str, object] = {}
+        self._constructed_by_registration: dict[object, Provider] = {}
         # Registration order is part of this registry's contract, and a name can move
         # between the two maps when a deferred provider is constructed. Keep the order
         # here so it never depends on construction state.
@@ -58,7 +59,9 @@ class ProviderRegistry:
         self._reserve(provider.name, replace=replace)
         self._factories.pop(provider.name, None)
         self._providers[provider.name] = provider
-        self._registration_tokens[provider.name] = object()
+        token = object()
+        self._registration_tokens[provider.name] = token
+        self._constructed_by_registration[token] = provider
 
     def register_factory(
         self,
@@ -105,6 +108,8 @@ class ProviderRegistry:
             raise ValueError(msg)
         self._providers[name] = provider
         self._factories.pop(name, None)
+        token = self._registration_tokens[name]
+        self._constructed_by_registration[token] = provider
         return provider
 
     def names(self) -> tuple[str, ...]:
@@ -121,6 +126,11 @@ class ProviderRegistry:
         """Return the identity of a name's current explicit registration."""
 
         return self._registration_tokens.get(name)
+
+    def constructed_for_registration(self, token: object) -> Provider | None:
+        """Return the provider built for a registration, even if later replaced."""
+
+        return self._constructed_by_registration.get(token)
 
     def constructed(self) -> dict[str, Provider]:
         """Return only the providers that already exist, constructing nothing."""
@@ -158,6 +168,9 @@ class ProviderRegistry:
         self._providers = replacements
         self._factories = {}
         self._registration_tokens = {name: object() for name in replacements}
+        self._constructed_by_registration = {
+            self._registration_tokens[name]: provider for name, provider in replacements.items()
+        }
         # `names()` promises registration order, which the caller knows and this
         # mapping does not; fall back to the replacement order when none is given.
         ordered = [name for name in (order or ()) if name in replacements]
