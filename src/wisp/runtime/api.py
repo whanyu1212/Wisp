@@ -162,12 +162,23 @@ class WispRuntime:
         self._configured_providers.update(self.providers.constructed())
         self._configured_names.clear()
         self._configured_names.extend(self.providers.names())
-        self._configured_registrations.clear()
-        self._configured_registrations.update(
-            (name, token)
-            for name in self._configured_names
-            if (token := self.providers.registration_token(name)) is not None
+        self._replace_configured_registrations(
+            {
+                name: token
+                for name in self._configured_names
+                if (token := self.providers.registration_token(name)) is not None
+            }
         )
+
+    def _replace_configured_registrations(self, registrations: dict[str, object]) -> None:
+        previous = set(self._configured_registrations.values())
+        current = set(registrations.values())
+        for token in previous - current:
+            self.providers.release_registration(token)
+        for token in current - previous:
+            self.providers.retain_registration(token)
+        self._configured_registrations.clear()
+        self._configured_registrations.update(registrations)
 
     def _configured_provider_items(self) -> tuple[tuple[str, Provider], ...]:
         """Return configured providers that exist, in registration order.
@@ -306,15 +317,17 @@ class WispRuntime:
         self._configured_providers.update(adopted)
         self._configured_names.clear()
         self._configured_names.extend(name for name in self.providers.names() if name in adopted)
-        self._configured_registrations.clear()
-        self._configured_registrations.update(
-            (name, token)
-            for name in self._configured_names
-            if (token := self.providers.registration_token(name)) is not None
+        self._replace_configured_registrations(
+            {
+                name: token
+                for name in self._configured_names
+                if (token := self.providers.registration_token(name)) is not None
+            }
         )
         for name in transferred:
             candidate._configured_providers.pop(name, None)
-            candidate._configured_registrations.pop(name, None)
+            if (token := candidate._configured_registrations.pop(name, None)) is not None:
+                candidate.providers.release_registration(token)
             with suppress(ValueError):
                 candidate._configured_names.remove(name)
         displaced = tuple(
@@ -333,7 +346,7 @@ class WispRuntime:
             )
             self._configured_providers.clear()
             self._configured_names.clear()
-            self._configured_registrations.clear()
+            self._replace_configured_registrations({})
         finally:
             try:
                 if self.mcp_runtime is not None:

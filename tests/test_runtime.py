@@ -278,6 +278,19 @@ def test_live_only_deferred_provider_remains_owned_across_refreshes() -> None:
     anyio.run(scenario)
 
 
+def test_provider_registry_releases_unretained_replacement_history() -> None:
+    registry = ProviderRegistry()
+    first = _NamedFakeProvider("rotating")
+    second = _NamedFakeProvider("rotating")
+    registry.register(first)
+    first_token = registry.registration_token("rotating")
+    assert first_token is not None
+
+    registry.register(second)
+
+    assert registry.constructed_for_registration(first_token) is None
+
+
 def test_runtime_closes_late_built_provider_after_extension_replaces_it() -> None:
     async def scenario() -> None:
         registry = ProviderRegistry()
