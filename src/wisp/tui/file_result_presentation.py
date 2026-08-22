@@ -422,7 +422,7 @@ def _hidden_footer(presentation: FileResultPresentation) -> str | None:
         prefix = "at least " if presentation.truncated else ""
         return f"… {prefix}{hidden} more {noun}"
     if presentation.truncated:
-        return f"… more {noun} available"
+        return "… output truncated"
     return None
 
 

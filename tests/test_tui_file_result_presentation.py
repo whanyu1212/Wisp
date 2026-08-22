@@ -262,6 +262,21 @@ def test_truncated_result_reports_only_counts_known_from_summary() -> None:
     assert expanded.plain.endswith("… at least 3 more matches")
 
 
+def test_truncated_result_uses_neutral_footer_without_hidden_count() -> None:
+    presentation = build_file_result_presentation(
+        "read",
+        {"path": "long-line.txt"},
+        "retained prefix",
+        "read 1 line from long-line.txt (truncated)",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    expanded = render_file_result_presentation(presentation, width=80, expanded=True)
+    assert expanded.plain.endswith("… output truncated")
+    assert "more lines" not in expanded.plain
+
+
 def test_markup_like_file_content_remains_literal() -> None:
     presentation = build_file_result_presentation(
         "read",
