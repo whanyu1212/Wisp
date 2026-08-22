@@ -68,6 +68,7 @@ from wisp.tui.file_index import (
     collect_project_snapshot,
     format_file_reference,
 )
+from wisp.tui.file_result_presentation import FileResultPresentation
 from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.input_types import TuiSubmission
 from wisp.tui.overlay import (
@@ -685,6 +686,7 @@ class TextualTui(App[None]):
        only rail so keyboard navigation remains visible. */
     ToolCard {
         color: $text-muted;
+        border-bottom: solid $panel;
     }
 
     ToolCard.message--tool,
@@ -3519,7 +3521,7 @@ class TextualTui(App[None]):
         arguments: object,
         *,
         status: ToolActionStatus,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | FileResultPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -3540,7 +3542,7 @@ class TextualTui(App[None]):
         call_id: str,
         status: ToolActionStatus,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | FileResultPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,

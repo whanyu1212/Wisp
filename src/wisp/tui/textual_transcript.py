@@ -19,6 +19,7 @@ from textual.content import Content
 from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
+from wisp.tui.file_result_presentation import FileResultPresentation
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.textual_card_registry import TextualCardIdentityRegistry
@@ -402,7 +403,7 @@ class TextualTranscriptController:
         arguments: object,
         *,
         status: ToolActionStatus,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | FileResultPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -427,7 +428,7 @@ class TextualTranscriptController:
         call_id: str,
         status: ToolActionStatus,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | FileResultPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,

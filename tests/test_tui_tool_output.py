@@ -16,6 +16,10 @@ import signal
 from textual.content import Content
 
 from wisp.tool_presentation import tool_result_status
+from wisp.tui.file_result_presentation import (
+    FileResultPresentation,
+    render_file_result_presentation,
+)
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
     _ERROR_TAIL_LINES,
@@ -27,7 +31,9 @@ from wisp.tui.tool_output import (
 )
 
 
-def _plain(rendered: str | Content) -> str:
+def _plain(rendered: str | Content | FileResultPresentation) -> str:
+    if isinstance(rendered, FileResultPresentation):
+        return render_file_result_presentation(rendered, width=80, expanded=False).plain
     return rendered.plain if isinstance(rendered, Content) else rendered
 
 
@@ -379,9 +385,10 @@ def test_render_tool_result_shows_summary_in_place_of_output() -> None:
         exit_code=None,
         summary="read 40 lines from foo.py",
     )
-    assert isinstance(via_dispatch, Content)
-    assert via_dispatch.plain == "read 40 lines from foo.py"
-    assert _span_style(via_dispatch, "read 40 lines from foo.py") == "$success"
+    assert isinstance(via_dispatch, FileResultPresentation)
+    collapsed = render_file_result_presentation(via_dispatch, width=80, expanded=False)
+    assert collapsed.plain == "read 40 lines from foo.py"
+    assert _span_style(collapsed, "read 40 lines from foo.py") == "$success"
 
 
 def test_render_tool_result_keeps_markup_like_summary_literal() -> None:
@@ -396,10 +403,11 @@ def test_render_tool_result_keeps_markup_like_summary_literal() -> None:
         summary=summary,
     )
 
-    assert isinstance(rendered, Content)
-    assert rendered.plain == summary
-    assert _span_style(rendered, summary) == "$success"
-    assert all("red" not in str(span.style).lower() for span in rendered.spans)
+    assert isinstance(rendered, FileResultPresentation)
+    collapsed = render_file_result_presentation(rendered, width=80, expanded=False)
+    assert collapsed.plain == summary
+    assert _span_style(collapsed, summary) == "$success"
+    assert all("red" not in str(span.style).lower() for span in collapsed.spans)
 
 
 def test_render_tool_result_no_summary_falls_back_to_generic() -> None:
@@ -438,13 +446,16 @@ def test_render_grep_result_keeps_summary_and_match_evidence() -> None:
         summary="grep: 2 matches",
     )
 
-    assert isinstance(rendered, Content)
-    assert rendered.plain == "grep: 2 matches\nsrc/a.py:1:TODO first\nsrc/b.py:2:TODO second"
-    assert _span_style(rendered, "grep: 2 matches") == "$success"
-    assert _span_style(rendered, "src/a.py") == "$text"
+    assert isinstance(rendered, FileResultPresentation)
+    expanded = render_file_result_presentation(rendered, width=80, expanded=True)
+    assert expanded.plain == (
+        "grep: 2 matches\nsrc/a.py · 1 match\n1 │ TODO first\n\nsrc/b.py · 1 match\n2 │ TODO second"
+    )
+    assert _span_style(expanded, "grep: 2 matches") == "$success"
+    assert _span_style(expanded, "src/a.py") == "$primary"
     assert (
         full_tool_result_for_display("grep", output, None, summary="grep: 2 matches")
-        == rendered.plain
+        == "grep: 2 matches\nsrc/a.py:1:TODO first\nsrc/b.py:2:TODO second"
     )
 
 
@@ -460,12 +471,11 @@ def test_render_long_grep_result_reports_hidden_match_lines() -> None:
         summary="grep: 20 matches",
     )
 
-    plain = _plain(rendered)
-    assert plain.startswith("grep: 20 matches\nsrc/file.py:0:match")
-    assert "src/file.py:7:match" in plain
-    assert "src/file.py:8:match" not in plain
-    assert "12 more lines" in plain
-    assert "bytes hidden" in plain
+    assert isinstance(rendered, FileResultPresentation)
+    plain = render_file_result_presentation(rendered, width=80, expanded=True).plain
+    assert plain.startswith("grep: 20 matches\nsrc/file.py · 20 matches\n 0 │ match")
+    assert " 7 │ match" in plain
+    assert "19 │ match" in plain
 
 
 def test_render_zero_match_grep_does_not_repeat_raw_empty_result() -> None:

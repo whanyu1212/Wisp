@@ -23,6 +23,7 @@ from textual.widget import Widget
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
 from wisp.tui.diff_presentation import DiffPresentation
+from wisp.tui.file_result_presentation import FileResultPresentation
 from wisp.tui.history import (
     HistoricalSkillInvocation,
     HistoricalToolCard,
@@ -141,7 +142,7 @@ class TextualHistorySurface(Protocol):
         arguments: JsonObject,
         *,
         status: ToolActionStatus,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | FileResultPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool: ...
@@ -151,7 +152,7 @@ class TextualHistorySurface(Protocol):
         call_id: str,
         status: ToolActionStatus,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | FileResultPresentation = "",
         full_output: str = "",
         truncated: bool = False,
     ) -> Widget | None: ...
@@ -1369,7 +1370,12 @@ class TextualHistoryController:
         *,
         name: str | None = None,
         arguments: JsonObject | None = None,
-    ) -> tuple[ToolActionStatus, str | Content | DiffPresentation, str, bool]:
+    ) -> tuple[
+        ToolActionStatus,
+        str | Content | DiffPresentation | FileResultPresentation,
+        str,
+        bool,
+    ]:
         status = historical_tool_status(entry)
         if status in {"cancelled", "denied"}:
             return status, entry.output, "", False
@@ -1387,6 +1393,7 @@ class TextualHistoryController:
                 before_text=entry.before_text,
                 created=entry.created,
                 summary=entry.summary,
+                truncated=entry.truncated,
             ),
             full_tool_result_for_display(
                 resolved_name,
