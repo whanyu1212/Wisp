@@ -145,7 +145,7 @@ def _build_grep(
     grouped: dict[str, list[FileResultRow]] = {}
     highlight_pattern = _grep_highlight_pattern(arguments)
     ignore_case = arguments.get("ignore_case") is True
-    for line in _result_lines(output):
+    for line in _result_lines(output, strip_truncation_marker=truncated):
         if line == "--":
             continue
         parsed = _parse_grep_record(
@@ -184,7 +184,7 @@ def _build_find(
             truncated=truncated,
             total_count=0,
         )
-    paths = tuple(_result_lines(output))
+    paths = tuple(_result_lines(output, strip_truncation_marker=truncated))
     if not paths:
         return None
     return FileResultPresentation(
@@ -282,13 +282,28 @@ def _literal_ranges(
     return tuple(match.span() for match in re.finditer(re.escape(pattern), text, flags))
 
 
-def _result_lines(output: str, *, keep_empty: bool = False) -> tuple[str, ...]:
-    normalized = output.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+def _result_lines(
+    output: str,
+    *,
+    keep_empty: bool = False,
+    strip_truncation_marker: bool = False,
+) -> tuple[str, ...]:
+    normalized = output.replace("\r\n", "\n").replace("\r", "\n")
     if not normalized:
         return ()
-    lines = tuple(line for line in normalized.split("\n") if line not in _TRUNCATION_MARKERS)
     if keep_empty:
-        return lines
+        # Tool output preserves the source's final line terminator. Remove exactly
+        # that delimiter without collapsing preceding blank source rows: ``a\n`` is
+        # one row, while ``a\n\n`` is two rows and ``\n`` is one blank row.
+        source = normalized[:-1] if normalized.endswith("\n") else normalized
+        return tuple(source.split("\n"))
+
+    lines = normalized.rstrip("\n").split("\n")
+    # Grep/find append this sentinel only when they report authoritative
+    # truncation. Strip one terminal marker, never an identical real path or read
+    # line elsewhere in the result.
+    if strip_truncation_marker and lines and lines[-1] in _TRUNCATION_MARKERS:
+        lines.pop()
     return tuple(line for line in lines if line)
 
 

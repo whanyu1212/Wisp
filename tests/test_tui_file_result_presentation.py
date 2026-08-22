@@ -91,6 +91,38 @@ def test_read_uses_requested_offset_for_line_number_gutter() -> None:
     assert "src/app.py\n20 │ first\n21 │ second" in expanded.plain
 
 
+def test_read_preserves_trailing_blank_source_rows() -> None:
+    presentation = build_file_result_presentation(
+        "read",
+        {"path": "notes.txt", "offset": 7},
+        "first\n\n",
+        "read 2 lines from notes.txt",
+    )
+
+    assert presentation is not None
+    assert [row.text for row in presentation.groups[0].rows] == ["first", ""]
+    assert [row.line_number for row in presentation.groups[0].rows] == [7, 8]
+
+
+def test_find_preserves_literal_truncation_marker_paths() -> None:
+    complete = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "[truncated]",
+        "find: 1 file",
+    )
+    capped = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "[truncated]\n[truncated]",
+        "find: 1 file (+ more)",
+        truncated=True,
+    )
+
+    assert complete is not None and complete.paths == ("[truncated]",)
+    assert capped is not None and capped.paths == ("[truncated]",)
+
+
 def test_truncated_result_reports_only_counts_known_from_summary() -> None:
     presentation = build_file_result_presentation(
         "grep",
