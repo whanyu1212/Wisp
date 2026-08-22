@@ -179,6 +179,15 @@ def _build_grep(
                 total_count=_summary_count(summary),
             )
         return None
+    total_count = _summary_count(summary)
+    retained_match_count = sum(row.kind == "match" for rows in grouped.values() for row in rows)
+    # Newlines are valid inside POSIX filenames but also delimit grep records. An
+    # impossible match count signals that the flattened output is ambiguous.
+    if total_count is not None and (
+        retained_match_count > total_count
+        or (not truncated and retained_match_count != total_count)
+    ):
+        return None
     return FileResultPresentation(
         kind="grep",
         summary=summary,
@@ -186,7 +195,7 @@ def _build_grep(
             FileResultGroup(path=path, rows=tuple(rows)) for path, rows in grouped.items()
         ),
         truncated=truncated,
-        total_count=_summary_count(summary),
+        total_count=total_count,
     )
 
 
@@ -214,12 +223,18 @@ def _build_find(
     paths = retained_paths
     if not paths:
         return None
+    total_count = _summary_count(summary)
+    # POSIX filenames may contain newlines, while the built-in find transport is
+    # newline-delimited. A complete result whose row count disagrees with its
+    # authoritative summary is therefore ambiguous and must remain literal.
+    if not truncated and total_count is not None and len(paths) != total_count:
+        return None
     return FileResultPresentation(
         kind="find",
         summary=summary,
         paths=paths,
         truncated=truncated,
-        total_count=_summary_count(summary),
+        total_count=total_count,
     )
 
 
@@ -354,7 +369,10 @@ def _summary_count(summary: str) -> int | None:
 
 
 def _read_summary_count(summary: str) -> int | None:
-    match = re.search(r"\bread (?P<count>\d+) lines?\b", summary)
+    # Only the count immediately following Wisp's controlled prefix is safe to
+    # parse. Truncated summaries put the path first, and filenames may themselves
+    # contain text such as "read 999 lines".
+    match = re.match(r"^read (?P<count>\d+) lines?\b", summary)
     return int(match.group("count")) if match is not None else None
 
 

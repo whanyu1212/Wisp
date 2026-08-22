@@ -73,6 +73,17 @@ def test_grep_ambiguous_flat_record_uses_generic_fallback() -> None:
     assert presentation is None
 
 
+def test_grep_with_newline_filename_uses_literal_fallback() -> None:
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "actual"},
+        "foo:1:manufactured\nbar:2:actual",
+        "grep: 1 match",
+    )
+
+    assert presentation is None
+
+
 def test_find_uses_two_columns_only_when_the_width_can_hold_them() -> None:
     presentation = build_file_result_presentation(
         "find",
@@ -92,6 +103,17 @@ def test_find_uses_two_columns_only_when_the_width_can_hold_them() -> None:
     ]
     assert len(wide.plain.splitlines()) == 3  # summary plus two paired rows
     assert "src/a.py" in wide.plain and "tests/a.py" in wide.plain
+
+
+def test_find_with_newline_filename_uses_literal_fallback() -> None:
+    presentation = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "foo\nbar",
+        "find: 1 file",
+    )
+
+    assert presentation is None
 
 
 def test_read_uses_requested_offset_for_line_number_gutter() -> None:
@@ -275,6 +297,22 @@ def test_truncated_result_uses_neutral_footer_without_hidden_count() -> None:
     expanded = render_file_result_presentation(presentation, width=80, expanded=True)
     assert expanded.plain.endswith("… output truncated")
     assert "more lines" not in expanded.plain
+
+
+def test_truncated_read_does_not_parse_count_from_filename() -> None:
+    presentation = build_file_result_presentation(
+        "read",
+        {"path": "read 999 lines"},
+        "only line",
+        "read (truncated) from read 999 lines",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    assert presentation.total_count is None
+    expanded = render_file_result_presentation(presentation, width=80, expanded=True)
+    assert expanded.plain.endswith("… output truncated")
+    assert "998 more" not in expanded.plain
 
 
 def test_markup_like_file_content_remains_literal() -> None:
