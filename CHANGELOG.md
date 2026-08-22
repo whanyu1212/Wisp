@@ -12,6 +12,12 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+## 0.1.0rc6 — 2026-08-22
+
+- Added bounded, structured TUI presentation for `read`, `grep`, and `find` results, including
+  path-aware summaries, line metadata, syntax highlighting, truncation indicators, and expandable
+  detail while preserving literal fallback rendering for ambiguous or malformed tool output.
+
 ## 0.1.0rc5 — 2026-08-22
 
 - Loaded provider and MCP SDKs only when selected or configured, reducing CLI and TUI startup time
