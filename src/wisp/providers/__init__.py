@@ -1,6 +1,20 @@
 """Provider implementations."""
 
 from importlib import import_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Import-time cost is what this module defers, and TYPE_CHECKING blocks never
+    # run. Declaring the lazy classes here keeps `from wisp.providers import
+    # OpenAIProvider` a concrete type for the typed embedders this package
+    # advertises via py.typed, which a bare `__getattr__` would erase to `object`.
+    from .anthropic import AnthropicProvider
+    from .deepseek import DeepSeekProvider
+    from .google import GoogleProvider
+    from .openai import OpenAIProvider
+    from .openai_codex import OpenAICodexProvider
+    from .openai_compatible import OpenAICompatibleProvider
+    from .xai import XAIProvider
 
 from wisp.retry import RetryPolicy, RetrySettings
 

@@ -43,6 +43,10 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
         self._factories: dict[str, Callable[[], Provider]] = {}
+        # Registration order is part of this registry's contract, and a name can move
+        # between the two maps when a deferred provider is constructed. Keep the order
+        # here so it never depends on construction state.
+        self._order: list[str] = []
 
     def register(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a provider by its declared name."""
@@ -69,14 +73,14 @@ class ProviderRegistry:
         self._factories[name] = factory
 
     def _reserve(self, name: str, *, replace: bool) -> None:
-        if not replace and name in self._names():
+        if not replace and name in self._order:
             msg = f"Provider already registered: {name}"
             raise ValueError(msg)
+        if name not in self._order:
+            self._order.append(name)
 
     def _names(self) -> tuple[str, ...]:
-        # Registration order across both maps, without constructing anything.
-        ordered = dict.fromkeys((*self._providers, *self._factories))
-        return tuple(ordered)
+        return tuple(self._order)
 
     def get(self, name: str) -> Provider:
         """Return a registered provider, constructing it on first use."""
@@ -89,6 +93,8 @@ class ProviderRegistry:
             raise UnknownProviderError(name)
         provider = factory()
         if provider.name != name:
+            # Leave the factory registered: a mismatch is a registration bug, and
+            # discarding it would turn every later lookup into "unknown provider".
             msg = f"Provider factory for {name!r} produced provider {provider.name!r}"
             raise ValueError(msg)
         self._providers[name] = provider
@@ -130,6 +136,7 @@ class ProviderRegistry:
         replacements = {provider.name: provider for provider in providers}
         self._providers = replacements
         self._factories = {}
+        self._order = list(replacements)
 
 
 class ToolRegistry:
