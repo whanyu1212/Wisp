@@ -56,7 +56,7 @@ export default withMermaid(
         { text: 'Architecture', link: '/architecture/', activeMatch: '/architecture/' },
         { text: 'Contributing', link: '/contributing/', activeMatch: '/contributing/' },
         {
-          text: 'v0.1.0rc5',
+          text: 'v0.1.0rc6',
           items: [
             { text: 'Changelog', link: 'https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md' },
             { text: 'PyPI', link: 'https://pypi.org/project/wisp-ai/' },
