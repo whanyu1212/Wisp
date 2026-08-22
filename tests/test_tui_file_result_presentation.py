@@ -104,6 +104,20 @@ def test_read_preserves_trailing_blank_source_rows() -> None:
     assert [row.line_number for row in presentation.groups[0].rows] == [7, 8]
 
 
+def test_truncated_read_strips_only_the_synthetic_terminal_marker() -> None:
+    presentation = build_file_result_presentation(
+        "read",
+        {"path": "notes.txt", "offset": 7},
+        "first\n[truncated]\n[truncated]",
+        "read 2 lines from notes.txt (truncated)",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    assert [row.text for row in presentation.groups[0].rows] == ["first", "[truncated]"]
+    assert [row.line_number for row in presentation.groups[0].rows] == [7, 8]
+
+
 def test_find_preserves_literal_truncation_marker_paths() -> None:
     complete = build_file_result_presentation(
         "find",

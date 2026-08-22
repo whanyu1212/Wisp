@@ -203,7 +203,11 @@ def _build_read(
     *,
     truncated: bool,
 ) -> FileResultPresentation | None:
-    lines = _result_lines(output, keep_empty=True)
+    lines = _result_lines(
+        output,
+        keep_empty=True,
+        strip_truncation_marker=truncated,
+    )
     if not lines:
         return FileResultPresentation(
             kind="read",
@@ -296,7 +300,10 @@ def _result_lines(
         # that delimiter without collapsing preceding blank source rows: ``a\n`` is
         # one row, while ``a\n\n`` is two rows and ``\n`` is one blank row.
         source = normalized[:-1] if normalized.endswith("\n") else normalized
-        return tuple(source.split("\n"))
+        lines = source.split("\n")
+        if strip_truncation_marker and lines[-1] in _TRUNCATION_MARKERS:
+            lines.pop()
+        return tuple(lines)
 
     lines = normalized.rstrip("\n").split("\n")
     # Grep/find append this sentinel only when they report authoritative
