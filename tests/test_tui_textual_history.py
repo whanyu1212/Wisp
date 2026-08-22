@@ -10,6 +10,10 @@ from textual.widget import Widget
 
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import JsonObject
+from wisp.tui.file_result_presentation import (
+    FileResultPresentation,
+    render_file_result_presentation,
+)
 from wisp.tui.history import (
     TUI_HISTORY_PAGE_LIMIT,
     HistoricalSkillInvocation,
@@ -31,7 +35,7 @@ class _HistoryWidget:
     name: str | None = None
     arguments: JsonObject | None = None
     status: str | None = None
-    detail: str | Content = ""
+    detail: str | Content | FileResultPresentation = ""
     process_presentation: ProcessLifecyclePresentation | None = None
 
 
@@ -210,7 +214,7 @@ class _HistorySurface:
         arguments: JsonObject,
         *,
         status: str,
-        detail: str | Content,
+        detail: str | Content | FileResultPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -229,7 +233,7 @@ class _HistorySurface:
         call_id: str,
         status: str,
         *,
-        detail: str | Content = "",
+        detail: str | Content | FileResultPresentation = "",
         full_output: str = "",
         truncated: bool = False,
     ) -> None:
@@ -747,6 +751,44 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert cards[0].status == "cancelled"
 
 
+def test_history_controller_defers_read_locations_until_boundary_call_arrives() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    result = HistoricalToolCard(
+        card_id="history:result",
+        name="read",
+        arguments={},
+        output="first\nsecond\n",
+        is_error=False,
+        tool_call_id="call-1",
+        call_missing=True,
+        summary="read 2 lines from src/app.py",
+    )
+    missing_call = HistoricalToolCard(
+        card_id="history:missing:call-1",
+        name="read",
+        arguments={"path": "src/app.py", "offset": 500},
+        output="No persisted tool result.",
+        is_error=True,
+        tool_call_id="call-1",
+        status="cancelled",
+        missing_result=True,
+    )
+
+    controller.replace_entries((result,), session_label="First")
+
+    card = surface.historical_cards[result.card_id]
+    assert isinstance(card.detail, Content)
+    assert card.detail.plain == result.summary
+
+    controller.prepend_entries((missing_call,))
+
+    assert isinstance(card.detail, FileResultPresentation)
+    group = card.detail.groups[0]
+    assert group.path == "src/app.py"
+    assert [row.line_number for row in group.rows] == [500, 501]
+
+
 def test_history_controller_pairs_split_process_call_before_grouping() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
@@ -1111,7 +1153,7 @@ def test_history_controller_repositions_process_card_when_first_poll_leaves_wind
     assert labels.index("assistant: between polls") < labels.index("process: proc-1")
 
 
-def test_history_controller_replays_grep_summary_with_match_evidence() -> None:
+def test_history_controller_replays_structured_grep_presentation() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
     output = "a.py:1:TODO\nb.py:2:TODO\n"
@@ -1132,7 +1174,11 @@ def test_history_controller_replays_grep_summary_with_match_evidence() -> None:
 
     card = next(widget for widget in surface.widgets if widget.name == "grep")
     assert card.arguments == {"pattern": "TODO", "path": "src"}
-    assert card.detail == "grep: 2 matches\na.py:1:TODO\nb.py:2:TODO"
+    assert isinstance(card.detail, FileResultPresentation)
+    rendered = render_file_result_presentation(card.detail, width=80, expanded=True)
+    assert rendered.plain == (
+        "grep: 2 matches\na.py · 1 match\n1 │ TODO\n\nb.py · 1 match\n2 │ TODO"
+    )
 
 
 def test_history_controller_finishes_a_render_batch_when_mounting_fails() -> None:

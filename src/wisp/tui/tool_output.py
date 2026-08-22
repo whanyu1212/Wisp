@@ -63,6 +63,10 @@ from wisp.tui.diff_presentation import (
     DiffRowKind,
     select_diff_rows,
 )
+from wisp.tui.file_result_presentation import (
+    FileResultPresentation,
+    build_file_result_presentation,
+)
 from wisp.tui.widgets import (
     _TOOL_OUTPUT_PREVIEW_BYTES,
     _TOOL_OUTPUT_PREVIEW_LINES,
@@ -194,8 +198,9 @@ def render_tool_result(
     before_text: str | None = None,
     created: bool = False,
     summary: str | None = None,
+    truncated: bool = False,
     process_state: ManagedProcessState | None = None,
-) -> str | Content | DiffPresentation:
+) -> str | Content | DiffPresentation | FileResultPresentation:
     """Render terminal tool output into bounded card detail.
 
     ``name`` selects the renderer; ``arguments`` supplies structured context for
@@ -204,13 +209,14 @@ def render_tool_result(
     file snapshot for the write tool, or None; ``created`` says whether that write
     made a new file, which disambiguates a None snapshot (create vs. uncapturable
     overwrite). ``summary`` is the promoted one-line success summary for read-type
-    tools (read/grep/find/ls), or None. ``process_state`` is the promoted managed
-    Bash state; terminal failure states use the error path even without an exit code.
+    tools (read/grep/find/ls), or None. ``truncated`` is the tool's authoritative
+    output-cap signal. ``process_state`` is the promoted managed Bash state;
+    terminal failure states use the error path even without an exit code.
 
     Returns a plain ``str`` for generic previews and unpromoted errors, Textual
     ``Content`` for trusted summaries/promoted failure labels, or a structured
-    :class:`DiffPresentation` for edit/write cards. Unknown tools and successful
-    results without a summary fall back to :func:`render_generic`.
+    presentation for diff and built-in file-result cards. Unknown tools and
+    successful results without a summary fall back to :func:`render_generic`.
     """
 
     if tool_result_failed(is_error, exit_code, process_state=process_state):
@@ -232,11 +238,20 @@ def render_tool_result(
         diff = build_write_diff_presentation(before_text, arguments, created=created)
         if diff is not None:
             return diff
-    # Read-type summaries stay concise, except grep: match lines are the useful
-    # evidence, so keep the authoritative count and add a bounded head preview.
-    # Prefixing both collapsed and expanded grep output with the same summary keeps
-    # ToolCard's equality-based expansion check honest for short complete results.
+    # Wisp-owned file tools get a structured, width-aware presentation when their
+    # bounded output can be interpreted without ambiguity. Counts still come from
+    # the promoted summary. Any malformed or ambiguous record falls through to the
+    # established literal summary/preview path below.
     if summary is not None:
+        file_presentation = build_file_result_presentation(
+            name,
+            arguments,
+            output,
+            summary,
+            truncated=truncated,
+        )
+        if file_presentation is not None:
+            return file_presentation
         if name == "grep":
             return _style_summary(_summary_with_grep_output(summary, output), summary)
         return Content.styled(summary, "$success")

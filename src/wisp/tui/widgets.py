@@ -82,6 +82,10 @@ from wisp.tui.diff_presentation import (
 )
 from wisp.tui.diff_rendering import render_diff_visible_row as _render_diff_visible_row
 from wisp.tui.file_index import ProjectSnapshot
+from wisp.tui.file_result_presentation import (
+    FileResultPresentation,
+    render_file_result_presentation,
+)
 from wisp.tui.incremental_markdown import IncrementalMarkdownState
 from wisp.tui.input_types import PendingSubmissionView, pending_submission_preview_lines
 from wisp.tui.overlay import TranscriptViewportState
@@ -453,7 +457,7 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m{secs:02d}s"
 
 
-def _has_detail(detail: str | Content | DiffPresentation) -> bool:
+def _has_detail(detail: str | Content | DiffPresentation | FileResultPresentation) -> bool:
     """Whether a card detail carries content, for both str and Content forms.
 
     An empty ``str`` and an empty ``Content`` both mean "no detail", so a
@@ -465,6 +469,8 @@ def _has_detail(detail: str | Content | DiffPresentation) -> bool:
         return bool(detail.plain)
     if isinstance(detail, DiffPresentation):
         return bool(detail.rows)
+    if isinstance(detail, FileResultPresentation):
+        return bool(detail.summary)
     return bool(detail)
 
 
@@ -510,6 +516,33 @@ def _tree_detail(detail: str | Content, *, width: int) -> Content:
         )
         for index, logical_line in enumerate(logical_lines)
     )
+
+
+def _file_result_detail(
+    presentation: FileResultPresentation,
+    *,
+    width: int,
+    expanded: bool,
+) -> Content:
+    """Render a file result with its toggle aligned on the summary row."""
+
+    rendered = render_file_result_presentation(
+        presentation,
+        width=max(12, width - 4),
+        expanded=expanded,
+    )
+    if not presentation.can_expand:
+        return rendered
+    lines = rendered.split("\n", allow_blank=True) or [Content("")]
+    label = "▾ collapse (Enter)" if expanded else f"▸ {presentation.expand_label} (Enter)"
+    label_content = Content.styled(label, "$text-muted")
+    available = max(1, width - 4)
+    used = cell_len(lines[0].plain) + cell_len(label)
+    if used + 2 <= available:
+        lines[0] += Content(" " * (available - used)) + label_content
+    else:
+        lines.insert(1, label_content)
+    return Content("\n").join(lines)
 
 
 def _render_diff_presentation(
@@ -2764,7 +2797,7 @@ class ToolCard(Static):
         # A plain str is untrusted output escaped at repaint; a Content is an
         # already-styled renderable (e.g. a colored diff) whose text is literal,
         # so it is composed directly without markup escaping.
-        self._detail: str | Content | DiffPresentation = ""
+        self._detail: str | Content | DiffPresentation | FileResultPresentation = ""
         # The full (tool-bounded) output, kept so the reader can expand past the
         # collapsed preview/summary/diff. Untrusted text, rendered literally like a
         # str detail. Empty when there is nothing more to show than the detail.
@@ -2858,7 +2891,7 @@ class ToolCard(Static):
         self,
         status: ToolActionStatus,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | FileResultPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
@@ -2915,6 +2948,8 @@ class ToolCard(Static):
         """
 
         if isinstance(self._detail, DiffPresentation):
+            return self._detail.can_expand
+        if isinstance(self._detail, FileResultPresentation):
             return self._detail.can_expand
         if not self._full_output:
             return False
@@ -3014,8 +3049,9 @@ class ToolCard(Static):
             # Label the affordance so a reader does not have to infer what a bare
             # triangle means. Enter is the primary binding; Space remains supported.
             if self._can_expand():
-                label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
-                suffix += Content.styled(label, "$text-muted")
+                if not isinstance(self._detail, FileResultPresentation):
+                    label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
+                    suffix += Content.styled(label, "$text-muted")
             if isinstance(self._detail, DiffPresentation):
                 suffix += Content.styled(" · v view diff", "$text-muted")
             self._stable_action_suffix = suffix
@@ -3051,6 +3087,15 @@ class ToolCard(Static):
                 self._detail,
                 width=max(12, width),
                 expanded=self._expanded,
+            )
+        elif isinstance(self._detail, FileResultPresentation):
+            body += Content("\n") + _tree_detail(
+                _file_result_detail(
+                    self._detail,
+                    width=width,
+                    expanded=self._expanded,
+                ),
+                width=width,
             )
         elif self._expanded and self._full_output:
             # Expanded: show the full (tool-bounded) output in place of the collapsed

@@ -3217,11 +3217,17 @@ def test_textual_tool_card_read_shows_summary_not_raw_output() -> None:
     assert "import os" not in text  # the raw output is replaced by the summary
 
 
-def test_textual_tool_card_grep_shows_summary_and_match_preview() -> None:
-    async def scenario() -> str:
+def test_textual_tool_card_grep_expands_summary_to_grouped_matches() -> None:
+    async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
-            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={"pattern": "x"}))
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="grep",
+                    arguments={"pattern": "x", "path": "src"},
+                )
+            )
             await pilot.pause()
             renderer.event(
                 ToolResultReady(
@@ -3233,13 +3239,22 @@ def test_textual_tool_card_grep_shows_summary_and_match_preview() -> None:
                 )
             )
             await pilot.pause()
-            return "\n".join(_transcript_texts(app_instance))
+            collapsed = "\n".join(_transcript_texts(app_instance))
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            expanded = "\n".join(_transcript_texts(app_instance))
+            return collapsed, expanded
 
-    text = anyio.run(scenario)
-    assert "• Searched  /x/ in ." in text  # semantic call arguments survive resolution
-    assert "grep: 3 matches" in text
-    assert "a.py:1:x" in text  # bounded evidence accompanies the structured count
-    assert "c.py:3:x" in text
+    collapsed, expanded = anyio.run(scenario)
+    assert "• Searched  /x/ in src" in collapsed
+    assert "grep: 3 matches" in collapsed
+    assert "a.py" not in collapsed
+    assert "a.py · 1 match" in expanded
+    assert "1 │ x" in expanded
+    assert "c.py · 1 match" in expanded
+    assert "3 │ x" in expanded
 
 
 def _first_tool_card(app: TextualTui) -> ToolCard:

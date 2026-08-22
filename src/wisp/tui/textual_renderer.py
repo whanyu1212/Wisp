@@ -805,6 +805,7 @@ class TextualTuiRenderer:
                         before_text=event.before_text,
                         created=event.created,
                         summary=event.summary,
+                        truncated=event.truncated,
                         process_state=event.process_state,
                     ),
                     elapsed=self._tool_elapsed(event.call_id, event.timestamp),

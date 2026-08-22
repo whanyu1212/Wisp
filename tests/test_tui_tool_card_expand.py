@@ -12,8 +12,11 @@ import gc
 import time
 import weakref
 
+from rich.cells import cell_len
 from textual.content import Content
 
+from wisp.tui.file_result_presentation import FileResultPresentation
+from wisp.tui.tool_output import render_tool_result
 from wisp.tui.widgets import ToolCard, _tree_detail, _tree_line
 
 
@@ -138,6 +141,57 @@ def test_resolved_card_keeps_semantic_call_arguments_in_header() -> None:
     rendered = _rendered(card)
     assert "• Searched  /TODO/ in src (*.py) · 0.1s" in rendered
     assert "  └ grep: 2 matches" in rendered
+
+
+def test_file_result_card_expands_from_summary_to_grouped_rows() -> None:
+    detail = render_tool_result(
+        "grep",
+        {"pattern": "TODO", "path": "src"},
+        "src/a.py:4:TODO first",
+        is_error=False,
+        exit_code=None,
+        summary="grep: 1 match",
+    )
+    card = ToolCard("grep", {"pattern": "TODO", "path": "src"})
+    card.set_state(
+        "done",
+        detail=detail,
+        full_output="grep: 1 match\nsrc/a.py:4:TODO first",
+    )
+
+    collapsed = _rendered(card)
+    assert "grep: 1 match" in collapsed
+    assert "TODO first" not in collapsed
+    assert "▸ show 1 match (Enter)" in collapsed
+
+    card.action_toggle_expand()
+    expanded = _rendered(card)
+    assert "src/a.py · 1 match" in expanded
+    assert "4 │ TODO first" in expanded
+    assert "▾ collapse (Enter)" in expanded
+
+    card._repaint(width=40)
+    assert all(cell_len(line) <= 40 for line in _rendered(card).splitlines())
+
+
+def test_empty_file_result_card_does_not_offer_disabled_expand_action() -> None:
+    detail = render_tool_result(
+        "grep",
+        {"pattern": "absent", "path": "src"},
+        "No matches found",
+        is_error=False,
+        exit_code=None,
+        summary="grep: no matches",
+    )
+    assert isinstance(detail, FileResultPresentation)
+    card = ToolCard("grep", {"pattern": "absent", "path": "src"})
+    card.set_state("done", detail=detail, full_output="No matches found")
+
+    assert card._can_expand() is False
+    rendered = _rendered(card)
+    assert "grep: no matches" in rendered
+    assert "show 0 matches" not in rendered
+    assert "(Enter)" not in rendered
 
 
 def test_toggle_is_noop_without_expandable_content() -> None:
