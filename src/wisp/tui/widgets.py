@@ -531,6 +531,8 @@ def _file_result_detail(
         width=max(12, width - 4),
         expanded=expanded,
     )
+    if not presentation.can_expand:
+        return rendered
     lines = rendered.split("\n", allow_blank=True) or [Content("")]
     label = "▾ collapse (Enter)" if expanded else f"▸ {presentation.expand_label} (Enter)"
     label_content = Content.styled(label, "$text-muted")

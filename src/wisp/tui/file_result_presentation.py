@@ -255,7 +255,7 @@ def _parse_grep_record(
     highlight_pattern: str | None,
     ignore_case: bool,
 ) -> tuple[str, FileResultRow] | None:
-    separators = tuple(_GREP_RECORD_SEPARATOR_RE.finditer(line))
+    separators = tuple(islice(_GREP_RECORD_SEPARATOR_RE.finditer(line), 2))
     # A second ``:N:`` / ``-N-`` sequence in a filename or source line makes the
     # flattened record ambiguous. Falling back keeps us from displaying a false
     # path or line number.
