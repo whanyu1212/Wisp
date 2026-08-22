@@ -304,7 +304,7 @@ def _result_lines(
         # one row, while ``a\n\n`` is two rows and ``\n`` is one blank row.
         source = normalized[:-1] if normalized.endswith("\n") else normalized
         lines = source.split("\n")
-        if strip_truncation_marker and lines[-1] in _TRUNCATION_MARKERS:
+        if strip_truncation_marker and _is_truncation_marker(lines[-1]):
             lines.pop()
         return tuple(lines)
 
@@ -312,9 +312,13 @@ def _result_lines(
     # Grep/find append this sentinel only when they report authoritative
     # truncation. Strip one terminal marker, never an identical real path or read
     # line elsewhere in the result.
-    if strip_truncation_marker and lines and lines[-1] in _TRUNCATION_MARKERS:
+    if strip_truncation_marker and lines and _is_truncation_marker(lines[-1]):
         lines.pop()
     return tuple(line for line in lines if line)
+
+
+def _is_truncation_marker(line: str) -> bool:
+    return bool(line) and any(marker.startswith(line) for marker in _TRUNCATION_MARKERS)
 
 
 def _summary_count(summary: str) -> int | None:

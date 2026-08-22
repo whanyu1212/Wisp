@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from wisp.tools.truncation import truncate_text
 from wisp.tui.file_result_presentation import (
     build_file_result_presentation,
     render_file_result_presentation,
@@ -131,6 +132,29 @@ def test_truncated_read_strips_only_the_synthetic_terminal_marker() -> None:
     assert presentation is not None
     assert [row.text for row in presentation.groups[0].rows] == ["first", "[truncated]"]
     assert [row.line_number for row in presentation.groups[0].rows] == [7, 8]
+
+
+def test_partial_truncation_markers_are_not_presented_as_file_data() -> None:
+    bounded = truncate_text("visible content", max_bytes=5, max_lines=100)
+    assert bounded.text == "[trun"
+
+    read = build_file_result_presentation(
+        "read",
+        {"path": "notes.txt"},
+        bounded.text,
+        "read 1 line from notes.txt (truncated)",
+        truncated=bounded.truncated,
+    )
+    find = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        bounded.text,
+        "find: 1 file (+ more)",
+        truncated=bounded.truncated,
+    )
+
+    assert read is not None and read.groups == ()
+    assert find is None
 
 
 def test_find_preserves_literal_truncation_marker_paths() -> None:
