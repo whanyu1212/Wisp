@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import islice
 from typing import Literal
 
 from rich.cells import cell_len
@@ -75,6 +76,7 @@ _COUNT_RE = re.compile(
 )
 _GREP_RECORD_SEPARATOR_RE = re.compile(r"(?P<separator>[:-])(?P<number>\d+)(?P=separator)")
 _TRUNCATION_MARKERS = frozenset(("[truncated]",))
+_MAX_HIGHLIGHT_RANGES_PER_ROW = 256
 
 
 def build_file_result_presentation(
@@ -283,7 +285,8 @@ def _literal_ranges(
     ignore_case: bool,
 ) -> tuple[tuple[int, int], ...]:
     flags = re.IGNORECASE if ignore_case else 0
-    return tuple(match.span() for match in re.finditer(re.escape(pattern), text, flags))
+    matches = re.finditer(re.escape(pattern), text, flags)
+    return tuple(match.span() for match in islice(matches, _MAX_HIGHLIGHT_RANGES_PER_ROW))
 
 
 def _result_lines(

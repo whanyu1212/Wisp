@@ -46,6 +46,21 @@ def test_grep_does_not_re_evaluate_regex_for_highlighting() -> None:
     assert presentation.groups[0].rows[0].highlight_ranges == ()
 
 
+def test_grep_bounds_literal_highlights_for_repetitive_rows() -> None:
+    text = "a" * 10_000
+    presentation = build_file_result_presentation(
+        "grep",
+        {"pattern": "a", "literal": True},
+        f"src/a.txt:1:{text}",
+        "grep: 1 match",
+    )
+
+    assert presentation is not None
+    row = presentation.groups[0].rows[0]
+    assert row.text == text
+    assert len(row.highlight_ranges) == 256
+
+
 def test_grep_ambiguous_flat_record_uses_generic_fallback() -> None:
     presentation = build_file_result_presentation(
         "grep",
