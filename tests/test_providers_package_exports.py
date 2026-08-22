@@ -113,6 +113,36 @@ def test_building_a_runtime_without_mcp_servers_does_not_load_the_mcp_sdk() -> N
     assert result.stdout.strip() == "False"
 
 
+def test_building_a_runtime_does_not_construct_providers() -> None:
+    """Lazy registration must survive runtime construction, not just import.
+
+    `build_runtime` previously snapshotted provider *instances* for configuration
+    ownership, which constructed all seven and undid the deferral for every real
+    command.
+    """
+
+    program = (
+        "import sys, anyio\n"
+        "from wisp.runtime.extensions import build_runtime\n"
+        "async def main():\n"
+        "    runtime = await build_runtime()\n"
+        "    loaded = [m for m in ('google.genai', 'anthropic', 'openai') "
+        "if m in sys.modules]\n"
+        "    print(len(runtime.providers.names()), loaded)\n"
+        "anyio.run(main)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    count, loaded = result.stdout.strip().split(" ", 1)
+    assert int(count) == 7
+    assert loaded == "[]"
+
+
 def test_provider_classes_remain_importable_from_the_package() -> None:
     """Deferring the imports must not remove the embedder-facing export surface."""
 

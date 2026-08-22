@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
@@ -125,7 +125,17 @@ class ProviderRegistry:
 
         return tuple(self.get(name) for name in self._names())
 
-    def replace_all(self, providers: Iterable[Provider]) -> None:
+    def deferred_factory(self, name: str) -> Callable[[], Provider] | None:
+        """Return the factory for a still-unconstructed provider, if any."""
+
+        return self._factories.get(name)
+
+    def replace_all(
+        self,
+        providers: Iterable[Provider],
+        *,
+        deferred: Mapping[str, Callable[[], Provider]] | None = None,
+    ) -> None:
         """Atomically replace provider instances while preserving this registry.
 
         Runtime extension APIs retain a reference to this registry. Replacing its
@@ -134,9 +144,15 @@ class ProviderRegistry:
         """
 
         replacements = {provider.name: provider for provider in providers}
+        # A provider neither side has constructed transfers as its factory, so the
+        # adopting runtime keeps the deferral instead of building a client that a
+        # refresh may never need.
+        factories = dict(deferred or {})
+        for name in factories:
+            replacements.pop(name, None)
         self._providers = replacements
-        self._factories = {}
-        self._order = list(replacements)
+        self._factories = factories
+        self._order = [*replacements, *(n for n in factories if n not in replacements)]
 
 
 class ToolRegistry:
