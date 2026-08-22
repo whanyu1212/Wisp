@@ -218,11 +218,16 @@ class WispRuntime:
                 remaining.remove(name)
             existing = self.providers.constructed().get(name)
             if existing is None:
-                # Never built here. Adoption transfers ownership of a concrete client,
-                # so resolve now: through the candidate when it owns the name (its
-                # configuration is what we are adopting), otherwise locally.
+                registration_unchanged = self.providers.registration_token(
+                    name
+                ) is self._configured_registrations.get(name)
+                # A still-deferred configured registration can be refreshed from the
+                # candidate. If the token changed, a live extension replaced it with
+                # its own factory; resolve and preserve that override instead.
                 providers.append(
-                    candidate.providers.get(name) if replaces else self.providers.get(name)
+                    candidate.providers.get(name)
+                    if replaces and registration_unchanged
+                    else self.providers.get(name)
                 )
                 continue
             # Configuration owns this name unless an extension replaced the instance

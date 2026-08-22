@@ -176,28 +176,23 @@ def test_repeated_configuration_refreshes_keep_adopting_new_credentials() -> Non
     anyio.run(scenario)
 
 
-def test_extension_factory_override_survives_a_configuration_refresh() -> None:
-    """An extension owns its provider however it registered it.
-
-    Registering by factory must mark ownership the same way registering an instance
-    does, or a refresh would silently replace the extension's provider once the
-    factory resolved.
-    """
+def test_unresolved_extension_factory_override_survives_configuration_refresh() -> None:
+    """An extension-owned factory must survive without being resolved first."""
 
     async def scenario() -> None:
         from wisp.runtime.extensions import build_runtime
 
         live = await build_runtime()
-        override = _NamedFakeProvider("openai")
+        candidate = await build_runtime()
+        override = _ClosableFakeProvider("openai")
         live.api.register_provider_factory("openai", lambda: override)
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+
         assert live.providers.get("openai") is override
-
-        adopted = {
-            provider.name: provider
-            for provider in live.providers_for_configuration(await build_runtime())
-        }
-
-        assert adopted["openai"] is override
+        await live.aclose()
+        assert override.close_count == 0
 
     anyio.run(scenario)
 
