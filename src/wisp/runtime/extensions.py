@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from inspect import isawaitable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 
@@ -20,7 +21,6 @@ from wisp.config import default_auth_path
 from wisp.events import ErrorEvent
 from wisp.extensions import builtin
 from wisp.mcp.config import McpServerConfig
-from wisp.mcp.runtime import McpRuntime
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.retry import RetryPolicy
@@ -28,6 +28,9 @@ from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
+
+if TYPE_CHECKING:
+    from wisp.mcp.runtime import McpRuntime
 from wisp.tools.process_manager import ProcessSupervisor
 
 type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
@@ -67,6 +70,11 @@ async def build_runtime(
             openai_compatible=openai_compatible,
         )
         if mcp_servers:
+            # `mcp` costs ~430 ms to import and is only reachable through this
+            # branch, which already runs solely when servers are configured. Import
+            # it here so a session without MCP servers never pays for it.
+            from wisp.mcp.runtime import McpRuntime
+
             mcp_runtime = await McpRuntime.start(
                 mcp_servers,
                 api=api,

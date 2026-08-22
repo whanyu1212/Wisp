@@ -73,6 +73,46 @@ def test_importing_the_cli_does_not_load_provider_sdks() -> None:
     assert result.stdout.strip() == ""
 
 
+def test_importing_the_cli_does_not_load_the_mcp_sdk() -> None:
+    """MCP is optional, and its SDK costs ~430 ms to import.
+
+    `McpRuntime` is only reachable when servers are configured, so importing the
+    package must not pull it in. A subprocess is required because another test in
+    this process may already have imported `mcp`.
+    """
+
+    program = "import sys; import wisp.cli; print('mcp' in sys.modules)"
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
+def test_building_a_runtime_without_mcp_servers_does_not_load_the_mcp_sdk() -> None:
+    """Registration must stay lazy through runtime construction, not just import."""
+
+    program = (
+        "import sys, anyio\n"
+        "from wisp.runtime.extensions import build_runtime\n"
+        "async def main():\n"
+        "    await build_runtime()\n"
+        "    print('mcp' in sys.modules)\n"
+        "anyio.run(main)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
 def test_provider_classes_remain_importable_from_the_package() -> None:
     """Deferring the imports must not remove the embedder-facing export surface."""
 
