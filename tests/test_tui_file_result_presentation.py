@@ -152,9 +152,21 @@ def test_partial_truncation_markers_are_not_presented_as_file_data() -> None:
         "find: 1 file (+ more)",
         truncated=bounded.truncated,
     )
+    grep = build_file_result_presentation(
+        "grep",
+        {"pattern": "visible"},
+        bounded.text,
+        "grep: 1 match (+ more)",
+        truncated=bounded.truncated,
+    )
 
     assert read is not None and read.groups == ()
     assert find is None
+    assert grep is not None and grep.groups == ()
+    assert grep.can_expand is False
+    assert render_file_result_presentation(grep, width=80, expanded=False).plain == (
+        "grep: 1 match (+ more)"
+    )
 
 
 def test_find_preserves_literal_truncation_marker_paths() -> None:
@@ -174,6 +186,21 @@ def test_find_preserves_literal_truncation_marker_paths() -> None:
 
     assert complete is not None and complete.paths == ("[truncated]",)
     assert capped is not None and capped.paths == ("[truncated]",)
+
+
+def test_truncated_expand_label_counts_only_retained_paths() -> None:
+    presentation = build_file_result_presentation(
+        "find",
+        {"pattern": "*"},
+        "src/a.py\nsrc/b.py\n[truncated]",
+        "find: 3 files (+ more)",
+        truncated=True,
+    )
+
+    assert presentation is not None
+    assert presentation.total_count == 3
+    assert presentation.retained_count == 2
+    assert presentation.expand_label == "show 2 files"
 
 
 def test_truncated_result_reports_only_counts_known_from_summary() -> None:

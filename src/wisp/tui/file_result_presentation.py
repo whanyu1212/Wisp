@@ -61,7 +61,7 @@ class FileResultPresentation:
 
     @property
     def expand_label(self) -> str:
-        count = self.total_count
+        count = self.retained_count if self.truncated else self.total_count
         if self.kind == "grep":
             noun = "match" if count == 1 else "matches"
         elif self.kind == "find":
@@ -69,6 +69,14 @@ class FileResultPresentation:
         else:
             noun = "line" if count == 1 else "lines"
         return f"show {count} {noun}" if count is not None else f"show {noun}"
+
+    @property
+    def retained_count(self) -> int:
+        if self.kind == "grep":
+            return sum(group.match_count for group in self.groups)
+        if self.kind == "find":
+            return len(self.paths)
+        return sum(len(group.rows) for group in self.groups)
 
 
 _COUNT_RE = re.compile(
@@ -161,6 +169,13 @@ def _build_grep(
         grouped.setdefault(path, []).append(row)
 
     if not grouped:
+        if truncated:
+            return FileResultPresentation(
+                kind="grep",
+                summary=summary,
+                truncated=True,
+                total_count=_summary_count(summary),
+            )
         return None
     return FileResultPresentation(
         kind="grep",
