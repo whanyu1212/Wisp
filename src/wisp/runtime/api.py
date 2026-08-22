@@ -38,20 +38,34 @@ class ExtensionAPI:
         self._events = events
         self._process_supervisor = process_supervisor
         self._extension_providers: set[str] = set()
+        self._configuration_sealed = False
 
     def register_provider(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a model provider with the runtime."""
 
         self._providers.register(provider, replace=replace)
-        # Remember that this name came from an extension. A configured provider is
-        # otherwise indistinguishable once constructed, and adoption must not replace
-        # an extension's provider with the candidate's.
-        self._extension_providers.add(provider.name)
+        self._record_extension_registration(provider.name)
 
     def extension_provider_names(self) -> frozenset[str]:
-        """Return provider names registered directly rather than by configuration."""
+        """Return provider names an extension registered after configuration."""
 
         return frozenset(self._extension_providers)
+
+    def seal_configured_providers(self) -> None:
+        """Mark every current registration as configuration-owned.
+
+        Called once the runtime has captured its configuration. Registrations after
+        this point come from extensions, whichever method registered them, and must
+        survive a configuration refresh instead of being replaced by the candidate's.
+        """
+
+        self._configuration_sealed = True
+
+    def _record_extension_registration(self, name: str) -> None:
+        # Built-in providers register before the seal and are configuration-owned;
+        # only what arrives afterwards belongs to an extension.
+        if self._configuration_sealed:
+            self._extension_providers.add(name)
 
     def register_provider_factory(
         self,
@@ -68,6 +82,7 @@ class ExtensionAPI:
         """
 
         self._providers.register_factory(name, factory, replace=replace)
+        self._record_extension_registration(name)
 
     def register_tool(
         self,
@@ -171,6 +186,7 @@ class WispRuntime:
         self._configured_providers.update(self.providers.constructed())
         self._configured_names.clear()
         self._configured_names.extend(self.providers.names())
+        self.api.seal_configured_providers()
 
     def _configured_provider_items(self) -> tuple[tuple[str, Provider], ...]:
         """Return configured providers that exist, in registration order.
@@ -257,15 +273,25 @@ class WispRuntime:
             for name, provider in previous_configured.items()
             if id(provider) in retained_ids
         }
-        transferred = {
-            name: provider
-            for name, provider in candidate._configured_provider_items()
-            if id(provider) in retained_ids
-        }
+        # Keyed by the candidate's configured *names*, not just the instances it had
+        # recorded: a deferred provider resolved during this adoption was constructed
+        # after the candidate's snapshot, so it is absent from that mapping. Omitting
+        # it would drop the name from configured ownership here, leaving the next
+        # refresh unable to replace the adapter and nobody responsible for closing it.
+        adopted_by_name = {provider.name: provider for provider in providers}
+        candidate_recorded = dict(candidate._configured_provider_items())
+        transferred = {}
+        for name in candidate._configured_names_or_all():
+            adopted_provider = adopted_by_name.get(name)
+            if adopted_provider is None or id(adopted_provider) not in retained_ids:
+                continue
+            recorded = candidate_recorded.get(name)
+            if recorded is not None and recorded is not adopted_provider:
+                # The candidate's own provider was masked by something else, so it is
+                # not the instance being transferred; leave it to be closed.
+                continue
+            transferred[name] = adopted_provider
         adopted = {**retained, **transferred}
-        # Only names that survive as deferrals: anything the adoption resolved to a
-        # concrete provider (an extension override, or a transferred instance) must
-        # keep that provider rather than fall back to a factory.
         # Registration order of the adopted runtime: live names first, then any the
         # candidate contributes, so `names()` keeps promising registration order.
         order = [

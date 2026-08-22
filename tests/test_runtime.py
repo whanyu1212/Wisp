@@ -144,6 +144,59 @@ def test_configuration_refresh_adopts_a_candidate_that_never_built_its_provider(
     anyio.run(scenario)
 
 
+def test_repeated_configuration_refreshes_keep_adopting_new_credentials() -> None:
+    """Adoption must not drop ownership of the provider it just resolved.
+
+    A deferred provider resolved *during* adoption is absent from the candidate's
+    instance snapshot. Omitting it there would strip the name from configured
+    ownership, so the next refresh would retain a stale adapter and nobody would
+    close it.
+    """
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        live.providers.get("anthropic")
+        await live.adopt_provider_configuration(await build_runtime())
+        first = live.providers.get("anthropic")
+
+        second = {
+            provider.name: provider
+            for provider in live.providers_for_configuration(await build_runtime())
+        }
+
+        assert second["anthropic"] is not first
+
+    anyio.run(scenario)
+
+
+def test_extension_factory_override_survives_a_configuration_refresh() -> None:
+    """An extension owns its provider however it registered it.
+
+    Registering by factory must mark ownership the same way registering an instance
+    does, or a refresh would silently replace the extension's provider once the
+    factory resolved.
+    """
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        override = _NamedFakeProvider("openai")
+        live.api.register_provider_factory("openai", lambda: override)
+        assert live.providers.get("openai") is override
+
+        adopted = {
+            provider.name: provider
+            for provider in live.providers_for_configuration(await build_runtime())
+        }
+
+        assert adopted["openai"] is override
+
+    anyio.run(scenario)
+
+
 def test_provider_registry_raises_for_unknown_provider() -> None:
     registry = ProviderRegistry()
 
