@@ -43,6 +43,10 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
         self._factories: dict[str, Callable[[], Provider]] = {}
+        # A token changes only when a name is explicitly registered or replaced, not
+        # when a deferred factory constructs its provider. Runtime ownership can then
+        # distinguish direct registry overrides from ordinary lazy construction.
+        self._registration_tokens: dict[str, object] = {}
         # Registration order is part of this registry's contract, and a name can move
         # between the two maps when a deferred provider is constructed. Keep the order
         # here so it never depends on construction state.
@@ -54,6 +58,7 @@ class ProviderRegistry:
         self._reserve(provider.name, replace=replace)
         self._factories.pop(provider.name, None)
         self._providers[provider.name] = provider
+        self._registration_tokens[provider.name] = object()
 
     def register_factory(
         self,
@@ -71,6 +76,7 @@ class ProviderRegistry:
         self._reserve(name, replace=replace)
         self._providers.pop(name, None)
         self._factories[name] = factory
+        self._registration_tokens[name] = object()
 
     def _reserve(self, name: str, *, replace: bool) -> None:
         if not replace and name in self._order:
@@ -111,6 +117,11 @@ class ProviderRegistry:
 
         return name in self._order
 
+    def registration_token(self, name: str) -> object | None:
+        """Return the identity of a name's current explicit registration."""
+
+        return self._registration_tokens.get(name)
+
     def constructed(self) -> dict[str, Provider]:
         """Return only the providers that already exist, constructing nothing."""
 
@@ -146,6 +157,7 @@ class ProviderRegistry:
         replacements = {provider.name: provider for provider in providers}
         self._providers = replacements
         self._factories = {}
+        self._registration_tokens = {name: object() for name in replacements}
         # `names()` promises registration order, which the caller knows and this
         # mapping does not; fall back to the replacement order when none is given.
         ordered = [name for name in (order or ()) if name in replacements]

@@ -37,35 +37,11 @@ class ExtensionAPI:
         self._commands = commands or CommandRegistry()
         self._events = events
         self._process_supervisor = process_supervisor
-        self._extension_providers: set[str] = set()
-        self._configuration_sealed = False
 
     def register_provider(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a model provider with the runtime."""
 
         self._providers.register(provider, replace=replace)
-        self._record_extension_registration(provider.name)
-
-    def _extension_provider_names(self) -> frozenset[str]:
-        """Return provider names an extension registered after configuration."""
-
-        return frozenset(self._extension_providers)
-
-    def _seal_provider_configuration(self) -> None:
-        """Mark every current registration as configuration-owned.
-
-        Called once the runtime has captured its configuration. Registrations after
-        this point come from extensions, whichever method registered them, and must
-        survive a configuration refresh instead of being replaced by the candidate's.
-        """
-
-        self._configuration_sealed = True
-
-    def _record_extension_registration(self, name: str) -> None:
-        # Built-in providers register before the seal and are configuration-owned;
-        # only what arrives afterwards belongs to an extension.
-        if self._configuration_sealed:
-            self._extension_providers.add(name)
 
     def register_provider_factory(
         self,
@@ -82,7 +58,6 @@ class ExtensionAPI:
         """
 
         self._providers.register_factory(name, factory, replace=replace)
-        self._record_extension_registration(name)
 
     def register_tool(
         self,
@@ -155,6 +130,7 @@ class WispRuntime:
     unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
     _configured_names: list[str] = field(default_factory=list, repr=False)
+    _configured_registrations: dict[str, object] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize shared registries and direct-construction provider state."""
@@ -186,7 +162,12 @@ class WispRuntime:
         self._configured_providers.update(self.providers.constructed())
         self._configured_names.clear()
         self._configured_names.extend(self.providers.names())
-        self.api._seal_provider_configuration()
+        self._configured_registrations.clear()
+        self._configured_registrations.update(
+            (name, token)
+            for name in self._configured_names
+            if (token := self.providers.registration_token(name)) is not None
+        )
 
     def _configured_provider_items(self) -> tuple[tuple[str, Provider], ...]:
         """Return configured providers that exist, in registration order.
@@ -197,14 +178,16 @@ class WispRuntime:
         """
 
         constructed = self.providers.constructed()
-        extension_owned = self.api._extension_provider_names()
         items: list[tuple[str, Provider]] = []
         for name in self._configured_names:
             provider = self._configured_providers.get(name)
-            if provider is None and name not in extension_owned:
+            registration_unchanged = self.providers.registration_token(
+                name
+            ) is self._configured_registrations.get(name)
+            if provider is None and registration_unchanged:
                 # A provider built from its configured factory after the initial
-                # snapshot remains configuration-owned. Include it for refresh and
-                # cleanup without mistaking a later extension override for ours.
+                # snapshot remains configuration-owned. A direct registry or API
+                # replacement changes the token and therefore remains extension-owned.
                 provider = constructed.get(name)
             if provider is not None:
                 items.append((name, provider))
@@ -248,9 +231,9 @@ class WispRuntime:
             # extension registering a different instance transfers ownership away.
             recorded = configured.get(name)
             configuration_owned = recorded is existing or (
-                recorded is None
-                and name in self._configured_names
-                and name not in self.api._extension_provider_names()
+                name in self._configured_names
+                and self.providers.registration_token(name)
+                is self._configured_registrations.get(name)
             )
             if configuration_owned and replaces:
                 providers.append(candidate_constructed.get(name) or candidate.providers.get(name))
@@ -269,8 +252,11 @@ class WispRuntime:
         Provider registrations that exist only in the live runtime remain available.
         """
 
-        previous_configured = dict(self._configured_provider_items())
         providers = self.providers_for_configuration(candidate)
+        # Planning may construct a configured provider that exists only in the live
+        # registry. Capture ownership afterwards so that preserved instance remains
+        # refreshable and closable.
+        previous_configured = dict(self._configured_provider_items())
         retained_ids = {id(provider) for provider in providers}
         retained = {
             name: provider
@@ -283,16 +269,16 @@ class WispRuntime:
         # it would drop the name from configured ownership here, leaving the next
         # refresh unable to replace the adapter and nobody responsible for closing it.
         adopted_by_name = {provider.name: provider for provider in providers}
-        candidate_recorded = dict(candidate._configured_provider_items())
+        candidate_constructed = candidate.providers.constructed()
         transferred = {}
         for name in candidate._configured_names_or_all():
             adopted_provider = adopted_by_name.get(name)
             if adopted_provider is None or id(adopted_provider) not in retained_ids:
                 continue
-            recorded = candidate_recorded.get(name)
-            if recorded is not None and recorded is not adopted_provider:
-                # The candidate's own provider was masked by something else, so it is
-                # not the instance being transferred; leave it to be closed.
+            if candidate_constructed.get(name) is not adopted_provider:
+                # The candidate stayed deferred because a live extension override
+                # won, or its own provider was otherwise masked. It owns no adopted
+                # instance to transfer; leave any constructed candidate to be closed.
                 continue
             transferred[name] = adopted_provider
         adopted = {**retained, **transferred}
@@ -311,8 +297,15 @@ class WispRuntime:
         self._configured_providers.update(adopted)
         self._configured_names.clear()
         self._configured_names.extend(name for name in self.providers.names() if name in adopted)
+        self._configured_registrations.clear()
+        self._configured_registrations.update(
+            (name, token)
+            for name in self._configured_names
+            if (token := self.providers.registration_token(name)) is not None
+        )
         for name in transferred:
             candidate._configured_providers.pop(name, None)
+            candidate._configured_registrations.pop(name, None)
             with suppress(ValueError):
                 candidate._configured_names.remove(name)
         displaced = tuple(
@@ -331,6 +324,7 @@ class WispRuntime:
             )
             self._configured_providers.clear()
             self._configured_names.clear()
+            self._configured_registrations.clear()
         finally:
             try:
                 if self.mcp_runtime is not None:
