@@ -42,26 +42,29 @@ a vanished reaction, an empty transient result, or a stale clean review is not s
 
 Use one managed monitor when available rather than issuing a visible full review query on every
 interval. Its normalized state must contain the current head SHA, the tracked trigger ID or timestamp,
-the sorted IDs and creation timestamps of issue comments added after the trigger, every formal review
-submitted after the trigger, any candidate verdict state, and the sorted IDs and resolution/outdated
-state of every unresolved thread. Snapshot review IDs and states at trigger time, then detect later
-submission timestamps and state transitions even when a pending review object was created earlier.
+the sorted IDs and creation/edit versions of issue comments added after the trigger, every formal
+review submitted after the trigger, any candidate verdict state, and the sorted IDs and
+resolution/outdated state of every unresolved thread. Represent a comment version with `updatedAt` or
+`lastEditedAt` when available, or a stable body hash; reclassify an observed comment whenever that
+version changes. Snapshot review IDs and states at trigger time, then detect later submission timestamps
+and state transitions even when a pending review object was created earlier.
 Do not restrict the post-trigger inventory to the expected automation account: another reviewer may
 add actionable feedback while automated review is running. For GraphQL, paginate every relevant
-connection but initially project only IDs, comment creation time, review `submittedAt`, state and commit
-identity, and thread `isResolved`/`isOutdated` state. Paginate each thread's comment connection and
-retain the complete sorted set of comment IDs already observed; on later polls, surface every unseen ID
-or fetch the complete delta after the last recorded cursor. Never reduce a multi-comment delta to only
-the newest reply.
+connection but initially project only IDs, comment creation/edit version, review `submittedAt`, state
+and commit identity, and thread `isResolved`/`isOutdated` state. Paginate each thread's comment
+connection and retain the complete sorted set of comment ID/version pairs already observed; on later
+polls, surface every unseen or changed pair, or fetch the complete delta after the last recorded cursor.
+Never reduce a multi-comment delta to only the newest reply.
 
 Emit the initial state and then only changes: a new acknowledgement, issue comment, formal review, or
-verdict; a changed thread set; a clean exact-head terminal result; a stale head; or an explicit query
-error. Do not repeatedly return full review bodies, file context, reactions, or complete comment
-histories. When any post-trigger item or unresolved thread first appears, leave the monitor and fetch
-that item's body, author, path/line context, reactions, submission state, and commit association once
-for classification. Record that classification and inspect every unseen inline comment and every newly
-submitted or state-changed review before accepting a clean verdict. Resume compact monitoring after a
-finding is handled and any replacement head has green CI.
+edited comment, verdict, changed thread set, clean exact-head terminal result, stale head, or explicit
+query error. Do not repeatedly return full review bodies, file context, reactions, or complete comment
+histories. When any post-trigger item, new comment version, or unresolved thread first appears, leave
+the monitor and fetch that item's body, author, path/line context, reactions, submission state, and
+commit association once for that version's classification. Record the classification and inspect every
+unseen or changed inline comment and every newly submitted or state-changed review before accepting a
+clean verdict. Resume compact monitoring after a finding is handled and any replacement head has green
+CI.
 
 An empty or malformed response, incomplete pagination, authentication failure, rate limit, or monitor
 exit without a classified terminal state is an error, not a clean review. If managed execution is not
