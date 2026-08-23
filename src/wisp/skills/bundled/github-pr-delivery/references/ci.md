@@ -6,7 +6,11 @@ that set. A previously verified complete run may seed candidate identities, but 
 current policy before reuse; never let a historical run override a newly added requirement. If current
 policy cannot be retrieved, report the limitation instead of claiming clean from a stale set. Do not
 infer completeness from checks that happen to be visible immediately after the push. Query results for
-that head and wait until every expected check is present and terminal.
+that head and wait until every expected check is present and terminal. Preserve each policy identity as
+its context plus provider or integration ID when policy pins one; a same-named result from another
+provider cannot satisfy that requirement. When current policy explicitly confirms an empty expected
+set, record that evidence and treat the required-CI gate as satisfied without running a required-check
+query. An unverified empty set remains an error.
 
 Treat queued, pending, cancelled, timed-out, action-required, stale-head, and unexplained skipped
 required checks as non-passing. Never infer green CI from an older SHA.
@@ -27,9 +31,9 @@ timing cause. If it repeats, diagnose it as real or report an external blocker; 
 
 ## Compact CI monitor
 
-When `gh` is the available interface, query structured check state instead of starting its table watch.
-A compact snapshot can use the following projection (adapt the PR selector and repository flag, but
-keep the selected fields minimal):
+When `gh` is the available interface and current policy requires checks, query structured check state
+instead of starting its table watch. A compact display snapshot can use the following projection (adapt
+the PR selector and repository flag, but keep the selected fields minimal):
 
 ```bash
 gh pr checks "$PR" --required --json bucket,name,state,link,workflow --jq '
@@ -46,13 +50,16 @@ gh pr checks "$PR" --required --json bucket,name,state,link,workflow --jq '
   }'
 ```
 
-Use the stable workflow/name pair as the check identity, and preserve the expected identity set outside
-the changing post-push snapshot. Compute missing expected identities on every observation and classify
-them as pending. If the required set cannot be established, report that limitation instead of treating
-an empty or partial visible set as complete. If the available interface cannot filter required checks
-reliably, query all checks internally but restrict readiness classification to the recorded expected
-identities. Optional check state may be reported separately as a caveat, but it must not block readiness
-or trigger a repair unless repository policy or the user puts it in scope.
+The projection's workflow/name pair is presentation, not always canonical identity. Preserve the
+policy's context plus optional provider/integration ID outside the changing post-push snapshot. When
+policy pins a provider or names are ambiguous, use the check-runs/status API or a structured connector
+that exposes provider metadata to map observations to policy identities; do not let another provider's
+same-named result fill the requirement. Compute missing expected identities on every observation and
+classify them as pending. If a nonempty required set cannot be established or mapped, report that
+limitation instead of treating a partial visible set as complete. If the available interface cannot
+filter required checks reliably, query all checks internally but restrict readiness classification to
+the recorded expected identities. Optional check state may be reported separately as a caveat, but it
+must not block readiness or trigger a repair unless repository policy or the user puts it in scope.
 
 Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
 equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
@@ -68,7 +75,8 @@ only for:
 Do not echo unchanged snapshots from the monitor. `gh pr checks` may return status 8 for valid pending
 checks or status 1 for a valid failing result, so validate and classify its structured output instead
 of treating every nonzero status as a transport failure. Conversely, never turn missing or malformed
-JSON into an empty passing set.
+JSON into an empty passing set. The only zero-check success is an empty expected set independently
+confirmed from current policy; in that case, skip the query instead of parsing its terminal diagnostic.
 
 Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
 success claim. Re-read the current required-check policy at the same final boundary; if the head or
