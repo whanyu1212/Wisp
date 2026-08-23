@@ -49,16 +49,19 @@ submission timestamps and state transitions even when a pending review object wa
 Do not restrict the post-trigger inventory to the expected automation account: another reviewer may
 add actionable feedback while automated review is running. For GraphQL, paginate every relevant
 connection but initially project only IDs, comment creation time, review `submittedAt`, state and commit
-identity, and thread `isResolved`/`isOutdated` state plus the newest comment ID.
+identity, and thread `isResolved`/`isOutdated` state. Paginate each thread's comment connection and
+retain the complete sorted set of comment IDs already observed; on later polls, surface every unseen ID
+or fetch the complete delta after the last recorded cursor. Never reduce a multi-comment delta to only
+the newest reply.
 
 Emit the initial state and then only changes: a new acknowledgement, issue comment, formal review, or
 verdict; a changed thread set; a clean exact-head terminal result; a stale head; or an explicit query
 error. Do not repeatedly return full review bodies, file context, reactions, or complete comment
 histories. When any post-trigger item or unresolved thread first appears, leave the monitor and fetch
 that item's body, author, path/line context, reactions, submission state, and commit association once
-for classification. Record that classification and inspect every newly submitted or state-changed
-review before accepting a clean verdict. Resume compact monitoring after a finding is handled and any
-replacement head has green CI.
+for classification. Record that classification and inspect every unseen inline comment and every newly
+submitted or state-changed review before accepting a clean verdict. Resume compact monitoring after a
+finding is handled and any replacement head has green CI.
 
 An empty or malformed response, incomplete pagination, authentication failure, rate limit, or monitor
 exit without a classified terminal state is an error, not a clean review. If managed execution is not

@@ -35,7 +35,10 @@ gh pr checks "$PR" --required --json bucket,name,state,link,workflow --jq '
     observed: ([.[] | {workflow, name, bucket}] | sort_by(.workflow, .name)),
     pending: ([.[] | select(.bucket == "pending") | {workflow, name}] |
       sort_by(.workflow, .name)),
-    blocking: ([.[] | select(.bucket != "pass" and .bucket != "pending") |
+    skipped: ([.[] | select(.bucket == "skipping") | {workflow, name, state, link}] |
+      sort_by(.workflow, .name)),
+    blocking: ([.[] | select(.bucket != "pass" and .bucket != "pending" and
+      .bucket != "skipping") |
       {workflow, name, bucket, state, link}] | sort_by(.workflow, .name))
   }'
 ```
@@ -51,10 +54,11 @@ or trigger a repair unless repository policy or the user puts it in scope.
 Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
 equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
 one monitor. Keep the complete normalized observation internal, compare it with the previous object,
-and emit a compact summary containing counts plus pending, missing, or blocking identities only for:
+and emit a compact summary containing counts plus pending, missing, skipped, or blocking identities
+only for:
 
 - the first observation;
-- a changed pending or blocking set;
+- a changed pending, skipped, or blocking set;
 - the terminal classification; or
 - a query, parsing, authentication, or rate-limit error.
 
@@ -65,13 +69,19 @@ JSON into an empty passing set.
 
 Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
 success claim. If it differs from the expected SHA, stop the monitor, record the replacement SHA, and
-restart observation for that head. Success requires every expected identity to be present and passing,
-with no pending or blocking check in that expected set. Failed, cancelled, and unexplained skipped
-required checks remain non-passing. After a blocking result, inspect only the identified run or job with
-`gh run view RUN_ID --log-failed` or `gh run view --job JOB_ID --log-failed`. Preserve or derive the
-selector from the check's recorded link, and verify the selected run's `headSha` matches the expected
-PR head before trusting its logs. Never use selector-free `gh run view --log-failed`, which can open an
-interactive chooser or select an unrelated run. Retrieve broader logs only if the focused output
+restart observation for that head. Success requires every expected identity to be present and in an
+accepted terminal state, with no pending or blocking check in that expected set. Passing is accepted;
+a skipped required check is accepted only after repository policy or check-specific evidence explains
+why that identity is intentionally inapplicable for this head. Record that classification. Failed,
+cancelled, and unexplained skipped required checks remain non-passing.
+
+After a blocking result, inspect only the identified check using its recorded provider and link. For a
+GitHub Actions check, preserve or derive the selector from that link, verify the selected run's
+`headSha` matches the expected PR head, then use `gh run view RUN_ID --log-failed` or
+`gh run view --job JOB_ID --log-failed`. Never use selector-free `gh run view --log-failed`, which can
+open an interactive chooser or select an unrelated run. For external CI, use its structured connector,
+API, or recorded external link instead of `gh run view`. Report inaccessible evidence as a blocker only
+after the provider-appropriate path is unavailable. Retrieve broader logs only if focused evidence
 cannot explain the failure.
 
 If resumable execution is unavailable, repeat the same projection as short snapshots and keep user
