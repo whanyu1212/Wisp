@@ -15,6 +15,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 - Made the bundled GitHub PR delivery workflow use structured, state-change-only monitoring for CI
   and review waits, reducing repeated tool output while preserving exact-head readiness and targeted
   failure diagnostics.
+- Clarified how the bundled Wisp development skill composes with GitHub PR delivery while keeping
+  local verification separate from remote merge-readiness evidence.
 
 ## 0.1.0rc6 — 2026-08-22
 
