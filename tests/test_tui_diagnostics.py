@@ -10,7 +10,7 @@ from textual.app import App
 from textual.geometry import Region
 from textual.strip import Strip
 
-from wisp.events import ToolCallRequested
+from wisp.events import ToolCallRequested, ToolResultReady
 from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.textual_app import _DisplayedFrame, create_textual_tui
@@ -152,6 +152,56 @@ def test_pending_tool_tick_stays_a_chops_update() -> None:
     assert updates
     assert any(update.kind == "chops" for update in updates)
     assert all(update.kind != "layout" for update in updates)
+
+
+def test_tool_card_updates_omit_unchanged_terminal_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    displayed: list[object | None] = []
+
+    def capture_display(
+        _app: App[object],
+        _screen: object,
+        renderable: object | None,
+    ) -> None:
+        displayed.append(renderable)
+
+    monkeypatch.setattr(App, "_display", capture_display)
+
+    async def scenario() -> tuple[int, list[object | None], list[object | None]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 18)) as pilot:
+            renderer.event(ToolCallRequested(call_id="card", name="read", arguments={}))
+            await pilot.pause()
+            await pilot.pause()
+            card = app.query_one(ToolCard)
+
+            displayed.clear()
+            card._tick()
+            await pilot.pause()
+            await pilot.pause()
+            tick_updates = displayed.copy()
+
+            displayed.clear()
+            renderer.event(
+                ToolResultReady(
+                    call_id="card",
+                    name="read",
+                    output="ok",
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+            await pilot.pause()
+            return app.screen.outer_size.width, tick_updates, displayed.copy()
+
+    width, tick_updates, result_updates = anyio.run(scenario)
+
+    for updates in (tick_updates, result_updates):
+        chops = [update for update in updates if isinstance(update, ChopsUpdate)]
+        assert len(chops) == 1
+        assert all(x2 < width for update in chops for _y, _x1, x2 in update.spans)
+        assert all(update is None or isinstance(update, ChopsUpdate) for update in updates)
 
 
 def test_display_diagnostics_report_filtered_layout_outcome(

@@ -276,7 +276,11 @@ class _DisplayedFrame:
             if not safe_to_compare or current != previous:
                 chops.append({0: output})
                 chop_ends.append([size.width])
-                spans.append((y, 0, size.width))
+                trailing_blanks = (
+                    0 if not safe_to_compare else _shared_trailing_blank_cells(previous, current)
+                )
+                narrowed_end = size.width - min(trailing_blanks, size.width - 1)
+                spans.append((y, 0, narrowed_end))
             else:
                 chops.append({})
                 chop_ends.append([])
@@ -314,7 +318,13 @@ class _DisplayedFrame:
                 if not safe_to_compare:
                     fail_open = True
                 if not allow_suppression or not safe_to_compare or patch != previous:
-                    retained_spans.append((y, x1, x2))
+                    trailing_blanks = (
+                        _shared_trailing_blank_cells(previous, patch)
+                        if allow_suppression and safe_to_compare
+                        else 0
+                    )
+                    narrowed_end = x2 - min(trailing_blanks, x2 - x1 - 1)
+                    retained_spans.append((y, x1, narrowed_end))
                 candidate_rows[y] = (
                     Strip.join(
                         (
@@ -332,7 +342,7 @@ class _DisplayedFrame:
         self.rows = candidate_rows
         if not retained_spans:
             return None, True, fail_open
-        if len(retained_spans) == len(update.spans):
+        if retained_spans == update.spans:
             return update, True, fail_open
         return ChopsUpdate(update.chops, retained_spans, update.chop_ends), True, fail_open
 
@@ -371,6 +381,55 @@ def _strip_has_control(strip: Strip) -> bool:
     """Return whether replaying an equal strip may still have a side effect."""
 
     return any(segment.control for segment in strip)
+
+
+def _shared_trailing_blank_cells(previous: Strip, current: Strip) -> int:
+    """Count an identical, style-stable suffix made only of ASCII spaces.
+
+    Textual commonly dirties a widget's complete row even when its visible text is
+    short. Trimming only matching single-cell blanks avoids replaying that padded
+    tail without introducing grapheme-boundary decisions into the display filter.
+    """
+
+    previous_segments = [segment for segment in previous if segment.text]
+    current_segments = [segment for segment in current if segment.text]
+    previous_index = len(previous_segments) - 1
+    current_index = len(current_segments) - 1
+    previous_end = len(previous_segments[previous_index].text) if previous_segments else 0
+    current_end = len(current_segments[current_index].text) if current_segments else 0
+    shared = 0
+
+    while previous_index >= 0 and current_index >= 0:
+        previous_segment = previous_segments[previous_index]
+        current_segment = current_segments[current_index]
+        if (
+            previous_segment.control
+            or current_segment.control
+            or previous_segment.style != current_segment.style
+        ):
+            break
+
+        previous_text = previous_segment.text[:previous_end]
+        current_text = current_segment.text[:current_end]
+        previous_blanks = len(previous_text) - len(previous_text.rstrip(" "))
+        current_blanks = len(current_text) - len(current_text.rstrip(" "))
+        matched = min(previous_blanks, current_blanks)
+        if matched == 0:
+            break
+
+        shared += matched
+        previous_end -= matched
+        current_end -= matched
+        if previous_end == 0:
+            previous_index -= 1
+            if previous_index >= 0:
+                previous_end = len(previous_segments[previous_index].text)
+        if current_end == 0:
+            current_index -= 1
+            if current_index >= 0:
+                current_end = len(current_segments[current_index].text)
+
+    return shared
 
 
 class _StableScrollCompositor(Compositor):

@@ -54,6 +54,25 @@ def test_pending_card_has_only_a_flat_action_row() -> None:
     assert _rendered(card) == "• Running  pytest -q"
 
 
+def test_tool_card_role_transition_updates_styles_once_and_preserves_classes() -> None:
+    class CountingToolCard(ToolCard):
+        style_updates = 0
+
+        def update_node_styles(self) -> None:
+            self.style_updates += 1
+            super().update_node_styles()
+
+    card = CountingToolCard("read", {"path": "foo.py"})
+    card.add_class("retained")
+    card.style_updates = 0
+
+    card.set_state("done", detail="ok")
+
+    assert card.style_updates == 1
+    assert card.classes.issuperset({"message", "message--approved", "retained"})
+    assert "message--tool" not in card.classes
+
+
 def test_multiline_result_uses_one_branch_and_aligned_continuations() -> None:
     card = ToolCard("bash", {"command": "pytest -q"})
     card.set_state("done", detail="first line\nsecond line", elapsed=1.2)

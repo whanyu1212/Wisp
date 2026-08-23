@@ -49,6 +49,25 @@ def test_displayed_frame_reduces_full_layout_to_changed_rows() -> None:
     assert not fail_open
 
 
+def test_displayed_frame_trims_shared_blank_tail_from_full_layout() -> None:
+    frame = _DisplayedFrame(size=Size(8, 1), rows=[_strip("long    ")])
+    update = LayoutUpdate([[_strip("x       ")]], Region(0, 0, 8, 1))
+
+    filtered, next_frame, fail_open = frame.filter_layout(
+        update,
+        size=Size(8, 1),
+        allow_suppression=True,
+    )
+
+    assert isinstance(filtered, ChopsUpdate)
+    # Preserve three spaces after ``x`` to erase ``ong``; the remaining four
+    # blanks were already displayed and do not need to cross the terminal.
+    assert filtered.spans == [(0, 0, 4)]
+    assert next_frame is not None
+    assert next_frame.rows == [_strip("x       ")]
+    assert not fail_open
+
+
 def test_displayed_frame_drops_duplicate_full_layout() -> None:
     frame = _DisplayedFrame(size=Size(4, 1), rows=[_strip("same")])
     update = LayoutUpdate([[_strip("same")]], Region(0, 0, 4, 1))
@@ -91,6 +110,48 @@ def test_displayed_frame_drops_only_exact_duplicate_rows() -> None:
     assert isinstance(filtered, ChopsUpdate)
     assert filtered.spans == [(1, 0, 4)]
     assert frame.rows == [_strip("same"), _strip("news")]
+
+
+def test_displayed_frame_trims_shared_blank_tail_from_chops() -> None:
+    frame = _DisplayedFrame(size=Size(8, 1), rows=[_strip("old     ")])
+    update = _update(_strip("new     "))
+
+    filtered, cache_valid, fail_open = frame.filter_chops(update, allow_suppression=True)
+
+    assert cache_valid
+    assert not fail_open
+    assert isinstance(filtered, ChopsUpdate)
+    assert filtered.spans == [(0, 0, 3)]
+    assert frame.rows == [_strip("new     ")]
+
+
+def test_displayed_frame_does_not_trim_nonblank_or_restyled_suffixes() -> None:
+    nonblank_frame = _DisplayedFrame(size=Size(6, 1), rows=[_strip("abcXYZ")])
+    nonblank_update = _update(_strip("defXYZ"))
+
+    nonblank, cache_valid, fail_open = nonblank_frame.filter_chops(
+        nonblank_update,
+        allow_suppression=True,
+    )
+
+    assert cache_valid
+    assert not fail_open
+    assert nonblank is nonblank_update
+
+    restyled_frame = _DisplayedFrame(
+        size=Size(8, 1),
+        rows=[_strip("old     ", style=Style(color="red"))],
+    )
+    restyled_update = _update(_strip("new     ", style=Style(color="blue")))
+
+    restyled, cache_valid, fail_open = restyled_frame.filter_chops(
+        restyled_update,
+        allow_suppression=True,
+    )
+
+    assert cache_valid
+    assert not fail_open
+    assert restyled is restyled_update
 
 
 def test_displayed_frame_reconstructs_a_sparse_partial_span() -> None:
