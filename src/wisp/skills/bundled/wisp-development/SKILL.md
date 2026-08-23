@@ -27,14 +27,13 @@ proposing changes.
 ## GitHub delivery boundary
 
 When Wisp development continues into branch, commit, push, pull-request, CI, review, or
-merge-readiness work on GitHub, inspect the resolved `github-pr-delivery` catalog entry before using it
-alongside this one. The `package:wisp` entry is Wisp's bundled delivery workflow. A higher-precedence
-project or user entry intentionally shadows it: treat that entry as a replacement, do not describe it
-as bundled or assume it preserves the same guarantees, and verify its authorization and current-head
-readiness rules before relying on it. This skill owns Wisp architecture, implementation, safety, and
-local verification; keep authorization-sensitive remote mechanics in the applicable delivery workflow
-rather than copying them here. Local verification is an input to PR delivery, not proof that remote CI
-or review is current and clean.
+merge-readiness work on GitHub, load the resolved `github-pr-delivery` entry and inspect its content
+before using it alongside this one. The name alone does not prove that Wisp's package entry was
+selected because a higher-precedence project or user entry may shadow it. Do not describe the resolved
+entry as bundled or assume guarantees that its content does not establish. This skill owns Wisp
+architecture, implementation, safety, and local verification; keep authorization-sensitive remote
+mechanics in the applicable delivery workflow rather than copying them here. Local verification is an
+input to PR delivery, not proof that remote CI or review is current and clean.
 
 Load only the supporting resource needed for the task:
 
