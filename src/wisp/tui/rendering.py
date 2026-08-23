@@ -269,7 +269,7 @@ class LineTuiRenderer:
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         for submission in submissions:
-            self.console.print(f"unsent follow-up: {submission.content}", markup=False)
+            self.console.print(_unsent_submission_text(submission), markup=False)
 
     def prompt_history_request(self) -> None:
         self.notice("Searchable prompt history is available in the Textual TUI.")
@@ -676,7 +676,8 @@ class FullscreenTuiRenderer:
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         for submission in submissions:
-            self._append("unsent follow-up", submission.content, style="yellow")
+            label = "unsent steering" if submission.queue_kind == "steering" else "unsent follow-up"
+            self._append(label, submission.content, style="yellow")
         if submissions:
             self._refresh()
 
@@ -1557,6 +1558,11 @@ def create_tui_renderer(kind: TuiRendererKind, console: Console | None = None) -
     """Create a built-in TUI renderer."""
 
     return _BUILT_IN_RENDERERS[kind](console)
+
+
+def _unsent_submission_text(submission: TuiSubmission) -> str:
+    label = "unsent steering" if submission.queue_kind == "steering" else "unsent follow-up"
+    return f"{label}: {submission.content}"
 
 
 def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? [y/N].") -> str:

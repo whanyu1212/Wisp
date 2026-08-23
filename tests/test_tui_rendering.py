@@ -31,11 +31,31 @@ from wisp.tui.history import (
     history_from_rpc_messages,
     represented_history_entry_ids,
 )
-from wisp.tui.input_types import PendingSubmissionView, new_submission_id
-from wisp.tui.rendering import _tui_help_text
+from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
+from wisp.tui.rendering import _tui_help_text, _unsent_submission_text
 from wisp.tui.theme import WISP_THEMES
 
 pytestmark = pytest.mark.tui
+
+
+def test_unsent_submission_label_preserves_queue_kind() -> None:
+    steering = TuiSubmission(
+        id=new_submission_id(),
+        content="change direction",
+        display="change direction",
+        input_mode="running",
+        queue_kind="steering",
+    )
+    follow_up = TuiSubmission(
+        id=new_submission_id(),
+        content="do this after",
+        display="do this after",
+        input_mode="running",
+        queue_kind="follow_up",
+    )
+
+    assert _unsent_submission_text(steering) == "unsent steering: change direction"
+    assert _unsent_submission_text(follow_up) == "unsent follow-up: do this after"
 
 
 def test_shared_help_scopes_runtime_queue_keys_to_fullscreen_interfaces() -> None:

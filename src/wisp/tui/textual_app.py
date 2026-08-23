@@ -80,7 +80,7 @@ from wisp.tui.overlay import (
 from wisp.tui.presentation_clock import PresentationClock
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
-from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
+from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot, _unsent_submission_text
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
 from wisp.tui.state import (
     TuiCancelRequested,
@@ -1009,7 +1009,7 @@ class TextualTui(App[None]):
         """Retain unsent text for display after the terminal screen is restored."""
 
         for submission in submissions:
-            line = f"unsent follow-up: {submission.content}"
+            line = _unsent_submission_text(submission)
             self._exit_unsent.append(line)
             self.write_notice(line)
 

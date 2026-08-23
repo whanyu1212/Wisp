@@ -34,6 +34,7 @@ from wisp.tui.rendering import (
     FullscreenTuiRenderer,
     TuiViewSnapshot,
     _RenderedTranscriptLine,
+    _unsent_submission_text,
     format_tui_footer_lines,
 )
 from wisp.tui.state import TuiQueueRestoreRequested, TuiQuitRequested
@@ -198,9 +199,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         super().report_unsent_submissions(submissions)
-        self._exit_unsent.extend(
-            f"unsent follow-up: {submission.content}" for submission in submissions
-        )
+        self._exit_unsent.extend(_unsent_submission_text(submission) for submission in submissions)
 
     def _refresh(self) -> None:
         if self._application is not None and not self._application.is_done:
