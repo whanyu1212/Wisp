@@ -5,8 +5,8 @@ Obtain the expected set from repository policy, repository instructions, or a pr
 complete run; do not infer completeness from the checks that happen to be visible immediately after
 the push. Query results for that head and wait until every expected check is present and terminal.
 
-Treat queued, pending, cancelled, timed-out, action-required, stale-head, and unexplained skipped checks
-as non-passing. Never infer green CI from an older SHA.
+Treat queued, pending, cancelled, timed-out, action-required, stale-head, and unexplained skipped
+required checks as non-passing. Never infer green CI from an older SHA.
 
 For each failure:
 
@@ -29,7 +29,7 @@ A compact snapshot can use the following projection (adapt the PR selector and r
 keep the selected fields minimal):
 
 ```bash
-gh pr checks "$PR" --json bucket,name,state,link,workflow --jq '
+gh pr checks "$PR" --required --json bucket,name,state,link,workflow --jq '
   {
     passed: ([.[] | select(.bucket == "pass")] | length),
     observed: ([.[] | {workflow, name, bucket}] | sort_by(.workflow, .name)),
@@ -43,7 +43,10 @@ gh pr checks "$PR" --json bucket,name,state,link,workflow --jq '
 Use the stable workflow/name pair as the check identity, and preserve the expected identity set outside
 the changing post-push snapshot. Compute missing expected identities on every observation and classify
 them as pending. If the required set cannot be established, report that limitation instead of treating
-an empty or partial visible set as complete.
+an empty or partial visible set as complete. If the available interface cannot filter required checks
+reliably, query all checks internally but restrict readiness classification to the recorded expected
+identities. Optional check state may be reported separately as a caveat, but it must not block readiness
+or trigger a repair unless repository policy or the user puts it in scope.
 
 Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
 equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
@@ -63,8 +66,8 @@ JSON into an empty passing set.
 Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
 success claim. If it differs from the expected SHA, stop the monitor, record the replacement SHA, and
 restart observation for that head. Success requires every expected identity to be present and passing,
-with no other visible pending or blocking check. Failed, cancelled, and unexplained skipped checks
-remain non-passing. After a blocking result, inspect only the identified run or job with
+with no pending or blocking check in that expected set. Failed, cancelled, and unexplained skipped
+required checks remain non-passing. After a blocking result, inspect only the identified run or job with
 `gh run view --log-failed`; retrieve broader logs only if that focused output cannot explain the
 failure.
 
