@@ -4818,19 +4818,18 @@ def test_tui_shell_reports_queued_follow_ups_after_failed_prompt() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_restores_runtime_queue_in_submission_order_before_shutdown() -> None:
+def test_tui_shell_reports_runtime_queue_in_submission_order_before_shutdown() -> None:
     async def run() -> None:
-        class RestoreRenderer(FullscreenTuiRenderer):
+        class ReportRenderer(FullscreenTuiRenderer):
             def __init__(self) -> None:
                 super().__init__(_console()[0], clear_screen=False)
-                self.restored: list[TuiSubmission] = []
+                self.reported: list[TuiSubmission] = []
 
-            def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
-                self.restored.extend(submissions)
-                return True
+            def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
+                self.reported.extend(submissions)
 
         controller = ScriptedController()
-        renderer = RestoreRenderer()
+        renderer = ReportRenderer()
         shell = TuiShell(controller, renderer=renderer)
         follow_up = TuiSubmission(
             id=new_submission_id(),
@@ -4856,7 +4855,7 @@ def test_tui_shell_restores_runtime_queue_in_submission_order_before_shutdown() 
 
         await shell._request_shutdown()
 
-        assert renderer.restored == [follow_up, steering]
+        assert renderer.reported == [follow_up, steering]
         assert shell._queue_steering == ()
         assert shell._queue_follow_up == ()
         assert shell._local_queue_submissions == []

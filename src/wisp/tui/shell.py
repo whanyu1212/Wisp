@@ -989,8 +989,8 @@ class TuiShell:
 
         self.state.queued_prompts.clear()
 
-    def _restore_runtime_queue_before_shutdown(self) -> None:
-        """Reclaim runtime-owned queued input before the RPC process exits."""
+    def _report_runtime_queue_before_shutdown(self) -> None:
+        """Report runtime-owned queued input before the RPC process exits."""
 
         queued = self._queued_submissions()
         if not queued:
@@ -1009,7 +1009,9 @@ class TuiShell:
         self._queue_follow_up = ()
         self._local_queue_submissions.clear()
         self._sync_pending_view()
-        self._restore_submissions(tuple(submissions))
+        for submission in submissions:
+            self._resolve_submission(submission)
+        self._call_renderer_optional("report_unsent_submissions", tuple(submissions))
 
     async def _submit_queue_message(
         self,
@@ -1951,7 +1953,7 @@ class TuiShell:
             self.state.status = TuiStatus.exiting
             self._sync_view()
             return False
-        self._restore_runtime_queue_before_shutdown()
+        self._report_runtime_queue_before_shutdown()
         self.state.status = TuiStatus.exiting
         self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
         self._pending_session_stats_command_ids.clear()
