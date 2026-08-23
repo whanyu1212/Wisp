@@ -464,9 +464,12 @@ class PromptEditor(TextArea):
         self.post_message(self.Submitted(self.text_for_submission(), self.text, "follow_up"))
 
     def action_restore_queued(self) -> None:
-        """Ask the shell to restore the newest eligible runtime queue item."""
+        """Ask the shell to restore the newest eligible active-run queue item."""
 
-        self.post_message(self.RestoreQueued())
+        # RPC queue mutation is active-run-only. Retained items remain visible and
+        # carry into the next run rather than being cleared by frontend policy.
+        if self._agent_running:
+            self.post_message(self.RestoreQueued())
 
     def action_newline(self) -> None:
         self.insert("\n")

@@ -13,14 +13,14 @@ from wisp.tui.textual_input import TextualInputController
 from wisp.tui.widgets import PromptEditor
 
 
-def test_prompt_editor_allows_restoring_retained_queue_while_idle() -> None:
+def test_prompt_editor_does_not_pop_retained_queue_while_idle() -> None:
     editor = PromptEditor()
     messages: list[PromptEditor.RestoreQueued] = []
     editor.post_message = messages.append  # type: ignore[method-assign]
 
     editor.action_restore_queued()
 
-    assert len(messages) == 1
+    assert messages == []
 
 
 @dataclass

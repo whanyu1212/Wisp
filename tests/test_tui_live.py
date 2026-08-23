@@ -405,19 +405,61 @@ def test_live_fullscreen_tui_captures_explicit_queue_intent_from_bindings() -> N
 
 
 def test_live_fullscreen_tui_alt_up_requests_queue_restore_without_clearing_draft() -> None:
+    from types import SimpleNamespace
+
+    from prompt_toolkit.keys import Keys
+
     from wisp.tui.state import TuiQueueRestoreRequested
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        read_task = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("keep draft")
+        binding = next(
+            binding
+            for binding in renderer._key_bindings.bindings
+            if binding.keys == (Keys.Escape, Keys.Up)
+        )
+        binding.handler(SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None)))
+
+        with pytest.raises(TuiQueueRestoreRequested):
+            await read_task
+        assert renderer._buffer.text == "keep draft"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_alt_up_is_inert_without_an_active_run() -> None:
+    from types import SimpleNamespace
+
+    from prompt_toolkit.keys import Keys
 
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)
         read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
         await anyio.sleep(0)
         renderer._buffer.insert_text("keep draft")
+        binding = next(
+            binding
+            for binding in renderer._key_bindings.bindings
+            if binding.keys == (Keys.Escape, Keys.Up)
+        )
 
-        renderer._restore_queued_input()
+        binding.handler(SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None)))
 
-        with pytest.raises(TuiQueueRestoreRequested):
-            await read_task
+        assert not read_task.done()
         assert renderer._buffer.text == "keep draft"
+        read_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read_task
 
     anyio.run(run)
 

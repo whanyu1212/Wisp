@@ -1583,7 +1583,8 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "Fullscreen controls: Esc cancels; press Ctrl+C twice within 1.5s to quit.\n"
         "Enter submits; Shift+Enter (Textual) or Ctrl+J inserts a newline.\n"
         "The line renderer retains terminal Ctrl+C interrupt and Ctrl+D EOF behavior.\n"
-        "While a prompt runs, Enter steers; Alt+Enter queues a follow-up; Alt+Up restores.\n"
+        "In fullscreen interfaces while a prompt runs, Enter steers; Alt+Enter queues a "
+        "follow-up; Alt+Up restores.\n"
         f"{approval_hint}"
     )
 

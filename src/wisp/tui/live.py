@@ -316,7 +316,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         @bindings.add("escape", "up")
         def _restore_queued(event: KeyPressEvent) -> None:
-            self._restore_queued_input()
+            if self._buffer_input_mode == "running":
+                self._restore_queued_input()
             event.app.invalidate()
 
         @bindings.add("c-j")

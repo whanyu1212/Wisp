@@ -32,9 +32,16 @@ from wisp.tui.history import (
     represented_history_entry_ids,
 )
 from wisp.tui.input_types import PendingSubmissionView, new_submission_id
+from wisp.tui.rendering import _tui_help_text
 from wisp.tui.theme import WISP_THEMES
 
 pytestmark = pytest.mark.tui
+
+
+def test_shared_help_scopes_runtime_queue_keys_to_fullscreen_interfaces() -> None:
+    help_text = _tui_help_text()
+
+    assert "In fullscreen interfaces while a prompt runs" in help_text
 
 
 def test_line_renderer_bounds_new_pending_submission_preview() -> None:
