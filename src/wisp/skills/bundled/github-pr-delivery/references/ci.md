@@ -1,9 +1,12 @@
 # Current-Head CI
 
 Before each monitor starts, record the PR, head SHA, push time, and expected required-check identities.
-Obtain the expected set from repository policy, repository instructions, or a previously verified
-complete run; do not infer completeness from the checks that happen to be visible immediately after
-the push. Query results for that head and wait until every expected check is present and terminal.
+Refresh the target branch's current protection/ruleset policy and repository instructions to establish
+that set. A previously verified complete run may seed candidate identities, but cross-check it against
+current policy before reuse; never let a historical run override a newly added requirement. If current
+policy cannot be retrieved, report the limitation instead of claiming clean from a stale set. Do not
+infer completeness from checks that happen to be visible immediately after the push. Query results for
+that head and wait until every expected check is present and terminal.
 
 Treat queued, pending, cancelled, timed-out, action-required, stale-head, and unexplained skipped
 required checks as non-passing. Never infer green CI from an older SHA.
@@ -68,12 +71,13 @@ of treating every nonzero status as a transport failure. Conversely, never turn 
 JSON into an empty passing set.
 
 Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
-success claim. If it differs from the expected SHA, stop the monitor, record the replacement SHA, and
-restart observation for that head. Success requires every expected identity to be present and in an
-accepted terminal state, with no pending or blocking check in that expected set. Passing is accepted;
-a skipped required check is accepted only after repository policy or check-specific evidence explains
-why that identity is intentionally inapplicable for this head. Record that classification. Failed,
-cancelled, and unexplained skipped required checks remain non-passing.
+success claim. Re-read the current required-check policy at the same final boundary; if the head or
+expected identity set changed, record the replacement state and restart observation. Success requires
+every current expected identity to be present and in an accepted terminal state, with no pending or
+blocking check in that expected set. Passing is accepted; a skipped required check is accepted only
+after repository policy or check-specific evidence explains why that identity is intentionally
+inapplicable for this head. Record that classification. Failed, cancelled, and unexplained skipped
+required checks remain non-passing.
 
 After a blocking result, inspect only the identified check using its recorded provider and link. For a
 GitHub Actions check, preserve or derive the selector from that link, verify the selected run's
