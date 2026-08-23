@@ -30,9 +30,6 @@
   <a href="https://github.com/whanyu1212/Wisp/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License" /></a>
 </p>
 
-> **Release candidate status:** Wisp is approaching its first stable release. Interfaces may still
-> change while the `0.1.0` candidate is validated.
-
 ## What is Wisp?
 
 Most coding agents ask you to choose between watching and working: you either sit and wait, or you
@@ -52,11 +49,11 @@ Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires 
 and macOS are supported; Windows is best-effort until it has dedicated CI coverage.
 
 ```bash
-uv tool install "wisp-ai==0.1.0rc6"   # request the prerelease explicitly
+uv tool install "wisp-ai==0.1.0"
 wisp --version
 ```
 
-To run it without installing: `uvx --from "wisp-ai==0.1.0rc6" wisp`. If `wisp` is not on your
+To run it without installing: `uvx --from "wisp-ai==0.1.0" wisp`. If `wisp` is not on your
 `PATH`, run `uv tool update-shell` once and restart your shell.
 
 See [Installation](https://whanyu1212.github.io/Wisp/guide/installation) for the update policy and

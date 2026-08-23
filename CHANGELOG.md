@@ -12,6 +12,15 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+## 0.1.0 — 2026-08-23
+
+- Added active-run steering and follow-up controls to the TUI, including queue previews,
+  restoration, cancellation, and session-transition handling through the shared typed RPC runtime.
+- Deferred provider construction until first use and tightened provider ownership across trusted
+  configuration refreshes, substantially reducing startup time while preserving registration and
+  cleanup behavior.
+- Reduced tool-card update flicker by avoiding full-width separator repaints, coalescing lifecycle
+  style changes, and limiting terminal writes to changed cells while retaining fail-open rendering.
 - Made the bundled GitHub PR delivery workflow use structured, state-change-only monitoring for CI
   and review waits, reducing repeated tool output while preserving exact-head readiness and targeted
   failure diagnostics.

@@ -15,11 +15,11 @@ package today.
 
 ## Install
 
-Wisp requires Python 3.12 or newer. Add the release candidate to an application environment rather
-than installing it only as a command-line tool:
+Wisp requires Python 3.12 or newer. Add the stable release to an application environment rather than
+installing it only as a command-line tool:
 
 ```bash
-uv add "wisp-ai==0.1.0rc6"
+uv add "wisp-ai==0.1.0"
 ```
 
 The supported embedding imports start here:
