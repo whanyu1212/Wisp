@@ -41,15 +41,17 @@ a vanished reaction, an empty transient result, or a stale clean review is not s
 ### Compact review monitor
 
 Use one managed monitor when available rather than issuing a visible full review query on every
-interval. Its normalized state must contain the current head SHA, the tracked trigger ID or timestamp,
-the sorted IDs and creation/edit versions of issue comments present at trigger time or added later,
-every formal review submitted after the trigger with its submission/edit version, any candidate verdict
-state, and the sorted IDs and resolution/outdated state of every unresolved thread. Represent a comment
-version with `updatedAt` or `lastEditedAt` when available, or a stable body hash. Snapshot issue-comment
-IDs and versions at trigger time, then surface newly added comments and reclassify any observed comment
-whenever its version changes. Represent a formal review version the same way, snapshot review IDs,
-versions, and states at trigger time, then detect later submissions, edits, and state transitions even
-when a pending review object was created earlier.
+interval. Its normalized state must contain the current head SHA, the tracked trigger ID or timestamp
+and its reaction state, the sorted IDs and creation/edit versions of issue comments present at trigger
+time or added later, every formal review submitted after the trigger with its submission/edit version,
+any candidate verdict state, and the sorted IDs and resolution/outdated state of every unresolved
+thread. Represent trigger reactions by content plus stable reactor identities when exposed, or counts
+otherwise, so acknowledgement changes are observable even though they do not edit the trigger comment.
+Represent a comment version with `updatedAt` or `lastEditedAt` when available, or a stable body hash.
+Snapshot issue-comment IDs and versions at trigger time, then surface newly added comments and
+reclassify any observed comment whenever its version changes. Represent a formal review version the
+same way, snapshot review IDs, versions, and states at trigger time, then detect later submissions,
+edits, and state transitions even when a pending review object was created earlier.
 Do not restrict the post-trigger inventory to the expected automation account: another reviewer may
 add actionable feedback while automated review is running. For GraphQL, paginate every relevant
 connection but initially project only IDs, comment creation/edit version, review `submittedAt`,
