@@ -4703,6 +4703,37 @@ def test_tui_shell_restores_latest_runtime_queue_item_after_confirmed_pop() -> N
     anyio.run(run)
 
 
+def test_tui_shell_reports_queue_restore_in_flight_during_shutdown() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content="do this later",
+            display="do this later",
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+        controller.follow_ups.append(submission.content)
+        shell._local_queue_submissions.append(("follow_up", submission))
+        shell._apply_queue_update(QueueUpdated(follow_up=(submission.content,)))
+
+        await shell._restore_latest_queue_item()
+        await shell._handle_rpc_event(await controller._receive.receive())
+        await shell._handle_rpc_event(await controller._receive.receive())
+        assert shell._queue_follow_up == ()
+        assert shell._pending_queue_restore is not None
+
+        await shell._request_shutdown()
+
+        assert "unsent follow-up: do this later" in output.getvalue()
+        assert shell._pending_queue_restore is None
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
 def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
     async def run() -> None:
         controller = ScriptedController(

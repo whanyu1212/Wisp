@@ -994,16 +994,22 @@ class TuiShell:
 
         queued = self._queued_submissions()
         pending = tuple(item.submission for item in self._pending_queue_submissions.values())
-        if not queued and not pending:
+        restoring = (
+            (self._pending_queue_restore.submission,)
+            if self._pending_queue_restore is not None
+            else ()
+        )
+        if not queued and not pending and not restoring:
             return
         by_id = {int(submission.id): submission for _, submission in queued}
-        for submission in pending:
+        for submission in (*pending, *restoring):
             by_id.setdefault(int(submission.id), submission)
         submissions = sorted(by_id.values(), key=lambda submission: int(submission.id))
         self._queue_steering = ()
         self._queue_follow_up = ()
         self._local_queue_submissions.clear()
         self._pending_queue_submissions.clear()
+        self._pending_queue_restore = None
         self._sync_pending_view()
         for submission in submissions:
             self._resolve_submission(submission)
