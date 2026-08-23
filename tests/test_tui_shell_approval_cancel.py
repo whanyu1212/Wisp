@@ -410,9 +410,9 @@ def test_tui_shell_interrupt_during_approval_preserves_queued_prompts_and_echoes
     anyio.run(run)
 
 
-def test_tui_shell_cancelling_running_prompt_clears_queued_prompts_and_echoes() -> None:
-    # Complement: cancelling the RUNNING prompt genuinely drops the queue, so the
-    # renderer hook fires exactly once to reclaim the abandoned prompts' echoes.
+def test_tui_shell_cancelling_running_prompt_preserves_runtime_queue_and_echoes() -> None:
+    # Cancellation belongs to the active command. Runtime-owned queued messages
+    # remain available rather than being silently discarded by the frontend.
     async def run() -> None:
         controller = ScriptedController()
 
@@ -428,7 +428,7 @@ def test_tui_shell_cancelling_running_prompt_clears_queued_prompts_and_echoes() 
         shell = TuiShell(controller, renderer=renderer)
         shell.state.current_command_id = "prompt-1"
         shell.state.status = TuiStatus.running
-        shell.state.queued_prompts.append("doomed follow-up")
+        shell._apply_queue_update(QueueUpdated(follow_up=("doomed follow-up",)))
 
         should_exit = await shell._handle_input_interrupted(
             _InputInterrupted(mode=_InputMode.running)
@@ -436,8 +436,8 @@ def test_tui_shell_cancelling_running_prompt_clears_queued_prompts_and_echoes() 
 
         assert should_exit is False
         assert controller.cancelled == ["prompt-1"]
-        assert list(shell.state.queued_prompts) == []  # queue dropped
-        assert renderer.cleared_calls == 1  # echo-reclaim hook fired
+        assert tuple(item.content for item in shell._queue_follow_up) == ("doomed follow-up",)
+        assert renderer.cleared_calls == 0
 
     anyio.run(run)
 
@@ -461,7 +461,8 @@ def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
 
         assert should_exit is False
         assert controller.approvals == []
-        assert list(shell.state.queued_prompts) == ["yes"]
+        assert controller.follow_ups == ["yes"]
+        assert list(shell.state.queued_prompts) == []
 
     anyio.run(run)
 
@@ -505,7 +506,8 @@ def test_tui_shell_queues_non_answer_from_stale_running_trust_input() -> None:
         assert should_exit is False
         assert controller.trusts == []
         assert shell.state.pending_trust is not None
-        assert list(shell.state.queued_prompts) == ["follow up"]
+        assert controller.follow_ups == ["follow up"]
+        assert list(shell.state.queued_prompts) == []
 
     anyio.run(run)
 
@@ -794,7 +796,6 @@ def test_tui_shell_interrupt_cancels_compaction_and_clears_queue() -> None:
         console, output = _console()
         shell = TuiShell(controller, console=console)
         await shell._start_compaction(None)
-        shell.state.queued_prompts.append("do not run")
 
         should_exit = await shell._handle_input_interrupted(
             _InputInterrupted(mode=_InputMode.running)
@@ -802,7 +803,6 @@ def test_tui_shell_interrupt_cancels_compaction_and_clears_queue() -> None:
 
         assert should_exit is False
         assert controller.cancelled == ["compact-1"]
-        assert list(shell.state.queued_prompts) == []
         assert "Cancelling compaction..." in output.getvalue()
 
         await shell._handle_rpc_event(

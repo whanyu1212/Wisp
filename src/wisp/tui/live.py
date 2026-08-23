@@ -25,6 +25,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
 from wisp.tui.input_types import (
+    QueueSubmissionKind,
     TuiSubmission,
     new_submission_id,
     pending_submission_preview_lines,
@@ -33,9 +34,10 @@ from wisp.tui.rendering import (
     FullscreenTuiRenderer,
     TuiViewSnapshot,
     _RenderedTranscriptLine,
+    _unsent_submission_text,
     format_tui_footer_lines,
 )
-from wisp.tui.state import TuiQuitRequested
+from wisp.tui.state import TuiQueueRestoreRequested, TuiQuitRequested
 
 _HEADER_FRAME_HEIGHT = 3
 _FOOTER_HEIGHT = 5
@@ -197,9 +199,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         super().report_unsent_submissions(submissions)
-        self._exit_unsent.extend(
-            f"unsent follow-up: {submission.content}" for submission in submissions
-        )
+        self._exit_unsent.extend(_unsent_submission_text(submission) for submission in submissions)
 
     def _refresh(self) -> None:
         if self._application is not None and not self._application.is_done:
@@ -299,7 +299,24 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         @bindings.add("enter")
         def _accept(event: KeyPressEvent) -> None:
-            self._accept_input()
+            kind: QueueSubmissionKind = (
+                "steering" if self._buffer_input_mode == "running" else "auto"
+            )
+            self._accept_input(queue_kind=kind)
+            event.app.invalidate()
+
+        @bindings.add("escape", "enter")
+        def _alternate_accept(event: KeyPressEvent) -> None:
+            if self._buffer_input_mode == "running":
+                self._accept_input(queue_kind="follow_up")
+            else:
+                self._insert_newline()
+            event.app.invalidate()
+
+        @bindings.add("escape", "up")
+        def _restore_queued(event: KeyPressEvent) -> None:
+            if self._buffer_input_mode == "running":
+                self._restore_queued_input()
             event.app.invalidate()
 
         @bindings.add("c-j")
@@ -356,7 +373,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
 
-    def _accept_input(self) -> None:
+    def _accept_input(self, *, queue_kind: QueueSubmissionKind = "auto") -> None:
         text = self._buffer.text
         mode = self._buffer_input_mode
         submission = TuiSubmission(
@@ -364,6 +381,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             content=text,
             display=text,
             input_mode=mode,
+            queue_kind=queue_kind,
         )
         if mode not in {"approval", "trust"}:
             self._buffered_submissions[int(submission.id)] = submission
@@ -388,6 +406,15 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def _interrupt_input(self) -> None:
         mode = self._buffer_input_mode
         signal = LiveFullscreenInputInterrupted()
+        if self._input_future is None or self._input_future.done():
+            self._queued_inputs.append((signal, mode))
+            return
+        self._submitted_input_mode = mode
+        self._input_future.set_exception(signal)
+
+    def _restore_queued_input(self) -> None:
+        mode = self._buffer_input_mode
+        signal = TuiQueueRestoreRequested()
         if self._input_future is None or self._input_future.done():
             self._queued_inputs.append((signal, mode))
             return

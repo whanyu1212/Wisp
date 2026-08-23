@@ -31,10 +31,37 @@ from wisp.tui.history import (
     history_from_rpc_messages,
     represented_history_entry_ids,
 )
-from wisp.tui.input_types import PendingSubmissionView, new_submission_id
+from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
+from wisp.tui.rendering import _tui_help_text, _unsent_submission_text
 from wisp.tui.theme import WISP_THEMES
 
 pytestmark = pytest.mark.tui
+
+
+def test_unsent_submission_label_preserves_queue_kind() -> None:
+    steering = TuiSubmission(
+        id=new_submission_id(),
+        content="change direction",
+        display="change direction",
+        input_mode="running",
+        queue_kind="steering",
+    )
+    follow_up = TuiSubmission(
+        id=new_submission_id(),
+        content="do this after",
+        display="do this after",
+        input_mode="running",
+        queue_kind="follow_up",
+    )
+
+    assert _unsent_submission_text(steering) == "unsent steering: change direction"
+    assert _unsent_submission_text(follow_up) == "unsent follow-up: do this after"
+
+
+def test_shared_help_scopes_runtime_queue_keys_to_fullscreen_interfaces() -> None:
+    help_text = _tui_help_text()
+
+    assert "In fullscreen interfaces while a prompt runs" in help_text
 
 
 def test_line_renderer_bounds_new_pending_submission_preview() -> None:
@@ -59,7 +86,7 @@ def test_line_renderer_bounds_new_pending_submission_preview() -> None:
     renderer.view_updated(snapshot)
 
     rendered = output.getvalue()
-    assert rendered.count("Queued follow-ups") == 1
+    assert rendered.count("Queued 1 follow-up") == 1
     assert "a third line that must stay hidden" not in rendered
     assert "a first line that is much wider than the terminal" not in rendered
     assert len(rendered.splitlines()) == 3
@@ -1099,7 +1126,7 @@ def test_tui_footer_context_gauge_is_responsive_without_displacing_status() -> N
         ),
         width=24,
     )[1]
-    assert protected == "running • queued 12"
+    assert protected == "running • later 12"
 
 
 def test_tui_footer_formats_complete_and_partial_costs_responsively() -> None:
@@ -1159,7 +1186,7 @@ def test_tui_footer_formatter_compacts_and_truncates() -> None:
     assert "…" in lines[0]
     # status outranks model (issue #72): the model is dropped entirely here
     # rather than kept whole at the cost of clipping live status text.
-    assert lines[1] == "running • queued 12"
+    assert lines[1] == "running • later 12"
     assert "openai/gpt-4.1" not in lines[1]
 
 
@@ -1822,7 +1849,7 @@ def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
     rendered = output.getvalue()
     assert "Transcript" in rendered
     assert "Editor" in rendered
-    assert "running • queued 1" in rendered
+    assert "running • later 1" in rendered
     assert "openai/gpt-test" in rendered
     assert "wisp(running)> " in rendered
 

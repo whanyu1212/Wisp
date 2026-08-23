@@ -30,6 +30,9 @@ from wisp.events import (
     MessageDelta,
     ModelProviderAutoSwitched,
     ProjectConfigApplied,
+    QueueItemsRemoved,
+    QueueKind,
+    QueueUpdated,
     RpcCommandArgument,
     RpcCommandDescriptor,
     RpcCommandFinished,
@@ -187,6 +190,10 @@ class ScriptedController:
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
         self.new_session_requests: list[str] = []
+        self.steering: list[str] = []
+        self.follow_ups: list[str] = []
+        self.queue_state_requests: list[str] = []
+        self.queue_pops: list[QueueKind] = []
         self.session_stats_requests: list[str] = []
         self.shutdown_count = 0
         self.closed = False
@@ -374,6 +381,68 @@ class ScriptedController:
         )
         return selected_id
 
+    async def steer(self, content: str, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"steer-{len(self.steering) + 1}"
+        self.steering.append(content)
+        await self._emit(
+            [
+                QueueUpdated(steering=tuple(self.steering), follow_up=tuple(self.follow_ups)),
+                RpcCommandFinished(command_id=selected_id, command_type="steer", ok=True),
+            ]
+        )
+        return selected_id
+
+    async def follow_up(self, content: str, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"follow-up-{len(self.follow_ups) + 1}"
+        self.follow_ups.append(content)
+        await self._emit(
+            [
+                QueueUpdated(steering=tuple(self.steering), follow_up=tuple(self.follow_ups)),
+                RpcCommandFinished(command_id=selected_id, command_type="follow_up", ok=True),
+            ]
+        )
+        return selected_id
+
+    async def get_queue_state(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"queue-state-{len(self.queue_state_requests) + 1}"
+        self.queue_state_requests.append(selected_id)
+        await self._emit(
+            [
+                QueueUpdated(steering=tuple(self.steering), follow_up=tuple(self.follow_ups)),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_queue_state",
+                    ok=True,
+                ),
+            ]
+        )
+        return selected_id
+
+    async def pop_queue(
+        self,
+        kind: QueueKind,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        selected_id = command_id or f"queue-pop-{len(self.queue_pops) + 1}"
+        self.queue_pops.append(kind)
+        queue = self.steering if kind == "steering" else self.follow_ups
+        removed = (queue.pop(),) if queue else ()
+        await self._emit(
+            [
+                QueueItemsRemoved(
+                    command_id=selected_id,
+                    operation="pop",
+                    kind=kind,
+                    steering=removed if kind == "steering" else (),
+                    follow_up=removed if kind == "follow_up" else (),
+                ),
+                QueueUpdated(steering=tuple(self.steering), follow_up=tuple(self.follow_ups)),
+                RpcCommandFinished(command_id=selected_id, command_type="pop_queue", ok=True),
+            ]
+        )
+        return selected_id
+
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
         self.cancelled.append(target_id)
         await self._emit_scripted(self.cancel_events, default=[])
@@ -511,6 +580,7 @@ __all__ = [
     "ModelProviderAutoSwitched",
     "Path",
     "ProjectConfigApplied",
+    "QueueUpdated",
     "RpcCommandDescriptor",
     "RpcCommandFinished",
     "RpcCommandsReported",

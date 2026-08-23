@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import count
-from typing import NewType
+from typing import Literal, NewType
 
 from rich.cells import cell_len, set_cell_size
 
 SubmissionId = NewType("SubmissionId", int)
+type QueueSubmissionKind = Literal["auto", "steering", "follow_up"]
 _SUBMISSION_IDS = count(1)
 PENDING_PREVIEW_ITEM_LIMIT = 3
 PENDING_PREVIEW_LINE_LIMIT = 2
@@ -23,10 +24,11 @@ def new_submission_id() -> SubmissionId:
 
 @dataclass(frozen=True)
 class PendingSubmissionView:
-    """Renderer-safe projection of one accepted prompt waiting to start."""
+    """Renderer-safe projection of one accepted prompt waiting in a runtime queue."""
 
     id: SubmissionId
     display: str
+    kind: Literal["steering", "follow_up"] = "follow_up"
 
 
 class TuiSubmission(str):
@@ -40,6 +42,7 @@ class TuiSubmission(str):
     id: SubmissionId
     display: str
     input_mode: str
+    queue_kind: QueueSubmissionKind
 
     def __new__(
         cls,
@@ -48,19 +51,23 @@ class TuiSubmission(str):
         content: str,
         display: str,
         input_mode: str,
+        queue_kind: QueueSubmissionKind = "auto",
     ) -> TuiSubmission:
         instance = super().__new__(cls, content)
         instance.id = id
         instance.display = display
         instance.input_mode = input_mode
+        instance.queue_kind = queue_kind
         return instance
 
     @property
     def content(self) -> str:
         return str(self)
 
-    def pending_view(self) -> PendingSubmissionView:
-        return PendingSubmissionView(id=self.id, display=self.display)
+    def pending_view(
+        self, *, kind: Literal["steering", "follow_up"] = "follow_up"
+    ) -> PendingSubmissionView:
+        return PendingSubmissionView(id=self.id, display=self.display, kind=kind)
 
 
 def _truncate_preview_line(line: str, width: int) -> str:
@@ -84,14 +91,22 @@ def pending_submission_preview_lines(
     selected_width = width or PENDING_PREVIEW_FALLBACK_WIDTH
     selected_width = max(1, selected_width)
     omitted = max(0, len(submissions) - PENDING_PREVIEW_ITEM_LIMIT)
-    lines = [_truncate_preview_line("Queued follow-ups", selected_width)]
+    steering_count = sum(item.kind == "steering" for item in submissions)
+    follow_up_count = len(submissions) - steering_count
+    labels = []
+    if steering_count:
+        labels.append(f"{steering_count} steering")
+    if follow_up_count:
+        labels.append(f"{follow_up_count} follow-up")
+    lines = [_truncate_preview_line(f"Queued {' · '.join(labels)}", selected_width)]
     if omitted:
         lines.append(_truncate_preview_line(f"… {omitted} earlier queued", selected_width))
     for submission in submissions[-PENDING_PREVIEW_ITEM_LIMIT:]:
         display_lines = submission.display.splitlines() or [""]
         visible = display_lines[:PENDING_PREVIEW_LINE_LIMIT]
         for index, line in enumerate(visible):
-            prefix = "↳ " if index == 0 else "  "
+            marker = "steer" if submission.kind == "steering" else "later"
+            prefix = f"↳ {marker}: " if index == 0 else "  "
             suffix = " …" if index == len(visible) - 1 and len(display_lines) > len(visible) else ""
             lines.append(_truncate_preview_line(f"{prefix}{line}{suffix}", selected_width))
     return tuple(lines)
@@ -102,6 +117,7 @@ __all__ = [
     "PENDING_PREVIEW_ITEM_LIMIT",
     "PENDING_PREVIEW_LINE_LIMIT",
     "PendingSubmissionView",
+    "QueueSubmissionKind",
     "SubmissionId",
     "TuiSubmission",
     "new_submission_id",

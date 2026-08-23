@@ -29,6 +29,10 @@ from wisp.events import (
     ModelProviderAutoSwitched,
     ProjectConfigApplied,
     ProviderRetrying,
+    QueueItemsRemoved,
+    QueueKind,
+    QueueMessageInjected,
+    QueueUpdated,
     RpcCommandFinished,
     RpcCommandsReported,
     RpcMcpStatusReported,
@@ -87,6 +91,7 @@ from wisp.tui.state import (
     TuiCancelRequested,
     TuiExitReason,
     TuiInteractionState,
+    TuiQueueRestoreRequested,
     TuiQuitRequested,
     TuiStatus,
     TuiViewState,
@@ -99,6 +104,7 @@ from wisp.tui.state import (
     _InputMode,
     _prompt_for_mode,
     _prompt_for_status,
+    _QueueRestoreRequested,
     _QuitPressed,
     _RpcEvent,
     _RpcEventsClosed,
@@ -160,6 +166,14 @@ class TuiController(Protocol):
 
     async def select_session(self, session_id: str, *, command_id: str | None = None) -> str: ...
 
+    async def steer(self, content: str, *, command_id: str | None = None) -> str: ...
+
+    async def follow_up(self, content: str, *, command_id: str | None = None) -> str: ...
+
+    async def get_queue_state(self, *, command_id: str | None = None) -> str: ...
+
+    async def pop_queue(self, kind: QueueKind, *, command_id: str | None = None) -> str: ...
+
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
 
     async def approve(
@@ -220,6 +234,21 @@ class _PendingConfigure:
     auto_compaction_enabled: bool | None = None
     has_auto_compaction_enabled: bool = False
     mode: AgentMode | None = None
+
+
+@dataclass
+class _PendingQueueSubmission:
+    command_id: str
+    kind: QueueKind
+    submission: TuiSubmission
+
+
+@dataclass
+class _PendingQueueRestore:
+    command_id: str
+    kind: QueueKind
+    submission: TuiSubmission
+    removed: QueueItemsRemoved | None = None
 
 
 @dataclass
@@ -357,6 +386,11 @@ class TuiShell:
         self.current_model = model
         self.command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self.skill_catalog = RpcSkillCatalogSnapshot()
+        self._queue_steering: tuple[TuiSubmission, ...] = ()
+        self._queue_follow_up: tuple[TuiSubmission, ...] = ()
+        self._pending_queue_submissions: dict[str, _PendingQueueSubmission] = {}
+        self._local_queue_submissions: list[tuple[QueueKind, TuiSubmission]] = []
+        self._pending_queue_restore: _PendingQueueRestore | None = None
         self.models = ModelRegistry(effective_catalog())
         # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
         # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
@@ -480,6 +514,7 @@ class TuiShell:
                 if await self._hydrate_skill_catalog(receive):
                     task_group.cancel_scope.cancel()
                     return self._exit_reason
+                await self._request_queue_state()
                 await self._request_session_stats()
                 self.view.input_ready = True
                 self._sync_view()
@@ -529,8 +564,11 @@ class TuiShell:
             status=_view_status_for_status(self.state.status),
             input_hint=_prompt_for_status(self.state.status),
             input_mode=mode,
-            queued_follow_ups=len(queued),
-            pending_submissions=tuple(submission.pending_view() for submission in queued),
+            queued_steering=len(self._queue_steering),
+            queued_follow_ups=len(self._queue_follow_up),
+            pending_submissions=tuple(
+                submission.pending_view(kind=kind) for kind, submission in queued
+            ),
         )
 
     def _update_view(
@@ -539,6 +577,7 @@ class TuiShell:
         status: str | None = None,
         input_hint: str | None = None,
         input_mode: _InputMode | None = None,
+        queued_steering: int | None = None,
         queued_follow_ups: int | None = None,
         pending_submissions: tuple[PendingSubmissionView, ...] | None = None,
         last_session: str | None = None,
@@ -549,6 +588,8 @@ class TuiShell:
             self.view.input_hint = input_hint
         if input_mode is not None:
             self.view.input_mode = input_mode.value
+        if queued_steering is not None:
+            self.view.queued_steering = queued_steering
         if queued_follow_ups is not None:
             self.view.queued_follow_ups = queued_follow_ups
         if pending_submissions is not None:
@@ -573,6 +614,9 @@ class TuiShell:
                             pressed_at=exc.pressed_at,
                         )
                     )
+                    continue
+                except TuiQueueRestoreRequested:
+                    await send.send(_QueueRestoreRequested())
                     continue
                 except (TuiCancelRequested, LiveFullscreenInputInterrupted):
                     await send.send(_InputCancelled(mode=self._submitted_input_mode(mode)))
@@ -888,6 +932,9 @@ class TuiShell:
             return await self._handle_input_closed(signal)
         if isinstance(signal, _QuitPressed):
             return await self._handle_quit_pressed(signal)
+        if isinstance(signal, _QueueRestoreRequested):
+            await self._restore_latest_queue_item()
+            return False
         if isinstance(signal, _InputCancelled):
             return await self._handle_input_cancelled(signal)
         if isinstance(signal, _InputInterrupted):
@@ -906,25 +953,18 @@ class TuiShell:
             input_mode=mode.value,
         )
 
-    def _queued_submissions(self) -> tuple[TuiSubmission, ...]:
-        normalized: list[TuiSubmission] = []
-        changed = False
-        for value in self.state.queued_prompts:
-            if isinstance(value, TuiSubmission):
-                normalized.append(value)
-                continue
-            changed = True
-            normalized.append(self._submission(value, _InputMode.running))
-        if changed:
-            self.state.queued_prompts.clear()
-            self.state.queued_prompts.extend(normalized)
-        return tuple(normalized)
+    def _queued_submissions(self) -> tuple[tuple[QueueKind, TuiSubmission], ...]:
+        return tuple(
+            [("steering", item) for item in self._queue_steering]
+            + [("follow_up", item) for item in self._queue_follow_up]
+        )
 
     def _sync_pending_view(self) -> None:
         submissions = self._queued_submissions()
         self._update_view(
-            queued_follow_ups=len(submissions),
-            pending_submissions=tuple(item.pending_view() for item in submissions),
+            queued_steering=len(self._queue_steering),
+            queued_follow_ups=len(self._queue_follow_up),
+            pending_submissions=tuple(item.pending_view(kind=kind) for kind, item in submissions),
         )
 
     def _resolve_submission(self, submission: TuiSubmission) -> None:
@@ -939,34 +979,145 @@ class TuiShell:
                 self._resolve_submission(submission)
             self._call_renderer_optional("report_unsent_submissions", submissions)
 
-    def _restore_queued_prompts(self) -> None:
-        submissions = self._queued_submissions()
-        self.state.queued_prompts.clear()
-        self._sync_pending_view()
-        self._restore_submissions(submissions)
-        self.renderer.queued_prompts_cleared()
-
     def _clear_queued_prompts(self) -> None:
-        """Compatibility seam: clearing interactive input now restores it safely."""
+        """Compatibility seam retained for callers; runtime queues remain authoritative."""
 
-        self._restore_queued_prompts()
+        self.state.queued_prompts.clear()
 
     def _abandon_queued_prompts(self) -> None:
-        submissions = self._queued_submissions()
+        """Drop only obsolete shell-local queue state, never runtime-owned messages."""
+
         self.state.queued_prompts.clear()
+
+    def _report_runtime_queue_before_shutdown(self) -> None:
+        """Report runtime-owned queued input before the RPC process exits."""
+
+        queued = self._queued_submissions()
+        pending = tuple(item.submission for item in self._pending_queue_submissions.values())
+        restoring = (
+            (self._pending_queue_restore.submission,)
+            if self._pending_queue_restore is not None
+            else ()
+        )
+        if not queued and not pending and not restoring:
+            return
+        by_id = {int(submission.id): submission for _, submission in queued}
+        for submission in (*pending, *restoring):
+            by_id.setdefault(int(submission.id), submission)
+        submissions = sorted(by_id.values(), key=lambda submission: int(submission.id))
+        self._queue_steering = ()
+        self._queue_follow_up = ()
+        self._local_queue_submissions.clear()
+        self._pending_queue_submissions.clear()
+        self._pending_queue_restore = None
         self._sync_pending_view()
         for submission in submissions:
             self._resolve_submission(submission)
-        self._call_renderer_optional("report_unsent_submissions", submissions)
-        self.renderer.queued_prompts_cleared()
+        self._call_renderer_optional("report_unsent_submissions", tuple(submissions))
 
-    def _queue_prompt(self, prompt: TuiSubmission) -> None:
-        """Retain and queue one accepted follow-up through a single seam."""
+    async def _submit_queue_message(
+        self,
+        submission: TuiSubmission,
+        kind: QueueKind,
+    ) -> None:
+        command_id = f"tui-{kind}-{uuid4().hex}"
+        pending = _PendingQueueSubmission(command_id, kind, submission)
+        self._pending_queue_submissions[command_id] = pending
+        try:
+            if kind == "steering":
+                await self.controller.steer(submission.content, command_id=command_id)
+            else:
+                await self.controller.follow_up(submission.content, command_id=command_id)
+        except Exception as exc:  # noqa: BLE001 - restore an unsent composer submission
+            self._pending_queue_submissions.pop(command_id, None)
+            self._restore_submissions((submission,))
+            self.renderer.send_failed("queue submission", exc)
 
-        self._record_prompt_acceptance(prompt.content)
-        self.state.queued_prompts.append(prompt)
+    async def _restore_latest_queue_item(self) -> None:
+        if self._pending_queue_restore is not None:
+            self.renderer.notice("A queued item is already being restored.")
+            return
+        local = next(
+            (
+                (kind, submission)
+                for kind, submission in reversed(self._local_queue_submissions)
+                if submission in self._queue_for(kind)
+            ),
+            None,
+        )
+        if local is None:
+            if self._queue_follow_up:
+                local = ("follow_up", self._queue_follow_up[-1])
+            elif self._queue_steering:
+                local = ("steering", self._queue_steering[-1])
+        if local is None:
+            self.renderer.notice("No queued steering or follow-up to restore.")
+            return
+        kind, submission = local
+        command_id = f"tui-queue-restore-{uuid4().hex}"
+        self._pending_queue_restore = _PendingQueueRestore(command_id, kind, submission)
+        try:
+            await self.controller.pop_queue(kind, command_id=command_id)
+        except Exception as exc:  # noqa: BLE001 - queue remains intact after send failure
+            self._pending_queue_restore = None
+            self.renderer.send_failed("restore queued item", exc)
+
+    def _queue_for(self, kind: QueueKind) -> tuple[TuiSubmission, ...]:
+        return self._queue_steering if kind == "steering" else self._queue_follow_up
+
+    def _reconcile_queue(
+        self,
+        kind: QueueKind,
+        contents: tuple[str, ...],
+    ) -> tuple[TuiSubmission, ...]:
+        old = list(self._queue_for(kind))
+        if contents and len(contents) < len(old):
+            suffix = old[-len(contents) :]
+            if tuple(item.content for item in suffix) == contents:
+                old = suffix
+        candidates = [
+            submission
+            for candidate_kind, submission in self._local_queue_submissions
+            if candidate_kind == kind
+        ]
+        candidates.extend(
+            pending.submission
+            for pending in self._pending_queue_submissions.values()
+            if pending.kind == kind
+        )
+        selected: list[TuiSubmission] = []
+        used_ids: set[int] = set()
+        for content in contents:
+            submission = next(
+                (
+                    item
+                    for item in (*old, *candidates)
+                    if item.content == content and int(item.id) not in used_ids
+                ),
+                None,
+            )
+            if submission is None:
+                submission = TuiSubmission(
+                    id=new_submission_id(),
+                    content=content,
+                    display=content,
+                    input_mode="running",
+                    queue_kind=kind,
+                )
+            selected.append(submission)
+            used_ids.add(int(submission.id))
+        return tuple(selected)
+
+    def _apply_queue_update(self, event: QueueUpdated) -> None:
+        self._queue_steering = self._reconcile_queue("steering", event.steering)
+        self._queue_follow_up = self._reconcile_queue("follow_up", event.follow_up)
+        live_ids = {int(item.id) for _, item in self._queued_submissions()}
+        self._local_queue_submissions = [
+            (kind, submission)
+            for kind, submission in self._local_queue_submissions
+            if int(submission.id) in live_ids
+        ]
         self._sync_pending_view()
-        self.renderer.queued_follow_up(len(self.state.queued_prompts))
 
     def _record_prompt_acceptance(self, prompt: str) -> None:
         """Notify renderers that implement the optional prompt-history hook."""
@@ -1024,7 +1175,10 @@ class TuiShell:
                 self._resolve_submission(submission)
                 return await self._answer_pending_trust(text)
             if has_content and self.state.current_command_id is not None:
-                self._queue_prompt(submission)
+                await self._submit_queue_message(
+                    submission,
+                    "steering" if submission.queue_kind == "steering" else "follow_up",
+                )
             else:
                 self._resolve_submission(submission)
             return False
@@ -1033,7 +1187,10 @@ class TuiShell:
                 self._resolve_submission(submission)
                 return await self._answer_pending_approval(text, exit_after_denial=False)
             if has_content and self.state.current_command_id is not None:
-                self._queue_prompt(submission)
+                await self._submit_queue_message(
+                    submission,
+                    "steering" if submission.queue_kind == "steering" else "follow_up",
+                )
             else:
                 self._resolve_submission(submission)
             return False
@@ -1041,7 +1198,14 @@ class TuiShell:
             self._resolve_submission(submission)
             return False
         if self.state.current_command_id is not None:
-            self._queue_prompt(submission)
+            if self.state.current_command_type == "compact":
+                self.renderer.command_error("Cannot steer or queue a follow-up during compaction.")
+                self._restore_submissions((submission,))
+                return False
+            kind: QueueKind = (
+                "follow_up" if submission.queue_kind in {"auto", "follow_up"} else "steering"
+            )
+            await self._submit_queue_message(submission, kind)
             return False
         self._record_prompt_acceptance(text)
         return await self._start_prompt(submission)
@@ -1728,10 +1892,7 @@ class TuiShell:
                 input_hint=_prompt_for_mode(_InputMode.idle),
                 input_mode=_InputMode.idle,
             )
-            queued = self._queued_submissions()
-            self.state.queued_prompts.clear()
-            self._sync_pending_view()
-            self._restore_submissions((prompt, *queued))
+            self._restore_submissions((prompt,))
             self.renderer.send_failed("prompt", exc)
             pagination = self._history_pagination
             if pagination is not None and pagination.latest_reload_pending:
@@ -1776,9 +1937,8 @@ class TuiShell:
         if self.state.cancel_requested:
             self.renderer.cancel_already_requested()
             return False
-        self._restore_queued_prompts()
         self.state.cancel_requested = True
-        self._update_view(status="cancelling", queued_follow_ups=0)
+        self._update_view(status="cancelling")
         self.renderer.cancelling(message)
         try:
             await self.controller.cancel(command_id)
@@ -1795,6 +1955,7 @@ class TuiShell:
             self.state.status = TuiStatus.exiting
             self._sync_view()
             return False
+        self._report_runtime_queue_before_shutdown()
         self.state.status = TuiStatus.exiting
         self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
         self._pending_session_stats_command_ids.clear()
@@ -2066,6 +2227,48 @@ class TuiShell:
             self._update_view()
         if isinstance(event, ContextEstimated):
             return False
+        if isinstance(event, QueueUpdated):
+            self._apply_queue_update(event)
+            return False
+        if isinstance(event, QueueItemsRemoved):
+            pending_restore = self._pending_queue_restore
+            if pending_restore is not None and event.command_id == pending_restore.command_id:
+                pending_restore.removed = event
+            if event.operation == "pop" and event.kind is not None:
+                queue = self._queue_for(event.kind)
+                if queue:
+                    if event.kind == "steering":
+                        self._queue_steering = queue[:-1]
+                    else:
+                        self._queue_follow_up = queue[:-1]
+                    self._sync_pending_view()
+            return False
+        if isinstance(event, QueueMessageInjected):
+            queued = self._queue_for(event.kind)
+            visible_content = (
+                event.skill_invocation.original_content
+                if event.skill_invocation is not None
+                else event.content
+            )
+            submission = next(
+                (item for item in queued if item.content == visible_content),
+                None,
+            )
+            self.renderer.prompt_submitted(submission or visible_content)
+            if submission is not None:
+                self._resolve_submission(submission)
+                self._local_queue_submissions = [
+                    (kind, item)
+                    for kind, item in self._local_queue_submissions
+                    if int(item.id) != int(submission.id)
+                ]
+                remaining = tuple(item for item in queued if int(item.id) != int(submission.id))
+                if event.kind == "steering":
+                    self._queue_steering = remaining
+                else:
+                    self._queue_follow_up = remaining
+                self._sync_pending_view()
+            return False
         if isinstance(event, ProviderRetrying):
             self._update_view(
                 status=(
@@ -2073,7 +2276,8 @@ class TuiShell:
                 ),
                 input_hint=_prompt_for_status(self._active_status()),
                 input_mode=_InputMode.running,
-                queued_follow_ups=len(self.state.queued_prompts),
+                queued_steering=len(self._queue_steering),
+                queued_follow_ups=len(self._queue_follow_up),
             )
             self.renderer.event(event)
             return False
@@ -2201,6 +2405,54 @@ class TuiShell:
             return False
 
         if isinstance(event, RpcCommandFinished):
+            pending_queue = self._pending_queue_submissions.pop(event.command_id, None)
+            if pending_queue is not None:
+                if event.ok:
+                    self._local_queue_submissions.append(
+                        (pending_queue.kind, pending_queue.submission)
+                    )
+                    self._record_prompt_acceptance(pending_queue.submission.content)
+                    label = "Steering" if pending_queue.kind == "steering" else "Follow-up"
+                    self.renderer.notice(f"{label} queued.")
+                    self._sync_pending_view()
+                else:
+                    self._restore_submissions((pending_queue.submission,))
+                    self.renderer.command_error(event.error or "Queue submission failed.")
+                return False
+            pending_restore = self._pending_queue_restore
+            if pending_restore is not None and event.command_id == pending_restore.command_id:
+                self._pending_queue_restore = None
+                removed = pending_restore.removed
+                removed_content = (
+                    (removed.steering if pending_restore.kind == "steering" else removed.follow_up)
+                    if removed is not None
+                    else ()
+                )
+                if event.ok and removed_content:
+                    self._local_queue_submissions = [
+                        (kind, item)
+                        for kind, item in self._local_queue_submissions
+                        if int(item.id) != int(pending_restore.submission.id)
+                    ]
+                    content = removed_content[0]
+                    restored = (
+                        pending_restore.submission
+                        if pending_restore.submission.content == content
+                        else TuiSubmission(
+                            id=new_submission_id(),
+                            content=content,
+                            display=content,
+                            input_mode="running",
+                            queue_kind=pending_restore.kind,
+                        )
+                    )
+                    self._restore_submissions((restored,))
+                    self.renderer.notice("Queued item restored.")
+                elif event.ok:
+                    self.renderer.notice("The selected queue was already empty.")
+                else:
+                    self.renderer.command_error(event.error or "Could not restore queued item.")
+                return False
             if event.command_id in self._ignored_session_stats_command_ids:
                 self._ignored_session_stats_command_ids.discard(event.command_id)
                 return False
@@ -2262,7 +2514,7 @@ class TuiShell:
                 await self._finish_newer_history_page(event)
                 return False
             if event.command_id == self.pending_new_session_command_id:
-                self._finish_new_session(event)
+                await self._finish_new_session(event)
                 return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
@@ -2292,7 +2544,7 @@ class TuiShell:
         self._render_event(event)
         return False
 
-    def _finish_new_session(self, event: RpcCommandFinished) -> None:
+    async def _finish_new_session(self, event: RpcCommandFinished) -> None:
         self.pending_new_session_command_id = None
         if not event.ok:
             self.renderer.command_error(event.error or "new session failed")
@@ -2313,6 +2565,7 @@ class TuiShell:
         self._call_renderer_optional("clear_session")
         self.renderer.notice("Started a new session.")
         self._sync_view()
+        await self._request_queue_state()
 
     async def _finish_session_catalog(self, event: RpcCommandFinished) -> None:
         pending = self.pending_session_catalog
@@ -2442,6 +2695,7 @@ class TuiShell:
         self.view.cost = None
         self._update_view(last_session=label)
         self._finish_session_switch_ui()
+        await self._request_queue_state()
         await self._request_session_stats()
 
     def _fail_committed_session_hydration(self, detail: str) -> None:
@@ -2538,7 +2792,8 @@ class TuiShell:
             status="error",
             input_hint=_prompt_for_mode(_InputMode.idle),
             input_mode=_InputMode.idle,
-            queued_follow_ups=len(self.state.queued_prompts),
+            queued_steering=len(self._queue_steering),
+            queued_follow_ups=len(self._queue_follow_up),
         )
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
@@ -2560,21 +2815,6 @@ class TuiShell:
             return await self._request_shutdown()
         if finished_command_type in {"prompt", "init", "compact"}:
             await self._request_session_stats()
-        if not event.ok and finished_command_type != "compact":
-            self._restore_queued_prompts()
-        if self.state.queued_prompts:
-            queued_prompt = self.state.queued_prompts.popleft()
-            self._update_view(
-                status="running queued follow-up",
-                input_hint=_prompt_for_mode(_InputMode.running),
-                input_mode=_InputMode.running,
-                queued_follow_ups=len(self.state.queued_prompts),
-                pending_submissions=tuple(
-                    submission.pending_view() for submission in self.state.queued_prompts
-                ),
-            )
-            self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
-            return await self._start_prompt(queued_prompt)
         pagination = self._history_pagination
         if pagination is not None and pagination.latest_reload_pending:
             await self._request_latest_history_page()
@@ -2589,9 +2829,16 @@ class TuiShell:
                 status="error",
                 input_hint=_prompt_for_mode(_InputMode.idle),
                 input_mode=_InputMode.idle,
-                queued_follow_ups=0,
+                queued_steering=len(self._queue_steering),
+                queued_follow_ups=len(self._queue_follow_up),
             )
         return False
+
+    async def _request_queue_state(self) -> None:
+        try:
+            await self.controller.get_queue_state()
+        except Exception as exc:  # noqa: BLE001 - queue chrome is recoverable
+            self.renderer.send_failed("queue state", exc)
 
     async def _request_session_stats(self) -> None:
         try:
@@ -2883,7 +3130,6 @@ class TuiShell:
             ):
                 self.state.status = TuiStatus.idle
                 self.state.cancel_requested = False
-                self._restore_queued_prompts()
                 self._sync_view()
                 if event.command_type == "compact":
                     self.renderer.notice("Compaction cancelled.")

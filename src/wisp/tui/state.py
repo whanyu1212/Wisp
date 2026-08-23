@@ -73,6 +73,7 @@ class TuiViewState:
     input_hint: str = "wisp> "
     input_mode: str = "idle"
     input_ready: bool = True
+    queued_steering: int = 0
     queued_follow_ups: int = 0
     pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
@@ -91,6 +92,7 @@ class TuiViewState:
             input_hint=self.input_hint,
             input_mode=self.input_mode,
             input_ready=self.input_ready,
+            queued_steering=self.queued_steering,
             queued_follow_ups=self.queued_follow_ups,
             pending_submissions=self.pending_submissions,
             last_session=self.last_session,
@@ -213,6 +215,11 @@ class _InputCancelled:
 
 
 @dataclass(frozen=True)
+class _QueueRestoreRequested:
+    """Restore the newest eligible item from the runtime-owned queues."""
+
+
+@dataclass(frozen=True)
 class _QuitPressed:
     """One timestamped Ctrl+C gesture from a double-press frontend."""
 
@@ -222,6 +229,10 @@ class _QuitPressed:
 
 class TuiCancelRequested(Exception):
     """Prompt-reader signal for an Escape cancellation request."""
+
+
+class TuiQueueRestoreRequested(Exception):
+    """Prompt-reader signal requesting restoration of one runtime queue item."""
 
 
 class TuiQuitRequested(Exception):
@@ -260,6 +271,7 @@ type _TuiSignal = (
     | _InputInterrupted
     | _InputCancelled
     | _QuitPressed
+    | _QueueRestoreRequested
     | _RpcEvent
     | _RpcEventsClosed
     | _UpdateCheckCompleted

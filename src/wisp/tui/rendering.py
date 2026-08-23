@@ -76,6 +76,7 @@ class TuiViewSnapshot:
     mode: AgentMode = "build"
     input_mode: str = "idle"
     input_ready: bool = True
+    queued_steering: int = 0
     queued_follow_ups: int = 0
     pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
@@ -268,7 +269,7 @@ class LineTuiRenderer:
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         for submission in submissions:
-            self.console.print(f"unsent follow-up: {submission.content}", markup=False)
+            self.console.print(_unsent_submission_text(submission), markup=False)
 
     def prompt_history_request(self) -> None:
         self.notice("Searchable prompt history is available in the Textual TUI.")
@@ -569,6 +570,7 @@ class FullscreenTuiState:
     input_hint: str = "wisp> "
     mode: AgentMode = "build"
     input_mode: str = "idle"
+    queued_steering: int = 0
     queued_follow_ups: int = 0
     pending_submissions: tuple[PendingSubmissionView, ...] = ()
     last_session: str | None = None
@@ -617,6 +619,7 @@ class FullscreenTuiRenderer:
         self.state.input_hint = snapshot.input_hint
         self.state.mode = snapshot.mode
         self.state.input_mode = snapshot.input_mode
+        self.state.queued_steering = snapshot.queued_steering
         self.state.queued_follow_ups = snapshot.queued_follow_ups
         self.state.pending_submissions = snapshot.pending_submissions
         self.state.last_session = snapshot.last_session
@@ -673,7 +676,8 @@ class FullscreenTuiRenderer:
 
     def report_unsent_submissions(self, submissions: tuple[TuiSubmission, ...]) -> None:
         for submission in submissions:
-            self._append("unsent follow-up", submission.content, style="yellow")
+            label = "unsent steering" if submission.queue_kind == "steering" else "unsent follow-up"
+            self._append(label, submission.content, style="yellow")
         if submissions:
             self._refresh()
 
@@ -1247,6 +1251,7 @@ class FullscreenTuiRenderer:
             status=self.state.status,
             input_hint=self.state.input_hint,
             input_mode=self.state.input_mode,
+            queued_steering=self.state.queued_steering,
             queued_follow_ups=self.state.queued_follow_ups,
             pending_submissions=self.state.pending_submissions,
             last_session=self.state.last_session,
@@ -1286,8 +1291,10 @@ def format_tui_footer_lines(
     )
 
     status_parts = (["plan"] if snapshot.mode == "plan" else []) + [snapshot.status]
+    if snapshot.queued_steering:
+        status_parts.append(f"steer {snapshot.queued_steering}")
     if snapshot.queued_follow_ups:
-        status_parts.append(f"queued {snapshot.queued_follow_ups}")
+        status_parts.append(f"later {snapshot.queued_follow_ups}")
     status_left = _sanitize_footer_text(" • ".join(status_parts))
     model_right = _sanitize_footer_text(_footer_model_text(snapshot.provider, snapshot.model))
     status_right = _footer_status_right(
@@ -1553,6 +1560,11 @@ def create_tui_renderer(kind: TuiRendererKind, console: Console | None = None) -
     return _BUILT_IN_RENDERERS[kind](console)
 
 
+def _unsent_submission_text(submission: TuiSubmission) -> str:
+    label = "unsent steering" if submission.queue_kind == "steering" else "unsent follow-up"
+    return f"{label}: {submission.content}"
+
+
 def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? [y/N].") -> str:
     """Shared TUI help text. ``approval_hint`` differs by renderer: the line and
     fullscreen renderers still read free-text `y`/`n` where blank/Enter denies, but
@@ -1577,7 +1589,8 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "Fullscreen controls: Esc cancels; press Ctrl+C twice within 1.5s to quit.\n"
         "Enter submits; Shift+Enter (Textual) or Ctrl+J inserts a newline.\n"
         "The line renderer retains terminal Ctrl+C interrupt and Ctrl+D EOF behavior.\n"
-        "While a prompt or compaction is running, submitted input is queued as a follow-up.\n"
+        "In fullscreen interfaces while a prompt runs, Enter steers; Alt+Enter queues a "
+        "follow-up; Alt+Up restores.\n"
         f"{approval_hint}"
     )
 

@@ -38,6 +38,16 @@ def test_live_fullscreen_tui_registers_transcript_scroll_keybindings() -> None:
     assert (Keys.PageDown,) in {binding.keys for binding in renderer._key_bindings.bindings}
 
 
+def test_live_fullscreen_tui_registers_runtime_queue_keybindings() -> None:
+    from prompt_toolkit.keys import Keys
+
+    renderer = LiveFullscreenTui(run_application=False)
+    keys = {binding.keys for binding in renderer._key_bindings.bindings}
+
+    assert (Keys.Escape, Keys.ControlM) in keys
+    assert (Keys.Escape, Keys.Up) in keys
+
+
 def test_live_fullscreen_tui_renders_pending_prompt_in_separate_bounded_region() -> None:
     renderer = LiveFullscreenTui(run_application=False)
     renderer._terminal_size = lambda: (20, 32)
@@ -53,7 +63,7 @@ def test_live_fullscreen_tui_renders_pending_prompt_in_separate_bounded_region()
     pending = "".join(fragment for _style, fragment in renderer._pending_fragments())
     transcript = "".join(fragment for _style, fragment in renderer._transcript_fragments())
 
-    assert "Queued follow-ups" in pending
+    assert "Queued 1 follow-up" in pending
     assert "…" in pending
     assert max(len(line) for line in pending.splitlines()) <= 30
     assert "Queued follow-ups" not in transcript
@@ -286,7 +296,7 @@ def test_live_fullscreen_tui_footer_fragments_use_compact_footer() -> None:
 
     footer = "".join(fragment for _style, fragment in renderer._footer_fragments())
 
-    assert "running • queued 2" in footer
+    assert "running • later 2" in footer
     assert "session: sess.jsonl" in footer
     assert "openai/gpt-test" in footer
 
@@ -353,6 +363,103 @@ def test_live_fullscreen_tui_preserves_typed_buffer_between_reads() -> None:
 
         assert await second_read == "second"
         assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_captures_explicit_queue_intent_from_bindings() -> None:
+    from types import SimpleNamespace
+
+    from prompt_toolkit.keys import Keys
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        bindings = {binding.keys: binding for binding in renderer._key_bindings.bindings}
+        event = SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None))
+
+        steering_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("change direction")
+        bindings[(Keys.ControlM,)].handler(event)
+        steering = await steering_read
+
+        follow_up_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("do this after")
+        bindings[(Keys.Escape, Keys.ControlM)].handler(event)
+        follow_up = await follow_up_read
+
+        assert isinstance(steering, TuiSubmission)
+        assert steering.queue_kind == "steering"
+        assert isinstance(follow_up, TuiSubmission)
+        assert follow_up.queue_kind == "follow_up"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_alt_up_requests_queue_restore_without_clearing_draft() -> None:
+    from types import SimpleNamespace
+
+    from prompt_toolkit.keys import Keys
+
+    from wisp.tui.state import TuiQueueRestoreRequested
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        read_task = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("keep draft")
+        binding = next(
+            binding
+            for binding in renderer._key_bindings.bindings
+            if binding.keys == (Keys.Escape, Keys.Up)
+        )
+        binding.handler(SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None)))
+
+        with pytest.raises(TuiQueueRestoreRequested):
+            await read_task
+        assert renderer._buffer.text == "keep draft"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_alt_up_is_inert_without_an_active_run() -> None:
+    from types import SimpleNamespace
+
+    from prompt_toolkit.keys import Keys
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("keep draft")
+        binding = next(
+            binding
+            for binding in renderer._key_bindings.bindings
+            if binding.keys == (Keys.Escape, Keys.Up)
+        )
+
+        binding.handler(SimpleNamespace(app=SimpleNamespace(invalidate=lambda: None)))
+
+        assert not read_task.done()
+        assert renderer._buffer.text == "keep draft"
+        read_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read_task
 
     anyio.run(run)
 
@@ -635,7 +742,8 @@ def test_live_fullscreen_tui_keeps_preexisting_text_mode_when_approval_arrives()
 
         assert should_exit is False
         assert controller.approvals == []
-        assert list(shell.state.queued_prompts) == ["run tests"]
+        assert controller.follow_ups == ["run tests"]
+        assert list(shell.state.queued_prompts) == []
 
     anyio.run(run)
 

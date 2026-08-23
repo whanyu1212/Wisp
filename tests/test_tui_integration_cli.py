@@ -6838,7 +6838,7 @@ def test_textual_status_bar_renders_compact_footer_summary() -> None:
         ]
     )
     assert "\n" not in status_text
-    assert "/tmp · queued 2" in status_text
+    assert "/tmp · 2 later" in status_text
     assert "esc cancel" in status_text
     assert "API" in status_text
     assert "gpt-test" not in status_text
@@ -10301,6 +10301,34 @@ def test_textual_newline_keys_edit_without_submitting() -> None:
     assert submitted == editor_text
 
 
+def test_textual_running_submit_keys_distinguish_steering_and_follow_up() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            app_instance.set_status(
+                TuiViewSnapshot(
+                    status="running",
+                    input_hint="wisp(running)> ",
+                    input_mode="running",
+                )
+            )
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.press(*"redirect", "enter")
+            with anyio.fail_after(1):
+                steering = await app_instance._input_controller.receive_stream.receive()
+            await pilot.press(*"afterward", "alt+enter")
+            with anyio.fail_after(1):
+                follow_up = await app_instance._input_controller.receive_stream.receive()
+            assert isinstance(steering, TuiSubmission)
+            assert isinstance(follow_up, TuiSubmission)
+            return steering.queue_kind, follow_up.queue_kind
+
+    steering_kind, follow_up_kind = anyio.run(scenario)
+    assert steering_kind == "steering"
+    assert follow_up_kind == "follow_up"
+
+
 def test_textual_multiline_editor_grows_to_a_bounded_height() -> None:
     async def scenario() -> tuple[int, int, int, int]:
         app_instance = TextualTui()
@@ -11501,7 +11529,7 @@ def test_textual_footer_shortcuts_are_contextual() -> None:
 
     assert startup.center == ""
     assert idle.center == "↵ send · / commands"
-    assert running.center == "esc cancel"
+    assert running.center == "↵ steer · alt+↵ later · esc cancel"
     assert approval.center == ""
 
 
@@ -11519,7 +11547,7 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
 
     idle_placeholder, running_placeholder = anyio.run(scenario)
     assert idle_placeholder == "❯ Ask Wisp anything…"
-    assert running_placeholder == "❯ Add a follow-up…"
+    assert running_placeholder == "❯ Steer the active run…"
 
 
 def test_textual_composer_uses_filled_left_rail_panel() -> None:
@@ -12093,7 +12121,7 @@ def test_textual_submission_moves_from_pending_preview_to_transcript_once() -> N
     assert sum("visible during handoff" in line for line in transcript) == 1
 
 
-def test_textual_failed_current_turn_restores_unstarted_follow_ups_in_order() -> None:
+def test_textual_failed_current_turn_preserves_runtime_owned_follow_ups() -> None:
     async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         shell = TuiShell(ScriptedController(), renderer=renderer)
@@ -12128,4 +12156,4 @@ def test_textual_failed_current_turn_restores_unstarted_follow_ups_in_order() ->
     pending_before, restored = anyio.run(scenario)
     assert "first follow up" in pending_before
     assert "second follow up" in pending_before
-    assert restored == "first follow up\nsecond follow up"
+    assert restored == ""
