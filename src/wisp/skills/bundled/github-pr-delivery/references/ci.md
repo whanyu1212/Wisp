@@ -63,11 +63,13 @@ must not block readiness or trigger a repair unless repository policy or the use
 
 Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
 equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
-one monitor. Keep the complete normalized observation internal, compare it with the previous object,
-and emit a compact summary containing counts plus pending, missing, skipped, or blocking identities
-only for:
+one monitor. Re-read the current `headRefOid` and required-check policy on every interval as part of the
+complete normalized observation, even when the projected check buckets are unchanged. Keep that
+observation internal, compare it with the previous object, and emit a compact summary containing counts
+plus pending, missing, skipped, or blocking identities only for:
 
 - the first observation;
+- a changed head or expected identity set;
 - a changed pending, skipped, or blocking set;
 - the terminal classification; or
 - a query, parsing, authentication, or rate-limit error.
@@ -78,14 +80,13 @@ of treating every nonzero status as a transport failure. Conversely, never turn 
 JSON into an empty passing set. The only zero-check success is an empty expected set independently
 confirmed from current policy; in that case, skip the query instead of parsing its terminal diagnostic.
 
-Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
-success claim. Re-read the current required-check policy at the same final boundary; if the head or
-expected identity set changed, record the replacement state and restart observation. Success requires
-every current expected identity to be present and in an accepted terminal state, with no pending or
-blocking check in that expected set. Passing is accepted; a skipped required check is accepted only
-after repository policy or check-specific evidence explains why that identity is intentionally
-inapplicable for this head. Record that classification. Failed, cancelled, and unexplained skipped
-required checks remain non-passing.
+If the head or expected identity set changes on any interval, emit the replacement state and restart
+observation; do not wait for a visible check-state delta. Re-read both once more immediately before a
+success claim. Success requires every current expected identity to be present and in an accepted
+terminal state, with no pending or blocking check in that expected set. Passing is accepted; a skipped
+required check is accepted only after repository policy or check-specific evidence explains why that
+identity is intentionally inapplicable for this head. Record that classification. Failed, cancelled,
+and unexplained skipped required checks remain non-passing.
 
 After a blocking result, inspect only the identified check using its recorded provider and link. For a
 GitHub Actions check, preserve or derive the selector from that link, verify the selected run's
