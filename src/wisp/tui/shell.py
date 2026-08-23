@@ -989,6 +989,28 @@ class TuiShell:
 
         self.state.queued_prompts.clear()
 
+    def _restore_runtime_queue_before_shutdown(self) -> None:
+        """Reclaim runtime-owned queued input before the RPC process exits."""
+
+        queued = self._queued_submissions()
+        if not queued:
+            return
+        live_ids = {int(submission.id) for _, submission in queued}
+        submissions = [
+            submission
+            for _, submission in self._local_queue_submissions
+            if int(submission.id) in live_ids
+        ]
+        selected_ids = {int(submission.id) for submission in submissions}
+        submissions.extend(
+            submission for _, submission in queued if int(submission.id) not in selected_ids
+        )
+        self._queue_steering = ()
+        self._queue_follow_up = ()
+        self._local_queue_submissions.clear()
+        self._sync_pending_view()
+        self._restore_submissions(tuple(submissions))
+
     async def _submit_queue_message(
         self,
         submission: TuiSubmission,
@@ -1929,6 +1951,7 @@ class TuiShell:
             self.state.status = TuiStatus.exiting
             self._sync_view()
             return False
+        self._restore_runtime_queue_before_shutdown()
         self.state.status = TuiStatus.exiting
         self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
         self._pending_session_stats_command_ids.clear()
@@ -2218,11 +2241,16 @@ class TuiShell:
             return False
         if isinstance(event, QueueMessageInjected):
             queued = self._queue_for(event.kind)
+            visible_content = (
+                event.skill_invocation.original_content
+                if event.skill_invocation is not None
+                else event.content
+            )
             submission = next(
-                (item for item in queued if item.content == event.content),
+                (item for item in queued if item.content == visible_content),
                 None,
             )
-            self.renderer.prompt_submitted(submission or event.content)
+            self.renderer.prompt_submitted(submission or visible_content)
             if submission is not None:
                 self._local_queue_submissions = [
                     (kind, item)

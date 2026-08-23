@@ -23,6 +23,7 @@ from wisp.events import (
     MessageRole,
     MessageStarted,
     ProviderRetrying,
+    QueueMessageInjected,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
@@ -37,6 +38,7 @@ from wisp.events import (
     UsageCost,
     UsageCostRates,
 )
+from wisp.skills.models import SkillInvocationEvidence
 from wisp.tui import auth_commands as tui_auth_commands_module
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.history import (
@@ -4747,7 +4749,7 @@ def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
+def test_tui_shell_reports_queued_follow_ups_after_input_eof() -> None:
     async def run() -> None:
         controller = ScriptedController(
             [
@@ -4771,7 +4773,7 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "Follow-up queued." in rendered
-        assert "unsent follow-up: second" not in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
         assert "input closed; finishing current prompt" in rendered
         assert "waiting for current prompt" not in rendered
@@ -4779,7 +4781,7 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
+def test_tui_shell_reports_queued_follow_ups_after_failed_prompt() -> None:
     async def run() -> None:
         controller = ScriptedController(
             [
@@ -4810,8 +4812,89 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "Follow-up queued." in rendered
-        assert "unsent follow-up: second" not in rendered
+        assert "unsent follow-up: second" in rendered
         assert "running queued follow-up" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_restores_runtime_queue_in_submission_order_before_shutdown() -> None:
+    async def run() -> None:
+        class RestoreRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.restored: list[TuiSubmission] = []
+
+            def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+                self.restored.extend(submissions)
+                return True
+
+        controller = ScriptedController()
+        renderer = RestoreRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        follow_up = TuiSubmission(
+            id=new_submission_id(),
+            content="do this after",
+            display="do this after",
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+        steering = TuiSubmission(
+            id=new_submission_id(),
+            content="change direction",
+            display="change direction",
+            input_mode="running",
+            queue_kind="steering",
+        )
+        shell._local_queue_submissions.extend([("follow_up", follow_up), ("steering", steering)])
+        shell._apply_queue_update(
+            QueueUpdated(
+                steering=(steering.content,),
+                follow_up=(follow_up.content,),
+            )
+        )
+
+        await shell._request_shutdown()
+
+        assert renderer.restored == [follow_up, steering]
+        assert shell._queue_steering == ()
+        assert shell._queue_follow_up == ()
+        assert shell._local_queue_submissions == []
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
+def test_tui_shell_matches_injected_skill_to_its_original_queued_submission() -> None:
+    async def run() -> None:
+        renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        original = "/skill:review focus on safety"
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content=original,
+            display=original,
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+        shell._local_queue_submissions.append(("follow_up", submission))
+        shell._apply_queue_update(QueueUpdated(follow_up=(original,)))
+
+        await shell._handle_rpc_event(
+            QueueMessageInjected(
+                kind="follow_up",
+                content="provider-visible expanded instructions",
+                skill_invocation=SkillInvocationEvidence(
+                    name="review",
+                    original_content=original,
+                    request="focus on safety",
+                    content_sha256="a" * 64,
+                ),
+            )
+        )
+
+        assert renderer.state.transcript[-1].content == original
+        assert shell._local_queue_submissions == []
 
     anyio.run(run)
 
