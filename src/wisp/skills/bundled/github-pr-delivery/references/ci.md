@@ -20,6 +20,48 @@ progress updates during long waits. For one plausibly flaky failure, inspect evi
 a no-code rerun. Permit one rerun when the same head previously passed or logs support an external or
 timing cause. If it repeats, diagnose it as real or report an external blocker; do not rerun forever.
 
+## Compact CI monitor
+
+When `gh` is the available interface, query structured check state instead of starting its table watch.
+A compact snapshot can use the following projection (adapt the PR selector and repository flag, but
+keep the selected fields minimal):
+
+```bash
+gh pr checks "$PR" --json bucket,name,state,link --jq '
+  {
+    passed: ([.[] | select(.bucket == "pass")] | length),
+    pending: ([.[] | select(.bucket == "pending") | .name] | sort),
+    blocking: ([.[] | select(.bucket != "pass" and .bucket != "pending") |
+      {name, bucket, state, link}] | sort_by(.name))
+  }'
+```
+
+Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
+equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
+one monitor. Serialize the normalized object deterministically, compare it with the previous object,
+and emit only:
+
+- the first observation;
+- a changed pending or blocking set;
+- the terminal classification; or
+- a query, parsing, authentication, or rate-limit error.
+
+Do not echo unchanged snapshots from the monitor. `gh pr checks` may return status 8 for valid pending
+checks or status 1 for a valid failing result, so validate and classify its structured output instead
+of treating every nonzero status as a transport failure. Conversely, never turn missing or malformed
+JSON into an empty passing set.
+
+Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
+success claim. If it differs from the expected SHA, stop the monitor, record the replacement SHA, and
+restart observation for that head. Success requires no pending checks and no blocking buckets; failed,
+cancelled, and unexplained skipped checks remain non-passing. After a blocking result, inspect only the
+identified run or job with `gh run view --log-failed`; retrieve broader logs only if that focused output
+cannot explain the failure.
+
+If resumable execution is unavailable, repeat the same projection as short snapshots and keep user
+progress updates change-based. Do not fall back to a redraw-heavy watch command merely to avoid a
+managed process.
+
 
 ## Clean-delivery terminal condition
 

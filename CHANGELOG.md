@@ -12,6 +12,10 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Made the bundled GitHub PR delivery workflow use structured, state-change-only monitoring for CI
+  and review waits, reducing repeated tool output while preserving exact-head readiness and targeted
+  failure diagnostics.
+
 ## 0.1.0rc6 — 2026-08-22
 
 - Added bounded, structured TUI presentation for `read`, `grep`, and `find` results, including

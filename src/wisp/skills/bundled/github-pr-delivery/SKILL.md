@@ -5,7 +5,7 @@ license: MIT
 compatibility: Git repositories hosted on GitHub; adapts to the GitHub tools and CLI available in the active Wisp runtime.
 metadata:
   author: Wisp
-  version: "1.0"
+  version: "1.1"
 ---
 
 # GitHub PR Delivery
@@ -55,6 +55,22 @@ readiness criteria.
 
 Follow repository instructions and commit conventions. If active higher-priority instructions require
 a commit trailer or attribution, preserve it exactly. Never add generic tool branding on your own.
+
+## Keep monitoring output efficient
+
+Compact the producer, not the evidence. Prefer structured connector fields or `gh --json` with a
+minimal projection over human-readable tables, and keep identifiers needed to retrieve details later.
+When command output becomes transcript context, do not use watch modes that redraw the complete table
+on every interval, such as `gh pr checks --watch` or `gh run watch`.
+
+For a long wait, start one resumable monitor when the runtime supports managed processes. Keep the
+normal polling cadence inside that process, normalize each observation, and print only the initial
+state, a changed state, the terminal state, or an error. Poll that stable process rather than launching
+one visible tool call per observation. Give the process a finite lifetime that covers the intended wait
+and sleep between observations; do not replace output noise with a busy loop. If managed execution is
+unavailable, use the same compact structured snapshot at bounded intervals. Never treat suppressed
+output, an empty response, or a monitor failure as success. Fetch full logs and comment bodies only
+after the compact state identifies the specific failure or new review item that needs investigation.
 
 ## Delivery workflow
 
