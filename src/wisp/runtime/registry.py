@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
@@ -43,6 +43,12 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
         self._factories: dict[str, Callable[[], Provider]] = {}
+        # A token changes only when a name is explicitly registered or replaced, not
+        # when a deferred factory constructs its provider. Runtime ownership can then
+        # distinguish direct registry overrides from ordinary lazy construction.
+        self._registration_tokens: dict[str, object] = {}
+        self._constructed_by_registration: dict[object, Provider] = {}
+        self._retained_registrations: set[object] = set()
         # Registration order is part of this registry's contract, and a name can move
         # between the two maps when a deferred provider is constructed. Keep the order
         # here so it never depends on construction state.
@@ -51,9 +57,13 @@ class ProviderRegistry:
     def register(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a provider by its declared name."""
 
+        self._discard_unretained_registration(provider.name)
         self._reserve(provider.name, replace=replace)
         self._factories.pop(provider.name, None)
         self._providers[provider.name] = provider
+        token = object()
+        self._registration_tokens[provider.name] = token
+        self._constructed_by_registration[token] = provider
 
     def register_factory(
         self,
@@ -68,9 +78,16 @@ class ProviderRegistry:
         identity every caller sees until something actually needs the provider.
         """
 
+        self._discard_unretained_registration(name)
         self._reserve(name, replace=replace)
         self._providers.pop(name, None)
         self._factories[name] = factory
+        self._registration_tokens[name] = object()
+
+    def _discard_unretained_registration(self, name: str) -> None:
+        token = self._registration_tokens.get(name)
+        if token is not None and token not in self._retained_registrations:
+            self._constructed_by_registration.pop(token, None)
 
     def _reserve(self, name: str, *, replace: bool) -> None:
         if not replace and name in self._order:
@@ -99,12 +116,41 @@ class ProviderRegistry:
             raise ValueError(msg)
         self._providers[name] = provider
         self._factories.pop(name, None)
+        token = self._registration_tokens[name]
+        self._constructed_by_registration[token] = provider
         return provider
 
     def names(self) -> tuple[str, ...]:
         """Return registered provider names in registration order."""
 
         return self._names()
+
+    def is_registered(self, name: str) -> bool:
+        """Return whether a provider name is registered without constructing it."""
+
+        return name in self._order
+
+    def registration_token(self, name: str) -> object | None:
+        """Return the identity of a name's current explicit registration."""
+
+        return self._registration_tokens.get(name)
+
+    def retain_registration(self, token: object) -> None:
+        """Keep a registration's constructed provider available across replacement."""
+
+        self._retained_registrations.add(token)
+
+    def release_registration(self, token: object) -> None:
+        """Release registration history no longer needed by runtime ownership."""
+
+        self._retained_registrations.discard(token)
+        if token not in self._registration_tokens.values():
+            self._constructed_by_registration.pop(token, None)
+
+    def constructed_for_registration(self, token: object) -> Provider | None:
+        """Return the provider built for a retained registration."""
+
+        return self._constructed_by_registration.get(token)
 
     def constructed(self) -> dict[str, Provider]:
         """Return only the providers that already exist, constructing nothing."""
@@ -125,7 +171,12 @@ class ProviderRegistry:
 
         return tuple(self.get(name) for name in self._names())
 
-    def replace_all(self, providers: Iterable[Provider]) -> None:
+    def replace_all(
+        self,
+        providers: Iterable[Provider],
+        *,
+        order: Sequence[str] | None = None,
+    ) -> None:
         """Atomically replace provider instances while preserving this registry.
 
         Runtime extension APIs retain a reference to this registry. Replacing its
@@ -136,7 +187,16 @@ class ProviderRegistry:
         replacements = {provider.name: provider for provider in providers}
         self._providers = replacements
         self._factories = {}
-        self._order = list(replacements)
+        self._registration_tokens = {name: object() for name in replacements}
+        self._constructed_by_registration = {
+            self._registration_tokens[name]: provider for name, provider in replacements.items()
+        }
+        self._retained_registrations = set()
+        # `names()` promises registration order, which the caller knows and this
+        # mapping does not; fall back to the replacement order when none is given.
+        ordered = [name for name in (order or ()) if name in replacements]
+        ordered.extend(name for name in replacements if name not in ordered)
+        self._order = ordered
 
 
 class ToolRegistry:

@@ -79,12 +79,17 @@ def test_provider_registry_defers_construction_until_first_use() -> None:
     registry.register_factory("fake", factory)
 
     assert registry.names() == ("fake",)
+    assert registry.is_registered("fake") is True
+    assert registry.is_registered("missing") is False
+    registration = registry.registration_token("fake")
+    assert registration is not None
     assert constructed == []
 
     provider = registry.get("fake")
 
     assert constructed == ["fake"]
     assert registry.get("fake") is provider
+    assert registry.registration_token("fake") is registration
 
 
 def test_provider_registry_keeps_registration_order_across_construction() -> None:
@@ -115,6 +120,249 @@ def test_provider_registry_rejects_a_factory_that_renames_its_provider() -> None
 
     # The registration survives, so a corrected factory is still reachable.
     assert registry.names() == ("declared",)
+
+
+def test_configuration_refresh_adopts_a_candidate_that_never_built_its_provider() -> None:
+    """A deferred candidate still owns its configuration.
+
+    Skipping names the candidate has not constructed would silently retain the live
+    runtime's stale adapter across a trusted refresh, ignoring the candidate's new
+    auth path or retry policy.
+    """
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        # The live runtime has already selected and built a provider; the candidate
+        # carries the new configuration but has not constructed anything yet.
+        stale = live.providers.get("anthropic")
+        assert candidate.providers.constructed().get("anthropic") is None
+
+        adopted = {
+            provider.name: provider for provider in live.providers_for_configuration(candidate)
+        }
+
+        assert adopted["anthropic"] is not stale
+
+    anyio.run(scenario)
+
+
+def test_repeated_configuration_refreshes_keep_adopting_new_credentials() -> None:
+    """Adoption must not drop ownership of the provider it just resolved.
+
+    A deferred provider resolved *during* adoption is absent from the candidate's
+    instance snapshot. Omitting it there would strip the name from configured
+    ownership, so the next refresh would retain a stale adapter and nobody would
+    close it.
+    """
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        live.providers.get("anthropic")
+        await live.adopt_provider_configuration(await build_runtime())
+        first = live.providers.get("anthropic")
+
+        second = {
+            provider.name: provider
+            for provider in live.providers_for_configuration(await build_runtime())
+        }
+
+        assert second["anthropic"] is not first
+
+    anyio.run(scenario)
+
+
+def test_unresolved_extension_factory_override_survives_configuration_refresh() -> None:
+    """An extension-owned factory must survive without being resolved first."""
+
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        override = _ClosableFakeProvider("openai")
+        live.api.register_provider_factory("openai", lambda: override)
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+
+        assert live.providers.get("openai") is override
+        await live.aclose()
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
+def test_direct_registry_override_of_deferred_provider_survives_refresh() -> None:
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        override = _ClosableFakeProvider("openai")
+        live.providers.register(override)
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+
+        assert live.providers.get("openai") is override
+        await live.aclose()
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
+def test_candidate_extension_override_remains_extension_owned_after_adoption() -> None:
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        live = await build_runtime()
+        candidate = await build_runtime()
+        override = _ClosableFakeProvider("openai")
+        candidate.providers.register(override)
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+        assert live.providers.get("openai") is override
+
+        next_candidate = await build_runtime()
+        await live.adopt_provider_configuration(next_candidate)
+        await next_candidate.aclose()
+
+        assert live.providers.get("openai") is override
+        await live.aclose()
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
+def test_live_only_deferred_provider_remains_owned_across_refreshes() -> None:
+    def runtime_with_deferred(name: str, provider: _ClosableFakeProvider) -> WispRuntime:
+        registry = ProviderRegistry()
+        registry.register_factory(name, lambda: provider)
+        tools = ToolRegistry()
+        events = EventBus()
+        return WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+    async def scenario() -> None:
+        stale = _ClosableFakeProvider("live-only")
+        live = runtime_with_deferred("live-only", stale)
+        candidate = runtime_with_deferred("candidate-only", _ClosableFakeProvider("candidate-only"))
+
+        await live.adopt_provider_configuration(candidate)
+        await candidate.aclose()
+        assert live.providers.get("live-only") is stale
+
+        replacement = _ClosableFakeProvider("live-only")
+        next_candidate = runtime_with_deferred("live-only", replacement)
+        await live.adopt_provider_configuration(next_candidate)
+        await next_candidate.aclose()
+
+        assert live.providers.get("live-only") is replacement
+        assert stale.close_count == 1
+        assert replacement.close_count == 0
+
+        await live.aclose()
+        assert replacement.close_count == 1
+
+    anyio.run(scenario)
+
+
+def test_provider_registry_releases_unretained_replacement_history() -> None:
+    registry = ProviderRegistry()
+    first = _NamedFakeProvider("rotating")
+    second = _NamedFakeProvider("rotating")
+    registry.register(first)
+    first_token = registry.registration_token("rotating")
+    assert first_token is not None
+
+    registry.register(second)
+
+    assert registry.constructed_for_registration(first_token) is None
+
+
+def test_runtime_closes_late_built_provider_after_extension_replaces_it() -> None:
+    async def scenario() -> None:
+        registry = ProviderRegistry()
+        configured = _ClosableFakeProvider("configured")
+        registry.register_factory("configured", lambda: configured)
+        tools = ToolRegistry()
+        events = EventBus()
+        runtime = WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+        assert runtime.providers.get("configured") is configured
+        override = _ClosableFakeProvider("configured")
+        runtime.providers.register(override)
+        await runtime.aclose()
+
+        assert configured.close_count == 1
+        assert override.close_count == 0
+
+    anyio.run(scenario)
+
+
+def test_runtime_closes_configured_provider_constructed_after_capture() -> None:
+    async def scenario() -> None:
+        registry = ProviderRegistry()
+        provider = _ClosableFakeProvider("deferred")
+        registry.register_factory("deferred", lambda: provider)
+        tools = ToolRegistry()
+        events = EventBus()
+        runtime = WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+        assert runtime.providers.get("deferred") is provider
+        await runtime.aclose()
+
+        assert provider.close_count == 1
+
+    anyio.run(scenario)
+
+
+def test_runtime_does_not_close_extension_factory_override() -> None:
+    async def scenario() -> None:
+        registry = ProviderRegistry()
+        registry.register_factory("configured", lambda: _NamedFakeProvider("configured"))
+        tools = ToolRegistry()
+        events = EventBus()
+        api = ExtensionAPI(providers=registry, tools=tools, events=events)
+        runtime = WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=api,
+            models=ModelRegistry(effective_catalog()),
+        )
+        override = _ClosableFakeProvider("configured")
+        api.register_provider_factory("configured", lambda: override)
+
+        assert runtime.providers.get("configured") is override
+        await runtime.aclose()
+
+        assert override.close_count == 0
+
+    anyio.run(scenario)
 
 
 def test_provider_registry_raises_for_unknown_provider() -> None:

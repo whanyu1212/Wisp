@@ -16,6 +16,7 @@ import wisp.tui.launch as tui_launch
 from wisp.config import WispConfig
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
+from wisp.runtime.registry import UnknownProviderError
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError
 from wisp.tui.launch import TuiOptions
@@ -140,6 +141,69 @@ def test_tui_preflight_closes_temporary_runtime(
         assert failure is not None
     else:
         assert failure is None
+
+    async def start_after_close() -> None:
+        await runtime.process_supervisor.start("true", cwd=tmp_path, timeout=1)
+
+    with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+        anyio.run(start_after_close)
+
+
+def test_tui_preflight_validates_provider_without_constructing_it(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def run() -> tuple[WispRuntime, int]:
+        runtime = await build_runtime()
+        construction_count = 0
+
+        def factory() -> Any:
+            nonlocal construction_count
+            construction_count += 1
+            raise AssertionError("preflight constructed the provider")
+
+        runtime.providers.register_factory("deferred-test", factory)
+
+        async def fake_build_runtime(**_kwargs: object) -> Any:
+            return runtime
+
+        monkeypatch.setattr(tui_launch, "build_runtime", fake_build_runtime)
+        await tui_launch._preflight_tui_options(
+            TuiOptions(
+                config=WispConfig(provider="deferred-test", session_dir=tmp_path),
+            )
+        )
+        return runtime, construction_count
+
+    runtime, construction_count = anyio.run(run)
+
+    assert construction_count == 0
+
+    async def start_after_close() -> None:
+        await runtime.process_supervisor.start("true", cwd=tmp_path, timeout=1)
+
+    with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+        anyio.run(start_after_close)
+
+
+def test_tui_preflight_rejects_unknown_provider_and_closes_runtime(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def run() -> WispRuntime:
+        runtime = await build_runtime()
+
+        async def fake_build_runtime(**_kwargs: object) -> Any:
+            return runtime
+
+        monkeypatch.setattr(tui_launch, "build_runtime", fake_build_runtime)
+        with pytest.raises(UnknownProviderError, match="Unknown provider: missing"):
+            await tui_launch._preflight_tui_options(
+                TuiOptions(config=WispConfig(provider="missing", session_dir=tmp_path))
+            )
+        return runtime
+
+    runtime = anyio.run(run)
 
     async def start_after_close() -> None:
         await runtime.process_supervisor.start("true", cwd=tmp_path, timeout=1)
