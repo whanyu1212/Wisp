@@ -26,6 +26,8 @@ uvx twine check dist/*
 Report every completed check accurately. A nonzero exit or timeout is not a pass.
 
 These checks establish local technical evidence. When the work is delivered through a GitHub pull
-request, also use the bundled `github-pr-delivery` skill for authorization boundaries, exact-head CI,
-thread-aware review, and final merge-readiness. Do not substitute local results for current remote
-evidence or duplicate that skill's delivery procedure here.
+request, inspect the resolved `github-pr-delivery` entry's source and content before using it. The
+`package:wisp` entry provides Wisp's bundled authorization boundaries, exact-head CI, thread-aware
+review, and final merge-readiness workflow; a higher-precedence project or user entry is a replacement
+and must not be assumed to preserve those guarantees. Do not substitute local results for current
+remote evidence or duplicate the applicable delivery procedure here.
