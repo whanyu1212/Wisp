@@ -1,7 +1,9 @@
 # Current-Head CI
 
-After every push, record the PR, head SHA, push time, and required checks. Query check results for that
-head and wait until every required check reaches a terminal conclusion.
+Before each monitor starts, record the PR, head SHA, push time, and expected required-check identities.
+Obtain the expected set from repository policy, repository instructions, or a previously verified
+complete run; do not infer completeness from the checks that happen to be visible immediately after
+the push. Query results for that head and wait until every expected check is present and terminal.
 
 Treat queued, pending, cancelled, timed-out, action-required, stale-head, and unexplained skipped checks
 as non-passing. Never infer green CI from an older SHA.
@@ -27,19 +29,26 @@ A compact snapshot can use the following projection (adapt the PR selector and r
 keep the selected fields minimal):
 
 ```bash
-gh pr checks "$PR" --json bucket,name,state,link --jq '
+gh pr checks "$PR" --json bucket,name,state,link,workflow --jq '
   {
     passed: ([.[] | select(.bucket == "pass")] | length),
-    pending: ([.[] | select(.bucket == "pending") | .name] | sort),
+    observed: ([.[] | {workflow, name, bucket}] | sort_by(.workflow, .name)),
+    pending: ([.[] | select(.bucket == "pending") | {workflow, name}] |
+      sort_by(.workflow, .name)),
     blocking: ([.[] | select(.bucket != "pass" and .bucket != "pending") |
-      {name, bucket, state, link}] | sort_by(.name))
+      {workflow, name, bucket, state, link}] | sort_by(.workflow, .name))
   }'
 ```
 
+Use the stable workflow/name pair as the check identity, and preserve the expected identity set outside
+the changing post-push snapshot. Compute missing expected identities on every observation and classify
+them as pending. If the required set cannot be established, report that limitation instead of treating
+an empty or partial visible set as complete.
+
 Before starting, record the expected head with a minimal `headRefOid` query. When managed Bash or an
 equivalent resumable process is available, run the snapshot at the normal 15–30 second interval inside
-one monitor. Serialize the normalized object deterministically, compare it with the previous object,
-and emit only:
+one monitor. Keep the complete normalized observation internal, compare it with the previous object,
+and emit a compact summary containing counts plus pending, missing, or blocking identities only for:
 
 - the first observation;
 - a changed pending or blocking set;
@@ -53,10 +62,11 @@ JSON into an empty passing set.
 
 Re-read `headRefOid` whenever the monitor emits a changed or terminal state and immediately before a
 success claim. If it differs from the expected SHA, stop the monitor, record the replacement SHA, and
-restart observation for that head. Success requires no pending checks and no blocking buckets; failed,
-cancelled, and unexplained skipped checks remain non-passing. After a blocking result, inspect only the
-identified run or job with `gh run view --log-failed`; retrieve broader logs only if that focused output
-cannot explain the failure.
+restart observation for that head. Success requires every expected identity to be present and passing,
+with no other visible pending or blocking check. Failed, cancelled, and unexplained skipped checks
+remain non-passing. After a blocking result, inspect only the identified run or job with
+`gh run view --log-failed`; retrieve broader logs only if that focused output cannot explain the
+failure.
 
 If resumable execution is unavailable, repeat the same projection as short snapshots and keep user
 progress updates change-based. Do not fall back to a redraw-heavy watch command merely to avoid a
