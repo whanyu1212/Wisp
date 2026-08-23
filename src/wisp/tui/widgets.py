@@ -466,8 +466,7 @@ class PromptEditor(TextArea):
     def action_restore_queued(self) -> None:
         """Ask the shell to restore the newest eligible runtime queue item."""
 
-        if self._agent_running:
-            self.post_message(self.RestoreQueued())
+        self.post_message(self.RestoreQueued())
 
     def action_newline(self) -> None:
         self.insert("\n")
