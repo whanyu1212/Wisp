@@ -41,7 +41,7 @@ def test_submission_clears_only_ordinary_editor_and_runs_hook_before_enqueue() -
 
     controller.set_submit_hook(hook)
 
-    assert controller.submit_line("typed prompt", clear_editor=True)
+    assert controller.submit_line("typed prompt", clear_editor=True, queue_kind="steering")
 
     def decision_hook() -> str:
         hook_calls.append("decision submit")
@@ -56,8 +56,16 @@ def test_submission_clears_only_ordinary_editor_and_runs_hook_before_enqueue() -
         return await controller.receive(), await controller.receive()
 
     typed, decision = anyio.run(receive)
-    assert (typed.content, typed.input_mode) == ("typed prompt", "running")
-    assert (decision.content, decision.input_mode) == ("decision answer", "approval")
+    assert (typed.content, typed.input_mode, typed.queue_kind) == (
+        "typed prompt",
+        "running",
+        "steering",
+    )
+    assert (decision.content, decision.input_mode, decision.queue_kind) == (
+        "decision answer",
+        "approval",
+        "auto",
+    )
     assert surface.buffered == [typed]
 
 

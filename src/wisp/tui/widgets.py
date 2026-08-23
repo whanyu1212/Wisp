@@ -87,7 +87,11 @@ from wisp.tui.file_result_presentation import (
     render_file_result_presentation,
 )
 from wisp.tui.incremental_markdown import IncrementalMarkdownState
-from wisp.tui.input_types import PendingSubmissionView, pending_submission_preview_lines
+from wisp.tui.input_types import (
+    PendingSubmissionView,
+    QueueSubmissionKind,
+    pending_submission_preview_lines,
+)
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.presentation_clock import PresentationClock
 from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
@@ -181,15 +185,19 @@ class PromptEditor(TextArea):
     HELP = """
     # Prompt editor
 
-    Write a prompt and press **Enter** to send it. Use **Shift+Enter**, **Alt+Enter**,
-    or **Ctrl+J** for a newline. Type `/` for commands or `@` to reference a
-    project path; when a suggestion menu is visible, Enter accepts its highlighted item.
+    Write a prompt and press **Enter** to send it. While Wisp is running, Enter steers
+    the active run and **Alt+Enter** queues a follow-up; **Alt+Up** restores the latest
+    queued item. Use **Shift+Enter** or **Ctrl+J** for a newline. Type `/` for commands
+    or `@` to reference a project path; when a suggestion menu is visible, Enter accepts
+    its highlighted item.
     Tool approval panels default to **1 (Approve once)**; their own contextual help
     explains every permission scope before you decide.
     """
     BINDINGS = [
         Binding("enter", "submit", "Send / accept suggestion", show=False),
-        Binding("shift+enter,alt+enter,ctrl+j", "newline", "Newline", show=False),
+        Binding("shift+enter,ctrl+j", "newline", "Newline", show=False),
+        Binding("alt+enter", "alternate_submit", "Follow up / newline", show=False),
+        Binding("alt+up", "restore_queued", "Restore queued item", show=False),
     ]
 
     class Submitted(Message):
@@ -203,10 +211,19 @@ class PromptEditor(TextArea):
         when there are no large pastes.
         """
 
-        def __init__(self, value: str, display: str) -> None:
+        def __init__(
+            self,
+            value: str,
+            display: str,
+            queue_kind: QueueSubmissionKind = "auto",
+        ) -> None:
             super().__init__()
             self.value = value
             self.display = display
+            self.queue_kind = queue_kind
+
+    class RestoreQueued(Message):
+        """Request restoration of the newest eligible runtime-queued item."""
 
     def __init__(
         self,
@@ -230,6 +247,12 @@ class PromptEditor(TextArea):
         self._semantic_highlight_revision = 0
         self._cached_semantic_highlight_revision = -1
         self._semantic_highlights: tuple[tuple[PromptHighlight, ...], ...] = ()
+        self._agent_running = False
+
+    def set_running(self, running: bool) -> None:
+        """Resolve mode-sensitive submit bindings from the latest shell snapshot."""
+
+        self._agent_running = running
 
     def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
         """Replace recognized runtime and Textual-local slash spellings."""
@@ -413,15 +436,38 @@ class PromptEditor(TextArea):
             self.action_submit()
             event.stop()
             event.prevent_default()
-        elif event.key in {"shift+enter", "alt+enter", "ctrl+j"}:
+        elif event.key in {"shift+enter", "ctrl+j"}:
             self.action_newline()
+            event.stop()
+            event.prevent_default()
+        elif event.key == "alt+enter":
+            self.action_alternate_submit()
+            event.stop()
+            event.prevent_default()
+        elif event.key == "alt+up":
+            self.action_restore_queued()
             event.stop()
             event.prevent_default()
 
     def action_submit(self) -> None:
-        """Submit the expanded value while retaining a compact transcript echo."""
+        """Submit a prompt or steering message with compact display metadata."""
 
-        self.post_message(self.Submitted(self.text_for_submission(), self.text))
+        kind: QueueSubmissionKind = "steering" if self._agent_running else "auto"
+        self.post_message(self.Submitted(self.text_for_submission(), self.text, kind))
+
+    def action_alternate_submit(self) -> None:
+        """Queue a follow-up while running; otherwise preserve Alt+Enter newline."""
+
+        if not self._agent_running:
+            self.action_newline()
+            return
+        self.post_message(self.Submitted(self.text_for_submission(), self.text, "follow_up"))
+
+    def action_restore_queued(self) -> None:
+        """Ask the shell to restore the newest eligible runtime queue item."""
+
+        if self._agent_running:
+            self.post_message(self.RestoreQueued())
 
     def action_newline(self) -> None:
         self.insert("\n")
@@ -3587,13 +3633,18 @@ class _TextualFooterParts:
 
 
 def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
-    activity = f"queued {snapshot.queued_follow_ups}" if snapshot.queued_follow_ups else ""
+    queue_parts = []
+    if snapshot.queued_steering:
+        queue_parts.append(f"{snapshot.queued_steering} steer")
+    if snapshot.queued_follow_ups:
+        queue_parts.append(f"{snapshot.queued_follow_ups} later")
+    activity = " · ".join(queue_parts)
     cwd = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
     left = " · ".join(part for part in (cwd, activity) if part)
     center = (
         ""
         if not snapshot.input_ready
-        else "esc cancel"
+        else "↵ steer · alt+↵ later · esc cancel"
         if snapshot.input_mode == "running"
         else "↵ send · / commands"
         if snapshot.input_mode == "idle"
@@ -3713,6 +3764,7 @@ def _format_textual_footer_line(
     compact_context = _joined_footer_fields(parts.billing, parts.context_compact)
     candidates = [
         (parts.left, parts.center, full_right),
+        (parts.left, "esc cancel" if "esc cancel" in parts.center else "", full_right),
         (parts.left, "", full_right),
         (parts.left, "", compact_context),
     ]

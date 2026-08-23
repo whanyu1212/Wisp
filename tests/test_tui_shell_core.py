@@ -47,6 +47,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     HistoryHydrationPolicy,
 )
+from wisp.tui.input_types import TuiSubmission, new_submission_id
 from wisp.tui.state import (
     TuiCancelRequested,
     TuiExitReason,
@@ -4560,11 +4561,142 @@ def test_tui_shell_queues_follow_up_while_running() -> None:
 
         await shell.run()
 
-        assert controller.prompts == ["first", "second"]
+        assert controller.prompts == ["first"]
+        assert controller.follow_ups == ["second"]
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
-        assert "queued follow-up #1" in rendered
-        assert "running queued follow-up" in rendered
+        assert "Follow-up queued." in rendered
+        assert "running queued follow-up" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_routes_explicit_running_submission_to_steering() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)],
+                )
+            ]
+        )
+        inputs = deque(
+            [
+                "first",
+                TuiSubmission(
+                    id=new_submission_id(),
+                    content="change direction",
+                    display="change direction",
+                    input_mode="running",
+                    queue_kind="steering",
+                ),
+            ]
+        )
+
+        async def read(_prompt: str) -> str:
+            if inputs:
+                return inputs.popleft()
+            await anyio.sleep(0.1)
+            raise EOFError
+
+        shell = TuiShell(controller, console=_console()[0], prompt_reader=read)
+        await shell.run()
+
+        assert controller.prompts == ["first"]
+        assert controller.steering == ["change direction"]
+        assert controller.follow_ups == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_restores_submission_when_runtime_rejects_queue_command() -> None:
+    async def run() -> None:
+        class RejectQueueController(ScriptedController):
+            async def follow_up(
+                self,
+                content: str,
+                *,
+                command_id: str | None = None,
+            ) -> str:
+                selected_id = command_id or "follow-up-rejected"
+                await self._emit(
+                    [
+                        RpcCommandFinished(
+                            command_id=selected_id,
+                            command_type="follow_up",
+                            ok=False,
+                            error="queue unavailable",
+                        )
+                    ]
+                )
+                return selected_id
+
+        class RestoreRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.restored: list[TuiSubmission] = []
+
+            def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+                self.restored.extend(submissions)
+                return True
+
+        controller = RejectQueueController()
+        renderer = RestoreRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content="try later",
+            display="try later",
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+
+        await shell._handle_input_line(_InputLine(submission, _InputMode.running))
+        await shell._handle_rpc_event(await controller._receive.receive())
+
+        assert renderer.restored == [submission]
+        assert shell._pending_queue_submissions == {}
+        assert shell._queue_follow_up == ()
+
+    anyio.run(run)
+
+
+def test_tui_shell_restores_latest_runtime_queue_item_after_confirmed_pop() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+
+        class RestoreRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.restored: list[TuiSubmission] = []
+
+            def restore_submissions(self, submissions: tuple[TuiSubmission, ...]) -> bool:
+                self.restored.extend(submissions)
+                return True
+
+        renderer = RestoreRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content="do this later",
+            display="do this later",
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+        controller.follow_ups.append(submission.content)
+        shell._local_queue_submissions.append(("follow_up", submission))
+        shell._apply_queue_update(QueueUpdated(follow_up=(submission.content,)))
+
+        await shell._restore_latest_queue_item()
+        for _ in range(3):
+            await shell._handle_rpc_event(await controller._receive.receive())
+
+        assert controller.queue_pops == ["follow_up"]
+        assert renderer.restored == [submission]
+        assert shell._queue_follow_up == ()
 
     anyio.run(run)
 
@@ -4590,7 +4722,7 @@ def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
             if inputs:
                 return inputs.popleft()
             with anyio.fail_after(2):
-                while len(controller.prompts) < 3:
+                while len(controller.follow_ups) < 2:
                     await anyio.sleep(0.01)
             raise EOFError
 
@@ -4608,13 +4740,9 @@ def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
 
         await shell.run()
 
-        assert controller.prompts == ["first", "second", "third"]
-        assert ("running queued follow-up", 1) in {
-            (snapshot.status, snapshot.queued_follow_ups) for snapshot in renderer.snapshots
-        }
-        assert ("running queued follow-up", 0) in {
-            (snapshot.status, snapshot.queued_follow_ups) for snapshot in renderer.snapshots
-        }
+        assert controller.prompts == ["first"]
+        assert controller.follow_ups == ["second", "third"]
+        assert any(snapshot.queued_follow_ups == 2 for snapshot in renderer.snapshots)
 
     anyio.run(run)
 
@@ -4639,10 +4767,11 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
         await shell.run()
 
         assert controller.prompts == ["first"]
+        assert controller.follow_ups == ["second"]
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
-        assert "queued follow-up #1" in rendered
-        assert "unsent follow-up: second" in rendered
+        assert "Follow-up queued." in rendered
+        assert "unsent follow-up: second" not in rendered
         assert "running queued follow-up" not in rendered
         assert "input closed; finishing current prompt" in rendered
         assert "waiting for current prompt" not in rendered
@@ -4677,10 +4806,11 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
         await shell.run()
 
         assert controller.prompts == ["first"]
+        assert controller.follow_ups == ["second"]
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
-        assert "queued follow-up #1" in rendered
-        assert "unsent follow-up: second" in rendered
+        assert "Follow-up queued." in rendered
+        assert "unsent follow-up: second" not in rendered
         assert "running queued follow-up" not in rendered
 
     anyio.run(run)
@@ -4822,8 +4952,8 @@ def test_tui_shell_queues_prompt_during_compaction_and_runs_it_after_success() -
         await shell.run()
 
         assert controller.compactions == [None]
-        assert controller.prompts == ["use the compacted context"]
-        assert "queued follow-up #1" in output.getvalue()
+        assert controller.prompts == []
+        assert "Cannot steer or queue a follow-up during compaction." in output.getvalue()
         assert "Compacted 3 context entries." in output.getvalue()
 
     anyio.run(run)
@@ -4867,10 +4997,11 @@ def test_tui_shell_failed_compaction_runs_queued_prompt_without_duplicate_error(
 
         await shell.run()
 
-        assert controller.prompts == ["run with unchanged context"]
+        assert controller.prompts == []
         assert list(shell.state.queued_prompts) == []
         rendered = output.getvalue()
         assert rendered.count("summary failed") == 1
+        assert "Cannot steer or queue a follow-up during compaction." in rendered
 
     anyio.run(run)
 

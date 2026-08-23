@@ -70,7 +70,7 @@ from wisp.tui.file_index import (
 )
 from wisp.tui.file_result_presentation import FileResultPresentation
 from wisp.tui.file_suggest import FileSuggest
-from wisp.tui.input_types import TuiSubmission
+from wisp.tui.input_types import QueueSubmissionKind, TuiSubmission
 from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
@@ -82,7 +82,12 @@ from wisp.tui.process_lifecycle import ProcessLifecyclePresentation
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
-from wisp.tui.state import TuiCancelRequested, TuiExitReason, TuiQuitRequested
+from wisp.tui.state import (
+    TuiCancelRequested,
+    TuiExitReason,
+    TuiQueueRestoreRequested,
+    TuiQuitRequested,
+)
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
@@ -1159,7 +1164,21 @@ class TextualTui(App[None]):
             # Keep the legacy compact-echo API coherent for embedded renderers;
             # owned submissions also carry this display text directly by identity.
             self._input_controller.register_compact_echo(event.value, event.display)
-        self.submit_command_line(event.value, display=event.display)
+        self.submit_command_line(
+            event.value,
+            display=event.display,
+            queue_kind=event.queue_kind,
+        )
+
+    def on_prompt_editor_restore_queued(self, event: PromptEditor.RestoreQueued) -> None:
+        """Forward queue restoration through the shell-owned RPC boundary."""
+
+        event.stop()
+        self._signal_input(
+            TuiQueueRestoreRequested(),
+            action="restore queued item",
+            clear_editor=False,
+        )
 
     def _accept_menu_highlight_on_enter(self, typed: str) -> bool:
         """Accept the highlighted slash command on Enter; return whether it handled.
@@ -1647,15 +1666,26 @@ class TextualTui(App[None]):
             )
         event.stop()
 
-    def submit_command_line(self, text: str, *, display: str | None = None) -> None:
-        """Submit a typed slash-command line through the input controller."""
+    def submit_command_line(
+        self,
+        text: str,
+        *,
+        display: str | None = None,
+        queue_kind: QueueSubmissionKind = "auto",
+    ) -> None:
+        """Submit a typed line through the input controller."""
 
         if self._block_submission_while_starting():
             return
         if self._submit_local_theme_command(text):
             self.clear_prompt_editor()
             return
-        self._input_controller.submit_line(text, clear_editor=True, display=display)
+        self._input_controller.submit_line(
+            text,
+            clear_editor=True,
+            display=display,
+            queue_kind=queue_kind,
+        )
 
     def _block_submission_while_starting(self) -> bool:
         """Keep an early draft editable until the shell can classify submissions."""
@@ -2612,6 +2642,8 @@ class TextualTui(App[None]):
         self._agent_mode = snapshot.mode
         self._visible_input_mode = snapshot.input_mode
         self._shell_snapshot = snapshot
+        if self._input is not None:
+            self._input.set_running(snapshot.input_mode == "running")
         self._render_pending_submissions()
         if self._status is not None:
             self._status.set_snapshot(snapshot)

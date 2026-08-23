@@ -472,18 +472,21 @@ def test_shell_accepts_prompts_with_legacy_renderer_without_history_hook() -> No
     assert anyio.run(scenario) == ["compatible prompt"]
 
 
-def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_it() -> None:
+def test_shell_records_runtime_accepted_follow_up_and_local_clear_does_not_erase_it() -> None:
     async def scenario() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         app, renderer = create_textual_tui()
-        shell = TuiShell(ScriptedController(), renderer=renderer)
+        controller = ScriptedController()
+        shell = TuiShell(controller, renderer=renderer)
         shell.state.current_command_id = "prompt-1"
         shell.state.current_command_type = "prompt"
 
         await shell._handle_input_line(_InputLine("submitted follow-up", _InputMode.running))
+        for _ in range(2):
+            await shell._handle_rpc_event(await controller._receive.receive())
         recorded_before_clear = tuple(
             entry.prompt for entry in app._input_controller.prompt_history_entries
         )
-        queued_before_clear = tuple(shell.state.queued_prompts)
+        queued_before_clear = tuple(item.content for item in shell._queue_follow_up)
         shell._clear_queued_prompts()
         recorded_after_clear = tuple(
             entry.prompt for entry in app._input_controller.prompt_history_entries

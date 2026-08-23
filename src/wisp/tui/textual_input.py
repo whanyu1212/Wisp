@@ -19,7 +19,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream
 
 from wisp.tui.compact_echo import CompactEchoLog
-from wisp.tui.input_types import TuiSubmission, new_submission_id
+from wisp.tui.input_types import QueueSubmissionKind, TuiSubmission, new_submission_id
 from wisp.tui.prompt_history import PromptHistory, PromptHistoryEntry
 
 _INPUT_BUFFER_CAPACITY = 100
@@ -112,6 +112,7 @@ class TextualInputController:
         *,
         clear_editor: bool,
         display: str | None = None,
+        queue_kind: QueueSubmissionKind = "auto",
     ) -> bool:
         """Queue a typed submission and clear its editor only after acceptance."""
 
@@ -121,6 +122,7 @@ class TextualInputController:
             content=text,
             display=text if display is None else display,
             input_mode=input_mode or "idle",
+            queue_kind=queue_kind,
         )
         try:
             self._send.send_nowait(submission)

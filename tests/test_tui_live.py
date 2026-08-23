@@ -53,7 +53,7 @@ def test_live_fullscreen_tui_renders_pending_prompt_in_separate_bounded_region()
     pending = "".join(fragment for _style, fragment in renderer._pending_fragments())
     transcript = "".join(fragment for _style, fragment in renderer._transcript_fragments())
 
-    assert "Queued follow-ups" in pending
+    assert "Queued 1 follow-up" in pending
     assert "…" in pending
     assert max(len(line) for line in pending.splitlines()) <= 30
     assert "Queued follow-ups" not in transcript
@@ -286,7 +286,7 @@ def test_live_fullscreen_tui_footer_fragments_use_compact_footer() -> None:
 
     footer = "".join(fragment for _style, fragment in renderer._footer_fragments())
 
-    assert "running • queued 2" in footer
+    assert "running • later 2" in footer
     assert "session: sess.jsonl" in footer
     assert "openai/gpt-test" in footer
 
@@ -635,7 +635,8 @@ def test_live_fullscreen_tui_keeps_preexisting_text_mode_when_approval_arrives()
 
         assert should_exit is False
         assert controller.approvals == []
-        assert list(shell.state.queued_prompts) == ["run tests"]
+        assert controller.follow_ups == ["run tests"]
+        assert list(shell.state.queued_prompts) == []
 
     anyio.run(run)
 
