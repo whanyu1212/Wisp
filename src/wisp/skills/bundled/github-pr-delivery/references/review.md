@@ -42,17 +42,20 @@ a vanished reaction, an empty transient result, or a stale clean review is not s
 
 Use one managed monitor when available rather than issuing a visible full review query on every
 interval. Its normalized state must contain the current head SHA, the tracked trigger ID or timestamp,
-the newest candidate verdict ID and state, and the sorted IDs and resolution/outdated state of every
-unresolved thread. For GraphQL, paginate the complete thread connection but initially project only the
-fields needed for this state, such as thread IDs, `isResolved`, `isOutdated`, and the newest comment's
-ID and timestamp.
+the sorted IDs and timestamps of every issue comment and formal review created after the trigger, any
+candidate verdict state, and the sorted IDs and resolution/outdated state of every unresolved thread.
+Do not restrict the post-trigger inventory to the expected automation account: another reviewer may
+add an actionable standalone comment while automated review is running. For GraphQL, paginate every
+relevant connection but initially project only IDs, timestamps, review state and commit identity, and
+thread `isResolved`/`isOutdated` state plus the newest comment ID.
 
-Emit the initial state and then only changes: a new acknowledgement or verdict, a changed thread set,
-a clean exact-head terminal result, a stale head, or an explicit query error. Do not repeatedly return
-full review bodies, file context, reactions, or complete comment histories. When a new candidate
-verdict or unresolved thread appears, leave the monitor and fetch that item's body, author, path/line
-context, reactions, and commit association once for classification. Resume compact monitoring after
-the finding is handled and any replacement head has green CI.
+Emit the initial state and then only changes: a new acknowledgement, issue comment, formal review, or
+verdict; a changed thread set; a clean exact-head terminal result; a stale head; or an explicit query
+error. Do not repeatedly return full review bodies, file context, reactions, or complete comment
+histories. When any post-trigger item or unresolved thread first appears, leave the monitor and fetch
+that item's body, author, path/line context, reactions, and commit association once for classification.
+Record that classification and inspect every newly observed item before accepting a clean verdict.
+Resume compact monitoring after a finding is handled and any replacement head has green CI.
 
 An empty or malformed response, incomplete pagination, authentication failure, rate limit, or monitor
 exit without a classified terminal state is an error, not a clean review. If managed execution is not
