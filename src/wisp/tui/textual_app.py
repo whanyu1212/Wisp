@@ -182,7 +182,7 @@ _PROMPT_GLYPH = "❯"
 # persistent transcript heartbeat while the editor explains what submission does.
 _INPUT_PLACEHOLDERS: dict[str, str] = {
     "wisp> ": f"{_PROMPT_GLYPH} Ask Wisp anything…",
-    "wisp(running)> ": f"{_PROMPT_GLYPH} Add a follow-up…",
+    "wisp(running)> ": f"{_PROMPT_GLYPH} Steer the active run…",
     "wisp(exiting)> ": f"{_PROMPT_GLYPH} exiting…",
     "approve? [y/N] ": f"{_PROMPT_GLYPH} approve? [y/N]",
 }

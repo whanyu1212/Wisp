@@ -4864,6 +4864,33 @@ def test_tui_shell_reports_runtime_queue_in_submission_order_before_shutdown() -
     anyio.run(run)
 
 
+def test_tui_shell_reports_in_flight_queue_submission_before_shutdown() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        submission = TuiSubmission(
+            id=new_submission_id(),
+            content="do this after",
+            display="do this after",
+            input_mode="running",
+            queue_kind="follow_up",
+        )
+
+        await shell._handle_input_line(_InputLine(submission, _InputMode.running))
+        assert shell._pending_queue_submissions
+
+        await shell._request_shutdown()
+
+        assert "unsent follow-up: do this after" in output.getvalue()
+        assert shell._pending_queue_submissions == {}
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
 def test_tui_shell_matches_injected_skill_to_its_original_queued_submission() -> None:
     async def run() -> None:
         renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)

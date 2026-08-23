@@ -993,21 +993,17 @@ class TuiShell:
         """Report runtime-owned queued input before the RPC process exits."""
 
         queued = self._queued_submissions()
-        if not queued:
+        pending = tuple(item.submission for item in self._pending_queue_submissions.values())
+        if not queued and not pending:
             return
-        live_ids = {int(submission.id) for _, submission in queued}
-        submissions = [
-            submission
-            for _, submission in self._local_queue_submissions
-            if int(submission.id) in live_ids
-        ]
-        selected_ids = {int(submission.id) for submission in submissions}
-        submissions.extend(
-            submission for _, submission in queued if int(submission.id) not in selected_ids
-        )
+        by_id = {int(submission.id): submission for _, submission in queued}
+        for submission in pending:
+            by_id.setdefault(int(submission.id), submission)
+        submissions = sorted(by_id.values(), key=lambda submission: int(submission.id))
         self._queue_steering = ()
         self._queue_follow_up = ()
         self._local_queue_submissions.clear()
+        self._pending_queue_submissions.clear()
         self._sync_pending_view()
         for submission in submissions:
             self._resolve_submission(submission)

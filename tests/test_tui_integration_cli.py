@@ -11547,7 +11547,7 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
 
     idle_placeholder, running_placeholder = anyio.run(scenario)
     assert idle_placeholder == "❯ Ask Wisp anything…"
-    assert running_placeholder == "❯ Add a follow-up…"
+    assert running_placeholder == "❯ Steer the active run…"
 
 
 def test_textual_composer_uses_filled_left_rail_panel() -> None:
