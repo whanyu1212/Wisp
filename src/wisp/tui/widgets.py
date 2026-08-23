@@ -2979,7 +2979,9 @@ class ToolCard(Static):
             self._start_timer()
         if role != self._role:
             if self._role:
-                self.remove_class(f"message--{self._role}")
+                # Keep the prior role out of the next style resolution without
+                # briefly exposing the generic ``message`` geometry in between.
+                self.remove_class(f"message--{self._role}", update=False)
             self.add_class("message", f"message--{role}")
             self._role = role
         self.border_title = ""
