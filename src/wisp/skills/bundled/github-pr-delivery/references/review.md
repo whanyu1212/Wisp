@@ -38,6 +38,44 @@ Use bounded polling, commonly around 30 seconds. Follow repository precedent for
 one, about ten minutes is a reasonable point to post one fresh independently tracked trigger. Silence,
 a vanished reaction, an empty transient result, or a stale clean review is not success.
 
+### Compact review monitor
+
+Use one managed monitor when available rather than issuing a visible full review query on every
+interval. Its normalized state must contain the current head SHA, the tracked trigger ID or timestamp
+and its reaction state, the sorted IDs and creation/edit versions of issue comments present at trigger
+time or added later, every formal review submitted after the trigger with its submission/edit version,
+any candidate verdict state, and the sorted IDs and resolution/outdated state of every unresolved
+thread. Represent trigger reactions by content plus stable reactor identities when exposed, or counts
+otherwise, so acknowledgement changes are observable even though they do not edit the trigger comment.
+Represent a comment version with `updatedAt` or `lastEditedAt` when available, or a stable body hash.
+Snapshot issue-comment IDs and versions at trigger time, then surface newly added comments and
+reclassify any observed comment whenever its version changes. Represent a formal review version the
+same way, snapshot review IDs, versions, and states at trigger time, then detect later submissions,
+edits, and state transitions even when a pending review object was created earlier.
+Do not restrict the post-trigger inventory to the expected automation account: another reviewer may
+add actionable feedback while automated review is running. For GraphQL, paginate every relevant
+connection but initially project only IDs, comment creation/edit version, review `submittedAt`,
+`updatedAt`/`lastEditedAt` (or a stable body hash), state and commit identity, and thread
+`isResolved`/`isOutdated` state. Paginate each thread's comment connection and retain the complete
+sorted set of comment ID/version pairs already observed; on later polls, surface every unseen or
+changed pair, or fetch the complete delta after the last recorded cursor. Never reduce a multi-comment
+delta to only the newest reply.
+
+Emit the initial state and then only changes: a new acknowledgement, issue comment, formal review,
+edited comment or review, verdict, changed thread set, clean exact-head terminal result, stale head, or explicit
+query error. Do not repeatedly return full review bodies, file context, reactions, or complete comment
+histories. When any post-trigger item, new comment or review version, or unresolved thread first
+appears, leave the monitor and fetch that item's body, author, path/line context, reactions, submission
+state, and commit association once for that version's classification. Record the classification and
+inspect every unseen or changed inline comment and every newly submitted, edited, or state-changed
+review before accepting a clean verdict. Resume compact monitoring after a finding is handled and any
+replacement head has green CI.
+
+An empty or malformed response, incomplete pagination, authentication failure, rate limit, or monitor
+exit without a classified terminal state is an error, not a clean review. If managed execution is not
+available, use the same minimal projections as bounded snapshots and preserve the exact-head and
+thread-aware criteria above.
+
 
 Never treat a clean verdict on a superseded commit as sufficient. Every pushed fix, including a
 test-only fix prompted by review, requires a new exact-head trigger after replacement CI is green.
