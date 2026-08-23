@@ -68,8 +68,11 @@ success claim. If it differs from the expected SHA, stop the monitor, record the
 restart observation for that head. Success requires every expected identity to be present and passing,
 with no pending or blocking check in that expected set. Failed, cancelled, and unexplained skipped
 required checks remain non-passing. After a blocking result, inspect only the identified run or job with
-`gh run view --log-failed`; retrieve broader logs only if that focused output cannot explain the
-failure.
+`gh run view RUN_ID --log-failed` or `gh run view --job JOB_ID --log-failed`. Preserve or derive the
+selector from the check's recorded link, and verify the selected run's `headSha` matches the expected
+PR head before trusting its logs. Never use selector-free `gh run view --log-failed`, which can open an
+interactive chooser or select an unrelated run. Retrieve broader logs only if the focused output
+cannot explain the failure.
 
 If resumable execution is unavailable, repeat the same projection as short snapshots and keep user
 progress updates change-based. Do not fall back to a redraw-heavy watch command merely to avoid a
