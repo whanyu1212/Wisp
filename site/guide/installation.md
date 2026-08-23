@@ -5,13 +5,13 @@ title: Installation
 # Installation
 
 Wisp is published on PyPI as [`wisp-ai`](https://pypi.org/project/wisp-ai/), installs a `wisp`
-command, and requires Python 3.12 or newer. The `0.1.0rc6` release candidate supports Linux and
-macOS; Windows remains best-effort until it has dedicated CI coverage.
+command, and requires Python 3.12 or newer. Wisp 0.1.0 supports Linux and macOS; Windows remains
+best-effort until it has dedicated CI coverage.
 
-Request the prerelease explicitly:
+Install the stable release:
 
 ```bash
-uv tool install "wisp-ai==0.1.0rc6"
+uv tool install "wisp-ai==0.1.0"
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell.
@@ -19,7 +19,7 @@ If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart you
 To run Wisp without installing it:
 
 ```bash
-uvx --from "wisp-ai==0.1.0rc6" wisp
+uvx --from "wisp-ai==0.1.0" wisp
 ```
 
 Check the installed version with `wisp --version`.
