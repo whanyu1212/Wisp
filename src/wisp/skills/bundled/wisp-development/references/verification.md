@@ -24,3 +24,10 @@ uvx twine check dist/*
 ```
 
 Report every completed check accurately. A nonzero exit or timeout is not a pass.
+
+These checks establish local technical evidence. When the work is delivered through a GitHub pull
+request, load the resolved `github-pr-delivery` entry and inspect its content before using it. Its name
+alone does not identify the package entry because a project or user skill may shadow it, so rely only
+on the authorization boundaries and current-head readiness guarantees its content actually provides.
+Do not substitute local results for current remote evidence or duplicate the applicable delivery
+procedure here.

@@ -5,7 +5,7 @@ license: MIT
 compatibility: Wisp source checkouts and installed wisp-ai packages.
 metadata:
   author: Wisp
-  version: "1.0"
+  version: "1.1"
 ---
 
 # Wisp Development
@@ -23,6 +23,17 @@ proposing changes.
 5. Add deterministic tests with fake or scripted providers and exercise real JSON round trips when
    events cross RPC.
 6. Run the repository's documented format, lint, type, and test gates.
+
+## GitHub delivery boundary
+
+When Wisp development continues into branch, commit, push, pull-request, CI, review, or
+merge-readiness work on GitHub, load the resolved `github-pr-delivery` entry and inspect its content
+before using it alongside this one. The name alone does not prove that Wisp's package entry was
+selected because a higher-precedence project or user entry may shadow it. Do not describe the resolved
+entry as bundled or assume guarantees that its content does not establish. This skill owns Wisp
+architecture, implementation, safety, and local verification; keep authorization-sensitive remote
+mechanics in the applicable delivery workflow rather than copying them here. Local verification is an
+input to PR delivery, not proof that remote CI or review is current and clean.
 
 Load only the supporting resource needed for the task:
 
