@@ -2256,11 +2256,18 @@ class TuiShell:
             )
             self.renderer.prompt_submitted(submission or visible_content)
             if submission is not None:
+                self._resolve_submission(submission)
                 self._local_queue_submissions = [
                     (kind, item)
                     for kind, item in self._local_queue_submissions
                     if int(item.id) != int(submission.id)
                 ]
+                remaining = tuple(item for item in queued if int(item.id) != int(submission.id))
+                if event.kind == "steering":
+                    self._queue_steering = remaining
+                else:
+                    self._queue_follow_up = remaining
+                self._sync_pending_view()
             return False
         if isinstance(event, ProviderRetrying):
             self._update_view(

@@ -4956,6 +4956,45 @@ def test_tui_shell_matches_injected_skill_to_its_original_queued_submission() ->
     anyio.run(run)
 
 
+def test_tui_shell_consumes_duplicate_injections_and_resolves_live_pending_state() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        submissions = tuple(
+            TuiSubmission(
+                id=new_submission_id(),
+                content="same text",
+                display=f"same text {index}",
+                input_mode="running",
+                queue_kind="follow_up",
+            )
+            for index in range(2)
+        )
+        shell._local_queue_submissions.extend(
+            ("follow_up", submission) for submission in submissions
+        )
+        for submission in submissions:
+            renderer._buffered_submissions[int(submission.id)] = submission
+        renderer.state.pending_submissions = tuple(
+            submission.pending_view() for submission in submissions
+        )
+        shell._apply_queue_update(QueueUpdated(follow_up=("same text", "same text")))
+
+        await shell._handle_rpc_event(QueueMessageInjected(kind="follow_up", content="same text"))
+
+        assert tuple(renderer._buffered_submissions) == (int(submissions[1].id),)
+        assert shell._queue_follow_up == (submissions[1],)
+
+        await shell._handle_rpc_event(QueueMessageInjected(kind="follow_up", content="same text"))
+
+        assert renderer._buffered_submissions == {}
+        assert shell._queue_follow_up == ()
+        user_entries = [entry for entry in renderer.state.transcript if entry.role == "user"]
+        assert [entry.content for entry in user_entries] == ["same text 0", "same text 1"]
+
+    anyio.run(run)
+
+
 def test_tui_shell_compact_calls_controller_without_prompting_and_returns_idle() -> None:
     async def run() -> None:
         controller = ScriptedController(
