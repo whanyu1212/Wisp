@@ -249,6 +249,23 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(wheel(transcript)) == "wheel"
             assert app._input_event_category(wheel(transcript, shift=True)) is None
             assert app._input_event_category(wheel(transcript, ctrl=True)) is None
+            transcript.stop_following()
+            assert app._input_event_category(wheel(transcript)) is None
+            transcript.return_to_latest()
+            downward_wheel = events.MouseScrollDown(
+                widget=transcript,
+                x=origin.x,
+                y=origin.y,
+                delta_x=0,
+                delta_y=0,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=origin.x,
+                screen_y=origin.y,
+            )
+            assert app._input_event_category(downward_wheel) is None
             horizontal_wheel = events.MouseScrollLeft(
                 widget=transcript,
                 x=origin.x,
@@ -281,12 +298,16 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("pageup", None)) is None
             assert app._input_event_category(events.Key("end", None)) == "navigation"
             assert app._input_event_category(events.Key("pagedown", None)) == "navigation"
+            assert app._input_event_category(wheel(transcript)) is None
+            assert app._input_event_category(downward_wheel) == "wheel"
             transcript.return_to_latest()
             await pilot.pause()
             assert app._input_event_category(events.Key("home", None)) == "navigation"
             assert app._input_event_category(events.Key("pageup", None)) == "navigation"
             assert app._input_event_category(events.Key("end", None)) is None
             assert app._input_event_category(events.Key("pagedown", None)) is None
+            assert app._input_event_category(wheel(transcript)) == "wheel"
+            assert app._input_event_category(downward_wheel) is None
             card = ToolCard("read", {"path": "README.md"})
             card.set_state("done", detail="complete", full_output="complete")
             await transcript.mount_message(card)

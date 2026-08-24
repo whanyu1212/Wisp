@@ -2085,7 +2085,9 @@ class TextualTui(App[None]):
         if isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)):
             return (
                 "wheel"
-                if not (event.ctrl or event.shift) and self._wheel_event_targets_transcript(event)
+                if not (event.ctrl or event.shift)
+                and self._wheel_event_targets_transcript(event)
+                and self._transcript_wheel_changes_view(event)
                 else None
             )
         if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
@@ -2605,6 +2607,23 @@ class TextualTui(App[None]):
         if key == "end":
             return can_move_down or not transcript.is_following
         return False
+
+    def _transcript_wheel_changes_view(
+        self,
+        event: events.MouseScrollUp | events.MouseScrollDown,
+    ) -> bool:
+        """Whether a routed vertical wheel gesture changes transcript state."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        if isinstance(event, events.MouseScrollUp):
+            return (
+                transcript.scroll_y > 0
+                or transcript.can_page_to_older_history
+                or transcript.is_following
+            )
+        return transcript.scroll_y < transcript.max_scroll_y or transcript.can_page_to_newer_history
 
     def _is_streaming(self) -> bool:
         """Whether a streamed assistant turn is mid-flight and mutating the transcript.
