@@ -2091,6 +2091,17 @@ class TextualTui(App[None]):
         if not isinstance(event, events.Key):
             return None
         key = event.key
+        focused = self.screen.focused
+        if isinstance(focused, ToolCard) and key in {
+            "enter",
+            "space",
+            "v",
+            "escape",
+            "p",
+            "n",
+            "l",
+        }:
+            return None
         decision_panel = self._decision_panel
         if decision_panel is not None and decision_panel.display and key in _DECISION_INPUT_KEYS:
             return "approval"

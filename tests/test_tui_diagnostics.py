@@ -162,6 +162,15 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("down", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+home", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
+            transcript = app.query_one("#transcript", Transcript)
+            card = ToolCard("read", {"path": "README.md"})
+            card.set_state("done", detail="complete", full_output="complete")
+            await transcript.mount_message(card)
+            card.focus()
+            await pilot.pause()
+            for key in ("enter", "space", "v", "escape", "p", "n", "l"):
+                assert app._input_event_category(events.Key(key, key)) is None
+            input_widget.focus()
             with monkeypatch.context() as context:
                 context.setattr(app, "_file_picker_is_active", lambda: True)
                 context.setattr(app, "_file_tree_is_active", lambda: True)
