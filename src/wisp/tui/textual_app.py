@@ -488,6 +488,7 @@ class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
 
     _MAX_PENDING_INPUT_DIAGNOSTICS = 1_024
+    _MAX_OBSERVED_INPUT_EVENTS = 1_024
 
     _displayed_frame: _DisplayedFrame | None
     _displayed_cursor_position: Offset | None
@@ -989,7 +990,7 @@ class TextualTui(App[None]):
         self._diagnostics = diagnostics
         self._pending_input_latency: list[_PendingInputLatency] = []
         self._input_priority = InputPriorityPolicy()
-        self._dispatching_input_events: set[int] = set()
+        self._observed_input_events: dict[tuple[int, float], None] = {}
         self.presentation_clock = PresentationClock(self.set_interval)
         self._displayed_frame = None
         self._displayed_cursor_position = None
@@ -2246,38 +2247,36 @@ class TextualTui(App[None]):
         # Paste is gated separately (it is not a MouseEvent or Key) because a
         # stale paste could otherwise still reach a focused-but-hidden
         # PromptEditor or an OptionList.
-        stale_event_types = (events.Key, events.MouseEvent, events.Paste)
+        input_event_types = (events.Key, events.MouseEvent, events.Paste)
         overlays = self._overlay_controller
         if (
             overlays is not None
-            and isinstance(event, stale_event_types)
+            and isinstance(event, input_event_types)
             and overlays.event_is_stale(event.time)
         ):
             return
+        if isinstance(event, input_event_types):
+            observation_token = (id(event), event.time)
+            if observation_token in self._observed_input_events:
+                await super().on_event(event)
+                return
+            if len(self._observed_input_events) >= self._MAX_OBSERVED_INPUT_EVENTS:
+                del self._observed_input_events[next(iter(self._observed_input_events))]
+            self._observed_input_events[observation_token] = None
         category = self._input_event_category(event)
         if category is None:
             await super().on_event(event)
             return
-        event_identity = id(event)
         event_token: InputPriorityToken = (category, event.time)
         received_at = perf_counter()
-        if (
-            event_identity in self._dispatching_input_events
-            or not self._input_priority.observe_input(
-                event_token,
-                now=received_at,
-            )
-        ):
+        if not self._input_priority.observe_input(event_token, now=received_at):
             await super().on_event(event)
             return
-        self._dispatching_input_events.add(event_identity)
         try:
             await super().on_event(event)
         except BaseException:
             self._input_priority.cancel_input(event_token)
             raise
-        finally:
-            self._dispatching_input_events.discard(event_identity)
         if self._diagnostics is None:
             return
         if len(self._pending_input_latency) >= self._MAX_PENDING_INPUT_DIAGNOSTICS:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import anyio
 import pytest
 from rich.segment import Segment
@@ -97,6 +99,44 @@ def test_textual_tracks_priority_without_enabling_diagnostics(
     assert app._input_priority.pending_count == 1
     app._input_frame_emitted(0.0)
     assert app._input_priority.pending_count == 0
+
+
+def test_textual_observes_repeated_event_delivery_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TextualTui(diagnostics=Mock())
+    forwarded: list[events.Event] = []
+
+    async def record_event(_app: App[object], event: events.Event) -> None:
+        forwarded.append(event)
+
+    monkeypatch.setattr(App, "on_event", record_event)
+    monkeypatch.setattr(app, "_input_event_category", lambda _event: "cursor")
+
+    async def scenario() -> None:
+        repeated = events.Key("left", None)
+        await app.on_event(repeated)
+        assert app._input_priority.pending_count == 1
+        assert len(app._pending_input_latency) == 1
+
+        app._pending_input_latency.clear()
+        app._input_frame_emitted(0.0)
+        assert app._input_priority.pending_count == 0
+
+        await app.on_event(repeated)
+        assert app._input_priority.pending_count == 0
+        assert app._pending_input_latency == []
+
+        distinct = events.Key("right", None)
+        await app.on_event(distinct)
+        assert app._input_priority.pending_count == 1
+        assert len(app._pending_input_latency) == 1
+
+    anyio.run(scenario)
+
+    assert len(forwarded) == 3
+    assert forwarded[0] is forwarded[1]
+    assert forwarded[2] is not forwarded[0]
 
 
 def test_filtered_duplicate_frame_does_not_release_input_priority(

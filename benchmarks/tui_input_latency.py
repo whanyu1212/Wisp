@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 import time
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -31,6 +32,8 @@ from wisp.tui.widgets import PromptEditor, StreamMessage, Transcript
 
 type BenchmarkCondition = Literal["idle", "streaming"]
 
+_INPUT_SAMPLE_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
@@ -38,6 +41,7 @@ class BenchmarkConfig:
     stream_chunks: int = 100
     stream_interval_seconds: float = 0.02
     action_interval_seconds: float = 0.03
+    gesture_repetitions: int = 5
     viewport_width: int = 100
     viewport_height: int = 24
 
@@ -94,9 +98,35 @@ class InputLatencyReport:
 @dataclass
 class _InputCollector:
     samples: list[InputLatencyDiagnostic] = field(default_factory=list)
+    _sample_added: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
     def record_input_latency(self, diagnostic: InputLatencyDiagnostic) -> None:
         self.samples.append(diagnostic)
+        self._sample_added.set()
+
+    def sample_count(self, category: InputEventCategory) -> int:
+        return sum(sample.category == category for sample in self.samples)
+
+    async def wait_for_next(
+        self,
+        category: InputEventCategory,
+        *,
+        previous_count: int,
+        action: str,
+    ) -> None:
+        """Wait until an action reaches its first emitted-frame diagnostic."""
+
+        try:
+            async with asyncio.timeout(_INPUT_SAMPLE_TIMEOUT_SECONDS):
+                while self.sample_count(category) <= previous_count:
+                    self._sample_added.clear()
+                    if self.sample_count(category) > previous_count:
+                        break
+                    await self._sample_added.wait()
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"timed out waiting for {category} input diagnostic after {action}"
+            ) from error
 
     def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
         return
@@ -177,6 +207,7 @@ async def _run_condition(
                 pilot,
                 input_widget,
                 transcript,
+                collector,
                 config,
             )
         finally:
@@ -212,6 +243,7 @@ async def _run_condition(
                     final_at_tail=transcript.scroll_y >= transcript.max_scroll_y - 3,
                 )
         await pilot.pause()
+    _validate_condition_samples(collector.samples, config)
     return (
         tuple(
             InputLatencySample(
@@ -259,18 +291,87 @@ async def _exercise_inputs(
     pilot: Pilot[object],
     input_widget: PromptEditor,
     transcript: Transcript,
+    collector: _InputCollector,
     config: BenchmarkConfig,
 ) -> bool:
     delay = config.action_interval_seconds
     for key in "latency":
-        await pilot.press(key)
+        await _press_and_wait(pilot, collector, key=key, category="typing")
         await asyncio.sleep(delay)
-    await pilot.press("left", "right")
+    reader_remained_parked = True
+    for _ in range(config.gesture_repetitions):
+        await _press_and_wait(pilot, collector, key="left", category="cursor")
+        await asyncio.sleep(delay)
+        await _press_and_wait(pilot, collector, key="right", category="cursor")
+        await asyncio.sleep(delay)
+
+        await _press_and_wait(pilot, collector, key="pageup", category="navigation")
+        await asyncio.sleep(delay)
+        page_up_following = transcript.is_following
+        transcript.scroll_end(animate=False)
+        await pilot.pause()
+
+        await _wheel_up_and_wait(app, transcript, collector)
+        await asyncio.sleep(delay)
+        wheel_following = transcript.is_following
+        reader_remained_parked = reader_remained_parked and _reader_remained_parked(
+            page_up_following=page_up_following,
+            wheel_following=wheel_following,
+        )
+        transcript.scroll_end(animate=False)
+        await pilot.pause()
+
+    input_widget.value = "steer benchmark"
+    await _press_and_wait(pilot, collector, key="enter", category="submission")
     await asyncio.sleep(delay)
-    await pilot.press("pageup")
-    await asyncio.sleep(delay)
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="benchmark-approval",
+            name="bash",
+            arguments={"command": "printf benchmark"},
+            safety="command",
+        )
+    )
     await pilot.pause()
-    page_up_following = transcript.is_following
+    await _press_and_wait(pilot, collector, key="down", category="approval")
+    await asyncio.sleep(delay)
+    app.hide_decision()
+    await pilot.pause()
+
+    previous_cancellations = collector.sample_count("cancellation")
+    await pilot.press("escape")
+    renderer.cancelling("benchmark cancellation requested")
+    await collector.wait_for_next(
+        "cancellation",
+        previous_count=previous_cancellations,
+        action="escape",
+    )
+    await pilot.pause()
+    return reader_remained_parked
+
+
+async def _press_and_wait(
+    pilot: Pilot[object],
+    collector: _InputCollector,
+    *,
+    key: str,
+    category: InputEventCategory,
+) -> None:
+    previous_count = collector.sample_count(category)
+    await pilot.press(key)
+    await collector.wait_for_next(
+        category,
+        previous_count=previous_count,
+        action=key,
+    )
+
+
+async def _wheel_up_and_wait(
+    app: TextualTui,
+    transcript: Transcript,
+    collector: _InputCollector,
+) -> None:
+    previous_count = collector.sample_count("wheel")
     origin = transcript.region.offset
     wheel = events.MouseScrollUp(
         widget=transcript,
@@ -287,39 +388,38 @@ async def _exercise_inputs(
     )
     wheel.set_sender(app)
     await app.on_event(wheel)
-    await asyncio.sleep(delay)
-    await pilot.pause()
-    reader_remained_parked = _reader_remained_parked(
-        page_up_following=page_up_following,
-        wheel_following=transcript.is_following,
+    await collector.wait_for_next(
+        "wheel",
+        previous_count=previous_count,
+        action="wheel up",
     )
-    transcript.scroll_end(animate=False)
-    await pilot.pause()
-    input_widget.value = "steer benchmark"
-    await pilot.press("enter")
-    await asyncio.sleep(delay)
-    renderer.approval_request(
-        ToolApprovalRequested(
-            call_id="benchmark-approval",
-            name="bash",
-            arguments={"command": "printf benchmark"},
-            safety="command",
-        )
-    )
-    await pilot.pause()
-    await pilot.press("down")
-    await asyncio.sleep(delay)
-    app.hide_decision()
-    await pilot.pause()
-
-    await pilot.press("escape")
-    renderer.cancelling("benchmark cancellation requested")
-    await pilot.pause()
-    return reader_remained_parked
 
 
 def _reader_remained_parked(*, page_up_following: bool, wheel_following: bool) -> bool:
     return not page_up_following and not wheel_following
+
+
+def _validate_condition_samples(
+    samples: Sequence[InputLatencyDiagnostic],
+    config: BenchmarkConfig,
+) -> None:
+    expected: Counter[InputEventCategory] = Counter(
+        {
+            "typing": len("latency"),
+            "cursor": config.gesture_repetitions * 2,
+            "navigation": config.gesture_repetitions,
+            "wheel": config.gesture_repetitions,
+            "submission": 1,
+            "approval": 1,
+            "cancellation": 1,
+        }
+    )
+    observed: Counter[InputEventCategory] = Counter(sample.category for sample in samples)
+    if observed != expected:
+        raise RuntimeError(
+            "unexpected input diagnostic counts: "
+            f"expected {dict(expected)}, observed {dict(observed)}"
+        )
 
 
 def _summarize(samples: Sequence[InputLatencySample]) -> tuple[InputLatencySummary, ...]:
@@ -366,8 +466,8 @@ def _summarize(samples: Sequence[InputLatencySample]) -> tuple[InputLatencySumma
 
 
 def _validate_config(config: BenchmarkConfig) -> None:
-    if config.runs < 1 or config.stream_chunks < 1:
-        raise ValueError("runs and stream_chunks must be positive")
+    if config.runs < 1 or config.stream_chunks < 1 or config.gesture_repetitions < 1:
+        raise ValueError("runs, stream_chunks, and gesture_repetitions must be positive")
     if config.stream_interval_seconds <= 0 or config.action_interval_seconds <= 0:
         raise ValueError("stream and action intervals must be positive")
     if config.viewport_width < 1 or config.viewport_height < 1:
@@ -388,6 +488,11 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=BenchmarkConfig.action_interval_seconds,
     )
+    parser.add_argument(
+        "--gesture-repetitions",
+        type=int,
+        default=BenchmarkConfig.gesture_repetitions,
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -400,6 +505,7 @@ async def _main(arguments: Sequence[str] | None = None) -> None:
             stream_chunks=parsed.stream_chunks,
             stream_interval_seconds=parsed.stream_interval_seconds,
             action_interval_seconds=parsed.action_interval_seconds,
+            gesture_repetitions=parsed.gesture_repetitions,
         )
     )
     payload = report.to_json()

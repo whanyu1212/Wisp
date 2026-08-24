@@ -131,17 +131,27 @@ uv run python -m benchmarks.tui_input_latency --runs 5 \
 
 The scenario covers typing, cursor movement, PageUp and wheel navigation, active-run submission,
 approval selection, and cancellation. It reports separate `handler`, `queued`, `display`, and `total`
-distributions for each input category and condition. The benchmark alternates idle/streaming order
-between runs to reduce order bias. It uses the production `TextualTui.on_event`, Markdown stream
-controller, transcript, decision panel, and display boundary; it does not use a synthetic latency
-threshold. `stream_chunks` is the minimum workload for each streaming run; the producer continues
-at the configured interval until the input exercise has also finished.
+distributions for each input category and condition. Every measured gesture waits for its own
+terminal-emitted diagnostic before the next gesture is dispatched, so opposite cursor movements
+cannot cancel before either becomes visible. PageUp and wheel gestures each begin at the transcript
+tail and are independently returned to the tail after measurement. The benchmark alternates
+idle/streaming order between runs to reduce order bias. It uses the production
+`TextualTui.on_event`, Markdown stream controller, transcript, decision panel, and display boundary;
+it does not use a synthetic latency threshold. `stream_chunks` is the minimum workload for each
+streaming run; the producer continues at the configured interval until the input exercise has also
+finished.
+
+`gesture_repetitions` defaults to 5 and is configurable with `--gesture-repetitions`. With the
+default five runs, each idle and streaming condition therefore contains 50 cursor samples and 25
+samples each for PageUp navigation and wheel navigation, keeping nearest-rank p95 values from being
+the single worst observation. The benchmark aborts if any scripted category produces a missing or
+duplicate diagnostic, so invalid event accounting cannot silently enter an evidence report.
 
 Each streaming run also reports total streaming-phase and final-flush time, produced chunks,
-expected and rendered source lengths, Markdown writes, exact source completeness, whether PageUp and
-wheel navigation remained parked until an explicit return to the tail, and the final follow/tail
-state. These fields keep responsiveness evidence tied to stream progress and correctness without
-turning machine-specific timings into CI limits.
+expected and rendered source lengths, Markdown writes, exact source completeness, whether every
+PageUp and wheel gesture remained parked until its explicit return to the tail, and the final
+follow/tail state. These fields keep responsiveness evidence tied to stream progress and correctness
+without turning machine-specific timings into CI limits.
 
 For before/after evidence, run an identical benchmark-only harness in temporary worktrees rooted at
 the two runtime commits. If the harness was added after the baseline, apply the same benchmark-only
@@ -163,10 +173,11 @@ active-stream latency gap improves consistently without a systematic completion 
 
 Input diagnostics are opt-in and privacy-safe: samples contain only a coarse event category,
 durations, and display-update kind. They never retain key values, pasted text, prompt content,
-coordinates, paths, tool payloads, or session identifiers. Multiple input events may settle against
-the same first subsequent frame, which reflects what the terminal can actually make visible.
-Machine-specific values are evidence for same-environment before/after comparisons, not portable CI
-limits.
+coordinates, paths, tool payloads, or session identifiers. Production diagnostics permit multiple
+input events to settle against the same first subsequent frame, which reflects what the terminal can
+actually make visible; this benchmark deliberately serializes its measured gestures so every sample
+has a distinct settlement boundary. Machine-specific values are evidence for same-environment
+before/after comparisons, not portable CI limits.
 
 Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
 Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
