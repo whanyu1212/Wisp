@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import anyio
 import pytest
 from rich.segment import Segment
+from textual import events
 from textual._compositor import ChopsUpdate, LayoutUpdate
 from textual.app import App
 from textual.geometry import Region
@@ -115,7 +116,9 @@ def test_input_diagnostics_measure_handler_queue_and_first_display_without_value
         assert not hasattr(sample, "content")
 
 
-def test_input_diagnostics_classify_contextual_key_actions() -> None:
+def test_input_diagnostics_classify_contextual_key_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def scenario() -> _Diagnostics:
         diagnostics = _Diagnostics()
         app, renderer = create_textual_tui(diagnostics=diagnostics)
@@ -139,6 +142,19 @@ def test_input_diagnostics_classify_contextual_key_actions() -> None:
             input_widget.value = "follow up"
             await pilot.press("alt+enter")
             await pilot.pause()
+            app.show_theme_picker()
+            assert app._input_event_category(events.Key("escape", None)) is None
+            app.hide_theme_picker()
+            with monkeypatch.context() as context:
+                context.setattr(app, "_file_picker_is_active", lambda: True)
+                context.setattr(app, "_file_tree_is_active", lambda: True)
+                context.setattr(app, "_suggestion_menu_is_open", lambda: True)
+                assert app._input_event_category(events.Key("enter", None)) is None
+                assert app._input_event_category(events.Key("up", None)) is None
+                assert app._input_event_category(events.Key("down", None)) is None
+                assert app._input_event_category(events.Key("left", None)) is None
+                assert app._input_event_category(events.Key("right", None)) is None
+                assert app._input_event_category(events.Key("escape", None)) is None
             renderer.approval_request(
                 ToolApprovalRequested(
                     call_id="diagnostic-approval",
@@ -148,6 +164,7 @@ def test_input_diagnostics_classify_contextual_key_actions() -> None:
                 )
             )
             await pilot.pause()
+            assert app._input_event_category(events.Key("ctrl+c", None)) == "cancellation"
             await pilot.press("escape")
             renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
             await pilot.pause()

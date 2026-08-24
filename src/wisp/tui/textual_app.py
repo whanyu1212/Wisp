@@ -2085,12 +2085,30 @@ class TextualTui(App[None]):
             return None
         key = event.key
         decision_panel = self._decision_panel
-        if decision_panel is not None and decision_panel.display:
+        if decision_panel is not None and decision_panel.display and key != "ctrl+c":
             return "approval"
         if key == "ctrl+c" and self._editor_owns_selection():
             return None
-        if key in {"escape", "ctrl+c"}:
+        if key == "ctrl+c":
             return "cancellation"
+        overlays = self._overlay_controller
+        if overlays is not None:
+            if overlays.active_overlay is not None:
+                return None
+            if overlays.active_operation is not None:
+                return (
+                    "cancellation"
+                    if key == "escape" and overlays.active_operation is OverlayOperation.update
+                    else None
+                )
+        if key == "escape":
+            return None if self._suggestion_menu_is_open() else "cancellation"
+        if key == "enter" and self._file_picker_is_active():
+            return None
+        if key in {"up", "down"} and self._suggestion_menu_is_open():
+            return None
+        if key in {"left", "right"} and self._file_tree_is_active():
+            return None
         if key == "enter" or (key == "alt+enter" and self._visible_input_mode == "running"):
             return "submission"
         if key == "alt+enter":
@@ -2192,17 +2210,20 @@ class TextualTui(App[None]):
     def _file_picker_is_active(self) -> bool:
         return self._file_suggest is not None and self._file_suggest.is_active
 
+    def _file_tree_is_active(self) -> bool:
+        return bool(
+            self._file_suggest is not None
+            and self._file_suggest.is_active
+            and self._file_suggest.is_tree_mode
+        )
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"menu_move", "menu_complete"}:
             return self._file_picker_is_active() or bool(
                 self._suggest is not None and self._suggest.is_open
             )
         if action == "file_tree_move":
-            return bool(
-                self._file_suggest is not None
-                and self._file_suggest.is_active
-                and self._file_suggest.is_tree_mode
-            )
+            return self._file_tree_is_active()
         return super().check_action(action, parameters)
 
     def action_menu_move(self, direction: int) -> None:
