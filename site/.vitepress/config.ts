@@ -113,6 +113,7 @@ export default withMermaid(
             text: 'Architecture',
             items: [
               { text: 'Overview', link: '/architecture/' },
+              { text: 'Rust TUI boundary', link: '/architecture/rust-tui-boundary' },
             ],
           },
         ],
