@@ -36,6 +36,17 @@ Sessions persist messages and selected raw event types through independent paths
 
 ## Frontend boundary
 
-The Textual TUI is a pure RPC client running against a subprocess. Arbitrary Python objects do not
-cross that boundary: contributions needed by the TUI must be represented by typed, bounded,
-JSON-serializable events. Keep untrusted output in literal text surfaces rather than Markdown.
+Interactive terminal frontends are process-isolated RPC clients. Textual is the current supported
+implementation. Wisp has accepted an experiment for an optional Rust frontend, but Python remains
+the sole authority for providers, MCP, tools and managed processes, trust, approvals, protected
+paths, configuration, authentication, sessions, compaction, cancellation, and durable state.
+
+Rust may own terminal input, frame scheduling, rendering, scrolling, overlays, pickers, frontend
+command correlation, and disposable presentation preferences. It must use typed, bounded,
+JSON-serializable commands and events; it does not read session JSONL, credential files, or project
+policy directly. Python loads historical durable formats and emits current live snapshots. Protocol
+types are generated from Python rather than maintained as a handwritten Rust schema.
+
+Keep untrusted output bounded and terminal-safe. A frontend may choose presentation, but it must not
+reconstruct runtime or safety policy from formatted output. Textual remains a supported fallback;
+making Rust the default or removing Textual requires a later evidence-backed decision.

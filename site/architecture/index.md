@@ -35,6 +35,17 @@ Each layer adds one concern:
 This boundary keeps persistence and frontend concerns out of the provider loop, while allowing
 provider adapters to preserve their own request, replay, continuation, and usage semantics.
 
+## Terminal frontend boundary
+
+Textual is Wisp's current interactive terminal frontend and remains supported. Wisp has accepted an
+experiment to add an optional Rust terminal frontend over the same Python JSONL-RPC runtime. The
+experiment changes presentation ownership, not runtime authority: Python continues to own providers,
+tools, trust, approvals, sessions, configuration, and every durable or safety-sensitive decision.
+
+The [Rust terminal frontend boundary](./rust-tui-boundary) records the process topology, subsystem
+ownership, migration map, compatibility rules, failure ownership, and evidence gates. Rust is not a
+shipped or default interface until later implementation and rollout decisions satisfy those gates.
+
 ## Resumed transcript hydration
 
 The Textual TUI completely hydrates the selected session's active path after an explicit interactive
