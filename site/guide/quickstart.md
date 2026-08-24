@@ -40,9 +40,10 @@ Wisp defaults to OpenAI Codex subscription access. In the TUI, enter:
 ```
 
 Choose **OpenAI → ChatGPT Plus/Pro** and complete the device-code flow. The same panel accepts
-masked API keys for OpenAI, Anthropic, Google, and configured OpenAI-compatible providers. Provider
-credentials default to Wisp's private `~/.wisp/auth.json` file. Before connecting in a repository
-you trust, inspect its `.wisp/settings.json`: the project may set `auth_path`, including a relative
+masked API keys for OpenAI, xAI, DeepSeek, Anthropic, Google, and configured OpenAI-compatible
+providers. Provider credentials default to Wisp's private `~/.wisp/auth.json` file. Before
+connecting in a repository you trust, inspect its `.wisp/settings.json`: the project may set
+`auth_path`, including a relative
 path inside the repository. Pass `--auth-file` or set `WISP_AUTH_FILE` to override that choice, and
 never commit the selected credential file.
 

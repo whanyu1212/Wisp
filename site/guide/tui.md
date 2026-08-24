@@ -30,6 +30,26 @@ chatbot that can't read files or run commands. Mutating and command tools still 
 approve once, allow that tool for the session, YOLO all mutating/command tools for the process (never
 persisted), or deny.
 
+## Steering and follow-ups
+
+The composer remains active while a prompt runs. In the Textual and prompt-toolkit fullscreen TUIs:
+
+- `Enter` sends a steering message for the active run. It is injected at the next safe request
+  boundary, after any current assistant/tool batch.
+- `Alt+Enter` queues follow-up work that starts when the active run would otherwise finish.
+- `Alt+Up` removes the newest queued steering or follow-up message and restores it ahead of the
+  current draft, after the shared runtime confirms the queue change.
+- `Escape` cancels the active prompt without discarding runtime-owned queued messages.
+
+A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
+count indicates when more are queued. The footer reports separate steering and follow-up totals.
+Accepted input is tracked through authoritative RPC queue events, so failed submissions return to the
+composer instead of disappearing. Queue contents that remain when the TUI shuts down are reported as
+unsent rather than silently dropped.
+
+The line renderer accepts text entered during a run as follow-up work, but does not expose the
+fullscreen steering and restoration keybindings.
+
 ## Slash commands
 
 ```text
@@ -82,7 +102,9 @@ submitted to the agent, and incomplete Markdown stays editable.
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit, or activate the selected slash/file-picker item |
+| `Enter` | Submit; while a prompt runs, steer it; or activate the selected slash/file-picker item |
+| `Alt+Enter` | While a prompt runs, queue a follow-up; otherwise insert a newline |
+| `Alt+Up` | While a prompt runs, restore the newest queued item to the composer |
 | `Shift+Enter` / `Ctrl+J` | Insert newline (`Ctrl+J` in the live fullscreen renderer) |
 | `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
 | `Up` / `Down` | Move through an active suggestion menu |
