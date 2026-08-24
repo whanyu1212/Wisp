@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+from collections import Counter
+
 import anyio
 import pytest
+from rich.console import RenderableType
 from textual import events
 
 from benchmarks.tui_input_latency import (
     BenchmarkConfig,
+    _InputCollector,
     _reader_remained_parked,
     _summarize,
+    _validate_condition_samples,
     run_benchmark,
 )
+from wisp.tui.diagnostics import InputEventCategory, InputLatencyDiagnostic
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import DecisionPanel
@@ -17,7 +24,28 @@ from wisp.tui.widgets import DecisionPanel
 pytestmark = pytest.mark.benchmark
 
 
-def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> None:
+def test_tui_input_latency_reports_idle_and_streaming_stage_distributions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor_samples_per_frame: list[int] = []
+    original_record = TextualTui._record_input_latency_diagnostics
+
+    def record_input_latency_diagnostics(
+        app: TextualTui,
+        renderable: RenderableType,
+        display_started: float,
+        displayed_at: float,
+    ) -> None:
+        cursor_samples_per_frame.append(
+            sum(sample.category == "cursor" for sample in app._pending_input_latency)
+        )
+        original_record(app, renderable, display_started, displayed_at)
+
+    monkeypatch.setattr(
+        TextualTui,
+        "_record_input_latency_diagnostics",
+        record_input_latency_diagnostics,
+    )
     report = anyio.run(
         run_benchmark,
         BenchmarkConfig(
@@ -25,6 +53,7 @@ def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> N
             stream_chunks=20,
             stream_interval_seconds=0.01,
             action_interval_seconds=0.01,
+            gesture_repetitions=2,
             viewport_width=80,
             viewport_height=16,
         ),
@@ -41,6 +70,20 @@ def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> N
         "approval",
         "cancellation",
     } <= categories
+    for condition in ("idle", "streaming"):
+        counts = Counter(
+            sample.category for sample in report.samples if sample.condition == condition
+        )
+        assert counts["cursor"] == 4
+        assert counts["navigation"] == 2
+        assert counts["wheel"] == 2
+        assert counts["typing"] == 7
+        assert counts["submission"] == 1
+        assert counts["approval"] == 1
+        assert counts["cancellation"] == 1
+    assert cursor_samples_per_frame
+    assert max(cursor_samples_per_frame) == 1
+    assert sum(cursor_samples_per_frame) == 8
     assert report.summaries
     for sample in report.samples:
         assert sample.handler_ms >= 0
@@ -64,6 +107,66 @@ def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> N
     assert '"queued_ms":' in report.to_json()
     assert '"stream_flush_ms":' in report.to_json()
     assert '"source_complete": true' in report.to_json()
+    assert '"gesture_repetitions": 2' in report.to_json()
+
+
+def test_input_collector_waits_for_the_next_category_sample() -> None:
+    async def exercise() -> None:
+        collector = _InputCollector()
+        previous_count = collector.sample_count("cursor")
+        waiter = asyncio.create_task(
+            collector.wait_for_next(
+                "cursor",
+                previous_count=previous_count,
+                action="left",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        collector.record_input_latency(
+            InputLatencyDiagnostic(
+                category="cursor",
+                handler_seconds=0.001,
+                queued_seconds=0.002,
+                display_seconds=0.003,
+                total_seconds=0.006,
+                display_kind="chops",
+            )
+        )
+        await waiter
+
+    anyio.run(exercise)
+
+
+def test_tui_input_latency_rejects_unexpected_diagnostic_counts() -> None:
+    categories: tuple[InputEventCategory, ...] = (
+        *("typing" for _ in "latency"),
+        "cursor",
+        "cursor",
+        "navigation",
+        "wheel",
+        "submission",
+        "approval",
+        "cancellation",
+    )
+    samples = tuple(
+        InputLatencyDiagnostic(
+            category=category,
+            handler_seconds=0.001,
+            queued_seconds=0.002,
+            display_seconds=0.003,
+            total_seconds=0.006,
+            display_kind="chops",
+        )
+        for category in categories
+    )
+
+    _validate_condition_samples(samples, BenchmarkConfig(gesture_repetitions=1))
+    with pytest.raises(RuntimeError, match="unexpected input diagnostic counts"):
+        _validate_condition_samples(
+            (*samples, samples[7]),
+            BenchmarkConfig(gesture_repetitions=1),
+        )
 
 
 def test_tui_input_latency_submits_in_the_condition_input_mode(
@@ -86,6 +189,7 @@ def test_tui_input_latency_submits_in_the_condition_input_mode(
             stream_chunks=20,
             stream_interval_seconds=0.01,
             action_interval_seconds=0.01,
+            gesture_repetitions=1,
             viewport_width=80,
             viewport_height=16,
         ),
@@ -139,6 +243,7 @@ def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellati
             stream_chunks=1,
             stream_interval_seconds=0.01,
             action_interval_seconds=0.01,
+            gesture_repetitions=1,
             viewport_width=80,
             viewport_height=16,
         ),
@@ -184,6 +289,7 @@ def test_tui_input_latency_requires_both_navigation_gestures_to_remain_parked(
         BenchmarkConfig(stream_chunks=0),
         BenchmarkConfig(stream_interval_seconds=0),
         BenchmarkConfig(action_interval_seconds=0),
+        BenchmarkConfig(gesture_repetitions=0),
         BenchmarkConfig(viewport_width=0),
         BenchmarkConfig(viewport_height=0),
     ],
