@@ -133,7 +133,7 @@ def test_input_diagnostics_classify_contextual_key_actions(
             app.copy_to_clipboard = lambda _text: None  # type: ignore[method-assign]
             await pilot.press("ctrl+c")
             input_widget.value = ""
-            await pilot.press("alt+enter")
+            await pilot.press("alt+enter", "shift+enter", "ctrl+j")
             await pilot.pause()
             renderer.view_updated(
                 TuiViewSnapshot(
@@ -163,6 +163,25 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("ctrl+home", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
             transcript = app.query_one("#transcript", Transcript)
+            origin = transcript.region.offset
+
+            def wheel(widget: object) -> events.MouseScrollUp:
+                return events.MouseScrollUp(
+                    widget=widget,  # type: ignore[arg-type]
+                    x=origin.x,
+                    y=origin.y,
+                    delta_x=0,
+                    delta_y=0,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                    screen_x=origin.x,
+                    screen_y=origin.y,
+                )
+
+            assert app._input_event_category(wheel(transcript)) == "wheel"
+            assert app._input_event_category(wheel(app.query_one("#theme-picker"))) is None
             card = ToolCard("read", {"path": "README.md"})
             card.set_state("done", detail="complete", full_output="complete")
             await transcript.mount_message(card)
@@ -206,6 +225,8 @@ def test_input_diagnostics_classify_contextual_key_actions(
     assert [sample.category for sample in diagnostics.input_latency] == [
         "navigation",
         "navigation",
+        "typing",
+        "typing",
         "typing",
         "submission",
         "approval",

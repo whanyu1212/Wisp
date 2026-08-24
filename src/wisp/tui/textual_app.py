@@ -2087,7 +2087,12 @@ class TextualTui(App[None]):
                 events.MouseScrollRight,
             ),
         ):
-            return "wheel"
+            target: object | None = event.widget
+            while isinstance(target, Widget):
+                if target is self._transcript:
+                    return "wheel"
+                target = target.parent
+            return None
         if not isinstance(event, events.Key):
             return None
         key = event.key
@@ -2129,7 +2134,9 @@ class TextualTui(App[None]):
             return None
         if key == "enter" or (key == "alt+enter" and self._visible_input_mode == "running"):
             return "submission"
-        if key == "alt+enter":
+        if key == "alt+enter" or (
+            key in {"shift+enter", "ctrl+j"} and isinstance(focused, PromptEditor)
+        ):
             return "typing"
         if key in {
             "left",
