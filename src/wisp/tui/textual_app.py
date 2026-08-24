@@ -75,6 +75,7 @@ from wisp.tui.file_index import (
 )
 from wisp.tui.file_result_presentation import FileResultPresentation
 from wisp.tui.file_suggest import FileSuggest
+from wisp.tui.input_priority import InputPriorityPolicy, InputPriorityToken
 from wisp.tui.input_types import QueueSubmissionKind, TuiSubmission
 from wisp.tui.overlay import (
     OverlayKind,
@@ -518,6 +519,8 @@ class TextualTui(App[None]):
             display_started = perf_counter()
             super()._display(screen, renderable)
             displayed_at = perf_counter()
+            if renderable is not None and not self._batch_count:
+                self._input_frame_emitted(displayed_at)
             if diagnostics_enabled:
                 self._record_display_diagnostic(renderable)
                 if renderable is not None and not self._batch_count:
@@ -581,6 +584,8 @@ class TextualTui(App[None]):
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
         self._displayed_screen = screen
+        if prepared is not None:
+            self._input_frame_emitted(displayed_at)
         if diagnostics_enabled:
             self._record_display_diagnostic(
                 diagnostic_renderable,
@@ -604,7 +609,6 @@ class TextualTui(App[None]):
         if not pending:
             return
         self._pending_input_latency.clear()
-        self._pending_input_tokens.clear()
         kind: DisplayUpdateKind = (
             "layout"
             if isinstance(renderable, LayoutUpdate)
@@ -625,6 +629,20 @@ class TextualTui(App[None]):
                     display_kind=kind,
                 ),
             )
+
+    def _input_frame_emitted(self, displayed_at: float) -> None:
+        """Wake non-critical stream work after an input-visible frame."""
+
+        if self._input_priority.frame_emitted(now=displayed_at):
+            self._stream.resume_after_input_frame()
+
+    def input_priority_drain_delay(
+        self,
+        deferred_since: float | None,
+    ) -> tuple[float, float | None]:
+        """Return the remaining bounded delay for one Markdown drain."""
+
+        return self._input_priority.drain_delay(deferred_since)
 
     def _record_display_diagnostic(
         self,
@@ -970,8 +988,8 @@ class TextualTui(App[None]):
         super().__init__()
         self._diagnostics = diagnostics
         self._pending_input_latency: list[_PendingInputLatency] = []
-        self._pending_input_tokens: set[tuple[InputEventCategory, float]] = set()
-        self._diagnostic_input_events: set[int] = set()
+        self._input_priority = InputPriorityPolicy()
+        self._dispatching_input_events: set[int] = set()
         self.presentation_clock = PresentationClock(self.set_interval)
         self._displayed_frame = None
         self._displayed_cursor_position = None
@@ -2236,31 +2254,34 @@ class TextualTui(App[None]):
             and overlays.event_is_stale(event.time)
         ):
             return
-        category = self._input_event_category(event) if self._diagnostics is not None else None
+        category = self._input_event_category(event)
         if category is None:
             await super().on_event(event)
             return
         event_identity = id(event)
-        event_token = (category, event.time)
+        event_token: InputPriorityToken = (category, event.time)
+        received_at = perf_counter()
         if (
-            event_identity in self._diagnostic_input_events
-            or event_token in self._pending_input_tokens
+            event_identity in self._dispatching_input_events
+            or not self._input_priority.observe_input(
+                event_token,
+                now=received_at,
+            )
         ):
             await super().on_event(event)
             return
-        received_at = perf_counter()
-        self._diagnostic_input_events.add(event_identity)
-        self._pending_input_tokens.add(event_token)
+        self._dispatching_input_events.add(event_identity)
         try:
             await super().on_event(event)
         except BaseException:
-            self._pending_input_tokens.discard(event_token)
+            self._input_priority.cancel_input(event_token)
             raise
         finally:
-            self._diagnostic_input_events.discard(event_identity)
+            self._dispatching_input_events.discard(event_identity)
+        if self._diagnostics is None:
+            return
         if len(self._pending_input_latency) >= self._MAX_PENDING_INPUT_DIAGNOSTICS:
-            discarded = self._pending_input_latency.pop(0)
-            self._pending_input_tokens.discard((discarded.category, discarded.event_time))
+            self._pending_input_latency.pop(0)
         self._pending_input_latency.append(
             _PendingInputLatency(
                 category=category,

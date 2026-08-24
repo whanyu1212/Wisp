@@ -4006,6 +4006,74 @@ def test_textual_streaming_coalesces_one_pending_drain_per_turn() -> None:
     assert text == "first batched stream output"
 
 
+def test_input_frame_resumes_stream_without_reanchoring_a_reader() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.token_delta("visible")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            stream = app_instance.query_one(StreamMessage)
+
+            app_instance._input_priority.observe_input(("navigation", 1.0))
+            renderer.token_delta(" deferred")
+            with anyio.fail_after(2):
+                while True:
+                    turn = app_instance._stream._turn
+                    if turn is not None and turn.input_priority_waiting:
+                        break
+                    await asyncio.sleep(0.005)
+
+            transcript.stop_following()
+            app_instance._display(app_instance.screen, "input frame")
+            await app_instance.wait_for_stream_idle()
+            parked_source = stream.source
+            parked_following = transcript.is_following
+
+            transcript.return_to_latest()
+            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
+            return parked_source, stream.source, parked_following
+
+    parked_source, final_source, parked_following = anyio.run(scenario)
+    assert parked_source == "visible"
+    assert final_source == "visible deferred"
+    assert not parked_following
+
+
+def test_stream_completion_bypasses_active_input_priority() -> None:
+    async def scenario() -> tuple[str, bool, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("visible")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+
+            app_instance._input_priority.observe_input(("typing", 1.0))
+            renderer.token_delta(" pending")
+            with anyio.fail_after(2):
+                while True:
+                    turn = app_instance._stream._turn
+                    if turn is not None and turn.input_priority_waiting:
+                        break
+                    await asyncio.sleep(0.005)
+
+            renderer.end_token_stream_with_content("authoritative response")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return (
+                stream.source,
+                app_instance._is_streaming(),
+                app_instance._stream._pending_callbacks,
+            )
+
+    source, is_streaming, pending_callbacks = anyio.run(scenario)
+    assert source == "authoritative response"
+    assert not is_streaming
+    assert pending_callbacks == 0
+
+
 def test_textual_stream_completion_reconciles_authoritative_content() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
