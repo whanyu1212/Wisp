@@ -162,6 +162,11 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("down", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+home", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
+            assert app._input_event_category(events.Key("ctrl+a", None)) == "cursor"
+            assert app._input_event_category(events.Key("ctrl+e", None)) == "cursor"
+            assert app._input_event_category(events.Key("backspace", None)) == "typing"
+            assert app._input_event_category(events.Key("delete", None)) == "typing"
+            assert app._input_event_category(events.Paste("private paste")) == "paste"
             transcript = app.query_one("#transcript", Transcript)
             origin = transcript.region.offset
 
@@ -187,6 +192,7 @@ def test_input_diagnostics_classify_contextual_key_actions(
             await transcript.mount_message(card)
             card.focus()
             await pilot.pause()
+            assert app._input_event_category(events.Paste("private paste")) is None
             for key in ("enter", "alt+enter", "space", "v", "escape", "p", "n", "l", "x"):
                 assert app._input_event_category(events.Key(key, key)) is None
             assert app._input_event_category(events.Key("home", None)) == "navigation"

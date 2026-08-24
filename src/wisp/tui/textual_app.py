@@ -2076,8 +2076,6 @@ class TextualTui(App[None]):
     def _input_event_category(self, event: events.Event) -> InputEventCategory | None:
         """Classify interactive input without retaining its value or coordinates."""
 
-        if isinstance(event, events.Paste):
-            return "paste"
         if isinstance(
             event,
             (
@@ -2093,6 +2091,10 @@ class TextualTui(App[None]):
                     return "wheel"
                 target = target.parent
             return None
+        if isinstance(event, events.Paste):
+            editor = self._input
+            focused = self.screen.focused
+            return "paste" if editor is not None and editor.display and focused is editor else None
         if not isinstance(event, events.Key):
             return None
         key = event.key
@@ -2147,10 +2149,14 @@ class TextualTui(App[None]):
             "ctrl+right",
             "ctrl+home",
             "ctrl+end",
+            "ctrl+a",
+            "ctrl+e",
         }:
             return "cursor"
         if key in {"home", "end", "pageup", "pagedown"}:
             return "navigation"
+        if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
+            return "typing"
         if event.character is not None:
             return "typing"
         return None
