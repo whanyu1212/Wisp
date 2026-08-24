@@ -134,7 +134,32 @@ approval selection, and cancellation. It reports separate `handler`, `queued`, `
 distributions for each input category and condition. The benchmark alternates idle/streaming order
 between runs to reduce order bias. It uses the production `TextualTui.on_event`, Markdown stream
 controller, transcript, decision panel, and display boundary; it does not use a synthetic latency
-threshold.
+threshold. `stream_chunks` is the minimum workload for each streaming run; the producer continues
+at the configured interval until the input exercise has also finished.
+
+Each streaming run also reports total streaming-phase and final-flush time, produced chunks,
+expected and rendered source lengths, Markdown writes, exact source completeness, whether PageUp and
+wheel navigation remained parked until an explicit return to the tail, and the final follow/tail
+state. These fields keep responsiveness evidence tied to stream progress and correctness without
+turning machine-specific timings into CI limits.
+
+For before/after evidence, run an identical benchmark-only harness in temporary worktrees rooted at
+the two runtime commits. If the harness was added after the baseline, apply the same benchmark-only
+commit to both worktrees before measuring. Capture both the default 20 ms stream interval and a 5 ms
+stress interval, then run the independent fixed-workload hotpath benchmark:
+
+```bash
+uv run python -m benchmarks.tui_input_latency --runs 5 \
+  --stream-interval-seconds 0.02 --output profiles/tui-input-default.json
+uv run python -m benchmarks.tui_input_latency --runs 5 \
+  --stream-interval-seconds 0.005 --output profiles/tui-input-stress.json
+uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
+  --output profiles/tui-stream-hotpaths.json
+```
+
+Report the exact runtime and harness commits, environment metadata, individual samples, p50/p95
+latency distributions, and correctness flags. Treat a result as evidence only when the known
+active-stream latency gap improves consistently without a systematic completion regression.
 
 Input diagnostics are opt-in and privacy-safe: samples contain only a coarse event category,
 durations, and display-update kind. They never retain key values, pasted text, prompt content,

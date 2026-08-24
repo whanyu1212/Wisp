@@ -43,8 +43,22 @@ def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> N
         assert sample.display_ms >= 0
         assert sample.total_ms >= sample.handler_ms + sample.queued_ms + sample.display_ms
         assert sample.display_kind in {"layout", "chops", "other"}
+    assert len(report.streaming_runs) == 1
+    streaming = report.streaming_runs[0]
+    assert streaming.run == 1
+    assert streaming.stream_total_ms >= streaming.stream_flush_ms >= 0
+    assert streaming.produced_chunk_count >= report.config.stream_chunks
+    assert streaming.expected_source_chars > 0
+    assert streaming.rendered_source_chars == streaming.expected_source_chars
+    assert 1 <= streaming.stream_write_count <= streaming.produced_chunk_count
+    assert streaming.source_complete
+    assert streaming.reader_remained_parked
+    assert streaming.final_following
+    assert streaming.final_at_tail
     assert '"condition": "streaming"' in report.to_json()
     assert '"queued_ms":' in report.to_json()
+    assert '"stream_flush_ms":' in report.to_json()
+    assert '"source_complete": true' in report.to_json()
 
 
 def test_tui_input_latency_submits_in_the_condition_input_mode(

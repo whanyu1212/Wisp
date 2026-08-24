@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,7 +27,7 @@ from wisp.tui.diagnostics import (
 )
 from wisp.tui.rendering import TuiViewSnapshot
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import PromptEditor, Transcript
+from wisp.tui.widgets import PromptEditor, StreamMessage, Transcript
 
 type BenchmarkCondition = Literal["idle", "streaming"]
 
@@ -64,11 +65,27 @@ class InputLatencySummary:
 
 
 @dataclass(frozen=True)
+class StreamingRunSample:
+    run: int
+    stream_total_ms: float
+    stream_flush_ms: float
+    produced_chunk_count: int
+    expected_source_chars: int
+    rendered_source_chars: int
+    stream_write_count: int
+    source_complete: bool
+    reader_remained_parked: bool
+    final_following: bool
+    final_at_tail: bool
+
+
+@dataclass(frozen=True)
 class InputLatencyReport:
     config: BenchmarkConfig
     environment: dict[str, str]
     summaries: tuple[InputLatencySummary, ...]
     samples: tuple[InputLatencySample, ...]
+    streaming_runs: tuple[StreamingRunSample, ...]
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
@@ -92,12 +109,20 @@ async def run_benchmark(config: BenchmarkConfig | None = None) -> InputLatencyRe
     selected = config or BenchmarkConfig()
     _validate_config(selected)
     samples: list[InputLatencySample] = []
+    streaming_runs: list[StreamingRunSample] = []
     for run in range(1, selected.runs + 1):
         conditions: tuple[BenchmarkCondition, ...] = (
             ("idle", "streaming") if run % 2 else ("streaming", "idle")
         )
         for condition in conditions:
-            samples.extend(await _run_condition(selected, run=run, condition=condition))
+            condition_samples, streaming_run = await _run_condition(
+                selected,
+                run=run,
+                condition=condition,
+            )
+            samples.extend(condition_samples)
+            if streaming_run is not None:
+                streaming_runs.append(streaming_run)
     report_environment = environment()
     report_environment["textual"] = textual.__version__
     return InputLatencyReport(
@@ -105,6 +130,7 @@ async def run_benchmark(config: BenchmarkConfig | None = None) -> InputLatencyRe
         environment=report_environment,
         summaries=_summarize(samples),
         samples=tuple(samples),
+        streaming_runs=tuple(streaming_runs),
     )
 
 
@@ -113,7 +139,7 @@ async def _run_condition(
     *,
     run: int,
     condition: BenchmarkCondition,
-) -> tuple[InputLatencySample, ...]:
+) -> tuple[tuple[InputLatencySample, ...], StreamingRunSample | None]:
     collector = _InputCollector()
     app, renderer = create_textual_tui(diagnostics=collector)
     assert isinstance(renderer, TextualTuiRenderer)
@@ -125,8 +151,10 @@ async def _run_condition(
         await pilot.pause()
         transcript.scroll_end(animate=False)
         await pilot.pause()
-        producer: asyncio.Task[None] | None = None
+        producer: asyncio.Task[tuple[str, ...]] | None = None
         stream_stop: asyncio.Event | None = None
+        minimum_streamed: asyncio.Event | None = None
+        stream_started: int | None = None
         if condition == "streaming":
             renderer.view_updated(
                 TuiViewSnapshot(
@@ -137,28 +165,68 @@ async def _run_condition(
             )
             renderer.running()
             stream_stop = asyncio.Event()
-            producer = asyncio.create_task(_stream(renderer, config, stream_stop))
+            minimum_streamed = asyncio.Event()
+            stream_started = time.perf_counter_ns()
+            producer = asyncio.create_task(_stream(renderer, config, stream_stop, minimum_streamed))
+        reader_remained_parked = False
+        streaming_run: StreamingRunSample | None = None
         try:
-            await _exercise_inputs(app, renderer, pilot, input_widget, transcript, config)
+            reader_remained_parked = await _exercise_inputs(
+                app,
+                renderer,
+                pilot,
+                input_widget,
+                transcript,
+                config,
+            )
         finally:
-            if producer is not None and stream_stop is not None:
+            if (
+                producer is not None
+                and stream_stop is not None
+                and minimum_streamed is not None
+                and stream_started is not None
+            ):
+                await minimum_streamed.wait()
+                flush_started = time.perf_counter_ns()
                 stream_stop.set()
-                await producer
+                chunks = await producer
                 renderer.end_token_stream()
                 await app.wait_for_stream_idle()
+                await pilot.pause()
+                completed = app.stream_widget_for_completed_message()
+                expected_source = "".join(chunks)
+                rendered_source = completed.source if isinstance(completed, StreamMessage) else ""
+                streaming_run = StreamingRunSample(
+                    run=run,
+                    stream_total_ms=(time.perf_counter_ns() - stream_started) / 1_000_000,
+                    stream_flush_ms=(time.perf_counter_ns() - flush_started) / 1_000_000,
+                    produced_chunk_count=len(chunks),
+                    expected_source_chars=len(expected_source),
+                    rendered_source_chars=len(rendered_source),
+                    stream_write_count=app.last_stream_write_count,
+                    source_complete=(
+                        isinstance(completed, StreamMessage) and rendered_source == expected_source
+                    ),
+                    reader_remained_parked=reader_remained_parked,
+                    final_following=transcript.is_following,
+                    final_at_tail=transcript.scroll_y >= transcript.max_scroll_y - 3,
+                )
         await pilot.pause()
-    return tuple(
-        InputLatencySample(
-            run=run,
-            condition=condition,
-            category=sample.category,
-            handler_ms=sample.handler_seconds * 1_000,
-            queued_ms=sample.queued_seconds * 1_000,
-            display_ms=sample.display_seconds * 1_000,
-            total_ms=sample.total_seconds * 1_000,
-            display_kind=sample.display_kind,
-        )
-        for sample in collector.samples
+    return (
+        tuple(
+            InputLatencySample(
+                run=run,
+                condition=condition,
+                category=sample.category,
+                handler_ms=sample.handler_seconds * 1_000,
+                queued_ms=sample.queued_seconds * 1_000,
+                display_ms=sample.display_seconds * 1_000,
+                total_ms=sample.total_seconds * 1_000,
+                display_kind=sample.display_kind,
+            )
+            for sample in collector.samples
+        ),
+        streaming_run,
     )
 
 
@@ -166,16 +234,23 @@ async def _stream(
     renderer: TextualTuiRenderer,
     config: BenchmarkConfig,
     stop: asyncio.Event,
-) -> None:
+    minimum_streamed: asyncio.Event,
+) -> tuple[str, ...]:
     index = 0
+    chunks: list[str] = []
     while not stop.is_set():
         section = index % config.stream_chunks
-        renderer.token_delta(f"## streamed section {section}\n\nbenchmark output\n\n")
+        chunk = f"## streamed section {section}\n\nbenchmark output\n\n"
+        renderer.token_delta(chunk)
+        chunks.append(chunk)
         index += 1
+        if index >= config.stream_chunks:
+            minimum_streamed.set()
         try:
             await asyncio.wait_for(stop.wait(), timeout=config.stream_interval_seconds)
         except TimeoutError:
             pass
+    return tuple(chunks)
 
 
 async def _exercise_inputs(
@@ -185,7 +260,7 @@ async def _exercise_inputs(
     input_widget: PromptEditor,
     transcript: Transcript,
     config: BenchmarkConfig,
-) -> None:
+) -> bool:
     delay = config.action_interval_seconds
     for key in "latency":
         await pilot.press(key)
@@ -211,6 +286,8 @@ async def _exercise_inputs(
     wheel.set_sender(app)
     await app.on_event(wheel)
     await asyncio.sleep(delay)
+    await pilot.pause()
+    reader_remained_parked = not transcript.is_following
     transcript.scroll_end(animate=False)
     await pilot.pause()
     input_widget.value = "steer benchmark"
@@ -233,6 +310,7 @@ async def _exercise_inputs(
     await pilot.press("escape")
     renderer.cancelling("benchmark cancellation requested")
     await pilot.pause()
+    return reader_remained_parked
 
 
 def _summarize(samples: Sequence[InputLatencySample]) -> tuple[InputLatencySummary, ...]:
