@@ -2120,6 +2120,10 @@ class TextualTui(App[None]):
                     "choose", (int(key),)
                 ):
                     return None
+                if key in {"up", "down", "home", "end", "pageup", "pagedown"} and not (
+                    decision_panel.navigation_key_changes_highlight(key)
+                ):
+                    return None
                 return "approval"
             return None
         if key == "ctrl+c" and self._editor_owns_selection():
@@ -2182,9 +2186,9 @@ class TextualTui(App[None]):
             "f6",
             "f7",
         }:
-            return "cursor"
+            return "cursor" if self._cursor_key_moves_prompt(key) else None
         if key in {"home", "end", "pageup", "pagedown"}:
-            return "navigation"
+            return "navigation" if self._transcript_navigation_changes_view(key) else None
         if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
             return "typing" if self._prompt_deletion_mutates(backward=key == "backspace") else None
         if key in {"ctrl+g", "ctrl+r", "ctrl+t", "shift+tab", "tab"}:
@@ -2532,6 +2536,75 @@ class TextualTui(App[None]):
             return True
         cursor = editor.cursor_position
         return cursor > 0 if backward else cursor < len(editor.text)
+
+    def _cursor_key_moves_prompt(self, key: str) -> bool:
+        """Whether a focused prompt cursor action changes its selection."""
+
+        editor = self._input
+        if editor is None or self.screen.focused is not editor:
+            return False
+        selection = editor.selection
+        cursor = selection.end
+        selecting = key.startswith("shift+") or key.startswith("ctrl+shift+")
+        if key in {"left", "shift+left"}:
+            target = (
+                editor.get_cursor_left_location()
+                if selecting or selection.is_empty
+                else min(selection)
+            )
+        elif key in {"right", "shift+right"}:
+            target = (
+                editor.get_cursor_right_location()
+                if selecting or selection.is_empty
+                else max(selection)
+            )
+        elif key in {"up", "shift+up"}:
+            target = editor.get_cursor_up_location()
+        elif key in {"down", "shift+down"}:
+            target = editor.get_cursor_down_location()
+        elif key in {"ctrl+left", "ctrl+shift+left"}:
+            target = editor.get_cursor_word_left_location()
+        elif key in {"ctrl+right", "ctrl+shift+right"}:
+            target = editor.get_cursor_word_right_location()
+        elif key == "ctrl+home":
+            target = (0, 0)
+        elif key == "ctrl+end":
+            last_row = editor.document.line_count - 1
+            target = (last_row, len(editor.document[last_row]))
+        elif key in {"ctrl+a", "shift+home"}:
+            target = editor.get_cursor_line_start_location(smart_home=True)
+        elif key in {"ctrl+e", "shift+end"}:
+            target = editor.get_cursor_line_end_location()
+        elif key == "f6":
+            row, _column = cursor
+            return (selection.start, selection.end) != ((row, 0), (row, len(editor.document[row])))
+        elif key == "f7":
+            last_row = editor.document.line_count - 1
+            return (selection.start, selection.end) != (
+                (0, 0),
+                (last_row, len(editor.document[last_row])),
+            )
+        else:
+            return False
+        return target != cursor if selecting else not selection.is_empty or target != cursor
+
+    def _transcript_navigation_changes_view(self, key: str) -> bool:
+        """Whether a transcript key can move or cross a retained-history edge."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        can_move_up = transcript.scroll_y > 0 or transcript.can_page_to_older_history
+        can_move_down = (
+            transcript.scroll_y < transcript.max_scroll_y or transcript.can_page_to_newer_history
+        )
+        if key in {"home", "pageup"}:
+            return can_move_up
+        if key == "pagedown":
+            return can_move_down
+        if key == "end":
+            return can_move_down or not transcript.is_following
+        return False
 
     def _is_streaming(self) -> bool:
         """Whether a streamed assistant turn is mid-flight and mutating the transcript.

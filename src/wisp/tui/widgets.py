@@ -831,6 +831,19 @@ class DecisionPanel(Vertical):
     def move_highlight_last(self) -> None:
         self._options.action_last()
 
+    def navigation_key_changes_highlight(self, key: str) -> bool:
+        """Whether a panel navigation key can select a different option."""
+
+        highlighted = self._options.highlighted
+        if highlighted is None:
+            return False
+        option_count = 4 if self._mode == "approval" else 2
+        if key in {"up", "home", "pageup"}:
+            return highlighted > 0
+        if key in {"down", "end", "pagedown"}:
+            return highlighted < option_count - 1
+        return True
+
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         content = _approval_content(event, cwd=_format_cwd_for_footer(cwd))
         tool_name = _bounded_tool_session_option_name(event.name)
@@ -2256,6 +2269,12 @@ class Transcript(VerticalScroll):
         """Whether ordinary edge paging can reveal older transcript entries."""
 
         return self._has_more_history or self._has_retained_history
+
+    @property
+    def can_page_to_newer_history(self) -> bool:
+        """Whether forward navigation can reveal newer retained entries."""
+
+        return self._has_newer_history
 
     def request_history_at_top(
         self,

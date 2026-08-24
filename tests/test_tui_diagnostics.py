@@ -130,9 +130,10 @@ def test_input_diagnostics_classify_contextual_key_actions(
         app, renderer = create_textual_tui(diagnostics=diagnostics)
         assert isinstance(renderer, TextualTuiRenderer)
         async with app.run_test() as pilot:
-            await pilot.press("home", "end")
-            await pilot.pause()
             input_widget = app.query_one("#input", PromptEditor)
+            transcript = app.query_one("#transcript", Transcript)
+            for key in ("home", "end", "pageup", "pagedown"):
+                assert app._input_event_category(events.Key(key, None)) is None
             input_widget.value = "copy me"
             input_widget.selection = type(input_widget.selection)((0, 0), (0, 7))
             app.copy_to_clipboard = lambda _text: None  # type: ignore[method-assign]
@@ -163,13 +164,20 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 context.setattr(app, "_file_picker_is_active", lambda: False)
                 context.setattr(app, "_slash_menu_prefills_on_enter", lambda: True)
                 assert app._input_event_category(events.Key("enter", None)) is None
-            assert app._input_event_category(events.Key("up", None)) == "cursor"
-            assert app._input_event_category(events.Key("down", None)) == "cursor"
-            assert app._input_event_category(events.Key("ctrl+home", None)) == "cursor"
-            assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
-            assert app._input_event_category(events.Key("ctrl+a", None)) == "cursor"
-            assert app._input_event_category(events.Key("ctrl+e", None)) == "cursor"
+            input_widget.value = "one\ntwo\nthree"
+            input_widget.cursor_position = 5
+            input_widget.selection = type(input_widget.selection)((1, 1), (1, 1))
             for key in (
+                "left",
+                "right",
+                "up",
+                "down",
+                "ctrl+left",
+                "ctrl+right",
+                "ctrl+home",
+                "ctrl+end",
+                "ctrl+a",
+                "ctrl+e",
                 "shift+left",
                 "shift+right",
                 "shift+up",
@@ -182,6 +190,19 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 "f7",
             ):
                 assert app._input_event_category(events.Key(key, None)) == "cursor"
+            input_widget.value = "x"
+            input_widget.cursor_position = 0
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 0))
+            for key in ("left", "up", "ctrl+left", "ctrl+home", "ctrl+a"):
+                assert app._input_event_category(events.Key(key, None)) is None
+            assert app._input_event_category(events.Key("down", None)) == "cursor"
+            input_widget.cursor_position = 1
+            for key in ("right", "down", "ctrl+right", "ctrl+end", "ctrl+e"):
+                assert app._input_event_category(events.Key(key, None)) is None
+            assert app._input_event_category(events.Key("up", None)) == "cursor"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 1))
+            assert app._input_event_category(events.Key("f6", None)) is None
+            assert app._input_event_category(events.Key("f7", None)) is None
             input_widget.value = "delete"
             input_widget.cursor_position = 0
             assert app._input_event_category(events.Key("backspace", None)) is None
@@ -203,7 +224,6 @@ def test_input_diagnostics_classify_contextual_key_actions(
             ):
                 assert app._input_event_category(events.Key(key, character)) is None
             assert app._input_event_category(events.Paste("private paste")) == "paste"
-            transcript = app.query_one("#transcript", Transcript)
             origin = transcript.region.offset
 
             def wheel(
@@ -251,6 +271,22 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("pageup", None)) is None
             app.action_toggle_contextual_help()
             await pilot.pause()
+            for index in range(40):
+                app.write_message(f"diagnostic transcript row {index}", role="system")
+            await pilot.pause()
+            assert transcript.max_scroll_y > 0
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            assert app._input_event_category(events.Key("home", None)) is None
+            assert app._input_event_category(events.Key("pageup", None)) is None
+            assert app._input_event_category(events.Key("end", None)) == "navigation"
+            assert app._input_event_category(events.Key("pagedown", None)) == "navigation"
+            transcript.return_to_latest()
+            await pilot.pause()
+            assert app._input_event_category(events.Key("home", None)) == "navigation"
+            assert app._input_event_category(events.Key("pageup", None)) == "navigation"
+            assert app._input_event_category(events.Key("end", None)) is None
+            assert app._input_event_category(events.Key("pagedown", None)) is None
             card = ToolCard("read", {"path": "README.md"})
             card.set_state("done", detail="complete", full_output="complete")
             await transcript.mount_message(card)
@@ -282,8 +318,19 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 )
             )
             await pilot.pause()
+            assert app._input_event_category(events.Key("up", None)) is None
+            assert app._input_event_category(events.Key("home", None)) is None
+            assert app._input_event_category(events.Key("pageup", None)) is None
             assert app._input_event_category(events.Key("down", None)) == "approval"
             decision_panel = app.query_one("#decision-panel", DecisionPanel)
+            decision_panel.move_highlight_last()
+            assert app._input_event_category(events.Key("down", None)) is None
+            assert app._input_event_category(events.Key("end", None)) is None
+            assert app._input_event_category(events.Key("pagedown", None)) is None
+            assert app._input_event_category(events.Key("up", None)) == "approval"
+            assert app._input_event_category(events.Key("home", None)) == "approval"
+            assert app._input_event_category(events.Key("pageup", None)) == "approval"
+            decision_panel.move_highlight_first()
             decision_panel._mode = "trust"  # noqa: SLF001 - mode-dependent classifier seam
             assert app._input_event_category(events.Key("2", "2")) == "approval"
             assert app._input_event_category(events.Key("3", "3")) is None
@@ -301,8 +348,6 @@ def test_input_diagnostics_classify_contextual_key_actions(
     diagnostics = anyio.run(scenario)
 
     assert [sample.category for sample in diagnostics.input_latency] == [
-        "navigation",
-        "navigation",
         "typing",
         "typing",
         "typing",
