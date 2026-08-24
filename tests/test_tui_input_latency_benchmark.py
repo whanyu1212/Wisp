@@ -82,7 +82,10 @@ def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellati
 ) -> None:
     streamed_chunks = 0
     cancellation_panel_states: list[bool] = []
+    cancellation_after_escape: list[bool] = []
+    escape_handled = False
     original_token_delta = TextualTuiRenderer.token_delta
+    original_cancelling = TextualTuiRenderer.cancelling
     original_on_event = TextualTui.on_event
 
     def record_token_delta(renderer: TextualTuiRenderer, text: str) -> None:
@@ -90,13 +93,24 @@ def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellati
         streamed_chunks += 1
         original_token_delta(renderer, text)
 
+    def record_cancelling(renderer: TextualTuiRenderer, message: str) -> None:
+        nonlocal escape_handled
+        cancellation_after_escape.append(escape_handled)
+        escape_handled = False
+        original_cancelling(renderer, message)
+
     async def record_event(app: TextualTui, event: events.Event) -> None:
-        if isinstance(event, events.Key) and event.key == "escape":
+        nonlocal escape_handled
+        is_escape = isinstance(event, events.Key) and event.key == "escape"
+        if is_escape:
             panel = app.query_one("#decision-panel", DecisionPanel)
             cancellation_panel_states.append(panel.display)
         await original_on_event(app, event)
+        if is_escape:
+            escape_handled = True
 
     monkeypatch.setattr(TextualTuiRenderer, "token_delta", record_token_delta)
+    monkeypatch.setattr(TextualTuiRenderer, "cancelling", record_cancelling)
     monkeypatch.setattr(TextualTui, "on_event", record_event)
 
     anyio.run(
@@ -114,6 +128,7 @@ def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellati
     assert streamed_chunks > 1
     assert cancellation_panel_states
     assert not any(cancellation_panel_states)
+    assert cancellation_after_escape == [True, True]
 
 
 def test_tui_input_latency_summary_omits_categories_without_samples() -> None:

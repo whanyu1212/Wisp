@@ -48,6 +48,7 @@ from wisp.tools.context import ToolContext
 from wisp.tui.commands import (
     DEFAULT_TUI_COMMAND_CATALOG,
     TEXTUAL_LOCAL_COMMAND_DESCRIPTORS,
+    SlashCommandSpec,
     TuiCommandCatalog,
 )
 from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
@@ -200,6 +201,10 @@ def _input_placeholder(hint: str) -> str:
     """
 
     return _INPUT_PLACEHOLDERS.get(hint, f"{_PROMPT_GLYPH} {hint}")
+
+
+def _slash_enter_prefills(typed: str, spec: SlashCommandSpec) -> bool:
+    return spec.prefill_on_partial_enter and typed.lower() != spec.command.lower()
 
 
 @dataclass
@@ -1321,8 +1326,7 @@ class TextualTui(App[None]):
             return False
         suggest.hide()
         self.refresh_bindings()
-        is_partial = typed.lower() != spec.command.lower()
-        if spec.prefill_on_partial_enter and is_partial:
+        if _slash_enter_prefills(typed, spec):
             self.prefill_command(f"{spec.command} ")
         else:
             self.submit_command_line(spec.command)
@@ -2103,7 +2107,9 @@ class TextualTui(App[None]):
                 )
         if key == "escape":
             return None if self._suggestion_menu_is_open() else "cancellation"
-        if key == "enter" and self._file_picker_is_active():
+        if key == "enter" and (
+            self._file_picker_is_active() or self._slash_menu_prefills_on_enter()
+        ):
             return None
         if key in {"up", "down"} and self._suggestion_menu_is_open():
             return None
@@ -2209,6 +2215,14 @@ class TextualTui(App[None]):
 
     def _file_picker_is_active(self) -> bool:
         return self._file_suggest is not None and self._file_suggest.is_active
+
+    def _slash_menu_prefills_on_enter(self) -> bool:
+        suggest = self._suggest
+        editor = self._input
+        if suggest is None or editor is None or not suggest.is_open:
+            return False
+        spec = suggest.highlighted_spec()
+        return spec is not None and _slash_enter_prefills(editor.text, spec)
 
     def _file_tree_is_active(self) -> bool:
         return bool(

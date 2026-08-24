@@ -12,6 +12,7 @@ from textual.geometry import Region
 from textual.strip import Strip
 
 from wisp.events import ToolApprovalRequested, ToolCallRequested, ToolResultReady
+from wisp.tui.commands import SlashCommandSpec
 from wisp.tui.diagnostics import (
     DisplayUpdateDiagnostic,
     InputLatencyDiagnostic,
@@ -19,7 +20,7 @@ from wisp.tui.diagnostics import (
 )
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
-from wisp.tui.textual_app import _DisplayedFrame, create_textual_tui
+from wisp.tui.textual_app import _DisplayedFrame, _slash_enter_prefills, create_textual_tui
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import PromptEditor, StreamMessage, ToolCard, Transcript
 
@@ -145,6 +146,18 @@ def test_input_diagnostics_classify_contextual_key_actions(
             app.show_theme_picker()
             assert app._input_event_category(events.Key("escape", None)) is None
             app.hide_theme_picker()
+            assert _slash_enter_prefills(
+                "/d",
+                SlashCommandSpec(
+                    command="/deploy",
+                    description="Deploy",
+                    prefill_on_partial_enter=True,
+                ),
+            )
+            with monkeypatch.context() as context:
+                context.setattr(app, "_file_picker_is_active", lambda: False)
+                context.setattr(app, "_slash_menu_prefills_on_enter", lambda: True)
+                assert app._input_event_category(events.Key("enter", None)) is None
             with monkeypatch.context() as context:
                 context.setattr(app, "_file_picker_is_active", lambda: True)
                 context.setattr(app, "_file_tree_is_active", lambda: True)

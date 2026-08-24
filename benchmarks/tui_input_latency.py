@@ -230,13 +230,8 @@ async def _exercise_inputs(
     app.hide_decision()
     await pilot.pause()
 
-    async def acknowledge_cancellation() -> None:
-        await asyncio.sleep(0)
-        renderer.cancelling("benchmark cancellation requested")
-
-    cancellation = asyncio.create_task(acknowledge_cancellation())
     await pilot.press("escape")
-    await cancellation
+    renderer.cancelling("benchmark cancellation requested")
     await pilot.pause()
 
 
