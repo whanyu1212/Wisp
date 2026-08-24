@@ -20,7 +20,7 @@ from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
 from wisp.tui.textual_app import _DisplayedFrame, create_textual_tui
 from wisp.tui.textual_renderer import TextualTuiRenderer
-from wisp.tui.widgets import StreamMessage, ToolCard, Transcript
+from wisp.tui.widgets import PromptEditor, StreamMessage, ToolCard, Transcript
 
 pytestmark = pytest.mark.tui
 
@@ -115,13 +115,29 @@ def test_input_diagnostics_measure_handler_queue_and_first_display_without_value
         assert not hasattr(sample, "content")
 
 
-def test_input_diagnostics_classify_priority_navigation_and_approval_escape() -> None:
+def test_input_diagnostics_classify_contextual_key_actions() -> None:
     async def scenario() -> _Diagnostics:
         diagnostics = _Diagnostics()
         app, renderer = create_textual_tui(diagnostics=diagnostics)
         assert isinstance(renderer, TextualTuiRenderer)
         async with app.run_test() as pilot:
             await pilot.press("home", "end")
+            await pilot.pause()
+            input_widget = app.query_one("#input", PromptEditor)
+            input_widget.value = "copy me"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 7))
+            app.copy_to_clipboard = lambda _text: None  # type: ignore[method-assign]
+            await pilot.press("ctrl+c")
+            input_widget.value = ""
+            await pilot.press("alt+enter")
+            await pilot.pause()
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="running", input_hint="wisp(running)> ", input_mode="running"
+                )
+            )
+            input_widget.value = "follow up"
+            await pilot.press("alt+enter")
             await pilot.pause()
             renderer.approval_request(
                 ToolApprovalRequested(
@@ -142,6 +158,8 @@ def test_input_diagnostics_classify_priority_navigation_and_approval_escape() ->
     assert [sample.category for sample in diagnostics.input_latency] == [
         "navigation",
         "navigation",
+        "typing",
+        "submission",
         "approval",
     ]
 

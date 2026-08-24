@@ -2087,10 +2087,14 @@ class TextualTui(App[None]):
         decision_panel = self._decision_panel
         if decision_panel is not None and decision_panel.display:
             return "approval"
+        if key == "ctrl+c" and self._editor_owns_selection():
+            return None
         if key in {"escape", "ctrl+c"}:
             return "cancellation"
-        if key in {"enter", "alt+enter"}:
+        if key == "enter" or (key == "alt+enter" and self._visible_input_mode == "running"):
             return "submission"
+        if key == "alt+enter":
+            return "typing"
         if key in {"left", "right", "ctrl+left", "ctrl+right"}:
             return "cursor"
         if key in {
