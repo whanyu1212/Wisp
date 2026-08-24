@@ -41,9 +41,9 @@ The composer remains active while a prompt runs. In the Textual and prompt-toolk
   current draft, after the shared runtime confirms the queue change.
 - `Escape` cancels the active prompt without discarding runtime-owned queued messages.
 
-A queue panel previews up to the three newest items and labels them `steer` or `later`; omitted-item
-counts keep the panel bounded. The footer reports separate steering and follow-up totals. Accepted
-input is tracked through authoritative RPC queue events, so failed submissions return to the
+A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
+count indicates when more are queued. The footer reports separate steering and follow-up totals.
+Accepted input is tracked through authoritative RPC queue events, so failed submissions return to the
 composer instead of disappearing. Queue contents that remain when the TUI shuts down are reported as
 unsent rather than silently dropped.
 
