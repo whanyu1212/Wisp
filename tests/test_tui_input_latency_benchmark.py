@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import anyio
 import pytest
+from textual import events
 
 from benchmarks.tui_input_latency import BenchmarkConfig, _summarize, run_benchmark
+from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_renderer import TextualTuiRenderer
+from wisp.tui.widgets import DecisionPanel
 
 pytestmark = pytest.mark.benchmark
 
@@ -72,6 +75,45 @@ def test_tui_input_latency_submits_in_the_condition_input_mode(
     assert submitted_modes
     assert set(submitted_modes) == {"idle", "running"}
     assert submitted_modes == sorted(submitted_modes, key=("idle", "running").index)
+
+
+def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    streamed_chunks = 0
+    cancellation_panel_states: list[bool] = []
+    original_token_delta = TextualTuiRenderer.token_delta
+    original_on_event = TextualTui.on_event
+
+    def record_token_delta(renderer: TextualTuiRenderer, text: str) -> None:
+        nonlocal streamed_chunks
+        streamed_chunks += 1
+        original_token_delta(renderer, text)
+
+    async def record_event(app: TextualTui, event: events.Event) -> None:
+        if isinstance(event, events.Key) and event.key == "escape":
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            cancellation_panel_states.append(panel.display)
+        await original_on_event(app, event)
+
+    monkeypatch.setattr(TextualTuiRenderer, "token_delta", record_token_delta)
+    monkeypatch.setattr(TextualTui, "on_event", record_event)
+
+    anyio.run(
+        run_benchmark,
+        BenchmarkConfig(
+            runs=1,
+            stream_chunks=1,
+            stream_interval_seconds=0.01,
+            action_interval_seconds=0.01,
+            viewport_width=80,
+            viewport_height=16,
+        ),
+    )
+
+    assert streamed_chunks > 1
+    assert cancellation_panel_states
+    assert not any(cancellation_panel_states)
 
 
 def test_tui_input_latency_summary_omits_categories_without_samples() -> None:

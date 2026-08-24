@@ -126,6 +126,7 @@ async def _run_condition(
         transcript.scroll_end(animate=False)
         await pilot.pause()
         producer: asyncio.Task[None] | None = None
+        stream_stop: asyncio.Event | None = None
         if condition == "streaming":
             renderer.view_updated(
                 TuiViewSnapshot(
@@ -135,12 +136,16 @@ async def _run_condition(
                 )
             )
             renderer.running()
-            producer = asyncio.create_task(_stream(renderer, config))
-        await _exercise_inputs(app, renderer, pilot, input_widget, transcript, config)
-        if producer is not None:
-            await producer
-            renderer.end_token_stream()
-            await app.wait_for_stream_idle()
+            stream_stop = asyncio.Event()
+            producer = asyncio.create_task(_stream(renderer, config, stream_stop))
+        try:
+            await _exercise_inputs(app, renderer, pilot, input_widget, transcript, config)
+        finally:
+            if producer is not None and stream_stop is not None:
+                stream_stop.set()
+                await producer
+                renderer.end_token_stream()
+                await app.wait_for_stream_idle()
         await pilot.pause()
     return tuple(
         InputLatencySample(
@@ -157,10 +162,20 @@ async def _run_condition(
     )
 
 
-async def _stream(renderer: TextualTuiRenderer, config: BenchmarkConfig) -> None:
-    for index in range(config.stream_chunks):
-        renderer.token_delta(f"## streamed section {index}\n\nbenchmark output\n\n")
-        await asyncio.sleep(config.stream_interval_seconds)
+async def _stream(
+    renderer: TextualTuiRenderer,
+    config: BenchmarkConfig,
+    stop: asyncio.Event,
+) -> None:
+    index = 0
+    while not stop.is_set():
+        section = index % config.stream_chunks
+        renderer.token_delta(f"## streamed section {section}\n\nbenchmark output\n\n")
+        index += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=config.stream_interval_seconds)
+        except TimeoutError:
+            pass
 
 
 async def _exercise_inputs(
@@ -212,7 +227,7 @@ async def _exercise_inputs(
     await pilot.pause()
     await pilot.press("down")
     await asyncio.sleep(delay)
-    app.action_interrupt()
+    app.hide_decision()
     await pilot.pause()
 
     async def acknowledge_cancellation() -> None:
