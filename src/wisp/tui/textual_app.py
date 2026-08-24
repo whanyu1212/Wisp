@@ -2114,7 +2114,7 @@ class TextualTui(App[None]):
             if key == "ctrl+c":
                 return "cancellation"
             if key == "ctrl+d":
-                return "typing" if self._ctrl_d_deletes_prompt() else None
+                return "typing" if self._prompt_deletion_mutates(backward=False) else None
             if key in _DECISION_INPUT_KEYS:
                 if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
                     "choose", (int(key),)
@@ -2127,7 +2127,7 @@ class TextualTui(App[None]):
         if key == "ctrl+c":
             return "cancellation"
         if key == "ctrl+d":
-            return "typing" if self._ctrl_d_deletes_prompt() else None
+            return "typing" if self._prompt_deletion_mutates(backward=False) else None
         overlays = self._overlay_controller
         if overlays is not None:
             if overlays.active_overlay is not None:
@@ -2150,6 +2150,12 @@ class TextualTui(App[None]):
             return None
         if key == "enter" or (key == "alt+enter" and self._visible_input_mode == "running"):
             return "submission"
+        if key == "alt+up":
+            return (
+                "typing"
+                if self._visible_input_mode == "running" and isinstance(focused, PromptEditor)
+                else None
+            )
         if key == "alt+enter" or (
             key in {"shift+enter", "ctrl+j"} and isinstance(focused, PromptEditor)
         ):
@@ -2180,7 +2186,9 @@ class TextualTui(App[None]):
         if key in {"home", "end", "pageup", "pagedown"}:
             return "navigation"
         if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
-            return "typing"
+            return "typing" if self._prompt_deletion_mutates(backward=key == "backspace") else None
+        if key in {"ctrl+g", "ctrl+r", "ctrl+t", "shift+tab", "tab"}:
+            return None
         if event.character is not None:
             return "typing"
         return None
@@ -2514,15 +2522,16 @@ class TextualTui(App[None]):
             editor is not None and editor.display and editor.has_focus and editor.selected_text
         )
 
-    def _ctrl_d_deletes_prompt(self) -> bool:
-        """Whether the priority Ctrl+D action will mutate the retained draft."""
+    def _prompt_deletion_mutates(self, *, backward: bool) -> bool:
+        """Whether an editor deletion action will mutate the retained draft."""
 
         editor = self._input
-        return bool(
-            editor is not None
-            and editor.text
-            and (editor.selected_text or editor.cursor_position < len(editor.text))
-        )
+        if editor is None:
+            return False
+        if editor.selected_text:
+            return True
+        cursor = editor.cursor_position
+        return cursor > 0 if backward else cursor < len(editor.text)
 
     def _is_streaming(self) -> bool:
         """Whether a streamed assistant turn is mid-flight and mutating the transcript.
