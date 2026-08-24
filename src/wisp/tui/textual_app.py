@@ -2090,6 +2090,7 @@ class TextualTui(App[None]):
         focused = self.screen.focused
         if isinstance(focused, ToolCard) and key not in {
             "ctrl+c",
+            "ctrl+d",
             "home",
             "end",
             "pageup",
@@ -2109,6 +2110,9 @@ class TextualTui(App[None]):
             return None
         if key == "ctrl+c":
             return "cancellation"
+        if key == "ctrl+d":
+            editor = self._input
+            return "typing" if editor is not None and editor.text else None
         overlays = self._overlay_controller
         if overlays is not None:
             if overlays.active_overlay is not None:
@@ -2151,8 +2155,6 @@ class TextualTui(App[None]):
         if key in {"home", "end", "pageup", "pagedown"}:
             return "navigation"
         if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
-            return "typing"
-        if key == "ctrl+d" and isinstance(focused, PromptEditor) and focused.text:
             return "typing"
         if event.character is not None:
             return "typing"

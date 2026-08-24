@@ -217,6 +217,7 @@ def test_input_diagnostics_classify_contextual_key_actions(
             card.focus()
             await pilot.pause()
             assert app._input_event_category(events.Paste("private paste")) is None
+            assert app._input_event_category(events.Key("ctrl+d", None)) == "typing"
             for key in ("enter", "alt+enter", "space", "v", "escape", "p", "n", "l", "x"):
                 assert app._input_event_category(events.Key(key, key)) is None
             assert app._input_event_category(events.Key("home", None)) == "navigation"
