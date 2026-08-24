@@ -34,7 +34,11 @@ from wisp.sessions.jsonl import (
     JsonlSession,
     JsonlSessionStore,
 )
-from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
+from wisp.tui.diagnostics import (
+    DisplayUpdateDiagnostic,
+    InputLatencyDiagnostic,
+    MarkdownDrainDiagnostic,
+)
 from wisp.tui.history import HistoricalTranscriptEntry, history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
@@ -206,6 +210,9 @@ class _HotpathCollector:
             self.markdown_drain_success_count += 1
         else:
             self.markdown_drain_failure_count += 1
+
+    def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
+        return
 
     def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:
         if not self.collecting:

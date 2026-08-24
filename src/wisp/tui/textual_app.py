@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import cast
 
 from rich.console import RenderableType
@@ -47,6 +48,7 @@ from wisp.tools.context import ToolContext
 from wisp.tui.commands import (
     DEFAULT_TUI_COMMAND_CATALOG,
     TEXTUAL_LOCAL_COMMAND_DESCRIPTORS,
+    SlashCommandSpec,
     TuiCommandCatalog,
 )
 from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
@@ -56,8 +58,11 @@ from wisp.tui.diagnostics import (
     DisplayFrameCacheOutcome,
     DisplayUpdateDiagnostic,
     DisplayUpdateKind,
+    InputEventCategory,
+    InputLatencyDiagnostic,
     TuiDiagnosticsSink,
     record_display_update,
+    record_input_latency,
 )
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.diff_viewer import DiffViewer
@@ -160,6 +165,9 @@ _WORDMARK_COMPACT = "wisp"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
+_DECISION_INPUT_KEYS = frozenset(
+    {"1", "2", "3", "4", "escape", "enter", "up", "down", "pageup", "pagedown", "home", "end"}
+)
 _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
     OverlayOperation.history_hydration: "Loading session history…",
     OverlayOperation.session_catalog: "Loading sessions…",
@@ -196,6 +204,10 @@ def _input_placeholder(hint: str) -> str:
     """
 
     return _INPUT_PLACEHOLDERS.get(hint, f"{_PROMPT_GLYPH} {hint}")
+
+
+def _slash_enter_prefills(typed: str, spec: SlashCommandSpec) -> bool:
+    return spec.prefill_on_partial_enter and typed.lower() != spec.command.lower()
 
 
 @dataclass
@@ -463,8 +475,18 @@ class _WispScreen(Screen[object]):
         self._compositor = _StableScrollCompositor()
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingInputLatency:
+    category: InputEventCategory
+    event_time: float
+    received_at: float
+    handled_at: float
+
+
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
+
+    _MAX_PENDING_INPUT_DIAGNOSTICS = 1_024
 
     _displayed_frame: _DisplayedFrame | None
     _displayed_cursor_position: Offset | None
@@ -493,9 +515,17 @@ class TextualTui(App[None]):
                 )
             return
         if renderable is None or self.is_inline or self._batch_count:
+            display_started = perf_counter()
             super()._display(screen, renderable)
+            displayed_at = perf_counter()
             if diagnostics_enabled:
                 self._record_display_diagnostic(renderable)
+                if renderable is not None and not self._batch_count:
+                    self._record_input_latency_diagnostics(
+                        renderable,
+                        display_started,
+                        displayed_at,
+                    )
             return
 
         displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
@@ -545,7 +575,9 @@ class TextualTui(App[None]):
             else:
                 fail_open = True
 
+        display_started = perf_counter()
         super()._display(screen, prepared)
+        displayed_at = perf_counter()
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
         self._displayed_screen = screen
@@ -556,6 +588,42 @@ class TextualTui(App[None]):
                 suppressed_spans=suppressed_spans,
                 frame_cache=frame_cache,
                 fail_open=fail_open,
+            )
+            if prepared is not None:
+                self._record_input_latency_diagnostics(prepared, display_started, displayed_at)
+
+    def _record_input_latency_diagnostics(
+        self,
+        renderable: RenderableType,
+        display_started: float,
+        displayed_at: float,
+    ) -> None:
+        """Settle observed input against the first subsequently emitted frame."""
+
+        pending = tuple(self._pending_input_latency)
+        if not pending:
+            return
+        self._pending_input_latency.clear()
+        self._pending_input_tokens.clear()
+        kind: DisplayUpdateKind = (
+            "layout"
+            if isinstance(renderable, LayoutUpdate)
+            else "chops"
+            if isinstance(renderable, ChopsUpdate)
+            else "other"
+        )
+        display_seconds = max(0.0, displayed_at - display_started)
+        for interaction in pending:
+            record_input_latency(
+                self._diagnostics,
+                InputLatencyDiagnostic(
+                    category=interaction.category,
+                    handler_seconds=max(0.0, interaction.handled_at - interaction.received_at),
+                    queued_seconds=max(0.0, display_started - interaction.handled_at),
+                    display_seconds=display_seconds,
+                    total_seconds=max(0.0, displayed_at - interaction.received_at),
+                    display_kind=kind,
+                ),
             )
 
     def _record_display_diagnostic(
@@ -901,6 +969,9 @@ class TextualTui(App[None]):
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
+        self._pending_input_latency: list[_PendingInputLatency] = []
+        self._pending_input_tokens: set[tuple[InputEventCategory, float]] = set()
+        self._diagnostic_input_events: set[int] = set()
         self.presentation_clock = PresentationClock(self.set_interval)
         self._displayed_frame = None
         self._displayed_cursor_position = None
@@ -1264,8 +1335,7 @@ class TextualTui(App[None]):
             return False
         suggest.hide()
         self.refresh_bindings()
-        is_partial = typed.lower() != spec.command.lower()
-        if spec.prefill_on_partial_enter and is_partial:
+        if _slash_enter_prefills(typed, spec):
             self.prefill_command(f"{spec.command} ")
         else:
             self.submit_command_line(spec.command)
@@ -2009,6 +2079,126 @@ class TextualTui(App[None]):
             self._input.cursor_position = len(prefix)
             self._input.focus()
 
+    def _input_event_category(self, event: events.Event) -> InputEventCategory | None:
+        """Classify interactive input without retaining its value or coordinates."""
+
+        if isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)):
+            return (
+                "wheel"
+                if not (event.ctrl or event.shift)
+                and self._wheel_event_targets_transcript(event)
+                and self._transcript_wheel_changes_view(event)
+                else None
+            )
+        if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
+            return None
+        if isinstance(event, events.Paste):
+            editor = self._input
+            focused = self.screen.focused
+            return "paste" if editor is not None and editor.display and focused is editor else None
+        if not isinstance(event, events.Key):
+            return None
+        key = event.key
+        focused = self.screen.focused
+        if isinstance(focused, ToolCard) and key not in {
+            "ctrl+c",
+            "ctrl+d",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+        }:
+            return None
+        if key in {"home", "end", "pageup", "pagedown"} and self._help_key_panel() is not None:
+            return None
+        decision_panel = self._decision_panel
+        if decision_panel is not None and decision_panel.display:
+            if key == "ctrl+c":
+                return "cancellation"
+            if key == "ctrl+d":
+                return "typing" if self._prompt_deletion_mutates(backward=False) else None
+            if key in _DECISION_INPUT_KEYS:
+                if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
+                    "choose", (int(key),)
+                ):
+                    return None
+                if key in {"up", "down", "home", "end", "pageup", "pagedown"} and not (
+                    decision_panel.navigation_key_changes_highlight(key)
+                ):
+                    return None
+                return "approval"
+            return None
+        if key == "ctrl+c" and self._editor_owns_selection():
+            return None
+        if key == "ctrl+c":
+            return "cancellation"
+        if key == "ctrl+d":
+            return "typing" if self._prompt_deletion_mutates(backward=False) else None
+        overlays = self._overlay_controller
+        if overlays is not None:
+            if overlays.active_overlay is not None:
+                return None
+            if overlays.active_operation is not None:
+                return (
+                    "cancellation"
+                    if key == "escape" and overlays.active_operation is OverlayOperation.update
+                    else None
+                )
+        if key == "escape":
+            return None if self._suggestion_menu_is_open() else "cancellation"
+        if key == "enter" and (
+            self._file_picker_is_active() or self._slash_menu_prefills_on_enter()
+        ):
+            return None
+        if key in {"up", "down"} and self._suggestion_menu_is_open():
+            return None
+        if key in {"left", "right"} and self._file_tree_is_active():
+            return None
+        if key == "enter" or (key == "alt+enter" and self._visible_input_mode == "running"):
+            return "submission"
+        if key == "alt+up":
+            return (
+                "typing"
+                if self._visible_input_mode == "running" and isinstance(focused, PromptEditor)
+                else None
+            )
+        if key == "alt+enter" or (
+            key in {"shift+enter", "ctrl+j"} and isinstance(focused, PromptEditor)
+        ):
+            return "typing"
+        if key in {
+            "left",
+            "right",
+            "up",
+            "down",
+            "ctrl+left",
+            "ctrl+right",
+            "ctrl+home",
+            "ctrl+end",
+            "ctrl+a",
+            "ctrl+e",
+            "ctrl+shift+left",
+            "ctrl+shift+right",
+            "shift+home",
+            "shift+end",
+            "shift+up",
+            "shift+down",
+            "shift+left",
+            "shift+right",
+            "f6",
+            "f7",
+        }:
+            return "cursor" if self._cursor_key_moves_prompt(key) else None
+        if key in {"home", "end", "pageup", "pagedown"}:
+            return "navigation" if self._transcript_navigation_changes_view(key) else None
+        if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
+            return "typing" if self._prompt_deletion_mutates(backward=key == "backspace") else None
+        if key in {"ctrl+g", "ctrl+r", "ctrl+t", "shift+tab", "tab"}:
+            return None
+        if event.character is not None:
+            return "typing"
+        return None
+
     async def on_event(self, event: events.Event) -> None:
         # App.on_event is the earliest point a Key/Mouse/Paste event passes
         # through before Textual forwards it to whatever currently has focus
@@ -2046,7 +2236,39 @@ class TextualTui(App[None]):
             and overlays.event_is_stale(event.time)
         ):
             return
-        await super().on_event(event)
+        category = self._input_event_category(event) if self._diagnostics is not None else None
+        if category is None:
+            await super().on_event(event)
+            return
+        event_identity = id(event)
+        event_token = (category, event.time)
+        if (
+            event_identity in self._diagnostic_input_events
+            or event_token in self._pending_input_tokens
+        ):
+            await super().on_event(event)
+            return
+        received_at = perf_counter()
+        self._diagnostic_input_events.add(event_identity)
+        self._pending_input_tokens.add(event_token)
+        try:
+            await super().on_event(event)
+        except BaseException:
+            self._pending_input_tokens.discard(event_token)
+            raise
+        finally:
+            self._diagnostic_input_events.discard(event_identity)
+        if len(self._pending_input_latency) >= self._MAX_PENDING_INPUT_DIAGNOSTICS:
+            discarded = self._pending_input_latency.pop(0)
+            self._pending_input_tokens.discard((discarded.category, discarded.event_time))
+        self._pending_input_latency.append(
+            _PendingInputLatency(
+                category=category,
+                event_time=event.time,
+                received_at=received_at,
+                handled_at=perf_counter(),
+            )
+        )
 
     def _suggestion_menu_is_open(self) -> bool:
         return bool(
@@ -2057,17 +2279,28 @@ class TextualTui(App[None]):
     def _file_picker_is_active(self) -> bool:
         return self._file_suggest is not None and self._file_suggest.is_active
 
+    def _slash_menu_prefills_on_enter(self) -> bool:
+        suggest = self._suggest
+        editor = self._input
+        if suggest is None or editor is None or not suggest.is_open:
+            return False
+        spec = suggest.highlighted_spec()
+        return spec is not None and _slash_enter_prefills(editor.text, spec)
+
+    def _file_tree_is_active(self) -> bool:
+        return bool(
+            self._file_suggest is not None
+            and self._file_suggest.is_active
+            and self._file_suggest.is_tree_mode
+        )
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"menu_move", "menu_complete"}:
             return self._file_picker_is_active() or bool(
                 self._suggest is not None and self._suggest.is_open
             )
         if action == "file_tree_move":
-            return bool(
-                self._file_suggest is not None
-                and self._file_suggest.is_active
-                and self._file_suggest.is_tree_mode
-            )
+            return self._file_tree_is_active()
         return super().check_action(action, parameters)
 
     def action_menu_move(self, direction: int) -> None:
@@ -2294,6 +2527,103 @@ class TextualTui(App[None]):
         return bool(
             editor is not None and editor.display and editor.has_focus and editor.selected_text
         )
+
+    def _prompt_deletion_mutates(self, *, backward: bool) -> bool:
+        """Whether an editor deletion action will mutate the retained draft."""
+
+        editor = self._input
+        if editor is None:
+            return False
+        if editor.selected_text:
+            return True
+        cursor = editor.cursor_position
+        return cursor > 0 if backward else cursor < len(editor.text)
+
+    def _cursor_key_moves_prompt(self, key: str) -> bool:
+        """Whether a focused prompt cursor action changes its selection."""
+
+        editor = self._input
+        if editor is None or self.screen.focused is not editor:
+            return False
+        selection = editor.selection
+        cursor = selection.end
+        selecting = key.startswith("shift+") or key.startswith("ctrl+shift+")
+        if key in {"left", "shift+left"}:
+            target = (
+                editor.get_cursor_left_location()
+                if selecting or selection.is_empty
+                else min(selection)
+            )
+        elif key in {"right", "shift+right"}:
+            target = (
+                editor.get_cursor_right_location()
+                if selecting or selection.is_empty
+                else max(selection)
+            )
+        elif key in {"up", "shift+up"}:
+            target = editor.get_cursor_up_location()
+        elif key in {"down", "shift+down"}:
+            target = editor.get_cursor_down_location()
+        elif key in {"ctrl+left", "ctrl+shift+left"}:
+            target = editor.get_cursor_word_left_location()
+        elif key in {"ctrl+right", "ctrl+shift+right"}:
+            target = editor.get_cursor_word_right_location()
+        elif key == "ctrl+home":
+            target = (0, 0)
+        elif key == "ctrl+end":
+            last_row = editor.document.line_count - 1
+            target = (last_row, len(editor.document[last_row]))
+        elif key in {"ctrl+a", "shift+home"}:
+            target = editor.get_cursor_line_start_location(smart_home=True)
+        elif key in {"ctrl+e", "shift+end"}:
+            target = editor.get_cursor_line_end_location()
+        elif key == "f6":
+            row, _column = cursor
+            return (selection.start, selection.end) != ((row, 0), (row, len(editor.document[row])))
+        elif key == "f7":
+            last_row = editor.document.line_count - 1
+            return (selection.start, selection.end) != (
+                (0, 0),
+                (last_row, len(editor.document[last_row])),
+            )
+        else:
+            return False
+        return target != cursor if selecting else not selection.is_empty or target != cursor
+
+    def _transcript_navigation_changes_view(self, key: str) -> bool:
+        """Whether a transcript key can move or cross a retained-history edge."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        can_move_up = transcript.scroll_y > 0 or transcript.can_page_to_older_history
+        can_move_down = (
+            transcript.scroll_y < transcript.max_scroll_y or transcript.can_page_to_newer_history
+        )
+        if key in {"home", "pageup"}:
+            return can_move_up
+        if key == "pagedown":
+            return can_move_down
+        if key == "end":
+            return can_move_down or not transcript.is_following
+        return False
+
+    def _transcript_wheel_changes_view(
+        self,
+        event: events.MouseScrollUp | events.MouseScrollDown,
+    ) -> bool:
+        """Whether a routed vertical wheel gesture changes transcript state."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        if isinstance(event, events.MouseScrollUp):
+            return (
+                transcript.scroll_y > 0
+                or transcript.can_page_to_older_history
+                or transcript.is_following
+            )
+        return transcript.scroll_y < transcript.max_scroll_y or transcript.can_page_to_newer_history
 
     def _is_streaming(self) -> bool:
         """Whether a streamed assistant turn is mid-flight and mutating the transcript.
