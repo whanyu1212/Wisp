@@ -24,6 +24,7 @@ from wisp.tui.diagnostics import (
     InputLatencyDiagnostic,
     MarkdownDrainDiagnostic,
 )
+from wisp.tui.rendering import TuiViewSnapshot
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import PromptEditor, Transcript
 
@@ -126,6 +127,13 @@ async def _run_condition(
         await pilot.pause()
         producer: asyncio.Task[None] | None = None
         if condition == "streaming":
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="running",
+                    input_hint="wisp(running)> ",
+                    input_mode="running",
+                )
+            )
             renderer.running()
             producer = asyncio.create_task(_stream(renderer, config))
         await _exercise_inputs(app, renderer, pilot, input_widget, transcript, config)

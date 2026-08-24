@@ -4,6 +4,7 @@ import anyio
 import pytest
 
 from benchmarks.tui_input_latency import BenchmarkConfig, _summarize, run_benchmark
+from wisp.tui.textual_renderer import TextualTuiRenderer
 
 pytestmark = pytest.mark.benchmark
 
@@ -41,6 +42,36 @@ def test_tui_input_latency_reports_idle_and_streaming_stage_distributions() -> N
         assert sample.display_kind in {"layout", "chops", "other"}
     assert '"condition": "streaming"' in report.to_json()
     assert '"queued_ms":' in report.to_json()
+
+
+def test_tui_input_latency_submits_in_the_condition_input_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submitted_modes: list[str] = []
+    original_capture = TextualTuiRenderer._capture_submitted_input_mode
+
+    def capture_mode(renderer: TextualTuiRenderer) -> str:
+        mode = original_capture(renderer)
+        submitted_modes.append(mode)
+        return mode
+
+    monkeypatch.setattr(TextualTuiRenderer, "_capture_submitted_input_mode", capture_mode)
+
+    anyio.run(
+        run_benchmark,
+        BenchmarkConfig(
+            runs=1,
+            stream_chunks=20,
+            stream_interval_seconds=0.01,
+            action_interval_seconds=0.01,
+            viewport_width=80,
+            viewport_height=16,
+        ),
+    )
+
+    assert submitted_modes
+    assert set(submitted_modes) == {"idle", "running"}
+    assert submitted_modes == sorted(submitted_modes, key=("idle", "running").index)
 
 
 def test_tui_input_latency_summary_omits_categories_without_samples() -> None:
