@@ -10,13 +10,14 @@ from textual.app import App
 from textual.geometry import Region
 from textual.strip import Strip
 
-from wisp.events import ToolCallRequested, ToolResultReady
+from wisp.events import ToolApprovalRequested, ToolCallRequested, ToolResultReady
 from wisp.tui.diagnostics import (
     DisplayUpdateDiagnostic,
     InputLatencyDiagnostic,
     MarkdownDrainDiagnostic,
 )
 from wisp.tui.history import HistoricalTranscriptMessage
+from wisp.tui.rendering import TuiViewSnapshot
 from wisp.tui.textual_app import _DisplayedFrame, create_textual_tui
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import StreamMessage, ToolCard, Transcript
@@ -112,6 +113,37 @@ def test_input_diagnostics_measure_handler_queue_and_first_display_without_value
         assert not hasattr(sample, "key")
         assert not hasattr(sample, "value")
         assert not hasattr(sample, "content")
+
+
+def test_input_diagnostics_classify_priority_navigation_and_approval_escape() -> None:
+    async def scenario() -> _Diagnostics:
+        diagnostics = _Diagnostics()
+        app, renderer = create_textual_tui(diagnostics=diagnostics)
+        assert isinstance(renderer, TextualTuiRenderer)
+        async with app.run_test() as pilot:
+            await pilot.press("home", "end")
+            await pilot.pause()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="diagnostic-approval",
+                    name="bash",
+                    arguments={"command": "printf diagnostic"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            await pilot.press("escape")
+            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+            await pilot.pause()
+        return diagnostics
+
+    diagnostics = anyio.run(scenario)
+
+    assert [sample.category for sample in diagnostics.input_latency] == [
+        "navigation",
+        "navigation",
+        "approval",
+    ]
 
 
 def test_display_diagnostics_report_exact_suppression_and_fail_open(

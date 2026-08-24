@@ -2084,16 +2084,25 @@ class TextualTui(App[None]):
         if not isinstance(event, events.Key):
             return None
         key = event.key
-        if key in {"escape", "ctrl+c"}:
-            return "cancellation"
         decision_panel = self._decision_panel
         if decision_panel is not None and decision_panel.display:
             return "approval"
+        if key in {"escape", "ctrl+c"}:
+            return "cancellation"
         if key in {"enter", "alt+enter"}:
             return "submission"
-        if key in {"left", "right", "home", "end", "ctrl+left", "ctrl+right"}:
+        if key in {"left", "right", "ctrl+left", "ctrl+right"}:
             return "cursor"
-        if key in {"up", "down", "pageup", "pagedown", "ctrl+home", "ctrl+end"}:
+        if key in {
+            "up",
+            "down",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "ctrl+home",
+            "ctrl+end",
+        }:
             return "navigation"
         if event.character is not None:
             return "typing"
