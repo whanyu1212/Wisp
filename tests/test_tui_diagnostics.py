@@ -22,7 +22,7 @@ from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
 from wisp.tui.textual_app import _DisplayedFrame, _slash_enter_prefills, create_textual_tui
 from wisp.tui.textual_renderer import TextualTuiRenderer
-from wisp.tui.widgets import PromptEditor, StreamMessage, ToolCard, Transcript
+from wisp.tui.widgets import DecisionPanel, PromptEditor, StreamMessage, ToolCard, Transcript
 
 pytestmark = pytest.mark.tui
 
@@ -166,6 +166,9 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("ctrl+e", None)) == "cursor"
             assert app._input_event_category(events.Key("backspace", None)) == "typing"
             assert app._input_event_category(events.Key("delete", None)) == "typing"
+            input_widget.value = "delete"
+            input_widget.cursor_position = 0
+            assert app._input_event_category(events.Key("ctrl+d", None)) == "typing"
             assert app._input_event_category(events.Paste("private paste")) == "paste"
             transcript = app.query_one("#transcript", Transcript)
             origin = transcript.region.offset
@@ -186,6 +189,20 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 )
 
             assert app._input_event_category(wheel(transcript)) == "wheel"
+            horizontal_wheel = events.MouseScrollLeft(
+                widget=transcript,
+                x=origin.x,
+                y=origin.y,
+                delta_x=0,
+                delta_y=0,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=origin.x,
+                screen_y=origin.y,
+            )
+            assert app._input_event_category(horizontal_wheel) is None
             assert app._jump_to_latest is not None
             assert app._input_event_category(wheel(app._jump_to_latest)) == "wheel"
             assert app._input_event_category(wheel(app.query_one("#theme-picker"))) is None
@@ -225,6 +242,10 @@ def test_input_diagnostics_classify_contextual_key_actions(
             )
             await pilot.pause()
             assert app._input_event_category(events.Key("down", None)) == "approval"
+            decision_panel = app.query_one("#decision-panel", DecisionPanel)
+            decision_panel._mode = "trust"  # noqa: SLF001 - mode-dependent classifier seam
+            assert app._input_event_category(events.Key("2", "2")) == "approval"
+            assert app._input_event_category(events.Key("3", "3")) is None
             assert app._input_event_category(events.Key("ctrl+t", None)) is None
             assert app._input_event_category(events.Key("shift+tab", None)) is None
             assert app._input_event_category(events.Key("ctrl+c", None)) == "cancellation"

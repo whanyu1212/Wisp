@@ -2079,11 +2079,6 @@ class TextualTui(App[None]):
         if isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)):
             return "wheel" if self._wheel_event_targets_transcript(event) else None
         if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
-            target: object | None = event.widget
-            while isinstance(target, Widget):
-                if target is self._transcript:
-                    return "wheel"
-                target = target.parent
             return None
         if isinstance(event, events.Paste):
             editor = self._input
@@ -2105,6 +2100,10 @@ class TextualTui(App[None]):
             return None
         decision_panel = self._decision_panel
         if decision_panel is not None and decision_panel.display and key in _DECISION_INPUT_KEYS:
+            if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
+                "choose", (int(key),)
+            ):
+                return None
             return "approval"
         if key == "ctrl+c" and self._editor_owns_selection():
             return None
@@ -2152,6 +2151,8 @@ class TextualTui(App[None]):
         if key in {"home", "end", "pageup", "pagedown"}:
             return "navigation"
         if key in {"backspace", "delete"} and isinstance(focused, PromptEditor):
+            return "typing"
+        if key == "ctrl+d" and isinstance(focused, PromptEditor) and focused.text:
             return "typing"
         if event.character is not None:
             return "typing"
