@@ -55,6 +55,8 @@ class _StreamTurn:
     finalize_requested: bool = False
     finalize_scheduled: bool = False
     drain_timer: asyncio.TimerHandle | None = None
+    input_priority_deferred_at: float | None = None
+    input_priority_waiting: bool = False
     has_written: bool = False
     write_count: int = 0
     last_render_seconds: float | None = None
@@ -256,6 +258,8 @@ class MarkdownStreamController:
         if timer is not None:
             timer.cancel()
             turn.drain_timer = None
+        turn.input_priority_deferred_at = None
+        turn.input_priority_waiting = False
         if turn.drain_scheduled:
             turn.drain_scheduled = False
             self._finish_callback()
@@ -323,6 +327,8 @@ class MarkdownStreamController:
 
     async def _drain(self, turn: _StreamTurn) -> None:
         if not turn.drain_scheduled:
+            return
+        if not turn.discarded and self._defer_drain_for_input(turn):
             return
         turn.drain_running = True
         try:
@@ -396,6 +402,40 @@ class MarkdownStreamController:
             elif turn.pending and not turn.discarded:
                 self._queue_drain(turn)
             self._finish_callback()
+
+    def _defer_drain_for_input(self, turn: _StreamTurn) -> bool:
+        delay, deferred_at = self._app.input_priority_drain_delay(turn.input_priority_deferred_at)
+        turn.input_priority_deferred_at = deferred_at
+        if delay <= 0:
+            turn.input_priority_waiting = False
+            return False
+        turn.input_priority_waiting = True
+        turn.drain_timer = asyncio.get_running_loop().call_later(
+            delay,
+            self._input_priority_timeout,
+            turn,
+        )
+        return True
+
+    def _input_priority_timeout(self, turn: _StreamTurn) -> None:
+        if not turn.input_priority_waiting:
+            return
+        turn.input_priority_waiting = False
+        self._schedule_drain_after_frame(turn)
+
+    def resume_after_input_frame(self) -> None:
+        """Resume the active drain once input has reached the terminal boundary."""
+
+        turn = self._turn
+        if turn is None or not turn.input_priority_waiting or not turn.drain_scheduled:
+            return
+        timer = turn.drain_timer
+        if timer is not None:
+            timer.cancel()
+            turn.drain_timer = None
+        turn.input_priority_waiting = False
+        turn.input_priority_deferred_at = None
+        self._schedule_drain_after_frame(turn)
 
     async def _finalize(self, turn: _StreamTurn) -> None:
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -27,19 +28,28 @@ class _Loop:
     def __init__(self) -> None:
         self.delays: list[float] = []
         self.timer = _ScheduledTimer()
+        self.callbacks: list[object] = []
 
-    def call_later(self, delay: float, _callback: object, _turn: object) -> _ScheduledTimer:
+    def call_later(self, delay: float, callback: object, _turn: object) -> _ScheduledTimer:
         self.delays.append(delay)
+        self.callbacks.append(callback)
         return self.timer
 
 
 class _App:
     def __init__(self) -> None:
         self.callbacks: list[object] = []
+        self.priority_delay: tuple[float, float | None] = (0.0, None)
 
     def call_after_refresh(self, callback: object, _turn: object) -> bool:
         self.callbacks.append(callback)
         return True
+
+    def input_priority_drain_delay(
+        self,
+        _deferred_since: float | None,
+    ) -> tuple[float, float | None]:
+        return self.priority_delay
 
 
 def _turn() -> _StreamTurn:
@@ -116,6 +126,107 @@ def test_flush_cancels_backoff_and_schedules_immediate_finalization(
     assert loop.timer.cancelled is True
     assert controller._turn is None
     assert turn.finalize_requested is True
+    assert app.callbacks == [controller._finalize]
+    assert controller._pending_callbacks == 1
+
+
+def test_input_priority_defers_without_consuming_or_releasing_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _App()
+    app.priority_delay = (0.1, 2.0)
+    loop = _Loop()
+    controller = MarkdownStreamController(cast(Any, app))
+    turn = _turn()
+    turn.pending.append("pending")
+    turn.pending_bytes = len("pending")
+    turn.drain_scheduled = True
+    controller._turn = turn
+    controller._pending_callbacks = 1
+    controller._idle.clear()
+    monkeypatch.setattr(stream_buffer.asyncio, "get_running_loop", lambda: loop)
+
+    asyncio.run(controller._drain(turn))
+
+    assert turn.pending == ["pending"]
+    assert turn.drain_scheduled
+    assert turn.input_priority_waiting
+    assert turn.input_priority_deferred_at == 2.0
+    assert loop.delays == [pytest.approx(0.1)]
+    assert controller._pending_callbacks == 1
+    assert not controller._idle.is_set()
+
+
+def test_input_frame_wakes_a_deferred_drain_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _App()
+    app.priority_delay = (0.1, 2.0)
+    loop = _Loop()
+    controller = MarkdownStreamController(cast(Any, app))
+    turn = _turn()
+    turn.pending.append("pending")
+    turn.drain_scheduled = True
+    controller._turn = turn
+    controller._pending_callbacks = 1
+    monkeypatch.setattr(stream_buffer.asyncio, "get_running_loop", lambda: loop)
+
+    asyncio.run(controller._drain(turn))
+    controller.resume_after_input_frame()
+    controller.resume_after_input_frame()
+    controller._input_priority_timeout(turn)
+
+    assert loop.timer.cancelled
+    assert app.callbacks == [controller._drain]
+    assert not turn.input_priority_waiting
+    assert turn.input_priority_deferred_at is None
+    assert controller._pending_callbacks == 1
+
+
+def test_input_priority_timeout_preserves_original_deadline_until_drain_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _App()
+    app.priority_delay = (0.1, 2.0)
+    loop = _Loop()
+    controller = MarkdownStreamController(cast(Any, app))
+    turn = _turn()
+    turn.pending.append("pending")
+    turn.drain_scheduled = True
+    controller._turn = turn
+    controller._pending_callbacks = 1
+    monkeypatch.setattr(stream_buffer.asyncio, "get_running_loop", lambda: loop)
+
+    asyncio.run(controller._drain(turn))
+    controller._input_priority_timeout(turn)
+
+    assert app.callbacks == [controller._drain]
+    assert turn.input_priority_deferred_at == 2.0
+    app.priority_delay = (0.0, None)
+    assert not controller._defer_drain_for_input(turn)
+    assert turn.input_priority_deferred_at is None
+
+
+def test_flush_cancels_input_priority_and_bypasses_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _App()
+    app.priority_delay = (0.1, 2.0)
+    loop = _Loop()
+    controller = MarkdownStreamController(cast(Any, app))
+    turn = _turn()
+    turn.pending.append("pending")
+    turn.drain_scheduled = True
+    controller._turn = turn
+    controller._pending_callbacks = 1
+    monkeypatch.setattr(stream_buffer.asyncio, "get_running_loop", lambda: loop)
+
+    asyncio.run(controller._drain(turn))
+    controller.flush("authoritative")
+
+    assert loop.timer.cancelled
+    assert not turn.input_priority_waiting
+    assert turn.input_priority_deferred_at is None
     assert app.callbacks == [controller._finalize]
     assert controller._pending_callbacks == 1
 
