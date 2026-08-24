@@ -2100,12 +2100,19 @@ class TextualTui(App[None]):
         if key in {"home", "end", "pageup", "pagedown"} and self._help_key_panel() is not None:
             return None
         decision_panel = self._decision_panel
-        if decision_panel is not None and decision_panel.display and key in _DECISION_INPUT_KEYS:
-            if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
-                "choose", (int(key),)
-            ):
-                return None
-            return "approval"
+        if decision_panel is not None and decision_panel.display:
+            if key == "ctrl+c":
+                return "cancellation"
+            if key == "ctrl+d":
+                editor = self._input
+                return "typing" if editor is not None and editor.text else None
+            if key in _DECISION_INPUT_KEYS:
+                if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
+                    "choose", (int(key),)
+                ):
+                    return None
+                return "approval"
+            return None
         if key == "ctrl+c" and self._editor_owns_selection():
             return None
         if key == "ctrl+c":

@@ -247,9 +247,12 @@ def test_input_diagnostics_classify_contextual_key_actions(
             decision_panel._mode = "trust"  # noqa: SLF001 - mode-dependent classifier seam
             assert app._input_event_category(events.Key("2", "2")) == "approval"
             assert app._input_event_category(events.Key("3", "3")) is None
+            assert app._input_event_category(events.Key("alt+enter", None)) is None
+            assert app._input_event_category(events.Key("x", "x")) is None
             assert app._input_event_category(events.Key("ctrl+t", None)) is None
             assert app._input_event_category(events.Key("shift+tab", None)) is None
             assert app._input_event_category(events.Key("ctrl+c", None)) == "cancellation"
+            assert app._input_event_category(events.Key("ctrl+d", None)) == "typing"
             await pilot.press("escape")
             renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
             await pilot.pause()
