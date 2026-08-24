@@ -20,7 +20,12 @@ from wisp.tui.diagnostics import (
 )
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
-from wisp.tui.textual_app import _DisplayedFrame, _slash_enter_prefills, create_textual_tui
+from wisp.tui.textual_app import (
+    _DisplayedFrame,
+    _PendingInputLatency,
+    _slash_enter_prefills,
+    create_textual_tui,
+)
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import DecisionPanel, PromptEditor, StreamMessage, ToolCard, Transcript
 
@@ -186,7 +191,12 @@ def test_input_diagnostics_classify_contextual_key_actions(
             transcript = app.query_one("#transcript", Transcript)
             origin = transcript.region.offset
 
-            def wheel(widget: object) -> events.MouseScrollUp:
+            def wheel(
+                widget: object,
+                *,
+                shift: bool = False,
+                ctrl: bool = False,
+            ) -> events.MouseScrollUp:
                 return events.MouseScrollUp(
                     widget=widget,  # type: ignore[arg-type]
                     x=origin.x,
@@ -194,14 +204,16 @@ def test_input_diagnostics_classify_contextual_key_actions(
                     delta_x=0,
                     delta_y=0,
                     button=0,
-                    shift=False,
+                    shift=shift,
                     meta=False,
-                    ctrl=False,
+                    ctrl=ctrl,
                     screen_x=origin.x,
                     screen_y=origin.y,
                 )
 
             assert app._input_event_category(wheel(transcript)) == "wheel"
+            assert app._input_event_category(wheel(transcript, shift=True)) is None
+            assert app._input_event_category(wheel(transcript, ctrl=True)) is None
             horizontal_wheel = events.MouseScrollLeft(
                 widget=transcript,
                 x=origin.x,
@@ -342,6 +354,52 @@ def test_display_diagnostics_report_exact_suppression_and_fail_open(
     assert incomplete.suppressed_spans == 0
     assert incomplete.frame_cache == "fail-open"
     assert incomplete.fail_open
+
+
+def test_input_latency_excludes_display_diagnostic_sink_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [3.0]
+
+    class DelayedDisplayDiagnostics(_Diagnostics):
+        def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:
+            super().record_display_update(diagnostic)
+            now[0] += 10.0
+
+    diagnostics = DelayedDisplayDiagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+
+    def discard_display(
+        _app: App[object],
+        _screen: object,
+        _renderable: object,
+    ) -> None:
+        return
+
+    monkeypatch.setattr(App, "_display", discard_display)
+
+    async def scenario() -> None:
+        async with app.run_test():
+            now[0] = 3.0
+            app._pending_input_latency.append(
+                _PendingInputLatency(
+                    category="typing",
+                    event_time=1.0,
+                    received_at=1.0,
+                    handled_at=2.0,
+                )
+            )
+            monkeypatch.setattr("wisp.tui.textual_app.perf_counter", lambda: now[0])
+            app._display(app.screen, "frame")
+
+    anyio.run(scenario)
+
+    assert len(diagnostics.input_latency) == 1
+    sample = diagnostics.input_latency[0]
+    assert sample.handler_seconds == 1.0
+    assert sample.queued_seconds == 1.0
+    assert sample.display_seconds == 0.0
+    assert sample.total_seconds == 2.0
 
 
 def test_pending_tool_tick_stays_a_chops_update() -> None:

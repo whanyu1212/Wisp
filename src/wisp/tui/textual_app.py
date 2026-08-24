@@ -517,10 +517,15 @@ class TextualTui(App[None]):
         if renderable is None or self.is_inline or self._batch_count:
             display_started = perf_counter()
             super()._display(screen, renderable)
+            displayed_at = perf_counter()
             if diagnostics_enabled:
                 self._record_display_diagnostic(renderable)
                 if renderable is not None and not self._batch_count:
-                    self._record_input_latency_diagnostics(renderable, display_started)
+                    self._record_input_latency_diagnostics(
+                        renderable,
+                        display_started,
+                        displayed_at,
+                    )
             return
 
         displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
@@ -572,6 +577,7 @@ class TextualTui(App[None]):
 
         display_started = perf_counter()
         super()._display(screen, prepared)
+        displayed_at = perf_counter()
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
         self._displayed_screen = screen
@@ -584,12 +590,13 @@ class TextualTui(App[None]):
                 fail_open=fail_open,
             )
             if prepared is not None:
-                self._record_input_latency_diagnostics(prepared, display_started)
+                self._record_input_latency_diagnostics(prepared, display_started, displayed_at)
 
     def _record_input_latency_diagnostics(
         self,
         renderable: RenderableType,
         display_started: float,
+        displayed_at: float,
     ) -> None:
         """Settle observed input against the first subsequently emitted frame."""
 
@@ -598,7 +605,6 @@ class TextualTui(App[None]):
             return
         self._pending_input_latency.clear()
         self._pending_input_tokens.clear()
-        displayed_at = perf_counter()
         kind: DisplayUpdateKind = (
             "layout"
             if isinstance(renderable, LayoutUpdate)
@@ -2077,7 +2083,11 @@ class TextualTui(App[None]):
         """Classify interactive input without retaining its value or coordinates."""
 
         if isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)):
-            return "wheel" if self._wheel_event_targets_transcript(event) else None
+            return (
+                "wheel"
+                if not (event.ctrl or event.shift) and self._wheel_event_targets_transcript(event)
+                else None
+            )
         if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
             return None
         if isinstance(event, events.Paste):
