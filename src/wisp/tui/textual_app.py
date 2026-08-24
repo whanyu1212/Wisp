@@ -2114,8 +2114,7 @@ class TextualTui(App[None]):
             if key == "ctrl+c":
                 return "cancellation"
             if key == "ctrl+d":
-                editor = self._input
-                return "typing" if editor is not None and editor.text else None
+                return "typing" if self._ctrl_d_deletes_prompt() else None
             if key in _DECISION_INPUT_KEYS:
                 if key in {"1", "2", "3", "4"} and not decision_panel.check_action(
                     "choose", (int(key),)
@@ -2128,8 +2127,7 @@ class TextualTui(App[None]):
         if key == "ctrl+c":
             return "cancellation"
         if key == "ctrl+d":
-            editor = self._input
-            return "typing" if editor is not None and editor.text else None
+            return "typing" if self._ctrl_d_deletes_prompt() else None
         overlays = self._overlay_controller
         if overlays is not None:
             if overlays.active_overlay is not None:
@@ -2514,6 +2512,16 @@ class TextualTui(App[None]):
         editor = self._input
         return bool(
             editor is not None and editor.display and editor.has_focus and editor.selected_text
+        )
+
+    def _ctrl_d_deletes_prompt(self) -> bool:
+        """Whether the priority Ctrl+D action will mutate the retained draft."""
+
+        editor = self._input
+        return bool(
+            editor is not None
+            and editor.text
+            and (editor.selected_text or editor.cursor_position < len(editor.text))
         )
 
     def _is_streaming(self) -> bool:

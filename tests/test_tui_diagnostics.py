@@ -187,6 +187,10 @@ def test_input_diagnostics_classify_contextual_key_actions(
             input_widget.value = "delete"
             input_widget.cursor_position = 0
             assert app._input_event_category(events.Key("ctrl+d", None)) == "typing"
+            input_widget.cursor_position = len(input_widget.text)
+            assert app._input_event_category(events.Key("ctrl+d", None)) is None
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 6))
+            assert app._input_event_category(events.Key("ctrl+d", None)) == "typing"
             assert app._input_event_category(events.Paste("private paste")) == "paste"
             transcript = app.query_one("#transcript", Transcript)
             origin = transcript.region.offset
