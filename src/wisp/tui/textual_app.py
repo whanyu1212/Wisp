@@ -2092,14 +2092,12 @@ class TextualTui(App[None]):
             return None
         key = event.key
         focused = self.screen.focused
-        if isinstance(focused, ToolCard) and key in {
-            "enter",
-            "space",
-            "v",
-            "escape",
-            "p",
-            "n",
-            "l",
+        if isinstance(focused, ToolCard) and key not in {
+            "ctrl+c",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
         }:
             return None
         decision_panel = self._decision_panel

@@ -168,8 +168,10 @@ def test_input_diagnostics_classify_contextual_key_actions(
             await transcript.mount_message(card)
             card.focus()
             await pilot.pause()
-            for key in ("enter", "space", "v", "escape", "p", "n", "l"):
+            for key in ("enter", "alt+enter", "space", "v", "escape", "p", "n", "l", "x"):
                 assert app._input_event_category(events.Key(key, key)) is None
+            assert app._input_event_category(events.Key("home", None)) == "navigation"
+            assert app._input_event_category(events.Key("ctrl+c", None)) == "cancellation"
             input_widget.focus()
             with monkeypatch.context() as context:
                 context.setattr(app, "_file_picker_is_active", lambda: True)
