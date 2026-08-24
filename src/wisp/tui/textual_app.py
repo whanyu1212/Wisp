@@ -2157,6 +2157,16 @@ class TextualTui(App[None]):
             "ctrl+end",
             "ctrl+a",
             "ctrl+e",
+            "ctrl+shift+left",
+            "ctrl+shift+right",
+            "shift+home",
+            "shift+end",
+            "shift+up",
+            "shift+down",
+            "shift+left",
+            "shift+right",
+            "f6",
+            "f7",
         }:
             return "cursor"
         if key in {"home", "end", "pageup", "pagedown"}:

@@ -164,6 +164,19 @@ def test_input_diagnostics_classify_contextual_key_actions(
             assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+a", None)) == "cursor"
             assert app._input_event_category(events.Key("ctrl+e", None)) == "cursor"
+            for key in (
+                "shift+left",
+                "shift+right",
+                "shift+up",
+                "shift+down",
+                "ctrl+shift+left",
+                "ctrl+shift+right",
+                "shift+home",
+                "shift+end",
+                "f6",
+                "f7",
+            ):
+                assert app._input_event_category(events.Key(key, None)) == "cursor"
             assert app._input_event_category(events.Key("backspace", None)) == "typing"
             assert app._input_event_category(events.Key("delete", None)) == "typing"
             input_widget.value = "delete"
