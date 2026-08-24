@@ -165,6 +165,9 @@ _WORDMARK_COMPACT = "wisp"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
+_DECISION_INPUT_KEYS = frozenset(
+    {"1", "2", "3", "4", "escape", "enter", "up", "down", "pageup", "pagedown", "home", "end"}
+)
 _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
     OverlayOperation.history_hydration: "Loading session history…",
     OverlayOperation.session_catalog: "Loading sessions…",
@@ -2089,7 +2092,7 @@ class TextualTui(App[None]):
             return None
         key = event.key
         decision_panel = self._decision_panel
-        if decision_panel is not None and decision_panel.display and key != "ctrl+c":
+        if decision_panel is not None and decision_panel.display and key in _DECISION_INPUT_KEYS:
             return "approval"
         if key == "ctrl+c" and self._editor_owns_selection():
             return None
@@ -2119,18 +2122,18 @@ class TextualTui(App[None]):
             return "submission"
         if key == "alt+enter":
             return "typing"
-        if key in {"left", "right", "ctrl+left", "ctrl+right"}:
-            return "cursor"
         if key in {
+            "left",
+            "right",
             "up",
             "down",
-            "home",
-            "end",
-            "pageup",
-            "pagedown",
+            "ctrl+left",
+            "ctrl+right",
             "ctrl+home",
             "ctrl+end",
         }:
+            return "cursor"
+        if key in {"home", "end", "pageup", "pagedown"}:
             return "navigation"
         if event.character is not None:
             return "typing"

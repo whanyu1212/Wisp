@@ -158,6 +158,10 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 context.setattr(app, "_file_picker_is_active", lambda: False)
                 context.setattr(app, "_slash_menu_prefills_on_enter", lambda: True)
                 assert app._input_event_category(events.Key("enter", None)) is None
+            assert app._input_event_category(events.Key("up", None)) == "cursor"
+            assert app._input_event_category(events.Key("down", None)) == "cursor"
+            assert app._input_event_category(events.Key("ctrl+home", None)) == "cursor"
+            assert app._input_event_category(events.Key("ctrl+end", None)) == "cursor"
             with monkeypatch.context() as context:
                 context.setattr(app, "_file_picker_is_active", lambda: True)
                 context.setattr(app, "_file_tree_is_active", lambda: True)
@@ -177,6 +181,9 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 )
             )
             await pilot.pause()
+            assert app._input_event_category(events.Key("down", None)) == "approval"
+            assert app._input_event_category(events.Key("ctrl+t", None)) is None
+            assert app._input_event_category(events.Key("shift+tab", None)) is None
             assert app._input_event_category(events.Key("ctrl+c", None)) == "cancellation"
             await pilot.press("escape")
             renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
