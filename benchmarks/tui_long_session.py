@@ -28,7 +28,11 @@ from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionMessagePage
 from wisp.tools.process_manager import ProcessSupervisor
-from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
+from wisp.tui.diagnostics import (
+    DisplayUpdateDiagnostic,
+    InputLatencyDiagnostic,
+    MarkdownDrainDiagnostic,
+)
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalTranscriptEntry,
@@ -112,6 +116,9 @@ class _ScenarioDiagnostics:
     first_uncovered_has_pending_layout: bool | None = None
 
     def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
+        return
+
+    def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
         return
 
     def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:

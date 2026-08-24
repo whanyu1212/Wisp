@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import cast
 
 from rich.console import RenderableType
@@ -56,8 +57,11 @@ from wisp.tui.diagnostics import (
     DisplayFrameCacheOutcome,
     DisplayUpdateDiagnostic,
     DisplayUpdateKind,
+    InputEventCategory,
+    InputLatencyDiagnostic,
     TuiDiagnosticsSink,
     record_display_update,
+    record_input_latency,
 )
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.diff_viewer import DiffViewer
@@ -463,8 +467,18 @@ class _WispScreen(Screen[object]):
         self._compositor = _StableScrollCompositor()
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingInputLatency:
+    category: InputEventCategory
+    event_time: float
+    received_at: float
+    handled_at: float
+
+
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
+
+    _MAX_PENDING_INPUT_DIAGNOSTICS = 1_024
 
     _displayed_frame: _DisplayedFrame | None
     _displayed_cursor_position: Offset | None
@@ -493,9 +507,12 @@ class TextualTui(App[None]):
                 )
             return
         if renderable is None or self.is_inline or self._batch_count:
+            display_started = perf_counter()
             super()._display(screen, renderable)
             if diagnostics_enabled:
                 self._record_display_diagnostic(renderable)
+                if renderable is not None and not self._batch_count:
+                    self._record_input_latency_diagnostics(renderable, display_started)
             return
 
         displayed_frame = self._displayed_frame if self._displayed_screen is screen else None
@@ -545,6 +562,7 @@ class TextualTui(App[None]):
             else:
                 fail_open = True
 
+        display_started = perf_counter()
         super()._display(screen, prepared)
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
@@ -556,6 +574,42 @@ class TextualTui(App[None]):
                 suppressed_spans=suppressed_spans,
                 frame_cache=frame_cache,
                 fail_open=fail_open,
+            )
+            if prepared is not None:
+                self._record_input_latency_diagnostics(prepared, display_started)
+
+    def _record_input_latency_diagnostics(
+        self,
+        renderable: RenderableType,
+        display_started: float,
+    ) -> None:
+        """Settle observed input against the first subsequently emitted frame."""
+
+        pending = tuple(self._pending_input_latency)
+        if not pending:
+            return
+        self._pending_input_latency.clear()
+        self._pending_input_tokens.clear()
+        displayed_at = perf_counter()
+        kind: DisplayUpdateKind = (
+            "layout"
+            if isinstance(renderable, LayoutUpdate)
+            else "chops"
+            if isinstance(renderable, ChopsUpdate)
+            else "other"
+        )
+        display_seconds = max(0.0, displayed_at - display_started)
+        for interaction in pending:
+            record_input_latency(
+                self._diagnostics,
+                InputLatencyDiagnostic(
+                    category=interaction.category,
+                    handler_seconds=max(0.0, interaction.handled_at - interaction.received_at),
+                    queued_seconds=max(0.0, display_started - interaction.handled_at),
+                    display_seconds=display_seconds,
+                    total_seconds=max(0.0, displayed_at - interaction.received_at),
+                    display_kind=kind,
+                ),
             )
 
     def _record_display_diagnostic(
@@ -901,6 +955,9 @@ class TextualTui(App[None]):
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
+        self._pending_input_latency: list[_PendingInputLatency] = []
+        self._pending_input_tokens: set[tuple[InputEventCategory, float]] = set()
+        self._diagnostic_input_events: set[int] = set()
         self.presentation_clock = PresentationClock(self.set_interval)
         self._displayed_frame = None
         self._displayed_cursor_position = None
@@ -2009,6 +2066,39 @@ class TextualTui(App[None]):
             self._input.cursor_position = len(prefix)
             self._input.focus()
 
+    def _input_event_category(self, event: events.Event) -> InputEventCategory | None:
+        """Classify interactive input without retaining its value or coordinates."""
+
+        if isinstance(event, events.Paste):
+            return "paste"
+        if isinstance(
+            event,
+            (
+                events.MouseScrollUp,
+                events.MouseScrollDown,
+                events.MouseScrollLeft,
+                events.MouseScrollRight,
+            ),
+        ):
+            return "wheel"
+        if not isinstance(event, events.Key):
+            return None
+        key = event.key
+        if key in {"escape", "ctrl+c"}:
+            return "cancellation"
+        decision_panel = self._decision_panel
+        if decision_panel is not None and decision_panel.display:
+            return "approval"
+        if key in {"enter", "alt+enter"}:
+            return "submission"
+        if key in {"left", "right", "home", "end", "ctrl+left", "ctrl+right"}:
+            return "cursor"
+        if key in {"up", "down", "pageup", "pagedown", "ctrl+home", "ctrl+end"}:
+            return "navigation"
+        if event.character is not None:
+            return "typing"
+        return None
+
     async def on_event(self, event: events.Event) -> None:
         # App.on_event is the earliest point a Key/Mouse/Paste event passes
         # through before Textual forwards it to whatever currently has focus
@@ -2046,7 +2136,39 @@ class TextualTui(App[None]):
             and overlays.event_is_stale(event.time)
         ):
             return
-        await super().on_event(event)
+        category = self._input_event_category(event) if self._diagnostics is not None else None
+        if category is None:
+            await super().on_event(event)
+            return
+        event_identity = id(event)
+        event_token = (category, event.time)
+        if (
+            event_identity in self._diagnostic_input_events
+            or event_token in self._pending_input_tokens
+        ):
+            await super().on_event(event)
+            return
+        received_at = perf_counter()
+        self._diagnostic_input_events.add(event_identity)
+        self._pending_input_tokens.add(event_token)
+        try:
+            await super().on_event(event)
+        except BaseException:
+            self._pending_input_tokens.discard(event_token)
+            raise
+        finally:
+            self._diagnostic_input_events.discard(event_identity)
+        if len(self._pending_input_latency) >= self._MAX_PENDING_INPUT_DIAGNOSTICS:
+            discarded = self._pending_input_latency.pop(0)
+            self._pending_input_tokens.discard((discarded.category, discarded.event_time))
+        self._pending_input_latency.append(
+            _PendingInputLatency(
+                category=category,
+                event_time=event.time,
+                received_at=received_at,
+                handled_at=perf_counter(),
+            )
+        )
 
     def _suggestion_menu_is_open(self) -> bool:
         return bool(

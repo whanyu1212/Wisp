@@ -11,7 +11,11 @@ from textual.geometry import Region
 from textual.strip import Strip
 
 from wisp.events import ToolCallRequested, ToolResultReady
-from wisp.tui.diagnostics import DisplayUpdateDiagnostic, MarkdownDrainDiagnostic
+from wisp.tui.diagnostics import (
+    DisplayUpdateDiagnostic,
+    InputLatencyDiagnostic,
+    MarkdownDrainDiagnostic,
+)
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.textual_app import _DisplayedFrame, create_textual_tui
 from wisp.tui.textual_renderer import TextualTuiRenderer
@@ -24,6 +28,7 @@ pytestmark = pytest.mark.tui
 class _Diagnostics:
     markdown: list[MarkdownDrainDiagnostic] = field(default_factory=list)
     display: list[DisplayUpdateDiagnostic] = field(default_factory=list)
+    input_latency: list[InputLatencyDiagnostic] = field(default_factory=list)
 
     def record_markdown_drain(self, diagnostic: MarkdownDrainDiagnostic) -> None:
         self.markdown.append(diagnostic)
@@ -31,12 +36,18 @@ class _Diagnostics:
     def record_display_update(self, diagnostic: DisplayUpdateDiagnostic) -> None:
         self.display.append(diagnostic)
 
+    def record_input_latency(self, diagnostic: InputLatencyDiagnostic) -> None:
+        self.input_latency.append(diagnostic)
+
 
 class _FailingDiagnostics:
     def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
         raise RuntimeError("diagnostic sink failed")
 
     def record_display_update(self, _diagnostic: DisplayUpdateDiagnostic) -> None:
+        raise RuntimeError("diagnostic sink failed")
+
+    def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
         raise RuntimeError("diagnostic sink failed")
 
 
@@ -71,6 +82,36 @@ def test_tui_diagnostics_report_only_numeric_stream_metadata() -> None:
     assert all(
         not hasattr(item, "source") for item in (*diagnostics.markdown, *diagnostics.display)
     )
+
+
+def test_input_diagnostics_measure_handler_queue_and_first_display_without_values() -> None:
+    async def scenario() -> _Diagnostics:
+        diagnostics = _Diagnostics()
+        app, _renderer = create_textual_tui(diagnostics=diagnostics)
+        async with app.run_test() as pilot:
+            await pilot.press(*"private-input")
+            await pilot.pause()
+            await pilot.press("left")
+            await pilot.pause()
+        return diagnostics
+
+    diagnostics = anyio.run(scenario)
+
+    assert [sample.category for sample in diagnostics.input_latency] == [
+        *("typing" for _ in "private-input"),
+        "cursor",
+    ]
+    for sample in diagnostics.input_latency:
+        assert sample.handler_seconds >= 0
+        assert sample.queued_seconds >= 0
+        assert sample.display_seconds >= 0
+        assert sample.total_seconds >= (
+            sample.handler_seconds + sample.queued_seconds + sample.display_seconds
+        )
+        assert sample.display_kind in {"layout", "chops", "other"}
+        assert not hasattr(sample, "key")
+        assert not hasattr(sample, "value")
+        assert not hasattr(sample, "content")
 
 
 def test_display_diagnostics_report_exact_suppression_and_fail_open(

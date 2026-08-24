@@ -118,6 +118,31 @@ distinguish hidden intermediate compositor work from a paint attempted while pre
 unsettled. A zero
 settled Markdown count is valid when Textual reuses prior measurements during the measured phase.
 
+## TUI Interactive Input Latency
+
+Measure the interval from Textual receiving an interactive event through its handler, queued
+framework work, and the first subsequently emitted terminal frame, under both idle and sustained
+assistant-stream conditions:
+
+```bash
+uv run python -m benchmarks.tui_input_latency --runs 5 \
+  --output profiles/tui-input-latency.json
+```
+
+The scenario covers typing, cursor movement, PageUp and wheel navigation, active-run submission,
+approval selection, and cancellation. It reports separate `handler`, `queued`, `display`, and `total`
+distributions for each input category and condition. The benchmark alternates idle/streaming order
+between runs to reduce order bias. It uses the production `TextualTui.on_event`, Markdown stream
+controller, transcript, decision panel, and display boundary; it does not use a synthetic latency
+threshold.
+
+Input diagnostics are opt-in and privacy-safe: samples contain only a coarse event category,
+durations, and display-update kind. They never retain key values, pasted text, prompt content,
+coordinates, paths, tool payloads, or session identifiers. Multiple input events may settle against
+the same first subsequent frame, which reflects what the terminal can actually make visible.
+Machine-specific values are evidence for same-environment before/after comparisons, not portable CI
+limits.
+
 Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
 Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
 rather than promoting one run to a portable threshold. An attempted update is a call into the app's
