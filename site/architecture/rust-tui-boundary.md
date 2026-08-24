@@ -62,8 +62,9 @@ frontend reaches parity.
 
 ```mermaid
 flowchart LR
-  Launcher[Python launcher] -->|exact frontend and backend command,<br/>trusted startup environment| Rust[Rust terminal frontend]
-  Rust -->|spawns and owns| Backend[Python JSONL-RPC backend]
+  Launcher[Python launcher] -->|starts and supervises| Rust[Rust terminal frontend]
+  Launcher -.->|shared killable process group or job| Backend[Python JSONL-RPC backend]
+  Rust -->|spawns for graceful protocol ownership| Backend
   Rust <-->|negotiated, bounded JSONL-RPC| Backend
   Backend --> Host[RPC command host]
   Host --> Session[CodingSession]
@@ -73,8 +74,11 @@ flowchart LR
 
 The Python launcher remains the trusted entrypoint. It resolves the selected renderer, chooses a
 compatible bundled Rust binary, supplies the exact Python interpreter and backend command, and
-passes only the required startup environment. After that handoff, Rust owns the backend child
-process and the terminal lifecycle for that invocation.
+passes only the required startup environment. Rust owns graceful backend protocol shutdown and the
+terminal lifecycle after handoff. The launcher remains alive as an external supervisor and places
+the frontend and backend in one OS-level cleanup boundary, such as a process group or job. If Rust
+cannot unwind, the launcher must detect its exit, restore a known terminal baseline, and terminate
+the entire boundary within a fixed deadline. Backend stdin reaching EOF is not a cleanup guarantee.
 
 Textual remains a separate, supported path through the same Python runtime. Explicit Rust selection
 that cannot start because the binary is missing, incompatible, or fails during negotiation returns
@@ -106,6 +110,7 @@ Textual, and any future automatic fallback policy requires the rollout decision 
 | Markdown, syntax, diff, and tool-card presentation | Rust | All untrusted data is bounded and terminal-sanitized. |
 | Themes, keymaps, layout, and other presentation preferences | Rust | Preferences cannot alter backend behavior or become session authority. |
 | Rust binary selection and backend command construction | Python launcher | Rust does not discover an arbitrary interpreter or rebuild trusted arguments. |
+| Invocation supervision and fail-safe cleanup | Python launcher and OS supervision primitive | Rust attempts graceful shutdown; the launcher terminates the shared process group or job when Rust cannot unwind. |
 | Textual TUI | Python fallback | It remains supported until a later explicit decision. |
 
 ## Migration map for the current TUI
@@ -115,7 +120,7 @@ module graph or translate Textual widgets line by line.
 
 | Current responsibility | Current location | Target disposition |
 |---|---|---|
-| Preflight, trusted configuration, backend argv/environment, renderer selection | `tui/launch.py`, `tui/app.py` | Retain in the Python launcher. Add the Rust handoff later without moving trust resolution into Rust. |
+| Preflight, trusted configuration, backend argv/environment, renderer selection, external supervision | `tui/launch.py`, `tui/app.py` | Retain in the Python launcher. Add a shared killable process boundary for Rust and its backend without moving trust resolution into Rust. |
 | Input/event coordination, command correlation, visible status, pending local submissions | `tui/shell.py`, `tui/state.py` | Reimplement as a terminal-independent Rust reducer driven by local actions and typed events. Python queue/run state remains authoritative. |
 | Session catalog, selection, history hydration, paging, detail lookup | `tui/shell.py`, `tui/history.py` | Port client correlation and viewport projection. Continue loading and validating durable state through Python RPC. |
 | Slash-command parsing and command catalog | `tui/commands.py`, `tui/shell.py` | Rust owns local dispatch and presentation; executable command metadata comes from Python. Local-only actions such as help and theme remain frontend-owned. |
@@ -176,17 +181,18 @@ This decision fixes their ownership, not their final wire representation. See
 | Failure or transition | Required owner and outcome |
 |---|---|
 | Rust binary missing or incompatible | The Python launcher reports an actionable non-zero failure for explicit Rust selection. Textual remains explicitly selectable. |
-| Backend spawn failure | Rust restores the terminal, reports the sanitized spawn failure, and exits non-zero. |
+| Backend spawn failure | Rust restores the terminal and reports the sanitized failure; the launcher verifies the supervised boundary is empty and exits non-zero. |
 | Protocol version mismatch | Negotiation fails before ordinary commands or terminal interaction; neither side continues optimistically. |
 | Backend exits or stdout closes | Rust stops accepting commands, preserves any bounded partial presentation, restores the terminal, and reports truthful status. |
 | Broken stdin pipe | Rust treats the backend as unavailable, stops writes, and begins bounded cleanup. |
-| Rust panic or unexpected exit | Panic handling restores terminal state where possible; backend ownership ensures graceful shutdown followed by bounded termination. |
-| Interrupt, termination signal, or normal quit | Rust owns terminal restoration and backend shutdown after handoff. The launcher propagates a truthful outcome. |
+| Rust panic, abort, or abrupt kill | Rust cleanup is best-effort only. The launcher observes the exit, restores a known terminal baseline, and terminates the shared process group or job within a fixed deadline, including the backend. |
+| Interrupt, termination signal, or normal quit | Rust attempts terminal restoration and graceful backend shutdown. The launcher enforces the cleanup deadline and propagates a truthful outcome. |
 | Failed update or restart | Python reports failure without leaving a mixed-version process pair. The user retains an explicit Textual path. |
 | Textual failure | Existing Python cleanup and RPC ownership remain unchanged by the Rust experiment. |
 
-Later implementation issues define exact timeouts and exit codes, but they may not transfer semantic
-authority or permit unbounded cleanup.
+Later implementation issues define exact timeouts, exit codes, and platform primitives, but they may
+not rely on frontend destructors or backend EOF for fail-safe cleanup, transfer semantic authority,
+or permit unbounded cleanup.
 
 ## Relationship to existing work
 

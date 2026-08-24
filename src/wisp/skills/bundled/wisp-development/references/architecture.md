@@ -47,6 +47,11 @@ JSON-serializable commands and events; it does not read session JSONL, credentia
 policy directly. Python loads historical durable formats and emits current live snapshots. Protocol
 types are generated from Python rather than maintained as a handwritten Rust schema.
 
+The Python launcher remains an external supervisor for a Rust invocation. Rust owns graceful RPC
+shutdown, but the launcher and an OS-level process group or job must terminate the Python backend
+within a fixed deadline when Rust panics, aborts, or is killed. Backend stdin reaching EOF and Rust
+destructors are not fail-safe cleanup mechanisms.
+
 Keep untrusted output bounded and terminal-safe. A frontend may choose presentation, but it must not
 reconstruct runtime or safety policy from formatted output. Textual remains a supported fallback;
 making Rust the default or removing Textual requires a later evidence-backed decision.
