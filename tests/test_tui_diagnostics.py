@@ -186,7 +186,14 @@ def test_input_diagnostics_classify_contextual_key_actions(
                 )
 
             assert app._input_event_category(wheel(transcript)) == "wheel"
+            assert app._jump_to_latest is not None
+            assert app._input_event_category(wheel(app._jump_to_latest)) == "wheel"
             assert app._input_event_category(wheel(app.query_one("#theme-picker"))) is None
+            app.action_toggle_contextual_help()
+            await pilot.pause()
+            assert app._input_event_category(events.Key("pageup", None)) is None
+            app.action_toggle_contextual_help()
+            await pilot.pause()
             card = ToolCard("read", {"path": "README.md"})
             card.set_state("done", detail="complete", full_output="complete")
             await transcript.mount_message(card)

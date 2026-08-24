@@ -2076,15 +2076,9 @@ class TextualTui(App[None]):
     def _input_event_category(self, event: events.Event) -> InputEventCategory | None:
         """Classify interactive input without retaining its value or coordinates."""
 
-        if isinstance(
-            event,
-            (
-                events.MouseScrollUp,
-                events.MouseScrollDown,
-                events.MouseScrollLeft,
-                events.MouseScrollRight,
-            ),
-        ):
+        if isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)):
+            return "wheel" if self._wheel_event_targets_transcript(event) else None
+        if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
             target: object | None = event.widget
             while isinstance(target, Widget):
                 if target is self._transcript:
@@ -2106,6 +2100,8 @@ class TextualTui(App[None]):
             "pageup",
             "pagedown",
         }:
+            return None
+        if key in {"home", "end", "pageup", "pagedown"} and self._help_key_panel() is not None:
             return None
         decision_panel = self._decision_panel
         if decision_panel is not None and decision_panel.display and key in _DECISION_INPUT_KEYS:
