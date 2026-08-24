@@ -269,6 +269,8 @@ async def _exercise_inputs(
     await asyncio.sleep(delay)
     await pilot.press("pageup")
     await asyncio.sleep(delay)
+    await pilot.pause()
+    page_up_following = transcript.is_following
     origin = transcript.region.offset
     wheel = events.MouseScrollUp(
         widget=transcript,
@@ -287,7 +289,10 @@ async def _exercise_inputs(
     await app.on_event(wheel)
     await asyncio.sleep(delay)
     await pilot.pause()
-    reader_remained_parked = not transcript.is_following
+    reader_remained_parked = _reader_remained_parked(
+        page_up_following=page_up_following,
+        wheel_following=transcript.is_following,
+    )
     transcript.scroll_end(animate=False)
     await pilot.pause()
     input_widget.value = "steer benchmark"
@@ -311,6 +316,10 @@ async def _exercise_inputs(
     renderer.cancelling("benchmark cancellation requested")
     await pilot.pause()
     return reader_remained_parked
+
+
+def _reader_remained_parked(*, page_up_following: bool, wheel_following: bool) -> bool:
+    return not page_up_following and not wheel_following
 
 
 def _summarize(samples: Sequence[InputLatencySample]) -> tuple[InputLatencySummary, ...]:

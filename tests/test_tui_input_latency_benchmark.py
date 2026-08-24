@@ -4,7 +4,12 @@ import anyio
 import pytest
 from textual import events
 
-from benchmarks.tui_input_latency import BenchmarkConfig, _summarize, run_benchmark
+from benchmarks.tui_input_latency import (
+    BenchmarkConfig,
+    _reader_remained_parked,
+    _summarize,
+    run_benchmark,
+)
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.widgets import DecisionPanel
@@ -147,6 +152,29 @@ def test_tui_input_latency_keeps_streaming_and_closes_approval_before_cancellati
 
 def test_tui_input_latency_summary_omits_categories_without_samples() -> None:
     assert _summarize(()) == ()
+
+
+@pytest.mark.parametrize(
+    ("page_up_following", "wheel_following", "expected"),
+    [
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+    ],
+)
+def test_tui_input_latency_requires_both_navigation_gestures_to_remain_parked(
+    page_up_following: bool,
+    wheel_following: bool,
+    expected: bool,
+) -> None:
+    assert (
+        _reader_remained_parked(
+            page_up_following=page_up_following,
+            wheel_following=wheel_following,
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(
