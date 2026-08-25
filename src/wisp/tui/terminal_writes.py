@@ -196,6 +196,11 @@ class TerminalWriteObserver:
             ),
         )
 
+    def discard_deferred_frames(self) -> None:
+        """Discard headless frames captured outside the measured phase."""
+
+        self._deferred_frames = []
+
     def flush_deferred_frames(self) -> None:
         """Render and publish deferred headless models outside benchmark timing."""
 

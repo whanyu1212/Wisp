@@ -665,6 +665,13 @@ class TextualTui(App[None]):
                 )
         return display_started, displayed_at
 
+    def discard_deferred_terminal_write_diagnostics(self) -> None:
+        """Discard benchmark-only headless models captured during setup."""
+
+        observer = self._terminal_writes
+        if observer is not None:
+            observer.discard_deferred_frames()
+
     def flush_deferred_terminal_write_diagnostics(self) -> None:
         """Publish benchmark-only headless write models outside measured work."""
 
@@ -1016,12 +1023,15 @@ class TextualTui(App[None]):
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
+        terminal_write_recorder = (
+            getattr(diagnostics, "record_terminal_write", None) if diagnostics is not None else None
+        )
         self._terminal_writes = (
             TerminalWriteObserver(
                 diagnostics,
                 defer_headless_models=defer_headless_terminal_write_models,
             )
-            if diagnostics is not None
+            if diagnostics is not None and callable(terminal_write_recorder)
             else None
         )
         self._pending_input_latency: list[_PendingInputLatency] = []

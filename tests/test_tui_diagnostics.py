@@ -753,14 +753,21 @@ def test_headless_write_model_chunks_windows_payloads_by_character_count() -> No
     assert sample.windows_chunk_count == 1
 
 
-def test_headless_write_model_can_be_deferred_until_timing_stops() -> None:
+def test_headless_write_model_discards_setup_before_deferred_measurement() -> None:
     from wisp.tui.terminal_writes import TerminalWriteObserver
 
     diagnostics = _Diagnostics()
     observer = TerminalWriteObserver(diagnostics, defer_headless_models=True)
     observer.begin_frame(None)
     observer.finish_frame(
-        "deferred",
+        "setup",
+        sync_available=False,
+        console=Console(color_system=None),
+    )
+    observer.discard_deferred_frames()
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "measured",
         sync_available=False,
         console=Console(color_system=None),
     )
@@ -769,9 +776,25 @@ def test_headless_write_model_can_be_deferred_until_timing_stops() -> None:
     observer.flush_deferred_frames()
 
     [sample] = diagnostics.terminal_writes
-    assert sample.payload_bytes > 0
+    assert sample.payload_bytes == len(b"measured\n")
     assert sample.posix_write_count == 1
     assert not sample.observed_driver
+
+
+def test_terminal_write_observer_requires_sink_opt_in() -> None:
+    class DisplayOnlyDiagnostics:
+        def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
+            return
+
+        def record_display_update(self, _diagnostic: DisplayUpdateDiagnostic) -> None:
+            return
+
+        def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
+            return
+
+    app, _renderer = create_textual_tui(diagnostics=DisplayOnlyDiagnostics())
+
+    assert app._terminal_writes is None
 
 
 def test_headless_display_reports_a_write_model_without_a_live_driver(

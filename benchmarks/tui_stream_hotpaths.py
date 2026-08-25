@@ -593,6 +593,7 @@ async def _measure_stream(
         _heartbeat(config.heartbeat_interval_seconds, heartbeat_stopped, heartbeat_delays)
     )
     await asyncio.sleep(0)
+    app.discard_deferred_terminal_write_diagnostics()
     started = time.perf_counter_ns()
     started_cpu = time.process_time_ns()
     try:
