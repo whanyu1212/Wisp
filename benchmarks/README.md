@@ -156,8 +156,8 @@ uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
   --messages 20 --retained-history 10 --stream-chunks 12 \
   --stream-interval-seconds 0.03 --width 100 --height 24 \
   --pending-tool-cards 2 \
-  --emulator-label "iTerm2 3.5 / macOS 26.5.2 / direct" \
-  --output profiles/tui-terminal-frames-iterm2.json
+  --emulator-label "Apple Terminal 2.15 / macOS 26.5.2 / direct" \
+  --output profiles/tui-terminal-frames-apple-terminal.json
 ```
 
 Native mode requires an interactive terminal and lets that emulator answer Textual's query. It waits
