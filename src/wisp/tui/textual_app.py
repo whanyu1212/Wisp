@@ -650,6 +650,7 @@ class TextualTui(App[None]):
         """Emit one Textual frame and observe writes after the latency clock stops."""
 
         observer = self._terminal_writes
+        model_headless_frame = self.is_headless and not self._batch_count
         if observer is not None:
             observer.begin_frame(getattr(self, "_driver", None))
         display_started = perf_counter()
@@ -660,7 +661,7 @@ class TextualTui(App[None]):
             if observer is not None:
                 observer.finish_frame(
                     renderable,
-                    headless=self.is_headless,
+                    headless=model_headless_frame,
                     sync_available=bool(getattr(self, "_sync_available", False)),
                     console=self.console,
                 )

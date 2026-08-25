@@ -845,6 +845,35 @@ def test_headless_display_reports_a_write_model_without_a_live_driver(
     assert not hasattr(sample, "text")
 
 
+def test_headless_batched_display_does_not_synthesize_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics = _Diagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+
+    def discard_display(
+        _app: App[object],
+        _screen: object,
+        _renderable: object,
+    ) -> None:
+        return
+
+    monkeypatch.setattr(App, "_display", discard_display)
+
+    async def scenario() -> None:
+        async with app.run_test():
+            diagnostics.terminal_writes.clear()
+            app._batch_count += 1
+            try:
+                app._display(app.screen, "suppressed")
+            finally:
+                app._batch_count -= 1
+
+    anyio.run(scenario)
+
+    assert diagnostics.terminal_writes == []
+
+
 def test_silent_live_driver_does_not_synthesize_headless_writes() -> None:
     from wisp.tui.terminal_writes import TerminalWriteObserver
 
