@@ -131,6 +131,47 @@ attribution evidence for #443, not a reason to emit synchronized-output sequence
 Compare them only on the same machine and treat them as before/after evidence for a later
 prototype, not as portable CI limits.
 
+## TUI Live Terminal Frames
+
+Exercise the same Wisp display boundary through a real terminal driver instead of the headless
+write model:
+
+```bash
+uv run python -m benchmarks.tui_terminal_frames --mode paired --runs 3 \
+  --output profiles/tui-terminal-frames-paired.json
+```
+
+Paired mode is POSIX-only. It launches each workload under a fixed-size pseudo-terminal, waits for
+Textual's real `CSI ? 2026 $ p` capability query, and rotates two modes between runs. The unsupported
+mode leaves the query unanswered; the supported mode returns the standard
+`CSI ? 2026 ; 1 $ y` report. It never assigns Textual's private capability flag directly. A control
+pipe starts fixture setup only after negotiation, while child results use a separate file so terminal
+bytes never enter report JSON.
+
+Use native mode in each representative emulator to confirm capability detection and observe visual
+flicker directly:
+
+```bash
+uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
+  --emulator-label "iTerm2 3.5" \
+  --output profiles/tui-terminal-frames-iterm2.json
+```
+
+Native mode requires an interactive terminal and lets that emulator answer Textual's query. It waits
+until support is detected or `--negotiation-timeout-seconds` expires before collecting frames. Reports
+contain only environment metadata, display/cache counts, payload sizes, write/flush counts,
+frame-level synchronization balance, and coarse out-of-band classes. The PTY reader keeps only a
+short control-sequence tail and discards terminal payload bytes. Paired reports additionally count
+process-wide begin/end controls from startup through restored shutdown.
+
+Counts demonstrate whether intermediate writes are exposed; they do not by themselves prove a
+perceptual flicker improvement. Compare native runs on the same machine, record the emulator version
+and multiplexer, and keep manual observations separate from automated framing evidence. Windows does
+not use the POSIX paired harness and must be covered through a native Windows Terminal run.
+
+See `benchmarks/tui_terminal_frames_evidence.md` for the current automated table, manual emulator
+matrix, and the decision gate for #443.
+
 ## TUI Interactive Input Latency
 
 Measure the interval from Textual receiving an interactive event through its handler, queued

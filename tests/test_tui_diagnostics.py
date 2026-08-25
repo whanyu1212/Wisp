@@ -936,6 +936,29 @@ def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> N
     assert not sample.out_of_band
 
 
+def test_observer_rejects_end_before_begin_as_an_exact_sync_pair() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    driver = _FakeDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.begin_frame(driver)
+    driver.write("\x1b[?2026l")
+    driver.write("\x1b[?2026h")
+    driver.write("payload")
+    observer.finish_frame(
+        object(),
+        headless=False,
+        sync_available=True,
+        console=_write_console(),
+    )
+
+    sample = diagnostics.terminal_writes[-1]
+    assert sample.sync_begin_count == 1
+    assert sample.sync_end_count == 1
+    assert not sample.sync_order_valid
+
+
 def test_observer_restores_driver_when_write_raises() -> None:
     from wisp.tui.terminal_writes import TerminalWriteObserver
 
@@ -1016,6 +1039,7 @@ def test_record_terminal_write_is_optional_and_isolates_sink_failures() -> None:
         windows_chunk_count=1,
         sync_begin_count=0,
         sync_end_count=0,
+        sync_order_valid=True,
         writes_inside_sync=0,
         writes_outside_sync=1,
         observed_driver=False,
