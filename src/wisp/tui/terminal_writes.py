@@ -191,6 +191,7 @@ class TerminalWriteObserver:
                 windows_chunk_count=windows_chunk_count(self._payload_write_characters),
                 sync_begin_count=self._sync_begin_count,
                 sync_end_count=self._sync_end_count,
+                sync_order_valid=self._sync_order_valid and self._sync_depth == 0,
                 writes_inside_sync=self._writes_inside_sync,
                 writes_outside_sync=self._writes_outside_sync,
                 observed_driver=True,
@@ -238,6 +239,7 @@ class TerminalWriteObserver:
                 windows_chunk_count=windows_chunk_count(payload_characters),
                 sync_begin_count=0,
                 sync_end_count=0,
+                sync_order_valid=True,
                 writes_inside_sync=0,
                 writes_outside_sync=posix_writes,
                 observed_driver=False,
@@ -251,6 +253,7 @@ class TerminalWriteObserver:
         self._flush_count = 0
         self._sync_begin_count = 0
         self._sync_end_count = 0
+        self._sync_order_valid = True
         self._writes_inside_sync = 0
         self._writes_outside_sync = 0
         self._sync_depth = 0
@@ -287,7 +290,10 @@ class TerminalWriteObserver:
             return
         if kind == "sync_end":
             self._sync_end_count += 1
-            self._sync_depth = max(0, self._sync_depth - 1)
+            if self._sync_depth == 0:
+                self._sync_order_valid = False
+            else:
+                self._sync_depth -= 1
             return
         if self._sync_depth > 0:
             self._writes_inside_sync += 1
@@ -316,6 +322,7 @@ class TerminalWriteObserver:
                 windows_chunk_count=0,
                 sync_begin_count=1 if kind == "sync_begin" else 0,
                 sync_end_count=1 if kind == "sync_end" else 0,
+                sync_order_valid=kind not in ("sync_begin", "sync_end"),
                 writes_inside_sync=0,
                 writes_outside_sync=1,
                 observed_driver=True,

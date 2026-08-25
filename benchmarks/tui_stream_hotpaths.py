@@ -278,7 +278,10 @@ class _HotpathCollector:
         if diagnostic.sync_available:
             self.sync_available_frame_count += 1
         if diagnostic.sync_begin_count or diagnostic.sync_end_count:
-            if diagnostic.sync_begin_count == diagnostic.sync_end_count:
+            if (
+                diagnostic.sync_begin_count == diagnostic.sync_end_count
+                and diagnostic.sync_order_valid
+            ):
                 self.sync_balanced_frame_count += 1
             else:
                 self.sync_unbalanced_frame_count += 1

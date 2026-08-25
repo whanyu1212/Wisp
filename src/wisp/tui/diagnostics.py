@@ -92,6 +92,7 @@ class TerminalWriteDiagnostic:
     windows_chunk_count: int
     sync_begin_count: int
     sync_end_count: int
+    sync_order_valid: bool
     writes_inside_sync: int
     writes_outside_sync: int
     observed_driver: bool

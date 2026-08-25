@@ -179,9 +179,14 @@ class _FrameCollector:
         self.terminal_flush_count += diagnostic.flush_count
         self.writes_inside_sync += diagnostic.writes_inside_sync
         self.writes_outside_sync += diagnostic.writes_outside_sync
-        if diagnostic.sync_begin_count == 1 and diagnostic.sync_end_count == 1:
+        has_sync_controls = bool(diagnostic.sync_begin_count or diagnostic.sync_end_count)
+        if (
+            diagnostic.sync_begin_count == 1
+            and diagnostic.sync_end_count == 1
+            and diagnostic.sync_order_valid
+        ):
             self.exact_sync_pair_frame_count += 1
-        elif diagnostic.sync_begin_count != diagnostic.sync_end_count:
+        elif has_sync_controls:
             self.unbalanced_sync_frame_count += 1
 
 
@@ -192,26 +197,54 @@ class _SequenceCounter:
         self.query_count = 0
         self.sync_begin_count = 0
         self.sync_end_count = 0
+        self.sync_order_valid = True
+        self._sync_depth = 0
         self._tail = b""
+
+    @property
+    def sync_balanced(self) -> bool:
+        return (
+            self.sync_order_valid
+            and self._sync_depth == 0
+            and self.sync_begin_count == self.sync_end_count
+        )
 
     def feed(self, data: bytes) -> None:
         prefix_size = len(self._tail)
         combined = self._tail + data
-        self.query_count += _new_sequence_count(combined, _MODE_QUERY, prefix_size)
-        self.sync_begin_count += _new_sequence_count(combined, _SYNC_START, prefix_size)
-        self.sync_end_count += _new_sequence_count(combined, _SYNC_END, prefix_size)
+        self.query_count += len(_new_sequence_offsets(combined, _MODE_QUERY, prefix_size))
+        sync_controls = [
+            *(
+                (offset, "begin")
+                for offset in _new_sequence_offsets(combined, _SYNC_START, prefix_size)
+            ),
+            *(
+                (offset, "end")
+                for offset in _new_sequence_offsets(combined, _SYNC_END, prefix_size)
+            ),
+        ]
+        for _offset, kind in sorted(sync_controls):
+            if kind == "begin":
+                self.sync_begin_count += 1
+                self._sync_depth += 1
+            else:
+                self.sync_end_count += 1
+                if self._sync_depth == 0:
+                    self.sync_order_valid = False
+                else:
+                    self._sync_depth -= 1
         self._tail = combined[-_SEQUENCE_TAIL_BYTES:]
 
 
-def _new_sequence_count(data: bytes, sequence: bytes, prefix_size: int) -> int:
-    count = 0
+def _new_sequence_offsets(data: bytes, sequence: bytes, prefix_size: int) -> list[int]:
+    offsets = []
     start = 0
     while True:
         index = data.find(sequence, start)
         if index < 0:
-            return count
+            return offsets
         if index + len(sequence) > prefix_size:
-            count += 1
+            offsets.append(index)
         start = index + len(sequence)
 
 
@@ -268,13 +301,12 @@ async def _wait_for_capability_state(
     timeout: float,
 ) -> None:
     if mode in ("supported", "native"):
-        if mode == "native":
-            await asyncio.sleep(0.25)
-            return
         deadline = asyncio.get_running_loop().time() + timeout
         while not bool(getattr(app, "_sync_available", False)):
             if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError("Textual did not accept the synchronized-output response")
+                if mode == "supported":
+                    raise TimeoutError("Textual did not accept the synchronized-output response")
+                return
             await asyncio.sleep(0.01)
     else:
         await asyncio.sleep(0.05)
@@ -552,7 +584,7 @@ def _run_pty_sample(
         capability_response_supplied=mode == "supported",
         process_sync_begin_count=counter.sync_begin_count,
         process_sync_end_count=counter.sync_end_count,
-        process_sync_balanced=counter.sync_begin_count == counter.sync_end_count,
+        process_sync_balanced=counter.sync_balanced,
     )
 
 

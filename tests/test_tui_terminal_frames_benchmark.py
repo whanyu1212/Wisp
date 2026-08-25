@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import os
@@ -14,12 +15,16 @@ from benchmarks.tui_terminal_frames import (
     _SYNC_START,
     TerminalFrameConfig,
     _fixture_history_entry_capacity,
+    _FrameCollector,
     _read_pty_process,
     _rotated_modes,
     _SequenceCounter,
     _validate_config,
+    _wait_for_capability_state,
     run_paired_benchmark,
 )
+from wisp.tui.diagnostics import TerminalWriteDiagnostic
+from wisp.tui.textual_app import TextualTui
 
 pytestmark = pytest.mark.benchmark
 
@@ -48,6 +53,76 @@ def test_sequence_counter_does_not_recount_complete_tail_sequences() -> None:
 
     assert counter.sync_begin_count == 1
     assert counter.sync_end_count == 1
+    assert counter.sync_balanced
+
+
+def test_sequence_counter_rejects_end_before_begin() -> None:
+    counter = _SequenceCounter()
+
+    counter.feed(_SYNC_END + _SYNC_START)
+
+    assert counter.sync_begin_count == 1
+    assert counter.sync_end_count == 1
+    assert not counter.sync_order_valid
+    assert not counter.sync_balanced
+
+
+def test_native_capability_wait_uses_configured_negotiation_window() -> None:
+    class FakeApp:
+        _sync_available = False
+
+    app = FakeApp()
+
+    async def scenario() -> float:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        async def enable_support() -> None:
+            await asyncio.sleep(0.3)
+            app._sync_available = True
+
+        task = asyncio.create_task(enable_support())
+        await _wait_for_capability_state(
+            cast(TextualTui, app),
+            mode="native",
+            timeout=0.5,
+        )
+        wait_elapsed = loop.time() - started
+        await task
+        return wait_elapsed
+
+    elapsed = asyncio.run(scenario())
+
+    assert app._sync_available
+    assert elapsed >= 0.3
+    assert elapsed < 0.5
+
+
+def test_terminal_frame_collector_rejects_misordered_exact_pair() -> None:
+    collector = _FrameCollector(collecting=True)
+    collector.record_terminal_write(
+        TerminalWriteDiagnostic(
+            display_kind="other",
+            sync_available=True,
+            write_count=3,
+            flush_count=1,
+            payload_bytes=7,
+            max_write_bytes=7,
+            posix_write_count=1,
+            windows_chunk_count=1,
+            sync_begin_count=1,
+            sync_end_count=1,
+            sync_order_valid=False,
+            writes_inside_sync=1,
+            writes_outside_sync=0,
+            observed_driver=True,
+            out_of_band=False,
+            out_of_band_kind=None,
+        )
+    )
+
+    assert collector.exact_sync_pair_frame_count == 0
+    assert collector.unbalanced_sync_frame_count == 1
 
 
 def test_terminal_frame_fixture_capacity_accounts_for_collapsed_tool_pairs() -> None:

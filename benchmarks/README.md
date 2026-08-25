@@ -157,7 +157,8 @@ uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
   --output profiles/tui-terminal-frames-iterm2.json
 ```
 
-Native mode requires an interactive terminal and lets that emulator answer Textual's query. Reports
+Native mode requires an interactive terminal and lets that emulator answer Textual's query. It waits
+until support is detected or `--negotiation-timeout-seconds` expires before collecting frames. Reports
 contain only environment metadata, display/cache counts, payload sizes, write/flush counts,
 frame-level synchronization balance, and coarse out-of-band classes. The PTY reader keeps only a
 short control-sequence tail and discards terminal payload bytes. Paired reports additionally count
