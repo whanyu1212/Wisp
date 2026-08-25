@@ -148,6 +148,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.terminal_write_frames >= 1
     assert sample.terminal_payload_bytes >= 0
     assert sample.terminal_write_count >= 0
+    assert sample.posix_write_count >= 1
+    assert sample.windows_chunk_count >= sample.posix_write_count
     assert sample.terminal_flush_count >= 0
     assert sample.terminal_writes_per_displayed_frame == (
         sample.terminal_write_count / sample.displayed_frame_count
@@ -187,6 +189,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     )
     assert summary.terminal_write_frames_median == sample.terminal_write_frames
     assert summary.terminal_payload_bytes_median == sample.terminal_payload_bytes
+    assert summary.posix_write_count_median == sample.posix_write_count
+    assert summary.windows_chunk_count_median == sample.windows_chunk_count
     assert (
         summary.terminal_writes_per_displayed_frame_median
         == sample.terminal_writes_per_displayed_frame
@@ -207,6 +211,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert '"display_frame_fail_open_count":' in payload
     assert '"terminal_write_frames":' in payload
     assert '"terminal_payload_bytes":' in payload
+    assert '"posix_write_count":' in payload
+    assert '"windows_chunk_count":' in payload
     assert '"terminal_writes_per_displayed_frame":' in payload
     assert "\\x1b" not in payload
     assert "\x1b" not in payload

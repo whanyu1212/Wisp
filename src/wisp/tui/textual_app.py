@@ -665,6 +665,13 @@ class TextualTui(App[None]):
                 )
         return display_started, displayed_at
 
+    def flush_deferred_terminal_write_diagnostics(self) -> None:
+        """Publish benchmark-only headless write models outside measured work."""
+
+        observer = self._terminal_writes
+        if observer is not None:
+            observer.flush_deferred_frames()
+
     def _record_display_diagnostic(
         self,
         renderable: RenderableType | None,
@@ -1005,11 +1012,17 @@ class TextualTui(App[None]):
         *,
         protected_paths: tuple[str, ...] | None = None,
         diagnostics: TuiDiagnosticsSink | None = None,
+        defer_headless_terminal_write_models: bool = False,
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
         self._terminal_writes = (
-            TerminalWriteObserver(diagnostics) if diagnostics is not None else None
+            TerminalWriteObserver(
+                diagnostics,
+                defer_headless_models=defer_headless_terminal_write_models,
+            )
+            if diagnostics is not None
+            else None
         )
         self._pending_input_latency: list[_PendingInputLatency] = []
         self._input_priority = InputPriorityPolicy()
@@ -4807,6 +4820,7 @@ def create_textual_tui(
     *,
     protected_paths: tuple[str, ...] | None = None,
     diagnostics: TuiDiagnosticsSink | None = None,
+    defer_headless_terminal_write_models: bool = False,
 ) -> tuple[TextualTui, TuiRenderer]:
     """Create a Textual app and renderer pair for `TuiShell`.
 
@@ -4816,7 +4830,11 @@ def create_textual_tui(
     is an internal, privacy-safe benchmark hook; normal product startup leaves it disabled.
     """
 
-    app = TextualTui(protected_paths=protected_paths, diagnostics=diagnostics)
+    app = TextualTui(
+        protected_paths=protected_paths,
+        diagnostics=diagnostics,
+        defer_headless_terminal_write_models=defer_headless_terminal_write_models,
+    )
     return app, TextualTuiRenderer(app)
 
 

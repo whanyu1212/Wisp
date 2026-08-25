@@ -132,6 +132,8 @@ class StreamHotpathSample:
     terminal_write_frames: int
     terminal_payload_bytes: int
     terminal_write_count: int
+    posix_write_count: int
+    windows_chunk_count: int
     terminal_flush_count: int
     terminal_writes_per_displayed_frame: float
     sync_available_frame_count: int
@@ -169,6 +171,8 @@ class StreamHotpathSummary:
     history_prepend_escaped_update_count_median: float
     terminal_write_frames_median: float
     terminal_payload_bytes_median: float
+    posix_write_count_median: float
+    windows_chunk_count_median: float
     terminal_writes_per_displayed_frame_median: float
     sync_available_frame_count_median: float
     out_of_band_write_count_median: float
@@ -220,6 +224,8 @@ class _HotpathCollector:
     terminal_write_frames: int = 0
     terminal_payload_bytes: int = 0
     terminal_write_count: int = 0
+    posix_write_count: int = 0
+    windows_chunk_count: int = 0
     terminal_flush_count: int = 0
     sync_available_frame_count: int = 0
     sync_balanced_frame_count: int = 0
@@ -266,6 +272,8 @@ class _HotpathCollector:
         self.terminal_write_frames += 1
         self.terminal_payload_bytes += diagnostic.payload_bytes
         self.terminal_write_count += diagnostic.write_count
+        self.posix_write_count += diagnostic.posix_write_count
+        self.windows_chunk_count += diagnostic.windows_chunk_count
         self.terminal_flush_count += diagnostic.flush_count
         if diagnostic.sync_available:
             self.sync_available_frame_count += 1
@@ -488,7 +496,10 @@ async def _run_sample(
             retained_history_entries=retained_history_entries,
         )
         collector = _HotpathCollector()
-        app, renderer = create_textual_tui(diagnostics=collector)
+        app, renderer = create_textual_tui(
+            diagnostics=collector,
+            defer_headless_terminal_write_models=True,
+        )
         assert isinstance(renderer, TextualTuiRenderer)
         async with app.run_test(size=(config.viewport_width, config.viewport_height)) as pilot:
             renderer.replace_history_entries(entries, session_label="Streaming hotpath benchmark")
@@ -600,11 +611,12 @@ async def _measure_stream(
                 if profiler is not None:
                     profiler.disable()
     finally:
-        collector.collecting = False
         stream_cpu_ms = (time.process_time_ns() - started_cpu) / 1_000_000
         heartbeat_stopped.set()
         await heartbeat_task
-    stream_total_ms = _milliseconds(started)
+        stream_total_ms = _milliseconds(started)
+        app.flush_deferred_terminal_write_diagnostics()
+        collector.collecting = False
     if profiler is not None and profile_output is not None:
         profiler.dump_stats(profile_output)
     completed = app.stream_widget_for_completed_message()
@@ -647,6 +659,8 @@ async def _measure_stream(
         terminal_write_frames=collector.terminal_write_frames,
         terminal_payload_bytes=collector.terminal_payload_bytes,
         terminal_write_count=collector.terminal_write_count,
+        posix_write_count=collector.posix_write_count,
+        windows_chunk_count=collector.windows_chunk_count,
         terminal_flush_count=collector.terminal_flush_count,
         terminal_writes_per_displayed_frame=(
             collector.terminal_write_count / collector.displayed_frame_count
@@ -743,6 +757,12 @@ def _summarize(
                 ),
                 terminal_payload_bytes_median=statistics.median(
                     sample.terminal_payload_bytes for sample in selected
+                ),
+                posix_write_count_median=statistics.median(
+                    sample.posix_write_count for sample in selected
+                ),
+                windows_chunk_count_median=statistics.median(
+                    sample.windows_chunk_count for sample in selected
                 ),
                 terminal_writes_per_displayed_frame_median=statistics.median(
                     sample.terminal_writes_per_displayed_frame for sample in selected

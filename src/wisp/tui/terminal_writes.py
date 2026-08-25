@@ -81,8 +81,15 @@ def _payload_sizes_for_renderable(renderable: object, console: Console) -> tuple
 class TerminalWriteObserver:
     """Count driver writes for one diagnostics-enabled Textual app."""
 
-    def __init__(self, sink: TuiDiagnosticsSink) -> None:
+    def __init__(
+        self,
+        sink: TuiDiagnosticsSink,
+        *,
+        defer_headless_models: bool = False,
+    ) -> None:
         self._sink = sink
+        self._defer_headless_models = defer_headless_models
+        self._deferred_frames: list[tuple[object, bool, Console]] = []
         self._driver: object | None = None
         self._original_write: Callable[[str], None] | None = None
         self._original_flush: Callable[[], None] | None = None
@@ -157,25 +164,75 @@ class TerminalWriteObserver:
         observed_driver = self._write_count > 0 or self._flush_count > 0
         if renderable is None and not observed_driver:
             return
-        payload_characters, payload_bytes = _payload_sizes_for_renderable(renderable, console)
-        posix_writes = 1 if payload_bytes else 0
-        write_count = self._write_count if observed_driver else posix_writes
+        if not observed_driver:
+            if self._defer_headless_models:
+                self._deferred_frames.append((renderable, sync_available, console))
+            else:
+                self._record_headless_frame(
+                    renderable,
+                    sync_available=sync_available,
+                    console=console,
+                )
+            return
+        posix_writes = 1 if self._payload_write_bytes else 0
         record_terminal_write(
             self._sink,
             TerminalWriteDiagnostic(
                 display_kind=_display_kind(renderable),
                 sync_available=sync_available,
-                write_count=write_count,
+                write_count=self._write_count,
                 flush_count=self._flush_count,
-                payload_bytes=payload_bytes,
-                max_write_bytes=self._max_payload_write_bytes if observed_driver else payload_bytes,
+                payload_bytes=self._payload_write_bytes,
+                max_write_bytes=self._max_payload_write_bytes,
                 posix_write_count=posix_writes,
-                windows_chunk_count=windows_chunk_count(payload_characters),
+                windows_chunk_count=windows_chunk_count(self._payload_write_characters),
                 sync_begin_count=self._sync_begin_count,
                 sync_end_count=self._sync_end_count,
                 writes_inside_sync=self._writes_inside_sync,
                 writes_outside_sync=self._writes_outside_sync,
-                observed_driver=observed_driver,
+                observed_driver=True,
+                out_of_band=False,
+                out_of_band_kind=None,
+            ),
+        )
+
+    def flush_deferred_frames(self) -> None:
+        """Render and publish deferred headless models outside benchmark timing."""
+
+        deferred_frames = self._deferred_frames
+        self._deferred_frames = []
+        for renderable, sync_available, console in deferred_frames:
+            self._record_headless_frame(
+                renderable,
+                sync_available=sync_available,
+                console=console,
+            )
+
+    def _record_headless_frame(
+        self,
+        renderable: object,
+        *,
+        sync_available: bool,
+        console: Console,
+    ) -> None:
+        payload_characters, payload_bytes = _payload_sizes_for_renderable(renderable, console)
+        posix_writes = 1 if payload_bytes else 0
+        record_terminal_write(
+            self._sink,
+            TerminalWriteDiagnostic(
+                display_kind=_display_kind(renderable),
+                sync_available=sync_available,
+                write_count=posix_writes,
+                flush_count=0,
+                payload_bytes=payload_bytes,
+                max_write_bytes=payload_bytes,
+                posix_write_count=posix_writes,
+                windows_chunk_count=windows_chunk_count(payload_characters),
+                sync_begin_count=0,
+                sync_end_count=0,
+                writes_inside_sync=0,
+                writes_outside_sync=posix_writes,
+                observed_driver=False,
                 out_of_band=False,
                 out_of_band_kind=None,
             ),
@@ -189,6 +246,8 @@ class TerminalWriteObserver:
         self._writes_inside_sync = 0
         self._writes_outside_sync = 0
         self._sync_depth = 0
+        self._payload_write_characters = 0
+        self._payload_write_bytes = 0
         self._max_payload_write_bytes = 0
 
     def _write(self, data: str) -> None:
@@ -227,9 +286,12 @@ class TerminalWriteObserver:
         else:
             self._writes_outside_sync += 1
         if kind == "payload":
+            payload_bytes = len(data.encode("utf-8"))
+            self._payload_write_characters += len(data)
+            self._payload_write_bytes += payload_bytes
             self._max_payload_write_bytes = max(
                 self._max_payload_write_bytes,
-                len(data.encode("utf-8")),
+                payload_bytes,
             )
 
     def _record_out_of_band(self, kind: TerminalWriteClass) -> None:

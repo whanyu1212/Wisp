@@ -753,6 +753,27 @@ def test_headless_write_model_chunks_windows_payloads_by_character_count() -> No
     assert sample.windows_chunk_count == 1
 
 
+def test_headless_write_model_can_be_deferred_until_timing_stops() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    observer = TerminalWriteObserver(diagnostics, defer_headless_models=True)
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "deferred",
+        sync_available=False,
+        console=Console(color_system=None),
+    )
+
+    assert diagnostics.terminal_writes == []
+    observer.flush_deferred_frames()
+
+    [sample] = diagnostics.terminal_writes
+    assert sample.payload_bytes > 0
+    assert sample.posix_write_count == 1
+    assert not sample.observed_driver
+
+
 def test_headless_display_reports_a_write_model_without_a_live_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -814,7 +835,7 @@ def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> N
     driver.write("payload")
     driver.write("\x1b[?2026l")
     driver.flush()
-    observer.finish_frame("frame", sync_available=True, console=_write_console())
+    observer.finish_frame(object(), sync_available=True, console=_write_console())
     observer.detach()
 
     assert getattr(driver.write, "__func__", driver.write) is _FakeDriver.write
@@ -828,6 +849,9 @@ def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> N
     assert sample.sync_available
     assert sample.write_count == 3
     assert sample.flush_count == 1
+    assert sample.payload_bytes == len(b"payload")
+    assert sample.posix_write_count == 1
+    assert sample.windows_chunk_count == 1
     assert sample.sync_begin_count == 1
     assert sample.sync_end_count == 1
     assert sample.writes_inside_sync == 1
