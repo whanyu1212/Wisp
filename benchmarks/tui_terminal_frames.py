@@ -215,6 +215,12 @@ def _new_sequence_count(data: bytes, sequence: bytes, prefix_size: int) -> int:
         start = index + len(sequence)
 
 
+def _fixture_history_entry_capacity(message_count: int) -> int:
+    """Return rendered entries produced by the shared five-message fixture cycle."""
+
+    return message_count - message_count // 5
+
+
 def _validate_config(config: TerminalFrameConfig) -> None:
     positive_integers = (
         config.message_count,
@@ -226,8 +232,11 @@ def _validate_config(config: TerminalFrameConfig) -> None:
     )
     if any(value < 1 for value in positive_integers):
         raise ValueError("message, history, chunk, viewport, and run values must be positive")
-    if config.retained_history_entries > config.message_count:
-        raise ValueError("retained history must not exceed message count")
+    history_capacity = _fixture_history_entry_capacity(config.message_count)
+    if config.retained_history_entries > history_capacity:
+        raise ValueError(
+            f"retained history must not exceed the fixture's {history_capacity} rendered entries"
+        )
     if config.stream_interval_seconds <= 0:
         raise ValueError("stream interval must be positive")
     if config.pending_tool_cards < 0:

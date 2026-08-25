@@ -13,6 +13,7 @@ from benchmarks.tui_terminal_frames import (
     _SYNC_END,
     _SYNC_START,
     TerminalFrameConfig,
+    _fixture_history_entry_capacity,
     _read_pty_process,
     _rotated_modes,
     _SequenceCounter,
@@ -47,6 +48,12 @@ def test_sequence_counter_does_not_recount_complete_tail_sequences() -> None:
 
     assert counter.sync_begin_count == 1
     assert counter.sync_end_count == 1
+
+
+def test_terminal_frame_fixture_capacity_accounts_for_collapsed_tool_pairs() -> None:
+    assert _fixture_history_entry_capacity(4) == 4
+    assert _fixture_history_entry_capacity(5) == 4
+    assert _fixture_history_entry_capacity(10) == 8
 
 
 def test_terminal_frame_mode_order_rotates_between_runs() -> None:
@@ -144,8 +151,8 @@ def test_terminal_frame_negotiation_timeout_terminates_child() -> None:
     [
         (TerminalFrameConfig(runs=0), "positive"),
         (
-            TerminalFrameConfig(message_count=2, retained_history_entries=3),
-            "must not exceed",
+            TerminalFrameConfig(message_count=5, retained_history_entries=5),
+            "fixture's 4 rendered entries",
         ),
         (TerminalFrameConfig(stream_interval_seconds=0), "stream interval"),
         (TerminalFrameConfig(pending_tool_cards=-1), "must not be negative"),
