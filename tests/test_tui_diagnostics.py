@@ -744,6 +744,7 @@ def test_headless_write_model_chunks_windows_payloads_by_character_count() -> No
     observer.begin_frame(None)
     observer.finish_frame(
         "界" * 4100,
+        headless=True,
         sync_available=False,
         console=Console(width=10000, color_system=None),
     )
@@ -761,6 +762,7 @@ def test_headless_write_model_discards_setup_before_deferred_measurement() -> No
     observer.begin_frame(None)
     observer.finish_frame(
         "setup",
+        headless=True,
         sync_available=False,
         console=Console(color_system=None),
     )
@@ -768,6 +770,7 @@ def test_headless_write_model_discards_setup_before_deferred_measurement() -> No
     observer.begin_frame(None)
     observer.finish_frame(
         "measured",
+        headless=True,
         sync_available=False,
         console=Console(color_system=None),
     )
@@ -842,6 +845,23 @@ def test_headless_display_reports_a_write_model_without_a_live_driver(
     assert not hasattr(sample, "text")
 
 
+def test_silent_live_driver_does_not_synthesize_headless_writes() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    driver = _FakeDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.begin_frame(driver)
+    observer.finish_frame(
+        "suppressed",
+        headless=False,
+        sync_available=False,
+        console=_write_console(),
+    )
+
+    assert diagnostics.terminal_writes == []
+
+
 def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> None:
     from wisp.tui.terminal_writes import TerminalWriteObserver
 
@@ -858,7 +878,12 @@ def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> N
     driver.write("payload")
     driver.write("\x1b[?2026l")
     driver.flush()
-    observer.finish_frame(object(), sync_available=True, console=_write_console())
+    observer.finish_frame(
+        object(),
+        headless=False,
+        sync_available=True,
+        console=_write_console(),
+    )
     observer.detach()
 
     assert getattr(driver.write, "__func__", driver.write) is _FakeDriver.write
@@ -915,7 +940,12 @@ def test_copy_to_clipboard_is_not_charged_to_the_current_frame() -> None:
     observer.begin_frame(driver)
     driver.write("payload")
     driver.flush()
-    observer.finish_frame("frame", sync_available=False, console=_write_console())
+    observer.finish_frame(
+        "frame",
+        headless=False,
+        sync_available=False,
+        console=_write_console(),
+    )
     observer.detach()
 
     out_of_band = [sample for sample in diagnostics.terminal_writes if sample.out_of_band]
@@ -965,7 +995,12 @@ def test_record_terminal_write_is_optional_and_isolates_sink_failures() -> None:
     )
     record_terminal_write(OptionalSink(), sample)
     observer = TerminalWriteObserver(FailingWriteSink())
-    observer.finish_frame("frame", sync_available=False, console=_write_console())
+    observer.finish_frame(
+        "frame",
+        headless=True,
+        sync_available=False,
+        console=_write_console(),
+    )
 
 
 def _write_console():

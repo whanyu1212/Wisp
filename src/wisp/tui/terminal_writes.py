@@ -155,6 +155,7 @@ class TerminalWriteObserver:
         self,
         renderable: object,
         *,
+        headless: bool,
         sync_available: bool,
         console: Console,
     ) -> None:
@@ -165,6 +166,8 @@ class TerminalWriteObserver:
         if renderable is None and not observed_driver:
             return
         if not observed_driver:
+            if not headless:
+                return
             if self._defer_headless_models:
                 self._deferred_frames.append((renderable, sync_available, console))
             else:

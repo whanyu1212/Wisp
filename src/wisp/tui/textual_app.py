@@ -660,6 +660,7 @@ class TextualTui(App[None]):
             if observer is not None:
                 observer.finish_frame(
                     renderable,
+                    headless=self.is_headless,
                     sync_available=bool(getattr(self, "_sync_available", False)),
                     console=self.console,
                 )
