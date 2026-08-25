@@ -153,7 +153,10 @@ flicker directly:
 
 ```bash
 uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
-  --emulator-label "iTerm2 3.5" \
+  --messages 20 --retained-history 10 --stream-chunks 12 \
+  --stream-interval-seconds 0.03 --width 100 --height 24 \
+  --pending-tool-cards 2 \
+  --emulator-label "iTerm2 3.5 / macOS 26.5.2 / direct" \
   --output profiles/tui-terminal-frames-iterm2.json
 ```
 
@@ -163,6 +166,24 @@ contain only environment metadata, display/cache counts, payload sizes, write/fl
 frame-level synchronization balance, and coarse out-of-band classes. The PTY reader keeps only a
 short control-sequence tail and discards terminal payload bytes. Paired reports additionally count
 process-wide begin/end controls from startup through restored shutdown.
+
+Before each native run, resize the usable terminal or multiplexer pane to exactly 100 columns by 24
+rows. Native mode validates the real TTY dimensions against `--width` and `--height` and aborts rather
+than recording a report with a misleading configured viewport. Keep the explicit workload arguments
+above identical in every environment. Include the emulator version, host OS, and `direct` or the
+multiplexer name and version in `--emulator-label`; for tmux, include both tmux and its host emulator.
+
+Retain one row per sample when transcribing evidence. Every sample must complete its source and include
+at least one full layout and one partial update. On a supporting terminal, every observed driver frame
+must have one ordered synchronization pair, no unbalanced frame, and no payload write outside
+synchronization. On an unsupported terminal, capability detection and synchronization-pair counts must
+remain zero. A mixed capability result across the three runs is a failure, not an aggregate pass.
+
+Observe the cold full-layout frame and subsequent streaming updates separately from those automated
+counts. Record whether any intermediate frame or residual whole-screen flicker was visible, then verify
+that the alternate screen, cursor, keyboard input, and shell prompt are restored after the command.
+Raw reports under `profiles/` remain machine-local and ignored; commit only privacy-safe numeric tables
+and factual manual observations.
 
 Counts demonstrate whether intermediate writes are exposed; they do not by themselves prove a
 perceptual flicker improvement. Compare native runs on the same machine, record the emulator version
