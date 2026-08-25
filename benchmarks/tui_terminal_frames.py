@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 import select
@@ -412,7 +413,7 @@ def _read_pty_process(
                 try:
                     data = os.read(master_fd, 65_536)
                 except OSError as error:
-                    if process.poll() is not None and error.errno == 5:
+                    if error.errno == errno.EIO:
                         break
                     raise
                 if not data:

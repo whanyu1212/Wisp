@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -52,6 +53,42 @@ def test_terminal_frame_mode_order_rotates_between_runs() -> None:
     assert _rotated_modes(1) == ("unsupported", "supported")
     assert _rotated_modes(2) == ("supported", "unsupported")
     assert _rotated_modes(3) == ("unsupported", "supported")
+
+
+def test_terminal_frame_linux_pty_eio_is_treated_as_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CompletedProcess:
+        returncode = 0
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout is not None
+            return 0
+
+    def raise_eio(_descriptor: int, _size: int) -> bytes:
+        raise OSError(errno.EIO, "PTY closed")
+
+    monkeypatch.setattr(
+        "benchmarks.tui_terminal_frames.select.select",
+        lambda *_args: ([101], [], []),
+    )
+    monkeypatch.setattr("benchmarks.tui_terminal_frames.os.read", raise_eio)
+
+    counter = _read_pty_process(
+        cast(subprocess.Popen[bytes], CompletedProcess()),
+        master_fd=101,
+        control_fd=102,
+        mode="unsupported",
+        negotiation_timeout=1,
+        process_timeout=1,
+    )
+
+    assert counter.query_count == 0
+    assert counter.sync_begin_count == 0
+    assert counter.sync_end_count == 0
 
 
 def test_terminal_frame_negotiation_timeout_terminates_child() -> None:
