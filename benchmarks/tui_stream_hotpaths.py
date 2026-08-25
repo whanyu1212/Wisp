@@ -38,6 +38,7 @@ from wisp.tui.diagnostics import (
     DisplayUpdateDiagnostic,
     InputLatencyDiagnostic,
     MarkdownDrainDiagnostic,
+    TerminalWriteDiagnostic,
 )
 from wisp.tui.history import HistoricalTranscriptEntry, history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
@@ -128,6 +129,18 @@ class StreamHotpathSample:
     display_frame_fail_open_count: int
     history_prepend_suppressed_update_count: int
     history_prepend_escaped_update_count: int
+    terminal_write_frames: int
+    terminal_payload_bytes: int
+    terminal_write_count: int
+    posix_write_count: int
+    windows_chunk_count: int
+    terminal_flush_count: int
+    terminal_writes_per_displayed_frame: float
+    sync_available_frame_count: int
+    sync_balanced_frame_count: int
+    sync_unbalanced_frame_count: int
+    out_of_band_write_count: int
+    observed_driver_frame_count: int
     layout_passes_per_displayed_frame: float
     event_loop_delay: TimingDistribution
     layout_passes: TimingDistribution
@@ -156,6 +169,13 @@ class StreamHotpathSummary:
     suppressed_chop_spans_median: float
     display_frame_fail_open_count_median: float
     history_prepend_escaped_update_count_median: float
+    terminal_write_frames_median: float
+    terminal_payload_bytes_median: float
+    posix_write_count_median: float
+    windows_chunk_count_median: float
+    terminal_writes_per_displayed_frame_median: float
+    sync_available_frame_count_median: float
+    out_of_band_write_count_median: float
     event_loop_p95_median_ms: float
     event_loop_max_median_ms: float
     layout_total_median_ms: float
@@ -201,6 +221,17 @@ class _HotpathCollector:
     display_frame_fail_open_count: int = 0
     history_prepend_suppressed_update_count: int = 0
     history_prepend_escaped_update_count: int = 0
+    terminal_write_frames: int = 0
+    terminal_payload_bytes: int = 0
+    terminal_write_count: int = 0
+    posix_write_count: int = 0
+    windows_chunk_count: int = 0
+    terminal_flush_count: int = 0
+    sync_available_frame_count: int = 0
+    sync_balanced_frame_count: int = 0
+    sync_unbalanced_frame_count: int = 0
+    out_of_band_write_count: int = 0
+    observed_driver_frame_count: int = 0
 
     def record_markdown_drain(self, diagnostic: MarkdownDrainDiagnostic) -> None:
         if not self.collecting:
@@ -231,6 +262,28 @@ class _HotpathCollector:
             self.history_prepend_suppressed_update_count += 1
         if diagnostic.history_prepend_unsettled and not diagnostic.history_prepend_suppressed:
             self.history_prepend_escaped_update_count += 1
+
+    def record_terminal_write(self, diagnostic: TerminalWriteDiagnostic) -> None:
+        if not self.collecting:
+            return
+        if diagnostic.out_of_band:
+            self.out_of_band_write_count += diagnostic.write_count
+            return
+        self.terminal_write_frames += 1
+        self.terminal_payload_bytes += diagnostic.payload_bytes
+        self.terminal_write_count += diagnostic.write_count
+        self.posix_write_count += diagnostic.posix_write_count
+        self.windows_chunk_count += diagnostic.windows_chunk_count
+        self.terminal_flush_count += diagnostic.flush_count
+        if diagnostic.sync_available:
+            self.sync_available_frame_count += 1
+        if diagnostic.sync_begin_count or diagnostic.sync_end_count:
+            if diagnostic.sync_begin_count == diagnostic.sync_end_count:
+                self.sync_balanced_frame_count += 1
+            else:
+                self.sync_unbalanced_frame_count += 1
+        if diagnostic.observed_driver:
+            self.observed_driver_frame_count += 1
 
 
 def _nearest_rank(ordered: Sequence[float], percentile: float) -> float:
@@ -443,7 +496,10 @@ async def _run_sample(
             retained_history_entries=retained_history_entries,
         )
         collector = _HotpathCollector()
-        app, renderer = create_textual_tui(diagnostics=collector)
+        app, renderer = create_textual_tui(
+            diagnostics=collector,
+            defer_headless_terminal_write_models=True,
+        )
         assert isinstance(renderer, TextualTuiRenderer)
         async with app.run_test(size=(config.viewport_width, config.viewport_height)) as pilot:
             renderer.replace_history_entries(entries, session_label="Streaming hotpath benchmark")
@@ -537,6 +593,7 @@ async def _measure_stream(
         _heartbeat(config.heartbeat_interval_seconds, heartbeat_stopped, heartbeat_delays)
     )
     await asyncio.sleep(0)
+    app.discard_deferred_terminal_write_diagnostics()
     started = time.perf_counter_ns()
     started_cpu = time.process_time_ns()
     try:
@@ -555,11 +612,12 @@ async def _measure_stream(
                 if profiler is not None:
                     profiler.disable()
     finally:
-        collector.collecting = False
         stream_cpu_ms = (time.process_time_ns() - started_cpu) / 1_000_000
         heartbeat_stopped.set()
         await heartbeat_task
-    stream_total_ms = _milliseconds(started)
+        stream_total_ms = _milliseconds(started)
+        app.flush_deferred_terminal_write_diagnostics()
+        collector.collecting = False
     if profiler is not None and profile_output is not None:
         profiler.dump_stats(profile_output)
     completed = app.stream_widget_for_completed_message()
@@ -599,6 +657,22 @@ async def _measure_stream(
         display_frame_fail_open_count=collector.display_frame_fail_open_count,
         history_prepend_suppressed_update_count=(collector.history_prepend_suppressed_update_count),
         history_prepend_escaped_update_count=collector.history_prepend_escaped_update_count,
+        terminal_write_frames=collector.terminal_write_frames,
+        terminal_payload_bytes=collector.terminal_payload_bytes,
+        terminal_write_count=collector.terminal_write_count,
+        posix_write_count=collector.posix_write_count,
+        windows_chunk_count=collector.windows_chunk_count,
+        terminal_flush_count=collector.terminal_flush_count,
+        terminal_writes_per_displayed_frame=(
+            collector.terminal_write_count / collector.displayed_frame_count
+            if collector.displayed_frame_count
+            else 0.0
+        ),
+        sync_available_frame_count=collector.sync_available_frame_count,
+        sync_balanced_frame_count=collector.sync_balanced_frame_count,
+        sync_unbalanced_frame_count=collector.sync_unbalanced_frame_count,
+        out_of_band_write_count=collector.out_of_band_write_count,
+        observed_driver_frame_count=collector.observed_driver_frame_count,
         layout_passes_per_displayed_frame=(
             len(collector.layout_ms) / collector.displayed_frame_count
             if collector.displayed_frame_count
@@ -678,6 +752,27 @@ def _summarize(
                 ),
                 history_prepend_escaped_update_count_median=statistics.median(
                     sample.history_prepend_escaped_update_count for sample in selected
+                ),
+                terminal_write_frames_median=statistics.median(
+                    sample.terminal_write_frames for sample in selected
+                ),
+                terminal_payload_bytes_median=statistics.median(
+                    sample.terminal_payload_bytes for sample in selected
+                ),
+                posix_write_count_median=statistics.median(
+                    sample.posix_write_count for sample in selected
+                ),
+                windows_chunk_count_median=statistics.median(
+                    sample.windows_chunk_count for sample in selected
+                ),
+                terminal_writes_per_displayed_frame_median=statistics.median(
+                    sample.terminal_writes_per_displayed_frame for sample in selected
+                ),
+                sync_available_frame_count_median=statistics.median(
+                    sample.sync_available_frame_count for sample in selected
+                ),
+                out_of_band_write_count_median=statistics.median(
+                    sample.out_of_band_write_count for sample in selected
                 ),
                 event_loop_p95_median_ms=statistics.median(
                     sample.event_loop_delay.p95_ms for sample in selected

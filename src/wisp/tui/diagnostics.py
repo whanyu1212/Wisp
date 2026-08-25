@@ -27,6 +27,15 @@ type DisplayFrameCacheOutcome = Literal[
     "unavailable",
     "fail-open",
 ]
+type TerminalWriteClass = Literal[
+    "payload",
+    "sync_begin",
+    "sync_end",
+    "osc52",
+    "mode_query",
+    "bell",
+    "other",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +76,27 @@ class DisplayUpdateDiagnostic:
     fail_open: bool
     history_prepend_suppressed: bool
     history_prepend_unsettled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalWriteDiagnostic:
+    """One logical display frame or out-of-band driver write, without payload text."""
+
+    display_kind: DisplayUpdateKind
+    sync_available: bool
+    write_count: int
+    flush_count: int
+    payload_bytes: int
+    max_write_bytes: int
+    posix_write_count: int
+    windows_chunk_count: int
+    sync_begin_count: int
+    sync_end_count: int
+    writes_inside_sync: int
+    writes_outside_sync: int
+    observed_driver: bool
+    out_of_band: bool
+    out_of_band_kind: TerminalWriteClass | None
 
 
 class TuiDiagnosticsSink(Protocol):
@@ -121,6 +151,23 @@ def record_display_update(
         return
 
 
+def record_terminal_write(
+    sink: TuiDiagnosticsSink | None,
+    diagnostic: TerminalWriteDiagnostic,
+) -> None:
+    """Publish a terminal-write sample if the sink opted into the method."""
+
+    if sink is None:
+        return
+    recorder = getattr(sink, "record_terminal_write", None)
+    if recorder is None:
+        return
+    try:
+        recorder(diagnostic)
+    except Exception:
+        return
+
+
 __all__ = [
     "DisplayFrameCacheOutcome",
     "DisplayUpdateDiagnostic",
@@ -128,8 +175,11 @@ __all__ = [
     "InputEventCategory",
     "InputLatencyDiagnostic",
     "MarkdownDrainDiagnostic",
+    "TerminalWriteClass",
+    "TerminalWriteDiagnostic",
     "TuiDiagnosticsSink",
     "record_display_update",
     "record_input_latency",
     "record_markdown_drain",
+    "record_terminal_write",
 ]

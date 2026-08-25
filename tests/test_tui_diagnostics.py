@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import anyio
 import pytest
+from rich.console import Console
 from rich.segment import Segment
 from textual import events
 from textual._compositor import ChopsUpdate, LayoutUpdate
@@ -17,6 +18,7 @@ from wisp.tui.diagnostics import (
     DisplayUpdateDiagnostic,
     InputLatencyDiagnostic,
     MarkdownDrainDiagnostic,
+    TerminalWriteDiagnostic,
 )
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
@@ -37,6 +39,7 @@ class _Diagnostics:
     markdown: list[MarkdownDrainDiagnostic] = field(default_factory=list)
     display: list[DisplayUpdateDiagnostic] = field(default_factory=list)
     input_latency: list[InputLatencyDiagnostic] = field(default_factory=list)
+    terminal_writes: list[TerminalWriteDiagnostic] = field(default_factory=list)
 
     def record_markdown_drain(self, diagnostic: MarkdownDrainDiagnostic) -> None:
         self.markdown.append(diagnostic)
@@ -47,6 +50,9 @@ class _Diagnostics:
     def record_input_latency(self, diagnostic: InputLatencyDiagnostic) -> None:
         self.input_latency.append(diagnostic)
 
+    def record_terminal_write(self, diagnostic: TerminalWriteDiagnostic) -> None:
+        self.terminal_writes.append(diagnostic)
+
 
 class _FailingDiagnostics:
     def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
@@ -56,6 +62,9 @@ class _FailingDiagnostics:
         raise RuntimeError("diagnostic sink failed")
 
     def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
+        raise RuntimeError("diagnostic sink failed")
+
+    def record_terminal_write(self, _diagnostic: TerminalWriteDiagnostic) -> None:
         raise RuntimeError("diagnostic sink failed")
 
 
@@ -87,9 +96,14 @@ def test_tui_diagnostics_report_only_numeric_stream_metadata() -> None:
     assert sample.render_seconds >= 0
     assert sample.succeeded
     assert diagnostics.display
+    assert diagnostics.terminal_writes
     assert all(
-        not hasattr(item, "source") for item in (*diagnostics.markdown, *diagnostics.display)
+        not hasattr(item, "source")
+        for item in (*diagnostics.markdown, *diagnostics.display, *diagnostics.terminal_writes)
     )
+    assert all(sample.payload_bytes >= 0 for sample in diagnostics.terminal_writes)
+    assert all(not sample.observed_driver for sample in diagnostics.terminal_writes)
+    assert all(sample.sync_begin_count == 0 for sample in diagnostics.terminal_writes)
 
 
 def test_input_diagnostics_measure_handler_queue_and_first_display_without_values() -> None:
@@ -689,3 +703,336 @@ def test_history_prepend_diagnostics_never_report_an_escaped_unsettled_paint() -
     assert not any(
         item.history_prepend_unsettled and not item.history_prepend_suppressed for item in display
     )
+
+
+class _FakeDriver:
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+        self.flush_count = 0
+
+    def write(self, data: str) -> None:
+        self.writes.append(data)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+def test_classify_terminal_write_uses_prefixes_only() -> None:
+    from wisp.tui.terminal_writes import classify_terminal_write, windows_chunk_count
+
+    assert classify_terminal_write("\x1b[?2026h", in_display=True) == "sync_begin"
+    assert classify_terminal_write("\x1b[?2026l", in_display=True) == "sync_end"
+    assert classify_terminal_write("\x1b]52;c;QUJD\a", in_display=False) == "osc52"
+    assert classify_terminal_write("\x1b[?2026$p", in_display=False) == "mode_query"
+    assert classify_terminal_write("\x07", in_display=False) == "bell"
+    assert classify_terminal_write("cells", in_display=True) == "payload"
+    assert classify_terminal_write("cells", in_display=False) == "other"
+    assert windows_chunk_count(0) == 0
+    assert windows_chunk_count(1) == 1
+    assert windows_chunk_count(8192) == 1
+    assert windows_chunk_count(8193) == 2
+    multibyte_payload = "界" * 4100
+    assert len(multibyte_payload.encode("utf-8")) > 8192
+    assert windows_chunk_count(len(multibyte_payload)) == 1
+
+
+def test_headless_write_model_chunks_windows_payloads_by_character_count() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "界" * 4100,
+        headless=True,
+        sync_available=False,
+        console=Console(width=10000, color_system=None),
+    )
+
+    [sample] = diagnostics.terminal_writes
+    assert sample.payload_bytes > 8192
+    assert sample.windows_chunk_count == 1
+
+
+def test_headless_write_model_discards_setup_before_deferred_measurement() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    observer = TerminalWriteObserver(diagnostics, defer_headless_models=True)
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "setup",
+        headless=True,
+        sync_available=False,
+        console=Console(color_system=None),
+    )
+    observer.discard_deferred_frames()
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "measured",
+        headless=True,
+        sync_available=False,
+        console=Console(color_system=None),
+    )
+
+    assert diagnostics.terminal_writes == []
+    observer.flush_deferred_frames()
+
+    [sample] = diagnostics.terminal_writes
+    assert sample.payload_bytes == len(b"measured\n")
+    assert sample.posix_write_count == 1
+    assert not sample.observed_driver
+
+
+def test_terminal_write_observer_requires_sink_opt_in() -> None:
+    class DisplayOnlyDiagnostics:
+        def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
+            return
+
+        def record_display_update(self, _diagnostic: DisplayUpdateDiagnostic) -> None:
+            return
+
+        def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
+            return
+
+    app, _renderer = create_textual_tui(diagnostics=DisplayOnlyDiagnostics())
+
+    assert app._terminal_writes is None
+
+
+def test_headless_display_reports_a_write_model_without_a_live_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics = _Diagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+
+    def discard_display(
+        _app: App[object],
+        _screen: object,
+        _renderable: object,
+    ) -> None:
+        return
+
+    monkeypatch.setattr(App, "_display", discard_display)
+
+    async def scenario() -> None:
+        async with app.run_test():
+            screen = app.screen
+            size = screen.outer_size
+            changed = Strip([Segment("x" + " " * (size.width - 1))], size.width)
+            blank = Strip([Segment(" " * size.width)], size.width)
+            diagnostics.terminal_writes.clear()
+            app._display(
+                screen,
+                LayoutUpdate(
+                    [[changed], *([blank] for _ in range(size.height - 1))],
+                    Region(0, 0, size.width, size.height),
+                ),
+            )
+
+    anyio.run(scenario)
+
+    frames = [sample for sample in diagnostics.terminal_writes if not sample.out_of_band]
+    assert frames
+    sample = frames[-1]
+    assert sample.payload_bytes > 0
+    assert sample.posix_write_count == 1
+    assert sample.windows_chunk_count >= 1
+    assert not sample.observed_driver
+    assert sample.sync_begin_count == 0
+    assert sample.sync_end_count == 0
+    assert not hasattr(sample, "payload")
+    assert not hasattr(sample, "text")
+
+
+def test_headless_batched_display_does_not_synthesize_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics = _Diagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+
+    def discard_display(
+        _app: App[object],
+        _screen: object,
+        _renderable: object,
+    ) -> None:
+        return
+
+    monkeypatch.setattr(App, "_display", discard_display)
+
+    async def scenario() -> None:
+        async with app.run_test():
+            diagnostics.terminal_writes.clear()
+            app._batch_count += 1
+            try:
+                app._display(app.screen, "suppressed")
+            finally:
+                app._batch_count -= 1
+
+    anyio.run(scenario)
+
+    assert diagnostics.terminal_writes == []
+
+
+def test_silent_live_driver_does_not_synthesize_headless_writes() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    driver = _FakeDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.begin_frame(driver)
+    observer.finish_frame(
+        "suppressed",
+        headless=False,
+        sync_available=False,
+        console=_write_console(),
+    )
+
+    assert diagnostics.terminal_writes == []
+
+
+def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    driver = _FakeDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    original_write = driver.write
+    original_flush = driver.flush
+    observer.attach(driver)
+    assert driver.write is not original_write
+
+    observer.begin_frame(driver)
+    driver.write("\x1b[?2026h")
+    driver.write("payload")
+    driver.write("\x1b[?2026l")
+    driver.flush()
+    observer.finish_frame(
+        object(),
+        headless=False,
+        sync_available=True,
+        console=_write_console(),
+    )
+    observer.detach()
+
+    assert getattr(driver.write, "__func__", driver.write) is _FakeDriver.write
+    assert getattr(driver.flush, "__func__", driver.flush) is _FakeDriver.flush
+    assert original_write.__func__ is _FakeDriver.write
+    assert original_flush.__func__ is _FakeDriver.flush
+    assert driver.writes == ["\x1b[?2026h", "payload", "\x1b[?2026l"]
+    assert driver.flush_count == 1
+    sample = diagnostics.terminal_writes[-1]
+    assert sample.observed_driver
+    assert sample.sync_available
+    assert sample.write_count == 3
+    assert sample.flush_count == 1
+    assert sample.payload_bytes == len(b"payload")
+    assert sample.posix_write_count == 1
+    assert sample.windows_chunk_count == 1
+    assert sample.sync_begin_count == 1
+    assert sample.sync_end_count == 1
+    assert sample.writes_inside_sync == 1
+    assert sample.writes_outside_sync == 0
+    assert not sample.out_of_band
+
+
+def test_observer_restores_driver_when_write_raises() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    class RaisingDriver(_FakeDriver):
+        def write(self, data: str) -> None:
+            raise RuntimeError("driver write failed")
+
+    diagnostics = _Diagnostics()
+    driver = RaisingDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    original_write = driver.write
+    observer.attach(driver)
+    observer.begin_frame(driver)
+    with pytest.raises(RuntimeError, match="driver write failed"):
+        driver.write("payload")
+    observer.detach()
+    assert getattr(driver.write, "__func__", driver.write) is RaisingDriver.write
+    assert original_write.__func__ is RaisingDriver.write
+    with pytest.raises(RuntimeError, match="driver write failed"):
+        driver.write("still original")
+
+
+def test_copy_to_clipboard_is_not_charged_to_the_current_frame() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    driver = _FakeDriver()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.attach(driver)
+    driver.write("\x1b]52;c;QUJD\a")
+    observer.begin_frame(driver)
+    driver.write("payload")
+    driver.flush()
+    observer.finish_frame(
+        "frame",
+        headless=False,
+        sync_available=False,
+        console=_write_console(),
+    )
+    observer.detach()
+
+    out_of_band = [sample for sample in diagnostics.terminal_writes if sample.out_of_band]
+    frames = [sample for sample in diagnostics.terminal_writes if not sample.out_of_band]
+    assert len(out_of_band) == 1
+    assert out_of_band[0].out_of_band_kind == "osc52"
+    assert out_of_band[0].payload_bytes == 0
+    assert frames[-1].write_count == 1
+    assert frames[-1].writes_outside_sync == 1
+    assert not frames[-1].out_of_band
+
+
+def test_record_terminal_write_is_optional_and_isolates_sink_failures() -> None:
+    from wisp.tui.diagnostics import record_terminal_write
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    class OptionalSink:
+        def record_markdown_drain(self, _diagnostic: MarkdownDrainDiagnostic) -> None:
+            return
+
+        def record_display_update(self, _diagnostic: DisplayUpdateDiagnostic) -> None:
+            return
+
+        def record_input_latency(self, _diagnostic: InputLatencyDiagnostic) -> None:
+            return
+
+    class FailingWriteSink(_FailingDiagnostics):
+        def record_terminal_write(self, _diagnostic: TerminalWriteDiagnostic) -> None:
+            raise RuntimeError("terminal write sink failed")
+
+    sample = TerminalWriteDiagnostic(
+        display_kind="other",
+        sync_available=False,
+        write_count=1,
+        flush_count=0,
+        payload_bytes=4,
+        max_write_bytes=4,
+        posix_write_count=1,
+        windows_chunk_count=1,
+        sync_begin_count=0,
+        sync_end_count=0,
+        writes_inside_sync=0,
+        writes_outside_sync=1,
+        observed_driver=False,
+        out_of_band=False,
+        out_of_band_kind=None,
+    )
+    record_terminal_write(OptionalSink(), sample)
+    observer = TerminalWriteObserver(FailingWriteSink())
+    observer.finish_frame(
+        "frame",
+        headless=True,
+        sync_available=False,
+        console=_write_console(),
+    )
+
+
+def _write_console():
+    from rich.console import Console
+
+    return Console(record=True, width=20, height=5)
