@@ -61,15 +61,40 @@ do not depend on a fixed refresh count.
 
 ## Native emulator matrix
 
-Run native mode in each environment and add the result before the production policy PR:
+Run native mode three times in each environment before the production policy PR. Use the explicit
+fixture below in every terminal so later default changes cannot alter the comparison:
 
-| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Payload outside sync | Manual flicker | Cleanup |
-|---|---|---|---:|---:|---:|---|---|
-| iTerm2 | pending | macOS / direct | pending | pending | pending | pending | pending |
-| Kitty or WezTerm | pending | direct | pending | pending | pending | pending | pending |
-| Apple Terminal | pending | macOS / direct | expected no | expected 0 | pending | pending | pending |
-| tmux | pending | representative host | pending | pending | pending | pending | pending |
-| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending |
+```bash
+uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
+  --messages 20 --retained-history 10 --stream-chunks 12 \
+  --stream-interval-seconds 0.03 --width 100 --height 24 \
+  --pending-tool-cards 2 \
+  --emulator-label "<emulator version / host OS / direct or multiplexer version>" \
+  --output profiles/tui-terminal-frames-<environment>.json
+```
+
+Resize the usable terminal or multiplexer pane to exactly 100x24 before running the command. Native
+mode now rejects a mismatched real viewport and records the validated dimensions as
+`terminal_columns` and `terminal_lines`. Keep raw JSON reports local under ignored `profiles/`.
+
+The final evidence update must include one row for each of the 15 samples, retaining capability,
+observed-frame, exact-pair, unbalanced-frame, inside/outside-write, complete-layout, partial-update,
+and source-completeness fields. The summary matrix remains pending until those individual rows exist:
+
+| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Unbalanced | Payload outside sync | Source complete | Manual flicker | Cleanup |
+|---|---|---|---:|---:|---:|---:|---:|---|---|
+| iTerm2 | pending | macOS / direct | pending | pending | pending | pending | pending | pending | pending |
+| Kitty or WezTerm | pending | direct | pending | pending | pending | pending | pending | pending | pending |
+| Apple Terminal | pending | macOS / direct | expected no | expected 0 | expected 0 | pending | pending | pending | pending |
+| tmux | pending | representative host | pending | pending | pending | pending | pending | pending | pending |
+| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending | pending | pending |
+
+For supported samples, require exact pairs to equal observed driver frames, unbalanced frames and
+payload writes outside synchronization to equal zero, at least one full layout and partial update, and
+complete source. Unsupported samples must detect no capability and emit no synchronization controls.
+Treat mixed capability across repeated runs as a failure. Manual observations cover the cold full
+layout, paced partial updates, and normal restoration of the alternate screen, cursor, keyboard input,
+and shell prompt; they remain separate from automated framing counts.
 
 The native matrix cannot be automated by the headless benchmark runner because visual flicker and the
 actual emulator capability response are properties of the user's interactive terminal.

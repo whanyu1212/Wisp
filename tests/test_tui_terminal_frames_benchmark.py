@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+from benchmarks import tui_terminal_frames as terminal_frames_module
 from benchmarks.tui_terminal_frames import (
     _MODE_QUERY,
     _SYNC_END,
@@ -20,7 +21,9 @@ from benchmarks.tui_terminal_frames import (
     _rotated_modes,
     _SequenceCounter,
     _validate_config,
+    _validate_native_viewport,
     _wait_for_capability_state,
+    run_native_benchmark,
     run_paired_benchmark,
 )
 from wisp.tui.diagnostics import TerminalWriteDiagnostic
@@ -240,6 +243,110 @@ def test_terminal_frame_config_rejects_invalid_values(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _validate_config(config)
+
+
+def test_native_terminal_frame_benchmark_rejects_noninteractive_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NonInteractiveStream:
+        def isatty(self) -> bool:
+            return False
+
+    class FakeSys:
+        stdin = NonInteractiveStream()
+        stdout = NonInteractiveStream()
+
+    monkeypatch.setattr(terminal_frames_module, "sys", FakeSys())
+
+    with pytest.raises(RuntimeError, match="requires an interactive terminal"):
+        asyncio.run(run_native_benchmark(TerminalFrameConfig(runs=1)))
+
+
+def test_native_terminal_frame_benchmark_rejects_mismatched_viewport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InteractiveStream:
+        def fileno(self) -> int:
+            return 101
+
+    class FakeSys:
+        stdout = InteractiveStream()
+
+    monkeypatch.setattr(terminal_frames_module, "sys", FakeSys())
+    monkeypatch.setattr(
+        terminal_frames_module.os,
+        "get_terminal_size",
+        lambda descriptor: os.terminal_size((120, 40)),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"native terminal viewport is 120x40; expected 100x24\. "
+            r"Resize the terminal or pass --width 120 --height 40"
+        ),
+    ):
+        _validate_native_viewport(TerminalFrameConfig())
+
+
+def test_native_terminal_frame_report_records_validated_viewport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InteractiveStream:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 101
+
+    class FakeSys:
+        stdin = InteractiveStream()
+        stdout = InteractiveStream()
+
+    async def fake_workload(*_args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "mode": "native",
+            "run": kwargs["run"],
+            "order": kwargs["order"],
+            "emulator_label": kwargs["emulator_label"],
+            "capability_detected": True,
+            "display_updates": {"layout": 1},
+            "display_frame_cache_outcomes": {"updated": 1},
+            "complete_layout_count": 1,
+            "chops_update_count": 0,
+            "emitted_spans": 0,
+            "suppressed_spans": 0,
+            "observed_driver_frames": 1,
+            "terminal_payload_bytes": 7,
+            "terminal_write_count": 3,
+            "terminal_flush_count": 1,
+            "exact_sync_pair_frame_count": 1,
+            "unbalanced_sync_frame_count": 0,
+            "writes_inside_sync": 1,
+            "writes_outside_sync": 0,
+            "out_of_band_writes": {},
+            "source_complete": True,
+        }
+
+    monkeypatch.setattr(terminal_frames_module, "sys", FakeSys())
+    monkeypatch.setattr(
+        terminal_frames_module.os,
+        "get_terminal_size",
+        lambda descriptor: os.terminal_size((100, 24)),
+    )
+    monkeypatch.setattr(terminal_frames_module, "_run_child_workload", fake_workload)
+
+    report = asyncio.run(
+        run_native_benchmark(
+            TerminalFrameConfig(runs=1),
+            emulator_label="test-terminal 1.0 / direct",
+        )
+    )
+    payload = json.loads(report.to_json())
+
+    assert payload["environment"]["terminal_columns"] == "100"
+    assert payload["environment"]["terminal_lines"] == "24"
+    assert payload["samples"][0]["emulator_label"] == "test-terminal 1.0 / direct"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX pseudo-terminals")

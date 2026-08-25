@@ -278,6 +278,24 @@ def _validate_config(config: TerminalFrameConfig) -> None:
         raise ValueError("terminal negotiation and process timeouts must be positive")
 
 
+def _validate_native_viewport(config: TerminalFrameConfig) -> os.terminal_size:
+    """Require the real terminal to match the configured evidence viewport."""
+
+    try:
+        terminal_size = os.get_terminal_size(sys.stdout.fileno())
+    except OSError as error:
+        raise RuntimeError("unable to read the native terminal viewport") from error
+    expected = (config.viewport_width, config.viewport_height)
+    actual = (terminal_size.columns, terminal_size.lines)
+    if actual != expected:
+        raise RuntimeError(
+            f"native terminal viewport is {actual[0]}x{actual[1]}; "
+            f"expected {expected[0]}x{expected[1]}. Resize the terminal or pass "
+            f"--width {actual[0]} --height {actual[1]}"
+        )
+    return terminal_size
+
+
 def _rotated_modes(run: int) -> tuple[CapabilityMode, CapabilityMode]:
     modes: tuple[CapabilityMode, CapabilityMode] = ("unsupported", "supported")
     return modes if run % 2 else tuple(reversed(modes))
@@ -631,6 +649,7 @@ async def run_native_benchmark(
     _validate_config(selected)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("native terminal-frame measurement requires an interactive terminal")
+    terminal_size = _validate_native_viewport(selected)
     samples = []
     for run in range(1, selected.runs + 1):
         child = await _run_child_workload(
@@ -655,6 +674,8 @@ async def run_native_benchmark(
     report_environment["textual"] = textual.__version__
     report_environment["term"] = os.environ.get("TERM", "")
     report_environment["term_program"] = os.environ.get("TERM_PROGRAM", "")
+    report_environment["terminal_columns"] = str(terminal_size.columns)
+    report_environment["terminal_lines"] = str(terminal_size.lines)
     return TerminalFrameReport(
         config=selected,
         environment=report_environment,
