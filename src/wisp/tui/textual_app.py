@@ -95,6 +95,7 @@ from wisp.tui.state import (
     TuiQuitRequested,
 )
 from wisp.tui.stream_buffer import MarkdownStreamController
+from wisp.tui.terminal_writes import TerminalWriteObserver
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
@@ -517,9 +518,7 @@ class TextualTui(App[None]):
                 )
             return
         if renderable is None or self.is_inline or self._batch_count:
-            display_started = perf_counter()
-            super()._display(screen, renderable)
-            displayed_at = perf_counter()
+            display_started, displayed_at = self._emit_display(screen, renderable)
             if renderable is not None and not self._batch_count:
                 self._input_frame_emitted(displayed_at)
             if diagnostics_enabled:
@@ -579,9 +578,7 @@ class TextualTui(App[None]):
             else:
                 fail_open = True
 
-        display_started = perf_counter()
-        super()._display(screen, prepared)
-        displayed_at = perf_counter()
+        display_started, displayed_at = self._emit_display(screen, prepared)
         self._displayed_frame = next_frame
         self._displayed_cursor_position = cursor_position
         self._displayed_screen = screen
@@ -644,6 +641,29 @@ class TextualTui(App[None]):
         """Return the remaining bounded delay for one Markdown drain."""
 
         return self._input_priority.drain_delay(deferred_since)
+
+    def _emit_display(
+        self,
+        screen: Screen[object],
+        renderable: RenderableType | None,
+    ) -> tuple[float, float]:
+        """Emit one Textual frame and observe writes after the latency clock stops."""
+
+        observer = self._terminal_writes
+        if observer is not None:
+            observer.begin_frame(getattr(self, "_driver", None))
+        display_started = perf_counter()
+        try:
+            super()._display(screen, renderable)
+        finally:
+            displayed_at = perf_counter()
+            if observer is not None:
+                observer.finish_frame(
+                    renderable,
+                    sync_available=bool(getattr(self, "_sync_available", False)),
+                    console=self.console,
+                )
+        return display_started, displayed_at
 
     def _record_display_diagnostic(
         self,
@@ -988,6 +1008,9 @@ class TextualTui(App[None]):
     ) -> None:
         super().__init__()
         self._diagnostics = diagnostics
+        self._terminal_writes = (
+            TerminalWriteObserver(diagnostics) if diagnostics is not None else None
+        )
         self._pending_input_latency: list[_PendingInputLatency] = []
         self._input_priority = InputPriorityPolicy()
         self._observed_input_events: dict[tuple[int, float], None] = {}
@@ -1279,8 +1302,16 @@ class TextualTui(App[None]):
         self.set_command_catalog(self._command_catalog)
         self.set_skill_catalog(self._skill_catalog)
         self._input.focus()  # keep the editor as the resting focus
+        if self._terminal_writes is not None:
+            self._terminal_writes.attach(getattr(self, "_driver", None))
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
+
+    def on_unmount(self) -> None:
+        """Drop any diagnostics-only driver wrap before Textual tears the app down."""
+
+        if self._terminal_writes is not None:
+            self._terminal_writes.detach()
 
     def on_resize(self, event: events.Resize) -> None:
         """Update responsive help and composer presentation after terminal resize."""
@@ -2514,12 +2545,16 @@ class TextualTui(App[None]):
             try:
                 await self._stream.shutdown()
             finally:
+                if self._terminal_writes is not None:
+                    self._terminal_writes.detach()
                 self.exit()
 
     async def close(self) -> None:
         try:
             await self._stream.shutdown()
         finally:
+            if self._terminal_writes is not None:
+                self._terminal_writes.detach()
             self.exit()
 
     def copy_to_clipboard(self, text: str) -> None:

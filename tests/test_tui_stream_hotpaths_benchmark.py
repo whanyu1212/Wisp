@@ -145,6 +145,17 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.display_frame_fail_open_count >= 0
     assert sample.history_prepend_suppressed_update_count == 0
     assert sample.history_prepend_escaped_update_count == 0
+    assert sample.terminal_write_frames >= 1
+    assert sample.terminal_payload_bytes >= 0
+    assert sample.terminal_write_count >= 0
+    assert sample.terminal_flush_count >= 0
+    assert sample.terminal_writes_per_displayed_frame == (
+        sample.terminal_write_count / sample.displayed_frame_count
+    )
+    assert sample.sync_available_frame_count == 0
+    assert sample.sync_unbalanced_frame_count == 0
+    assert sample.out_of_band_write_count >= 0
+    assert sample.observed_driver_frame_count == 0
     assert sample.layout_passes_per_displayed_frame == (
         sample.layout_passes.sample_count / sample.displayed_frame_count
     )
@@ -174,17 +185,31 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
         summary.history_prepend_escaped_update_count_median
         == sample.history_prepend_escaped_update_count
     )
-    assert '"retained_history_entries": 4' in report.to_json()
-    assert '"mounted_history_entries": 4' in report.to_json()
-    assert '"stream_cpu_ms":' in report.to_json()
-    assert '"layout_requests":' in report.to_json()
-    assert '"layout_passes_per_stream_update":' in report.to_json()
-    assert '"tool_card_body_build_count": 0' in report.to_json()
-    assert '"markdown_renders":' in report.to_json()
-    assert '"markdown_source_chars_processed":' in report.to_json()
-    assert '"markdown_drains":' in report.to_json()
-    assert '"display_updates":' in report.to_json()
-    assert '"display_frame_fail_open_count":' in report.to_json()
+    assert summary.terminal_write_frames_median == sample.terminal_write_frames
+    assert summary.terminal_payload_bytes_median == sample.terminal_payload_bytes
+    assert (
+        summary.terminal_writes_per_displayed_frame_median
+        == sample.terminal_writes_per_displayed_frame
+    )
+    assert summary.sync_available_frame_count_median == sample.sync_available_frame_count
+    assert summary.out_of_band_write_count_median == sample.out_of_band_write_count
+    payload = report.to_json()
+    assert '"retained_history_entries": 4' in payload
+    assert '"mounted_history_entries": 4' in payload
+    assert '"stream_cpu_ms":' in payload
+    assert '"layout_requests":' in payload
+    assert '"layout_passes_per_stream_update":' in payload
+    assert '"tool_card_body_build_count": 0' in payload
+    assert '"markdown_renders":' in payload
+    assert '"markdown_source_chars_processed":' in payload
+    assert '"markdown_drains":' in payload
+    assert '"display_updates":' in payload
+    assert '"display_frame_fail_open_count":' in payload
+    assert '"terminal_write_frames":' in payload
+    assert '"terminal_payload_bytes":' in payload
+    assert '"terminal_writes_per_displayed_frame":' in payload
+    assert "\\x1b" not in payload
+    assert "\x1b" not in payload
 
 
 def test_tui_stream_hotpaths_pages_sessions_larger_than_the_read_limit() -> None:
