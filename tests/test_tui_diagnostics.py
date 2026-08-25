@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import anyio
 import pytest
+from rich.console import Console
 from rich.segment import Segment
 from textual import events
 from textual._compositor import ChopsUpdate, LayoutUpdate
@@ -730,6 +731,26 @@ def test_classify_terminal_write_uses_prefixes_only() -> None:
     assert windows_chunk_count(1) == 1
     assert windows_chunk_count(8192) == 1
     assert windows_chunk_count(8193) == 2
+    multibyte_payload = "界" * 4100
+    assert len(multibyte_payload.encode("utf-8")) > 8192
+    assert windows_chunk_count(len(multibyte_payload)) == 1
+
+
+def test_headless_write_model_chunks_windows_payloads_by_character_count() -> None:
+    from wisp.tui.terminal_writes import TerminalWriteObserver
+
+    diagnostics = _Diagnostics()
+    observer = TerminalWriteObserver(diagnostics)
+    observer.begin_frame(None)
+    observer.finish_frame(
+        "界" * 4100,
+        sync_available=False,
+        console=Console(width=10000, color_system=None),
+    )
+
+    [sample] = diagnostics.terminal_writes
+    assert sample.payload_bytes > 8192
+    assert sample.windows_chunk_count == 1
 
 
 def test_headless_display_reports_a_write_model_without_a_live_driver(

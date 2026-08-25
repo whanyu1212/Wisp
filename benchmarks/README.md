@@ -122,7 +122,7 @@ The same harness now also reports a privacy-safe terminal-write model for each s
 `terminal_write_frames`, `terminal_payload_bytes`, `terminal_write_count`, and
 `terminal_writes_per_displayed_frame` describe how many driver writes one logical `_display` call
 would produce after `_DisplayedFrame` filtering. `posix_write_count` is the Unix model (one write
-per payload); `windows_chunk_count` is derived from Textual's 8 KiB Windows split. Headless
+per payload); `windows_chunk_count` is derived from Textual's 8,192-character Windows split. Headless
 `run_test()` never enables CSI 2026, so `sync_available_frame_count` and
 `observed_driver_frame_count` stay at zero unless a live driver is wrapped. Those fields are
 attribution evidence for #443, not a reason to emit synchronized-output sequences from Wisp.

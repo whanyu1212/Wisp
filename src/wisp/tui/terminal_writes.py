@@ -52,8 +52,21 @@ def classify_terminal_write(data: str, *, in_display: bool) -> TerminalWriteClas
 def payload_bytes_for_renderable(renderable: object, console: Console) -> int:
     """Return UTF-8 size of one prepared display payload, excluding CSI 2026."""
 
-    if renderable is None:
+    _payload_characters, payload_bytes = _payload_sizes_for_renderable(renderable, console)
+    return payload_bytes
+
+
+def windows_chunk_count(payload_characters: int) -> int:
+    """Return how many 8,192-character writes Textual would emit on Windows."""
+
+    if payload_characters <= 0:
         return 0
+    return ceil(payload_characters / _WINDOWS_WRITE_CHUNK_SIZE)
+
+
+def _payload_sizes_for_renderable(renderable: object, console: Console) -> tuple[int, int]:
+    if renderable is None:
+        return 0, 0
     try:
         if isinstance(renderable, CompositorUpdate):
             sequence = renderable.render_segments(console)
@@ -61,16 +74,8 @@ def payload_bytes_for_renderable(renderable: object, console: Console) -> int:
             segments = console.render(cast(RenderableType, renderable))
             sequence = console._render_buffer(segments)
     except Exception:
-        return 0
-    return len(sequence.encode("utf-8"))
-
-
-def windows_chunk_count(payload_bytes: int) -> int:
-    """Return how many 8 KiB writes Textual would emit on Windows."""
-
-    if payload_bytes <= 0:
-        return 0
-    return ceil(payload_bytes / _WINDOWS_WRITE_CHUNK_SIZE)
+        return 0, 0
+    return len(sequence), len(sequence.encode("utf-8"))
 
 
 class TerminalWriteObserver:
@@ -152,7 +157,7 @@ class TerminalWriteObserver:
         observed_driver = self._write_count > 0 or self._flush_count > 0
         if renderable is None and not observed_driver:
             return
-        payload_bytes = payload_bytes_for_renderable(renderable, console)
+        payload_characters, payload_bytes = _payload_sizes_for_renderable(renderable, console)
         posix_writes = 1 if payload_bytes else 0
         write_count = self._write_count if observed_driver else posix_writes
         record_terminal_write(
@@ -165,7 +170,7 @@ class TerminalWriteObserver:
                 payload_bytes=payload_bytes,
                 max_write_bytes=self._max_payload_write_bytes if observed_driver else payload_bytes,
                 posix_write_count=posix_writes,
-                windows_chunk_count=windows_chunk_count(payload_bytes),
+                windows_chunk_count=windows_chunk_count(payload_characters),
                 sync_begin_count=self._sync_begin_count,
                 sync_end_count=self._sync_end_count,
                 writes_inside_sync=self._writes_inside_sync,
