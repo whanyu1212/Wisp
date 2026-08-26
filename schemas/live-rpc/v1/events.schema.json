@@ -1,0 +1,5952 @@
+{
+  "$defs": {
+    "AgentCompleted": {
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turns": {
+          "title": "Turns",
+          "type": "integer"
+        },
+        "type": {
+          "const": "agent.completed",
+          "default": "agent.completed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id",
+        "turns",
+        "outcome"
+      ],
+      "title": "AgentCompleted",
+      "type": "object"
+    },
+    "AgentMode": {
+      "enum": [
+        "build",
+        "plan"
+      ],
+      "type": "string"
+    },
+    "AgentStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "agent.started",
+          "default": "agent.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id"
+      ],
+      "title": "AgentStarted",
+      "type": "object"
+    },
+    "BillableTokenUsage": {
+      "additionalProperties": false,
+      "description": "Provider-normalized token buckets used only for list-price estimates.",
+      "properties": {
+        "cache_read_input_tokens": {
+          "minimum": 0,
+          "title": "Cache Read Input Tokens",
+          "type": "integer"
+        },
+        "cache_write_input_tokens": {
+          "minimum": 0,
+          "title": "Cache Write Input Tokens",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens"
+      ],
+      "title": "BillableTokenUsage",
+      "type": "object"
+    },
+    "CompactionCompleted": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "will_retry": {
+                "const": false
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "overflow"
+              }
+            }
+          },
+          "then": {
+            "else": {
+              "properties": {
+                "will_retry": {
+                  "const": false
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "if": {
+                "properties": {
+                  "will_retry": {
+                    "const": false
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "error": {
+                    "pattern": "\\S",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "compaction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compaction Id"
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "reason": {
+          "default": "manual",
+          "enum": [
+            "manual",
+            "threshold",
+            "overflow"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "replaced_entry_count": {
+          "minimum": 0,
+          "title": "Replaced Entry Count",
+          "type": "integer"
+        },
+        "retained_entry_count": {
+          "minimum": 0,
+          "title": "Retained Entry Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "compaction.completed",
+          "default": "compaction.completed",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "will_retry": {
+          "default": false,
+          "title": "Will Retry",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id",
+        "reason",
+        "outcome",
+        "compaction_id",
+        "replaced_entry_count",
+        "retained_entry_count",
+        "provider",
+        "model",
+        "usage",
+        "cost",
+        "error",
+        "will_retry"
+      ],
+      "title": "CompactionCompleted",
+      "type": "object"
+    },
+    "CompactionPolicyStatus": {
+      "additionalProperties": false,
+      "description": "Current automatic-compaction policy and threshold eligibility.",
+      "properties": {
+        "auto_compaction_enabled": {
+          "default": true,
+          "title": "Auto Compaction Enabled",
+          "type": "boolean"
+        },
+        "overflow_recovery_enabled": {
+          "default": true,
+          "title": "Overflow Recovery Enabled",
+          "type": "boolean"
+        },
+        "threshold_eligible": {
+          "default": false,
+          "title": "Threshold Eligible",
+          "type": "boolean"
+        },
+        "threshold_ineligible_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "status unavailable",
+          "title": "Threshold Ineligible Reason"
+        }
+      },
+      "required": [
+        "auto_compaction_enabled",
+        "threshold_eligible",
+        "threshold_ineligible_reason",
+        "overflow_recovery_enabled"
+      ],
+      "title": "CompactionPolicyStatus",
+      "type": "object"
+    },
+    "CompactionStarted": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "trigger_budget": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "manual"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "trigger_budget": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "reason": {
+          "default": "manual",
+          "enum": [
+            "manual",
+            "threshold",
+            "overflow"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "source_entry_count": {
+          "minimum": 0,
+          "title": "Source Entry Count",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "trigger_budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "type": {
+          "const": "compaction.started",
+          "default": "compaction.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id",
+        "reason",
+        "source_entry_count",
+        "trigger_budget"
+      ],
+      "title": "CompactionStarted",
+      "type": "object"
+    },
+    "ContextBudget": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "accounting_method": {
+                "const": "fully_estimated"
+              },
+              "observed_is_current": {
+                "const": true
+              },
+              "observed_tokens": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Current estimate, latest observation, and model-window budget.",
+      "properties": {
+        "accounting_method": {
+          "default": "fully_estimated",
+          "enum": [
+            "fully_estimated",
+            "provider_observed",
+            "provider_observed_plus_estimate"
+          ],
+          "title": "Accounting Method",
+          "type": "string"
+        },
+        "context_window": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Window"
+        },
+        "effective_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Effective Tokens"
+        },
+        "estimate": {
+          "$ref": "#/$defs/ContextEstimate"
+        },
+        "estimated_percent": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Percent"
+        },
+        "observed_is_current": {
+          "default": false,
+          "title": "Observed Is Current",
+          "type": "boolean"
+        },
+        "observed_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Tokens"
+        },
+        "over_budget": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Over Budget"
+        },
+        "remaining_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remaining Tokens"
+        },
+        "reserve_tokens": {
+          "minimum": 0,
+          "title": "Reserve Tokens",
+          "type": "integer"
+        },
+        "trailing_estimated_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trailing Estimated Tokens"
+        }
+      },
+      "required": [
+        "estimate",
+        "observed_tokens",
+        "observed_is_current",
+        "trailing_estimated_tokens",
+        "effective_tokens",
+        "accounting_method",
+        "context_window",
+        "reserve_tokens",
+        "remaining_tokens",
+        "estimated_percent",
+        "over_budget"
+      ],
+      "title": "ContextBudget",
+      "type": "object"
+    },
+    "ContextEstimate": {
+      "additionalProperties": false,
+      "description": "Deterministic approximation of one provider-facing request context.",
+      "properties": {
+        "message_tokens": {
+          "minimum": 0,
+          "title": "Message Tokens",
+          "type": "integer"
+        },
+        "method": {
+          "default": "chars_div_4_v1",
+          "enum": [
+            "chars_div_4_v1",
+            "utf8_bytes_div_4_v2"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "system_tokens": {
+          "minimum": 0,
+          "title": "System Tokens",
+          "type": "integer"
+        },
+        "tool_schema_tokens": {
+          "minimum": 0,
+          "title": "Tool Schema Tokens",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "minimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "method",
+        "system_tokens",
+        "message_tokens",
+        "tool_schema_tokens",
+        "total_tokens"
+      ],
+      "title": "ContextEstimate",
+      "type": "object"
+    },
+    "ContextEstimated": {
+      "additionalProperties": false,
+      "description": "Approximate context budget immediately before a provider request.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/ContextBudget"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "context.estimated",
+          "default": "context.estimated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "provider",
+        "model",
+        "budget"
+      ],
+      "title": "ContextEstimated",
+      "type": "object"
+    },
+    "ContextObservation": {
+      "additionalProperties": false,
+      "description": "Provider-reported input usage for one exact request-context prefix.",
+      "properties": {
+        "context_fingerprint": {
+          "minLength": 1,
+          "title": "Context Fingerprint",
+          "type": "string"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "message_count": {
+          "minimum": 0,
+          "title": "Message Count",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "input_tokens",
+        "message_count",
+        "context_fingerprint"
+      ],
+      "title": "ContextObservation",
+      "type": "object"
+    },
+    "ContextOverflow": {
+      "additionalProperties": false,
+      "description": "A provider rejected a request because its context window was exceeded.",
+      "properties": {
+        "context_window": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Window"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "context.overflow",
+          "default": "context.overflow",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "provider",
+        "model",
+        "context_window",
+        "message"
+      ],
+      "title": "ContextOverflow",
+      "type": "object"
+    },
+    "ContextPressure": {
+      "additionalProperties": false,
+      "description": "Provider-reported total usage crossed the configured warning threshold.",
+      "properties": {
+        "context_window": {
+          "exclusiveMinimum": 0,
+          "title": "Context Window",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "observed_tokens": {
+          "minimum": 0,
+          "title": "Observed Tokens",
+          "type": "integer"
+        },
+        "pressure_ratio": {
+          "minimum": 0,
+          "title": "Pressure Ratio",
+          "type": "number"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "remaining_tokens": {
+          "minimum": 0,
+          "title": "Remaining Tokens",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "context.pressure",
+          "default": "context.pressure",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "provider",
+        "model",
+        "context_window",
+        "observed_tokens",
+        "remaining_tokens",
+        "pressure_ratio"
+      ],
+      "title": "ContextPressure",
+      "type": "object"
+    },
+    "ErrorEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "error",
+          "default": "error",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "message"
+      ],
+      "title": "ErrorEvent",
+      "type": "object"
+    },
+    "MessageCompleted": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "context_observation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "finish_reason": {
+          "enum": [
+            "stop",
+            "tool_calls",
+            "length",
+            "error",
+            "cancelled"
+          ],
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "response_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Id"
+        },
+        "role": {
+          "default": "assistant",
+          "enum": [
+            "system",
+            "user",
+            "assistant",
+            "tool"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tool_calls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolCallSnapshot"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "message.completed",
+          "default": "message.completed",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "content",
+        "finish_reason",
+        "role",
+        "response_id",
+        "tool_calls",
+        "usage",
+        "cost",
+        "context_observation"
+      ],
+      "title": "MessageCompleted",
+      "type": "object"
+    },
+    "MessageDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "content_index": {
+          "default": 0,
+          "title": "Content Index",
+          "type": "integer"
+        },
+        "content_kind": {
+          "default": "text",
+          "enum": [
+            "text",
+            "thinking"
+          ],
+          "title": "Content Kind",
+          "type": "string"
+        },
+        "delta": {
+          "title": "Delta",
+          "type": "string"
+        },
+        "role": {
+          "default": "assistant",
+          "enum": [
+            "system",
+            "user",
+            "assistant",
+            "tool"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "message.delta",
+          "default": "message.delta",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "delta",
+        "role",
+        "content_index",
+        "content_kind"
+      ],
+      "title": "MessageDelta",
+      "type": "object"
+    },
+    "MessageStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "default": "assistant",
+          "enum": [
+            "system",
+            "user",
+            "assistant",
+            "tool"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "message.started",
+          "default": "message.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "role"
+      ],
+      "title": "MessageStarted",
+      "type": "object"
+    },
+    "ModelProviderAutoSwitched": {
+      "additionalProperties": false,
+      "description": "A model-only ``configure`` command's resolved model belonged to another provider.\n\nEmitted by the RPC process immediately before the ``configure`` command's\n``RpcCommandFinished`` when the model-registry-backed auto-switch in\n``handle_rpc_configure_command`` changes ``agent.provider`` as a side effect\nof a model-only ``/model <id>`` request. Without this, an out-of-process\nfront-end (the TUI) that only tracks provider changes it explicitly\nrequested would keep displaying and using its old provider while the RPC\nagent has actually moved to a different one.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "model.provider_auto_switched",
+          "default": "model.provider_auto_switched",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "provider",
+        "model"
+      ],
+      "title": "ModelProviderAutoSwitched",
+      "type": "object"
+    },
+    "ProjectConfigApplied": {
+      "additionalProperties": false,
+      "description": "A trusted project's local config was applied mid-session.\n\nEmitted by the RPC process after a first-run trust approval rebuilds the runtime\nfrom the project's ``.wisp/settings.json``. It lets an out-of-process front-end\n(the TUI) refresh the provider/model/auth it displays and mutates, so its header\nand ``/provider`` / ``/model`` / ``/auth`` / ``/connect`` commands match the config\nthe agent is actually running with. It also carries the effective automatic-\ncompaction setting so frontends do not infer policy from their own startup state.\n\n``effort`` carries the RPC agent's already-filtered, authoritative post-rebuild\nvalue (see the trusted-project rebuild in ``wisp.rpc.host``) rather than\nleaving the TUI to re-derive it from its own locally-tracked, already-once-filtered\nvalue -- the TUI's own copy was filtered against the untrusted-startup\nprovider/model, so a tier invalid there but valid for the trusted project's\nprovider/model would already be gone and unrecoverable from it. A single\nauthoritative value avoids the two sides' filtering logic silently diverging.",
+      "properties": {
+        "auth_path": {
+          "format": "path",
+          "title": "Auth Path",
+          "type": "string"
+        },
+        "auto_compaction_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auto Compaction Enabled"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "project.config.applied",
+          "default": "project.config.applied",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "provider",
+        "model",
+        "effort",
+        "auto_compaction_enabled",
+        "auth_path"
+      ],
+      "title": "ProjectConfigApplied",
+      "type": "object"
+    },
+    "ProviderRetrying": {
+      "additionalProperties": false,
+      "description": "A provider request failed before streaming and will be retried.",
+      "properties": {
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "delay_seconds": {
+          "minimum": 0,
+          "title": "Delay Seconds",
+          "type": "number"
+        },
+        "max_attempts": {
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "network",
+            "timeout",
+            "rate_limit",
+            "server_error",
+            "transient_http"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Code"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "provider.retrying",
+          "default": "provider.retrying",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "provider",
+        "attempt",
+        "max_attempts",
+        "delay_seconds",
+        "reason",
+        "status_code"
+      ],
+      "title": "ProviderRetrying",
+      "type": "object"
+    },
+    "QueueItemsRemoved": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "pop"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "properties": {
+                "follow_up": {
+                  "minItems": 1
+                },
+                "steering": {
+                  "minItems": 1
+                }
+              }
+            },
+            "properties": {
+              "follow_up": {
+                "maxItems": 1
+              },
+              "kind": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "steering": {
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "steering"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "follow_up": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "follow_up"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steering": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
+      "description": "Queued text removed by an RPC pop or clear operation.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "follow_up": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Follow Up",
+          "type": "array"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "steering",
+                "follow_up"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "operation": {
+          "enum": [
+            "pop",
+            "clear"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "steering": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Steering",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "queue.items.removed",
+          "default": "queue.items.removed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "operation",
+        "kind",
+        "steering",
+        "follow_up"
+      ],
+      "title": "QueueItemsRemoved",
+      "type": "object"
+    },
+    "QueueMessageInjected": {
+      "additionalProperties": false,
+      "description": "A queued user message crossed into the active transcript.",
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "steering",
+            "follow_up"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "skill_invocation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkillInvocationEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "queue.message.injected",
+          "default": "queue.message.injected",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "kind",
+        "content",
+        "skill_invocation"
+      ],
+      "title": "QueueMessageInjected",
+      "type": "object"
+    },
+    "QueueUpdated": {
+      "additionalProperties": false,
+      "description": "Current harness-owned steering and follow-up queue state.",
+      "properties": {
+        "follow_up": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Follow Up",
+          "type": "array"
+        },
+        "follow_up_mode": {
+          "default": "one_at_a_time",
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Follow Up Mode",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "steering": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Steering",
+          "type": "array"
+        },
+        "steering_mode": {
+          "default": "one_at_a_time",
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Steering Mode",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "queue.updated",
+          "default": "queue.updated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "steering",
+        "follow_up",
+        "steering_mode",
+        "follow_up_mode"
+      ],
+      "title": "QueueUpdated",
+      "type": "object"
+    },
+    "RpcCommandArgument": {
+      "additionalProperties": false,
+      "description": "Frontend-neutral argument metadata for a discoverable RPC command.",
+      "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "required"
+      ],
+      "title": "RpcCommandArgument",
+      "type": "object"
+    },
+    "RpcCommandDescriptor": {
+      "additionalProperties": false,
+      "description": "Frontend-neutral command metadata returned by RPC discovery.",
+      "properties": {
+        "accepts_arguments": {
+          "default": false,
+          "title": "Accepts Arguments",
+          "type": "boolean"
+        },
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "arguments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcCommandArgument"
+          },
+          "title": "Arguments",
+          "type": "array"
+        },
+        "category": {
+          "minLength": 1,
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "prefill_on_partial_enter": {
+          "default": false,
+          "title": "Prefill On Partial Enter",
+          "type": "boolean"
+        },
+        "slash_aliases": {
+          "default": [],
+          "items": {
+            "pattern": "^[/:]",
+            "type": "string"
+          },
+          "title": "Slash Aliases",
+          "type": "array"
+        },
+        "slash_command": {
+          "minLength": 2,
+          "title": "Slash Command",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "category",
+        "aliases",
+        "slash_command",
+        "slash_aliases",
+        "arguments",
+        "accepts_arguments",
+        "prefill_on_partial_enter",
+        "order"
+      ],
+      "title": "RpcCommandDescriptor",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "value-equals-prefixed-property",
+          "prefix": "/",
+          "source_property": "name",
+          "value_property": "slash_command"
+        }
+      ]
+    },
+    "RpcCommandFinished": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "command_type": {
+          "title": "Command Type",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.command.finished",
+          "default": "rpc.command.finished",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "command_type",
+        "ok",
+        "error"
+      ],
+      "title": "RpcCommandFinished",
+      "type": "object"
+    },
+    "RpcCommandStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "command_type": {
+          "title": "Command Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.command.started",
+          "default": "rpc.command.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "command_type"
+      ],
+      "title": "RpcCommandStarted",
+      "type": "object"
+    },
+    "RpcCommandsReported": {
+      "additionalProperties": false,
+      "description": "Immediate, non-persisted command registry snapshot returned over RPC.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "commands": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcCommandDescriptor"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.commands",
+          "default": "rpc.commands",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "commands"
+      ],
+      "title": "RpcCommandsReported",
+      "type": "object"
+    },
+    "RpcMcpServerSnapshot": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "error": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Sanitized status for one configured MCP server.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "connected",
+            "disconnected",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tool Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "tool_names",
+        "error"
+      ],
+      "title": "RpcMcpServerSnapshot",
+      "type": "object"
+    },
+    "RpcMcpStatusReported": {
+      "additionalProperties": false,
+      "description": "Immediate, non-persisted MCP runtime status returned over RPC.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/RpcMcpStatusSnapshot"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.mcp",
+          "default": "rpc.mcp",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "status"
+      ],
+      "title": "RpcMcpStatusReported",
+      "type": "object"
+    },
+    "RpcMcpStatusSnapshot": {
+      "additionalProperties": false,
+      "description": "Current sanitized MCP server and registered-tool status.",
+      "properties": {
+        "servers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcMcpServerSnapshot"
+          },
+          "title": "Servers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "servers"
+      ],
+      "title": "RpcMcpStatusSnapshot",
+      "type": "object"
+    },
+    "RpcMessageSnapshot": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "not": {
+                  "const": "tool"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tool_result": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One bounded, frontend-oriented persisted message snapshot.",
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "content_original_bytes": {
+          "minimum": 0,
+          "title": "Content Original Bytes",
+          "type": "integer"
+        },
+        "content_truncated": {
+          "default": false,
+          "title": "Content Truncated",
+          "type": "boolean"
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "entry_id": {
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "finish_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "stop",
+                "tool_calls",
+                "length",
+                "error",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finish Reason"
+        },
+        "is_error": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Error"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation Id"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "response_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Id"
+        },
+        "role": {
+          "enum": [
+            "system",
+            "user",
+            "assistant",
+            "tool"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "skill_invocation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpcSkillInvocationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Id"
+        },
+        "tool_calls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcMessageToolCallSnapshot"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        },
+        "tool_calls_original_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Tool Calls Original Count",
+          "type": "integer"
+        },
+        "tool_calls_truncated": {
+          "default": false,
+          "title": "Tool Calls Truncated",
+          "type": "boolean"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Name"
+        },
+        "tool_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpcMessageToolResultSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "entry_id",
+        "parent_id",
+        "operation_id",
+        "created_at",
+        "role",
+        "content",
+        "content_original_bytes",
+        "content_truncated",
+        "tool_call_id",
+        "tool_name",
+        "tool_calls",
+        "tool_calls_original_count",
+        "tool_calls_truncated",
+        "response_id",
+        "finish_reason",
+        "is_error",
+        "usage",
+        "cost",
+        "tool_result",
+        "skill_invocation"
+      ],
+      "title": "RpcMessageSnapshot",
+      "type": "object"
+    },
+    "RpcMessageToolCallSnapshot": {
+      "additionalProperties": false,
+      "description": "Bounded tool-call state retained on an RPC transcript message.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "arguments_original_bytes": {
+          "minimum": 0,
+          "title": "Arguments Original Bytes",
+          "type": "integer"
+        },
+        "arguments_truncated": {
+          "default": false,
+          "title": "Arguments Truncated",
+          "type": "boolean"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parse_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parse Error"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "arguments",
+        "arguments_original_bytes",
+        "arguments_truncated",
+        "parse_error"
+      ],
+      "title": "RpcMessageToolCallSnapshot",
+      "type": "object"
+    },
+    "RpcMessageToolResultSnapshot": {
+      "additionalProperties": false,
+      "description": "Bounded presentation metadata for a persisted tool-result message.",
+      "properties": {
+        "before_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Text"
+        },
+        "created": {
+          "default": false,
+          "title": "Created",
+          "type": "boolean"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "output_has_exit_status": {
+          "default": false,
+          "title": "Output Has Exit Status",
+          "type": "boolean"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "done",
+                "error",
+                "denied",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "exit_code",
+        "output_has_exit_status",
+        "before_text",
+        "created",
+        "summary",
+        "truncated"
+      ],
+      "title": "RpcMessageToolResultSnapshot",
+      "type": "object"
+    },
+    "RpcMessagesReported": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "truncated": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "next_after_entry_id": {
+                "type": "null"
+              },
+              "next_before_entry_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "next_after_entry_id": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "next_before_entry_id": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "On-demand, bounded persisted transcript page returned over RPC.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "messages": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcMessageSnapshot"
+          },
+          "title": "Messages",
+          "type": "array"
+        },
+        "next_after_entry_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next After Entry Id"
+        },
+        "next_before_entry_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Before Entry Id"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "session_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Path"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.messages",
+          "default": "rpc.messages",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "active_leaf_id",
+        "messages",
+        "truncated",
+        "next_before_entry_id",
+        "next_after_entry_id"
+      ],
+      "title": "RpcMessagesReported",
+      "type": "object"
+    },
+    "RpcSessionCloned": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "properties": {
+            "active_leaf_id": {
+              "not": {
+                "type": "null"
+              }
+            },
+            "entry_count": {
+              "minimum": 1
+            }
+          }
+        }
+      ],
+      "description": "Confirmation that the active path was cloned and selected.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Name"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "source_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Active Leaf Id"
+        },
+        "source_session_id": {
+          "minLength": 1,
+          "title": "Source Session Id",
+          "type": "string"
+        },
+        "source_session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Session Name"
+        },
+        "source_session_path": {
+          "format": "path",
+          "title": "Source Session Path",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.cloned",
+          "default": "rpc.session.cloned",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "source_session_id",
+        "source_session_path",
+        "source_active_leaf_id",
+        "source_session_name",
+        "session_id",
+        "session_path",
+        "active_leaf_id",
+        "session_name",
+        "entry_count"
+      ],
+      "title": "RpcSessionCloned",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "source_session_id",
+          "right_property": "session_id"
+        }
+      ]
+    },
+    "RpcSessionForked": {
+      "additionalProperties": false,
+      "description": "Confirmation that a session was forked before a user message and selected.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "selected_entry_id": {
+          "minLength": 1,
+          "title": "Selected Entry Id",
+          "type": "string"
+        },
+        "selected_prompt": {
+          "title": "Selected Prompt",
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Name"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "source_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Active Leaf Id"
+        },
+        "source_session_id": {
+          "minLength": 1,
+          "title": "Source Session Id",
+          "type": "string"
+        },
+        "source_session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Session Name"
+        },
+        "source_session_path": {
+          "format": "path",
+          "title": "Source Session Path",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.forked",
+          "default": "rpc.session.forked",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "source_session_id",
+        "source_session_path",
+        "source_active_leaf_id",
+        "source_session_name",
+        "session_id",
+        "session_path",
+        "active_leaf_id",
+        "session_name",
+        "entry_count",
+        "selected_entry_id",
+        "selected_prompt"
+      ],
+      "title": "RpcSessionForked",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "source_session_id",
+          "right_property": "session_id"
+        }
+      ]
+    },
+    "RpcSessionNameChanged": {
+      "additionalProperties": false,
+      "description": "Confirmation that a session display name metadata record was appended.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "previous_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Name"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.name_changed",
+          "default": "rpc.session.name_changed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "previous_name",
+        "name",
+        "entry_count"
+      ],
+      "title": "RpcSessionNameChanged",
+      "type": "object"
+    },
+    "RpcSessionSelected": {
+      "additionalProperties": false,
+      "description": "Confirmation that an RPC session selection has become active.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Name"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.selected",
+          "default": "rpc.session.selected",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "active_leaf_id",
+        "entry_count",
+        "session_name"
+      ],
+      "title": "RpcSessionSelected",
+      "type": "object"
+    },
+    "RpcSessionSummary": {
+      "additionalProperties": false,
+      "description": "One persisted session summary returned by the RPC session catalog.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "session_path",
+        "updated_at",
+        "entry_count",
+        "active_leaf_id",
+        "name"
+      ],
+      "title": "RpcSessionSummary",
+      "type": "object"
+    },
+    "RpcSessionTreeNavigated": {
+      "additionalProperties": false,
+      "description": "Confirmation that a selected session's active path changed.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "changed": {
+          "title": "Changed",
+          "type": "boolean"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "editor_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editor Text"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "previous_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Active Leaf Id"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "selected_entry_id": {
+          "minLength": 1,
+          "title": "Selected Entry Id",
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.tree.navigated",
+          "default": "rpc.session.tree.navigated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "selected_entry_id",
+        "previous_active_leaf_id",
+        "active_leaf_id",
+        "editor_text",
+        "changed",
+        "entry_count"
+      ],
+      "title": "RpcSessionTreeNavigated",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "boolean_property": "changed",
+          "current_property": "active_leaf_id",
+          "kind": "boolean-reports-property-change",
+          "previous_property": "previous_active_leaf_id"
+        }
+      ]
+    },
+    "RpcSessionTreeNode": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "role": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "message"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "role": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "One bounded node summary from a persisted session tree.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "entry_id": {
+          "minLength": 1,
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "message",
+            "event",
+            "compaction"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation Id"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "preview": {
+          "title": "Preview",
+          "type": "string"
+        },
+        "preview_truncated": {
+          "default": false,
+          "title": "Preview Truncated",
+          "type": "boolean"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "enum": [
+                "system",
+                "user",
+                "assistant",
+                "tool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        }
+      },
+      "required": [
+        "entry_id",
+        "parent_id",
+        "operation_id",
+        "created_at",
+        "kind",
+        "role",
+        "preview",
+        "preview_truncated"
+      ],
+      "title": "RpcSessionTreeNode",
+      "type": "object"
+    },
+    "RpcSessionTreeReported": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "session_path": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "session_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "active_leaf_id": {
+                "type": "null"
+              },
+              "nodes": {
+                "maxItems": 0
+              },
+              "session_path": {
+                "type": "null"
+              },
+              "total_node_count": {
+                "const": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "else": {
+            "properties": {
+              "next_after_entry_id": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "next_after_entry_id": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "nodes": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "description": "Bounded append-order page of the selected persisted session tree.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "next_after_entry_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next After Entry Id"
+        },
+        "nodes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcSessionTreeNode"
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "session_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Path"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "total_node_count": {
+          "minimum": 0,
+          "title": "Total Node Count",
+          "type": "integer"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.session.tree",
+          "default": "rpc.session.tree",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "active_leaf_id",
+        "total_node_count",
+        "nodes",
+        "truncated",
+        "next_after_entry_id"
+      ],
+      "title": "RpcSessionTreeReported",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "array_property": "nodes",
+          "kind": "array-length-at-most-property",
+          "maximum_property": "total_node_count"
+        },
+        {
+          "array_property": "nodes",
+          "item_property": "entry_id",
+          "kind": "array-item-property-unique"
+        },
+        {
+          "array_property": "nodes",
+          "item_property": "entry_id",
+          "kind": "value-equals-last-array-item-property",
+          "value_property": "next_after_entry_id",
+          "when_property": "truncated"
+        }
+      ]
+    },
+    "RpcSessionTreeUnreverted": {
+      "additionalProperties": false,
+      "description": "Confirmation that the latest explicit tree navigation was reversed.",
+      "properties": {
+        "active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Leaf Id"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "entry_count": {
+          "minimum": 1,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "previous_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Active Leaf Id"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_path": {
+          "format": "path",
+          "title": "Session Path",
+          "type": "string"
+        },
+        "source_transition_id": {
+          "minLength": 1,
+          "title": "Source Transition Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.session.tree.unreverted",
+          "default": "rpc.session.tree.unreverted",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "session_id",
+        "session_path",
+        "source_transition_id",
+        "previous_active_leaf_id",
+        "active_leaf_id",
+        "entry_count"
+      ],
+      "title": "RpcSessionTreeUnreverted",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "previous_active_leaf_id",
+          "right_property": "active_leaf_id"
+        }
+      ]
+    },
+    "RpcSessionsReported": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "selected_session_path": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "selected_session_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected_session_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "On-demand, bounded persisted session catalog returned over RPC.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "selected_session_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Session Id"
+        },
+        "selected_session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Session Name"
+        },
+        "selected_session_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Session Path"
+        },
+        "sessions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcSessionSummary"
+          },
+          "title": "Sessions",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.sessions",
+          "default": "rpc.sessions",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "sessions",
+        "selected_session_id",
+        "selected_session_path",
+        "selected_session_name"
+      ],
+      "title": "RpcSessionsReported",
+      "type": "object"
+    },
+    "RpcSkillCatalogEntry": {
+      "additionalProperties": false,
+      "description": "One model-free skill descriptor returned to RPC frontends.",
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SkillSource"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "source"
+      ],
+      "title": "RpcSkillCatalogEntry",
+      "type": "object"
+    },
+    "RpcSkillCatalogSnapshot": {
+      "additionalProperties": false,
+      "description": "Current immutable skill catalog and project-trust state.",
+      "properties": {
+        "diagnostics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcSkillDiagnostic"
+          },
+          "title": "Diagnostics",
+          "type": "array"
+        },
+        "entries": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcSkillCatalogEntry"
+          },
+          "title": "Entries",
+          "type": "array"
+        },
+        "project_trusted": {
+          "default": false,
+          "title": "Project Trusted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "diagnostics",
+        "project_trusted"
+      ],
+      "title": "RpcSkillCatalogSnapshot",
+      "type": "object"
+    },
+    "RpcSkillDiagnostic": {
+      "additionalProperties": false,
+      "description": "One isolated skill discovery diagnostic returned to RPC frontends.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/SkillDiagnosticCode"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "severity": {
+          "$ref": "#/$defs/SkillDiagnosticSeverity"
+        },
+        "source": {
+          "$ref": "#/$defs/SkillSource"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "source",
+        "path"
+      ],
+      "title": "RpcSkillDiagnostic",
+      "type": "object"
+    },
+    "RpcSkillInvocationSnapshot": {
+      "additionalProperties": false,
+      "description": "Bounded explicit-skill evidence attached to an RPC transcript message.",
+      "properties": {
+        "content_sha256": {
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "instructions_truncated": {
+          "default": false,
+          "title": "Instructions Truncated",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "original_content": {
+          "title": "Original Content",
+          "type": "string"
+        },
+        "original_content_bytes": {
+          "minimum": 0,
+          "title": "Original Content Bytes",
+          "type": "integer"
+        },
+        "original_content_truncated": {
+          "default": false,
+          "title": "Original Content Truncated",
+          "type": "boolean"
+        },
+        "request": {
+          "title": "Request",
+          "type": "string"
+        },
+        "request_bytes": {
+          "minimum": 0,
+          "title": "Request Bytes",
+          "type": "integer"
+        },
+        "request_truncated": {
+          "default": false,
+          "title": "Request Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "original_content",
+        "original_content_bytes",
+        "original_content_truncated",
+        "request",
+        "request_bytes",
+        "request_truncated",
+        "content_sha256",
+        "instructions_truncated"
+      ],
+      "title": "RpcSkillInvocationSnapshot",
+      "type": "object"
+    },
+    "RpcSkillsReported": {
+      "additionalProperties": false,
+      "description": "Immediate, non-persisted skill catalog snapshot returned over RPC.",
+      "properties": {
+        "catalog": {
+          "$ref": "#/$defs/RpcSkillCatalogSnapshot"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.skills",
+          "default": "rpc.skills",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "catalog"
+      ],
+      "title": "RpcSkillsReported",
+      "type": "object"
+    },
+    "RpcStateReported": {
+      "additionalProperties": false,
+      "description": "Immediate, non-persisted in-memory state returned over RPC.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/RpcStateSnapshot"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.state",
+          "default": "rpc.state",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "state"
+      ],
+      "title": "RpcStateReported",
+      "type": "object"
+    },
+    "RpcStateSnapshot": {
+      "additionalProperties": false,
+      "description": "RPC-facing state extended with session and active-command identity.",
+      "properties": {
+        "active_command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Command Id"
+        },
+        "active_command_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Command Type"
+        },
+        "auto_compaction_enabled": {
+          "title": "Auto Compaction Enabled",
+          "type": "boolean"
+        },
+        "cancel_requested": {
+          "default": false,
+          "title": "Cancel Requested",
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "follow_up_mode": {
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Follow Up Mode",
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/AgentMode",
+          "default": "build"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "pending_follow_up_count": {
+          "minimum": 0,
+          "title": "Pending Follow Up Count",
+          "type": "integer"
+        },
+        "pending_steering_count": {
+          "minimum": 0,
+          "title": "Pending Steering Count",
+          "type": "integer"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "session_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Name"
+        },
+        "session_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Path"
+        },
+        "steering_mode": {
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Steering Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "mode",
+        "effort",
+        "auto_compaction_enabled",
+        "steering_mode",
+        "follow_up_mode",
+        "pending_steering_count",
+        "pending_follow_up_count",
+        "session_id",
+        "session_path",
+        "session_name",
+        "active_command_id",
+        "active_command_type",
+        "cancel_requested"
+      ],
+      "title": "RpcStateSnapshot",
+      "type": "object"
+    },
+    "SessionCostSummary": {
+      "additionalProperties": false,
+      "description": "Cumulative persisted list-price accounting for a session.",
+      "properties": {
+        "complete": {
+          "default": true,
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "currency": {
+          "const": "USD",
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "known_usd": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Known Usd"
+        },
+        "priced_record_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Priced Record Count",
+          "type": "integer"
+        },
+        "unpriced_record_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Unpriced Record Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "currency",
+        "known_usd",
+        "complete",
+        "priced_record_count",
+        "unpriced_record_count"
+      ],
+      "title": "SessionCostSummary",
+      "type": "object"
+    },
+    "SessionSaved": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.saved",
+          "default": "session.saved",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id",
+        "path"
+      ],
+      "title": "SessionSaved",
+      "type": "object"
+    },
+    "SessionStats": {
+      "additionalProperties": false,
+      "description": "Derived lifetime usage and active-context statistics for one session.",
+      "properties": {
+        "active_message_count": {
+          "minimum": 0,
+          "title": "Active Message Count",
+          "type": "integer"
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactionPolicyStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "compaction_count": {
+          "minimum": 0,
+          "title": "Compaction Count",
+          "type": "integer"
+        },
+        "context": {
+          "$ref": "#/$defs/ContextBudget"
+        },
+        "cost": {
+          "$ref": "#/$defs/SessionCostSummary"
+        },
+        "entry_count": {
+          "minimum": 0,
+          "title": "Entry Count",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "usage": {
+          "$ref": "#/$defs/TokenUsage"
+        },
+        "usage_record_count": {
+          "minimum": 0,
+          "title": "Usage Record Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_id",
+        "entry_count",
+        "active_message_count",
+        "compaction_count",
+        "usage_record_count",
+        "usage",
+        "context",
+        "compaction",
+        "cost"
+      ],
+      "title": "SessionStats",
+      "type": "object"
+    },
+    "SessionStatsReported": {
+      "additionalProperties": false,
+      "description": "On-demand, non-persisted session statistics returned over RPC.",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stats": {
+          "$ref": "#/$defs/SessionStats"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.stats",
+          "default": "session.stats",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "command_id",
+        "stats"
+      ],
+      "title": "SessionStatsReported",
+      "type": "object"
+    },
+    "SkillCatalogUpdated": {
+      "additionalProperties": false,
+      "description": "A trust transition replaced the catalog available to future operations.",
+      "properties": {
+        "catalog": {
+          "$ref": "#/$defs/RpcSkillCatalogSnapshot"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "skill.catalog.updated",
+          "default": "skill.catalog.updated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "catalog"
+      ],
+      "title": "SkillCatalogUpdated",
+      "type": "object"
+    },
+    "SkillDiagnosticCode": {
+      "enum": [
+        "catalog-limit",
+        "entry-symlink",
+        "file-unreadable",
+        "invalid-frontmatter",
+        "invalid-metadata",
+        "invalid-yaml",
+        "path-escape",
+        "protected-path",
+        "root-entry-limit",
+        "root-metadata-limit",
+        "root-not-directory",
+        "root-symlink",
+        "root-unreadable",
+        "shadowed",
+        "unsupported-field"
+      ],
+      "type": "string"
+    },
+    "SkillDiagnosticSeverity": {
+      "enum": [
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
+    "SkillInvocationEvidence": {
+      "additionalProperties": false,
+      "description": "Typed evidence retained with one explicitly expanded user message.",
+      "properties": {
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "instructions_truncated": {
+          "default": false,
+          "title": "Instructions Truncated",
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "original_content": {
+          "title": "Original Content",
+          "type": "string"
+        },
+        "request": {
+          "title": "Request",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "original_content",
+        "request",
+        "content_sha256",
+        "instructions_truncated"
+      ],
+      "title": "SkillInvocationEvidence",
+      "type": "object"
+    },
+    "SkillInvoked": {
+      "additionalProperties": false,
+      "description": "An explicit skill directive became one provider-visible user message.",
+      "properties": {
+        "invocation": {
+          "$ref": "#/$defs/SkillInvocationEvidence"
+        },
+        "message_entry_id": {
+          "title": "Message Entry Id",
+          "type": "string"
+        },
+        "provider_content": {
+          "title": "Provider Content",
+          "type": "string"
+        },
+        "queue_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "steering",
+                "follow_up"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Queue Kind"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "skill.invoked",
+          "default": "skill.invoked",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "session_id",
+        "message_entry_id",
+        "invocation",
+        "provider_content",
+        "queue_kind"
+      ],
+      "title": "SkillInvoked",
+      "type": "object"
+    },
+    "SkillSource": {
+      "enum": [
+        "project:wisp",
+        "project:agents",
+        "user:wisp",
+        "user:agents",
+        "package:wisp"
+      ],
+      "type": "string"
+    },
+    "TokenUsage": {
+      "additionalProperties": false,
+      "description": "Provider-reported token usage for one successful model request.",
+      "properties": {
+        "cache_read_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Read Input Tokens"
+        },
+        "cache_write_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Write Input Tokens"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "reasoning_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Output Tokens"
+        },
+        "total_tokens": {
+          "minimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "reasoning_output_tokens"
+      ],
+      "title": "TokenUsage",
+      "type": "object"
+    },
+    "ToolApprovalRequested": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "safety": {
+          "enum": [
+            "read",
+            "mutating",
+            "command"
+          ],
+          "title": "Safety",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.approval.requested",
+          "default": "tool.approval.requested",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "arguments",
+        "safety"
+      ],
+      "title": "ToolApprovalRequested",
+      "type": "object"
+    },
+    "ToolApprovalResolved": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.approval.resolved",
+          "default": "tool.approval.resolved",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "approved",
+        "reason"
+      ],
+      "title": "ToolApprovalResolved",
+      "type": "object"
+    },
+    "ToolCallRequested": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.call",
+          "default": "tool.call",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "arguments"
+      ],
+      "title": "ToolCallRequested",
+      "type": "object"
+    },
+    "ToolCallSnapshot": {
+      "additionalProperties": false,
+      "description": "Serializable tool-call state attached to a completed assistant message.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parse_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parse Error"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "arguments",
+        "parse_error"
+      ],
+      "title": "ToolCallSnapshot",
+      "type": "object"
+    },
+    "ToolExecutionEnded": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_error": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              },
+              "recovery_hint": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "recovery_hint": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "description": "Durable boundary reached after one tool execution finishes.",
+      "properties": {
+        "before_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Text"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "created": {
+          "default": false,
+          "title": "Created",
+          "type": "boolean"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "approval_denied",
+                "internal_error",
+                "invalid_arguments",
+                "invalid_pattern",
+                "invalid_result",
+                "not_found",
+                "path_outside_workspace",
+                "policy_denied",
+                "stale_input",
+                "timeout",
+                "unknown_tool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
+        },
+        "is_error": {
+          "title": "Is Error",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output": {
+          "title": "Output",
+          "type": "string"
+        },
+        "output_has_exit_status": {
+          "default": false,
+          "title": "Output Has Exit Status",
+          "type": "boolean"
+        },
+        "process_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Error"
+        },
+        "process_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Id"
+        },
+        "process_state": {
+          "anyOf": [
+            {
+              "enum": [
+                "running",
+                "completed",
+                "failed",
+                "timed_out",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process State"
+        },
+        "recovery_hint": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Hint"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stderr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stderr"
+        },
+        "stderr_dropped_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stderr Dropped Bytes",
+          "type": "integer"
+        },
+        "stderr_truncated": {
+          "default": false,
+          "title": "Stderr Truncated",
+          "type": "boolean"
+        },
+        "stdout": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stdout"
+        },
+        "stdout_dropped_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stdout Dropped Bytes",
+          "type": "integer"
+        },
+        "stdout_truncated": {
+          "default": false,
+          "title": "Stdout Truncated",
+          "type": "boolean"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "tool.execution.ended",
+          "default": "tool.execution.ended",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "output",
+        "is_error",
+        "failure_code",
+        "retryable",
+        "recovery_hint",
+        "exit_code",
+        "output_has_exit_status",
+        "before_text",
+        "created",
+        "summary",
+        "truncated",
+        "process_id",
+        "process_state",
+        "process_error",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_dropped_bytes",
+        "stderr_dropped_bytes"
+      ],
+      "title": "ToolExecutionEnded",
+      "type": "object"
+    },
+    "ToolExecutionStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.execution.started",
+          "default": "tool.execution.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "arguments"
+      ],
+      "title": "ToolExecutionStarted",
+      "type": "object"
+    },
+    "ToolResultReady": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_error": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              },
+              "recovery_hint": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "recovery_hint": {
+                "type": "null"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "description": "Presentation/provider projection of a completed tool execution.",
+      "properties": {
+        "before_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Text"
+        },
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "created": {
+          "default": false,
+          "title": "Created",
+          "type": "boolean"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "approval_denied",
+                "internal_error",
+                "invalid_arguments",
+                "invalid_pattern",
+                "invalid_result",
+                "not_found",
+                "path_outside_workspace",
+                "policy_denied",
+                "stale_input",
+                "timeout",
+                "unknown_tool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
+        },
+        "is_error": {
+          "title": "Is Error",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output": {
+          "title": "Output",
+          "type": "string"
+        },
+        "output_has_exit_status": {
+          "default": false,
+          "title": "Output Has Exit Status",
+          "type": "boolean"
+        },
+        "process_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Error"
+        },
+        "process_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Id"
+        },
+        "process_state": {
+          "anyOf": [
+            {
+              "enum": [
+                "running",
+                "completed",
+                "failed",
+                "timed_out",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process State"
+        },
+        "recovery_hint": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Hint"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stderr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stderr"
+        },
+        "stderr_dropped_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stderr Dropped Bytes",
+          "type": "integer"
+        },
+        "stderr_truncated": {
+          "default": false,
+          "title": "Stderr Truncated",
+          "type": "boolean"
+        },
+        "stdout": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stdout"
+        },
+        "stdout_dropped_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stdout Dropped Bytes",
+          "type": "integer"
+        },
+        "stdout_truncated": {
+          "default": false,
+          "title": "Stdout Truncated",
+          "type": "boolean"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "tool.result",
+          "default": "tool.result",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "call_id",
+        "name",
+        "output",
+        "is_error",
+        "failure_code",
+        "retryable",
+        "recovery_hint",
+        "exit_code",
+        "output_has_exit_status",
+        "before_text",
+        "created",
+        "summary",
+        "truncated",
+        "process_id",
+        "process_state",
+        "process_error",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_dropped_bytes",
+        "stderr_dropped_bytes"
+      ],
+      "title": "ToolResultReady",
+      "type": "object"
+    },
+    "TrustRequested": {
+      "additionalProperties": false,
+      "properties": {
+        "project_path": {
+          "format": "path",
+          "title": "Project Path",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "trust.requested",
+          "default": "trust.requested",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "request_id",
+        "project_path"
+      ],
+      "title": "TrustRequested",
+      "type": "object"
+    },
+    "TrustResolved": {
+      "additionalProperties": false,
+      "properties": {
+        "project_path": {
+          "format": "path",
+          "title": "Project Path",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "trusted": {
+          "title": "Trusted",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "trust.resolved",
+          "default": "trust.resolved",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "request_id",
+        "project_path",
+        "trusted",
+        "reason"
+      ],
+      "title": "TrustResolved",
+      "type": "object"
+    },
+    "TurnCompleted": {
+      "additionalProperties": false,
+      "properties": {
+        "finish_reason": {
+          "enum": [
+            "stop",
+            "tool_calls",
+            "length",
+            "error",
+            "cancelled"
+          ],
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "turn.completed",
+          "default": "turn.completed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn",
+        "outcome",
+        "finish_reason"
+      ],
+      "title": "TurnCompleted",
+      "type": "object"
+    },
+    "TurnStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 34,
+          "default": 34,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "turn.started",
+          "default": "turn.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "schema_version",
+        "timestamp",
+        "turn"
+      ],
+      "title": "TurnStarted",
+      "type": "object"
+    },
+    "UsageCost": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "billable": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "rates": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "unavailable_reason": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "estimated_usd": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "estimated_usd"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unavailable_reason": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Immutable list-price estimate captured with one successful response.",
+      "properties": {
+        "billable": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BillableTokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "currency": {
+          "const": "USD",
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimated_usd": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Usd"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "rates": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCostRates"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requested_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested Model"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "unavailable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "pricing_unavailable",
+                "usage_incomplete",
+                "estimation_failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unavailable Reason"
+        }
+      },
+      "required": [
+        "schema_version",
+        "currency",
+        "provider",
+        "requested_model",
+        "model",
+        "billable",
+        "rates",
+        "estimated_usd",
+        "unavailable_reason"
+      ],
+      "title": "UsageCost",
+      "type": "object"
+    },
+    "UsageCostRates": {
+      "additionalProperties": false,
+      "description": "Exact USD-per-million rates selected when one request completed.",
+      "properties": {
+        "cache_read_usd_per_million": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Read Usd Per Million"
+        },
+        "cache_write_usd_per_million": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Write Usd Per Million"
+        },
+        "input_usd_per_million": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            }
+          ],
+          "title": "Input Usd Per Million"
+        },
+        "output_usd_per_million": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|-0+(?:\\.0*)?)(?:[eE][+-]?\\d+)?(?![\\s\\S])",
+              "type": "string"
+            }
+          ],
+          "title": "Output Usd Per Million"
+        }
+      },
+      "required": [
+        "input_usd_per_million",
+        "output_usd_per_million",
+        "cache_read_usd_per_million",
+        "cache_write_usd_per_million"
+      ],
+      "title": "UsageCostRates",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "agent.completed": "#/$defs/AgentCompleted",
+      "agent.started": "#/$defs/AgentStarted",
+      "compaction.completed": "#/$defs/CompactionCompleted",
+      "compaction.started": "#/$defs/CompactionStarted",
+      "context.estimated": "#/$defs/ContextEstimated",
+      "context.overflow": "#/$defs/ContextOverflow",
+      "context.pressure": "#/$defs/ContextPressure",
+      "error": "#/$defs/ErrorEvent",
+      "message.completed": "#/$defs/MessageCompleted",
+      "message.delta": "#/$defs/MessageDelta",
+      "message.started": "#/$defs/MessageStarted",
+      "model.provider_auto_switched": "#/$defs/ModelProviderAutoSwitched",
+      "project.config.applied": "#/$defs/ProjectConfigApplied",
+      "provider.retrying": "#/$defs/ProviderRetrying",
+      "queue.items.removed": "#/$defs/QueueItemsRemoved",
+      "queue.message.injected": "#/$defs/QueueMessageInjected",
+      "queue.updated": "#/$defs/QueueUpdated",
+      "rpc.command.finished": "#/$defs/RpcCommandFinished",
+      "rpc.command.started": "#/$defs/RpcCommandStarted",
+      "rpc.commands": "#/$defs/RpcCommandsReported",
+      "rpc.mcp": "#/$defs/RpcMcpStatusReported",
+      "rpc.messages": "#/$defs/RpcMessagesReported",
+      "rpc.session.cloned": "#/$defs/RpcSessionCloned",
+      "rpc.session.forked": "#/$defs/RpcSessionForked",
+      "rpc.session.name_changed": "#/$defs/RpcSessionNameChanged",
+      "rpc.session.selected": "#/$defs/RpcSessionSelected",
+      "rpc.session.tree": "#/$defs/RpcSessionTreeReported",
+      "rpc.session.tree.navigated": "#/$defs/RpcSessionTreeNavigated",
+      "rpc.session.tree.unreverted": "#/$defs/RpcSessionTreeUnreverted",
+      "rpc.sessions": "#/$defs/RpcSessionsReported",
+      "rpc.skills": "#/$defs/RpcSkillsReported",
+      "rpc.state": "#/$defs/RpcStateReported",
+      "session.saved": "#/$defs/SessionSaved",
+      "session.stats": "#/$defs/SessionStatsReported",
+      "skill.catalog.updated": "#/$defs/SkillCatalogUpdated",
+      "skill.invoked": "#/$defs/SkillInvoked",
+      "tool.approval.requested": "#/$defs/ToolApprovalRequested",
+      "tool.approval.resolved": "#/$defs/ToolApprovalResolved",
+      "tool.call": "#/$defs/ToolCallRequested",
+      "tool.execution.ended": "#/$defs/ToolExecutionEnded",
+      "tool.execution.started": "#/$defs/ToolExecutionStarted",
+      "tool.result": "#/$defs/ToolResultReady",
+      "trust.requested": "#/$defs/TrustRequested",
+      "trust.resolved": "#/$defs/TrustResolved",
+      "turn.completed": "#/$defs/TurnCompleted",
+      "turn.started": "#/$defs/TurnStarted"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AgentStarted"
+    },
+    {
+      "$ref": "#/$defs/TurnStarted"
+    },
+    {
+      "$ref": "#/$defs/ProviderRetrying"
+    },
+    {
+      "$ref": "#/$defs/MessageStarted"
+    },
+    {
+      "$ref": "#/$defs/MessageDelta"
+    },
+    {
+      "$ref": "#/$defs/MessageCompleted"
+    },
+    {
+      "$ref": "#/$defs/ContextEstimated"
+    },
+    {
+      "$ref": "#/$defs/ContextPressure"
+    },
+    {
+      "$ref": "#/$defs/ContextOverflow"
+    },
+    {
+      "$ref": "#/$defs/ToolCallRequested"
+    },
+    {
+      "$ref": "#/$defs/ToolExecutionStarted"
+    },
+    {
+      "$ref": "#/$defs/ToolApprovalRequested"
+    },
+    {
+      "$ref": "#/$defs/ToolApprovalResolved"
+    },
+    {
+      "$ref": "#/$defs/TrustRequested"
+    },
+    {
+      "$ref": "#/$defs/TrustResolved"
+    },
+    {
+      "$ref": "#/$defs/ProjectConfigApplied"
+    },
+    {
+      "$ref": "#/$defs/ToolExecutionEnded"
+    },
+    {
+      "$ref": "#/$defs/ToolResultReady"
+    },
+    {
+      "$ref": "#/$defs/TurnCompleted"
+    },
+    {
+      "$ref": "#/$defs/SessionSaved"
+    },
+    {
+      "$ref": "#/$defs/CompactionStarted"
+    },
+    {
+      "$ref": "#/$defs/CompactionCompleted"
+    },
+    {
+      "$ref": "#/$defs/AgentCompleted"
+    },
+    {
+      "$ref": "#/$defs/RpcCommandStarted"
+    },
+    {
+      "$ref": "#/$defs/RpcCommandFinished"
+    },
+    {
+      "$ref": "#/$defs/SessionStatsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcStateReported"
+    },
+    {
+      "$ref": "#/$defs/RpcCommandsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcSkillsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcMcpStatusReported"
+    },
+    {
+      "$ref": "#/$defs/SkillCatalogUpdated"
+    },
+    {
+      "$ref": "#/$defs/RpcMessagesReported"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionSelected"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionCloned"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionForked"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionNameChanged"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionTreeReported"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionTreeNavigated"
+    },
+    {
+      "$ref": "#/$defs/RpcSessionTreeUnreverted"
+    },
+    {
+      "$ref": "#/$defs/QueueUpdated"
+    },
+    {
+      "$ref": "#/$defs/QueueItemsRemoved"
+    },
+    {
+      "$ref": "#/$defs/QueueMessageInjected"
+    },
+    {
+      "$ref": "#/$defs/SkillInvoked"
+    },
+    {
+      "$ref": "#/$defs/ModelProviderAutoSwitched"
+    },
+    {
+      "$ref": "#/$defs/ErrorEvent"
+    }
+  ],
+  "title": "Wisp current live event output"
+}

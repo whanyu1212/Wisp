@@ -37,6 +37,54 @@ Capabilities tracked in [#400](https://github.com/whanyu1212/Wisp/issues/400) th
 Package organization beyond `wisp-ai` remains tracked by
 [#409](https://github.com/whanyu1212/Wisp/issues/409).
 
+## Live JSONL-RPC protocol
+
+The proposed external frontend protocol is a separate compatibility domain. Python models remain
+its semantic source of truth, and deterministic current-version artifacts are checked in under
+`schemas/live-rpc/v1/`. Once runtime negotiation lands, ordinary command envelopes will inherit the
+selected connection version rather than carrying their own version. Events continue to carry the
+independently negotiated `schema_version` described below.
+
+The v1 schema bundle contains client and server handshake messages, the complete typed-client command
+output union, and the complete current live event output union. Command schemas describe payloads
+produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
+superset. Event schemas describe the exact current serialized shape, including required defaulted and
+nullable fields. Stateful lifecycle invariants remain model-level protocol requirements rather than
+JSON Schema constraints.
+
+JSON Schema cannot compare two properties or express that one array is a subset of another. The
+handshake artifacts therefore record ordered ranges, selected-version containment, and the client
+required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce
+those rules during decoding.
+
+The live event artifact includes only the version emitted by the current package even though Python
+retains historical event parsing for persisted sessions. The handshake negotiates protocol and event
+compatibility independently, advertises a fixed pre-negotiation frame ceiling, and reports directional
+application-frame limits. The manifest records both version domains, transport ceilings, and SHA-256
+hashes for every schema.
+
+Regenerate or verify the artifacts from the repository root with:
+
+```bash
+uv run python -m wisp.rpc.protocol_schema --write
+uv run python -m wisp.rpc.protocol_schema --check
+```
+
+Generated schema files must not be edited manually. CI rejects changed, missing, obsolete,
+cross-version, and hash-mismatched artifacts. A new protocol version writes a new immutable version
+directory rather than replacing an older bundle. Before a protocol bump, the previous manifest's
+SHA-256 digest must be added to `HISTORICAL_PROTOCOL_MANIFEST_SHA256`; that digest transitively pins
+the old schemas and metadata outside their version directory. CI also compares committed version
+artifacts with the trusted base revision and rejects modifications, deletions, or renames; new
+protocol directories may only be added. A separate `pull_request_target` guard performs the same
+check from default-branch workflow code without checking out or executing pull-request code.
+
+Schema bundles are repository build inputs and versioned GitHub release assets named
+`wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
+models define the contract for the optional Rust frontend experiment, but the currently shipped
+JSONL-RPC adapter does not perform negotiation until the remaining work in
+[#458](https://github.com/whanyu1212/Wisp/issues/458) lands.
+
 ## Deprecation and removal
 
 A public API may be removed only when all of these conditions are met:

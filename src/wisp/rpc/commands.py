@@ -26,9 +26,9 @@ QUEUE_RPC_COMMAND_TYPES = frozenset(
 class RpcCommandModel(BaseModel):
     """Base class for RPC commands sent to `wisp --mode rpc`."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    id: str | None = None
+    id: str | None = Field(default=None, min_length=1)
 
     def to_json_line(self) -> str:
         """Serialize this command as one JSONL command line."""
@@ -94,7 +94,7 @@ class GetMessagesCommand(RpcCommandModel):
     limit: int = Field(default=200, ge=1, le=500, strict=True)
     before_entry_id: str | None = Field(default=None, min_length=1)
     after_entry_id: str | None = Field(default=None, min_length=1)
-    entry_ids: tuple[str, ...] | None = Field(default=None, max_length=16)
+    entry_ids: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=16)
     complete_structure: bool | None = Field(default=None, strict=True)
     full_content: bool | None = Field(default=None, strict=True)
     allow_during_prompt: bool | None = Field(default=None, strict=True)
@@ -104,7 +104,9 @@ class GetMessagesCommand(RpcCommandModel):
         if self.before_entry_id is not None and self.after_entry_id is not None:
             raise ValueError("message page cursors are mutually exclusive")
         entry_ids = self.entry_ids or ()
-        if entry_ids and (self.before_entry_id is not None or self.after_entry_id is not None):
+        if self.entry_ids is not None and (
+            self.before_entry_id is not None or self.after_entry_id is not None
+        ):
             raise ValueError("exact message entry IDs cannot be combined with page cursors")
         if any(not entry_id for entry_id in entry_ids):
             raise ValueError("message entry IDs must be non-empty")
@@ -225,24 +227,30 @@ class CancelCommand(RpcCommandModel):
     """Cancel a running prompt or compact command."""
 
     type: Literal["cancel"] = "cancel"
-    target_id: str
+    target_id: str = Field(min_length=1)
 
 
 class ApprovalCommand(RpcCommandModel):
     """Resolve a pending tool approval request."""
 
     type: Literal["approval"] = "approval"
-    call_id: str
+    call_id: str = Field(min_length=1)
     approved: bool
     reason: str | None = None
     scope: ApprovalScope | None = None
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> ApprovalCommand:
+        if not self.approved and self.scope is not None:
+            raise ValueError("denied approvals must not include an approval scope")
+        return self
 
 
 class TrustCommand(RpcCommandModel):
     """Resolve a pending project-trust request."""
 
     type: Literal["trust"] = "trust"
-    request_id: str
+    request_id: str = Field(min_length=1)
     trusted: bool
     reason: str | None = None
     transient: bool | None = None
@@ -271,6 +279,23 @@ class ConfigureCommand(RpcCommandModel):
     # provider's own default: it has no default value that `exclude_none`
     # would ever drop, since `False` is not `None`.
     clear_effort: bool = False
+
+    @model_validator(mode="after")
+    def _validate_mutation(self) -> ConfigureCommand:
+        if not self.clear_effort and all(
+            value is None
+            for value in (
+                self.provider,
+                self.model,
+                self.effort,
+                self.auto_compaction_enabled,
+                self.mode,
+            )
+        ):
+            raise ValueError("configure commands require an effective mutation")
+        if self.clear_effort and self.effort is not None:
+            raise ValueError("configure commands cannot set and clear effort together")
+        return self
 
 
 type RpcCommand = Annotated[
