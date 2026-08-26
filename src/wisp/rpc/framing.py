@@ -44,7 +44,7 @@ def decode_rpc_object(frame: bytes, *, max_frame_bytes: int) -> dict[str, object
         value = json.loads(text, object_pairs_hook=cast(Callable[..., object], object_pairs))
     except RpcFrameError:
         raise
-    except (json.JSONDecodeError, UnicodeError) as exc:
+    except (json.JSONDecodeError, RecursionError, UnicodeError) as exc:
         raise RpcFrameError("RPC frame is not valid JSON") from exc
     if not isinstance(value, dict):
         raise RpcFrameError("RPC frame must be a JSON object")

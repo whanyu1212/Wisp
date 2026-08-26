@@ -52,6 +52,11 @@ def _handshake_line() -> bytes:
     ).encode()
 
 
+def _recursive_json_line() -> bytes:
+    nesting = 2_000
+    return b'{"value":' + (b"[" * nesting) + b"0" + (b"]" * nesting) + b"}\n"
+
+
 def _limits() -> RpcTransportLimits:
     return RpcTransportLimits(max_client_frame_bytes=1024, max_server_frame_bytes=2048)
 
@@ -81,6 +86,7 @@ def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
         b'{"type":"rpc.handshake.request","type":"rpc.handshake.request"}\n',
         b"\xff\n",
         b"{}",
+        _recursive_json_line(),
         b"x" * (MAX_HANDSHAKE_FRAME_BYTES + 1) + b"\n",
     ],
 )
@@ -222,7 +228,14 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
     anyio.run(scenario)
 
 
-def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        "not json",
+        _recursive_json_line().decode("utf-8").rstrip("\n"),
+    ],
+)
+def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str) -> None:
     async def scenario() -> None:
         events: list[object] = []
         transport = RpcStdinTransport(
@@ -233,7 +246,7 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
-            await transport.send_line(send, "not json")
+            await transport.send_line(send, bad_frame)
             await transport.send_line(send, '  {"id":"ok","type":"shutdown"}  ')
             command = await receive.receive()
 
