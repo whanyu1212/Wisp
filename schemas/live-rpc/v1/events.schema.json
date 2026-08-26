@@ -126,6 +126,57 @@
     },
     "CompactionCompleted": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "will_retry": {
+                "const": false
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "overflow"
+              }
+            }
+          },
+          "then": {
+            "else": {
+              "properties": {
+                "will_retry": {
+                  "const": false
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "if": {
+                "properties": {
+                  "will_retry": {
+                    "const": false
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "error": {
+                    "pattern": "\\S",
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "compaction_id": {
           "anyOf": [
@@ -316,6 +367,33 @@
     },
     "CompactionStarted": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "trigger_budget": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "manual"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "trigger_budget": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "reason": {
           "default": "manual",
@@ -379,6 +457,25 @@
     },
     "ContextBudget": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "accounting_method": {
+                "const": "fully_estimated"
+              },
+              "observed_is_current": {
+                "const": true
+              },
+              "observed_tokens": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
       "description": "Current estimate, latest observation, and model-window budget.",
       "properties": {
         "accounting_method": {
@@ -409,12 +506,8 @@
             {
               "minimum": 0,
               "type": "integer"
-            },
-            {
-              "type": "null"
             }
           ],
-          "default": null,
           "title": "Effective Tokens"
         },
         "estimate": {
@@ -1282,6 +1375,74 @@
     },
     "QueueItemsRemoved": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "pop"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "properties": {
+                "follow_up": {
+                  "minItems": 1
+                },
+                "steering": {
+                  "minItems": 1
+                }
+              }
+            },
+            "properties": {
+              "follow_up": {
+                "maxItems": 1
+              },
+              "kind": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "steering": {
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "steering"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "follow_up": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "follow_up"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steering": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
       "description": "Queued text removed by an RPC pop or clear operation.",
       "properties": {
         "command_id": {
@@ -1563,6 +1724,7 @@
         "slash_aliases": {
           "default": [],
           "items": {
+            "pattern": "^[/:]",
             "type": "string"
           },
           "title": "Slash Aliases",
@@ -1593,7 +1755,15 @@
         "order"
       ],
       "title": "RpcCommandDescriptor",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "value-equals-prefixed-property",
+          "prefix": "/",
+          "source_property": "name",
+          "value_property": "slash_command"
+        }
+      ]
     },
     "RpcCommandFinished": {
       "additionalProperties": false,
@@ -1870,6 +2040,26 @@
     },
     "RpcMessageSnapshot": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "not": {
+                  "const": "tool"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tool_result": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "description": "One bounded, frontend-oriented persisted message snapshot.",
       "properties": {
         "content": {
@@ -2377,6 +2567,20 @@
     },
     "RpcSessionCloned": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "properties": {
+            "active_leaf_id": {
+              "not": {
+                "type": "null"
+              }
+            },
+            "entry_count": {
+              "minimum": 1
+            }
+          }
+        }
+      ],
       "description": "Confirmation that the active path was cloned and selected.",
       "properties": {
         "active_leaf_id": {
@@ -2492,7 +2696,14 @@
         "entry_count"
       ],
       "title": "RpcSessionCloned",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "source_session_id",
+          "right_property": "session_id"
+        }
+      ]
     },
     "RpcSessionForked": {
       "additionalProperties": false,
@@ -2622,7 +2833,14 @@
         "selected_prompt"
       ],
       "title": "RpcSessionForked",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "source_session_id",
+          "right_property": "session_id"
+        }
+      ]
     },
     "RpcSessionNameChanged": {
       "additionalProperties": false,
@@ -2947,10 +3165,45 @@
         "entry_count"
       ],
       "title": "RpcSessionTreeNavigated",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "boolean_property": "changed",
+          "current_property": "active_leaf_id",
+          "kind": "boolean-reports-property-change",
+          "previous_property": "previous_active_leaf_id"
+        }
+      ]
     },
     "RpcSessionTreeNode": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "role": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "message"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "role": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
       "description": "One bounded node summary from a persisted session tree.",
       "properties": {
         "created_at": {
@@ -3040,6 +3293,73 @@
     },
     "RpcSessionTreeReported": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "session_path": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "session_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "active_leaf_id": {
+                "type": "null"
+              },
+              "nodes": {
+                "maxItems": 0
+              },
+              "session_path": {
+                "type": "null"
+              },
+              "total_node_count": {
+                "const": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "else": {
+            "properties": {
+              "next_after_entry_id": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "next_after_entry_id": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "nodes": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
       "description": "Bounded append-order page of the selected persisted session tree.",
       "properties": {
         "active_leaf_id": {
@@ -3148,7 +3468,26 @@
         "next_after_entry_id"
       ],
       "title": "RpcSessionTreeReported",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "array_property": "nodes",
+          "kind": "array-length-at-most-property",
+          "maximum_property": "total_node_count"
+        },
+        {
+          "array_property": "nodes",
+          "item_property": "entry_id",
+          "kind": "array-item-property-unique"
+        },
+        {
+          "array_property": "nodes",
+          "item_property": "entry_id",
+          "kind": "value-equals-last-array-item-property",
+          "value_property": "next_after_entry_id",
+          "when_property": "truncated"
+        }
+      ]
     },
     "RpcSessionTreeUnreverted": {
       "additionalProperties": false,
@@ -3235,10 +3574,44 @@
         "entry_count"
       ],
       "title": "RpcSessionTreeUnreverted",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "properties-not-equal",
+          "left_property": "previous_active_leaf_id",
+          "right_property": "active_leaf_id"
+        }
+      ]
     },
     "RpcSessionsReported": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "selected_session_path": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "selected_session_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected_session_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "description": "On-demand, bounded persisted session catalog returned over RPC.",
       "properties": {
         "command_id": {

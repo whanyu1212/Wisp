@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -15,16 +16,21 @@ import wisp.rpc.protocol_schema as protocol_schema
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
     BillableTokenUsage,
+    CompactionCompleted,
+    CompactionStarted,
     ContextBudget,
     ContextEstimate,
     ContextPressure,
     MessageCompleted,
     ProviderRetrying,
+    QueueItemsRemoved,
     RpcCommandFinished,
     RpcMcpServerSnapshot,
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
     RpcMessagesReported,
+    RpcSessionTreeNode,
+    RpcSessionTreeReported,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
@@ -631,6 +637,163 @@ def test_event_schema_enforces_mcp_status_error_coupling() -> None:
     assert validator.is_valid(unavailable_payload)
     unavailable_payload["status"]["servers"][0]["error"] = None
     assert not validator.is_valid(unavailable_payload)
+
+
+def test_event_schema_enforces_session_tree_report_invariants() -> None:
+    schema = _artifact("events.schema.json")
+    validator = Draft202012Validator(schema)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    nodes = (
+        RpcSessionTreeNode(
+            entry_id="entry-1",
+            created_at=created_at,
+            kind="message",
+            role="user",
+            preview="first",
+        ),
+        RpcSessionTreeNode(
+            entry_id="entry-2",
+            parent_id="entry-1",
+            created_at=created_at,
+            kind="event",
+            preview="second",
+        ),
+    )
+    report = RpcSessionTreeReported(
+        command_id="command-1",
+        session_id="session-1",
+        session_path=Path("/tmp/session-1.jsonl"),
+        active_leaf_id="entry-2",
+        total_node_count=2,
+        nodes=nodes,
+        truncated=True,
+        next_after_entry_id="entry-2",
+    )
+    payload = json.loads(report.model_dump_json())
+    assert validator.is_valid(payload)
+
+    for field, value in (
+        ("session_path", None),
+        ("truncated", False),
+    ):
+        malformed = dict(payload)
+        malformed[field] = value
+        assert not validator.is_valid(malformed)
+    malformed = json.loads(report.model_dump_json())
+    malformed["nodes"][0]["role"] = None
+    assert not validator.is_valid(malformed)
+
+    empty_payload = json.loads(
+        RpcSessionTreeReported(command_id="command-1", total_node_count=0).model_dump_json()
+    )
+    assert validator.is_valid(empty_payload)
+    empty_payload["total_node_count"] = 1
+    assert not validator.is_valid(empty_payload)
+
+    definitions = cast(dict[str, dict[str, object]], schema["$defs"])
+    invariants = cast(
+        list[dict[str, object]],
+        definitions["RpcSessionTreeReported"]["x-wisp-cross-field-invariants"],
+    )
+    assert [invariant["kind"] for invariant in invariants] == [
+        "array-length-at-most-property",
+        "array-item-property-unique",
+        "value-equals-last-array-item-property",
+    ]
+
+
+def test_event_schema_enforces_compaction_invariants() -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    budget = ContextBudget(
+        estimate=ContextEstimate(
+            system_tokens=0,
+            message_tokens=0,
+            tool_schema_tokens=0,
+            total_tokens=0,
+        ),
+        reserve_tokens=0,
+    )
+    manual_started = CompactionStarted(session_id="session-1", source_entry_count=1)
+    manual_payload = json.loads(manual_started.model_dump_json())
+    assert validator.is_valid(manual_payload)
+    manual_payload["trigger_budget"] = json.loads(budget.model_dump_json())
+    assert not validator.is_valid(manual_payload)
+
+    for reason in ("threshold", "overflow"):
+        started = CompactionStarted(
+            session_id="session-1",
+            reason=reason,
+            source_entry_count=1,
+            trigger_budget=budget,
+        )
+        payload = json.loads(started.model_dump_json())
+        assert validator.is_valid(payload)
+        payload["trigger_budget"] = None
+        assert not validator.is_valid(payload)
+
+    manual_completed = CompactionCompleted(
+        session_id="session-1",
+        outcome="completed",
+        replaced_entry_count=1,
+        retained_entry_count=1,
+    )
+    manual_completed_payload = json.loads(manual_completed.model_dump_json())
+    assert validator.is_valid(manual_completed_payload)
+    manual_completed_payload["will_retry"] = True
+    assert not validator.is_valid(manual_completed_payload)
+
+    overflow_retry = CompactionCompleted(
+        session_id="session-1",
+        reason="overflow",
+        outcome="completed",
+        replaced_entry_count=0,
+        retained_entry_count=1,
+        will_retry=True,
+    )
+    assert validator.is_valid(json.loads(overflow_retry.model_dump_json()))
+    overflow_stopped = overflow_retry.model_copy(
+        update={"will_retry": False, "error": "context still exceeds the limit"}
+    )
+    overflow_stopped_payload = json.loads(overflow_stopped.model_dump_json())
+    assert validator.is_valid(overflow_stopped_payload)
+    overflow_stopped_payload["error"] = "   "
+    assert not validator.is_valid(overflow_stopped_payload)
+
+    overflow_failed = CompactionCompleted(
+        session_id="session-1",
+        reason="overflow",
+        outcome="failed",
+        replaced_entry_count=0,
+        retained_entry_count=1,
+        error="provider failure",
+    )
+    overflow_failed_payload = json.loads(overflow_failed.model_dump_json())
+    assert validator.is_valid(overflow_failed_payload)
+    overflow_failed_payload["will_retry"] = True
+    assert not validator.is_valid(overflow_failed_payload)
+
+
+def test_event_schema_enforces_queue_removal_invariants() -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    cleared = QueueItemsRemoved(command_id="command-1", operation="clear")
+    assert validator.is_valid(json.loads(cleared.model_dump_json()))
+
+    popped = QueueItemsRemoved(
+        command_id="command-1",
+        operation="pop",
+        kind="steering",
+        steering=("first",),
+    )
+    payload = json.loads(popped.model_dump_json())
+    assert validator.is_valid(payload)
+    for field, value in (
+        ("kind", None),
+        ("follow_up", ["second"]),
+        ("steering", ["first", "second"]),
+    ):
+        malformed = dict(payload)
+        malformed[field] = value
+        assert not validator.is_valid(malformed)
 
 
 def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:

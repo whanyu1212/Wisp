@@ -494,6 +494,43 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
 
 def _add_event_semantic_constraints(schema: JsonObject) -> None:
     definitions = _object_member(schema, "$defs")
+    context_budget = _named_definition(definitions, "ContextBudget")
+    context_properties = _object_member(context_budget, "properties")
+    effective_tokens = _object_member(context_properties, "effective_tokens")
+    _remove_null(effective_tokens)
+    effective_tokens.pop("default", None)
+    context_budget["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "not": {
+                    "properties": {
+                        "accounting_method": {"const": "fully_estimated"},
+                        "observed_is_current": {"const": True},
+                        "observed_tokens": {"not": {"type": "null"}},
+                    }
+                }
+            }
+        ],
+    )
+
+    command_descriptor = _named_definition(definitions, "RpcCommandDescriptor")
+    command_properties = _object_member(command_descriptor, "properties")
+    slash_aliases = _object_member(command_properties, "slash_aliases")
+    slash_alias_items = _object_member(slash_aliases, "items")
+    slash_alias_items["pattern"] = r"^[/:]"
+    command_descriptor["x-wisp-cross-field-invariants"] = cast(
+        JsonValue,
+        [
+            {
+                "kind": "value-equals-prefixed-property",
+                "prefix": "/",
+                "source_property": "name",
+                "value_property": "slash_command",
+            }
+        ],
+    )
+
     usage_cost = _named_definition(definitions, "UsageCost")
     usage_cost["allOf"] = cast(
         JsonValue,
@@ -573,6 +610,204 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
                 "if": {"properties": {"status": {"const": "unavailable"}}},
                 "then": {"properties": {"error": {"not": {"type": "null"}}}},
                 "else": {"properties": {"error": {"type": "null"}}},
+            }
+        ],
+    )
+
+    session_tree_node = _named_definition(definitions, "RpcSessionTreeNode")
+    session_tree_node["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"kind": {"const": "message"}}},
+                "then": {"properties": {"role": {"not": {"type": "null"}}}},
+                "else": {"properties": {"role": {"type": "null"}}},
+            }
+        ],
+    )
+
+    message_snapshot = _named_definition(definitions, "RpcMessageSnapshot")
+    message_snapshot["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"role": {"not": {"const": "tool"}}}},
+                "then": {"properties": {"tool_result": {"type": "null"}}},
+            }
+        ],
+    )
+
+    sessions = _named_definition(definitions, "RpcSessionsReported")
+    sessions["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"selected_session_id": {"type": "null"}}},
+                "then": {"properties": {"selected_session_path": {"type": "null"}}},
+                "else": {"properties": {"selected_session_path": {"not": {"type": "null"}}}},
+            }
+        ],
+    )
+
+    session_tree = _named_definition(definitions, "RpcSessionTreeReported")
+    session_tree["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"session_id": {"type": "null"}}},
+                "then": {
+                    "properties": {
+                        "session_path": {"type": "null"},
+                        "active_leaf_id": {"type": "null"},
+                        "total_node_count": {"const": 0},
+                        "nodes": {"maxItems": 0},
+                        "truncated": {"const": False},
+                    }
+                },
+                "else": {"properties": {"session_path": {"not": {"type": "null"}}}},
+            },
+            {
+                "if": {"properties": {"truncated": {"const": True}}},
+                "then": {
+                    "properties": {
+                        "next_after_entry_id": {"not": {"type": "null"}},
+                        "nodes": {"minItems": 1},
+                    }
+                },
+                "else": {"properties": {"next_after_entry_id": {"type": "null"}}},
+            },
+        ],
+    )
+    session_tree["x-wisp-cross-field-invariants"] = cast(
+        JsonValue,
+        [
+            {
+                "kind": "array-length-at-most-property",
+                "array_property": "nodes",
+                "maximum_property": "total_node_count",
+            },
+            {
+                "kind": "array-item-property-unique",
+                "array_property": "nodes",
+                "item_property": "entry_id",
+            },
+            {
+                "kind": "value-equals-last-array-item-property",
+                "array_property": "nodes",
+                "item_property": "entry_id",
+                "value_property": "next_after_entry_id",
+                "when_property": "truncated",
+            },
+        ],
+    )
+
+    compaction_started = _named_definition(definitions, "CompactionStarted")
+    compaction_started["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"reason": {"const": "manual"}}},
+                "then": {"properties": {"trigger_budget": {"type": "null"}}},
+                "else": {"properties": {"trigger_budget": {"not": {"type": "null"}}}},
+            }
+        ],
+    )
+
+    compaction_completed = _named_definition(definitions, "CompactionCompleted")
+    compaction_completed["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"reason": {"const": "overflow"}}},
+                "then": {
+                    "if": {"properties": {"outcome": {"const": "completed"}}},
+                    "then": {
+                        "if": {"properties": {"will_retry": {"const": False}}},
+                        "then": {"properties": {"error": {"type": "string", "pattern": r"\S"}}},
+                    },
+                    "else": {"properties": {"will_retry": {"const": False}}},
+                },
+                "else": {"properties": {"will_retry": {"const": False}}},
+            }
+        ],
+    )
+
+    queue_items_removed = _named_definition(definitions, "QueueItemsRemoved")
+    queue_items_removed["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"operation": {"const": "pop"}}},
+                "then": {
+                    "properties": {
+                        "kind": {"not": {"type": "null"}},
+                        "steering": {"maxItems": 1},
+                        "follow_up": {"maxItems": 1},
+                    },
+                    "not": {
+                        "properties": {
+                            "steering": {"minItems": 1},
+                            "follow_up": {"minItems": 1},
+                        }
+                    },
+                },
+            },
+            {
+                "if": {"properties": {"kind": {"const": "steering"}}},
+                "then": {"properties": {"follow_up": {"maxItems": 0}}},
+            },
+            {
+                "if": {"properties": {"kind": {"const": "follow_up"}}},
+                "then": {"properties": {"steering": {"maxItems": 0}}},
+            },
+        ],
+    )
+
+    for name in ("RpcSessionCloned", "RpcSessionForked"):
+        derived = _named_definition(definitions, name)
+        derived["x-wisp-cross-field-invariants"] = cast(
+            JsonValue,
+            [
+                {
+                    "kind": "properties-not-equal",
+                    "left_property": "source_session_id",
+                    "right_property": "session_id",
+                }
+            ],
+        )
+    cloned = _named_definition(definitions, "RpcSessionCloned")
+    cloned["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "properties": {
+                    "active_leaf_id": {"not": {"type": "null"}},
+                    "entry_count": {"minimum": 1},
+                }
+            }
+        ],
+    )
+
+    navigated = _named_definition(definitions, "RpcSessionTreeNavigated")
+    navigated["x-wisp-cross-field-invariants"] = cast(
+        JsonValue,
+        [
+            {
+                "kind": "boolean-reports-property-change",
+                "boolean_property": "changed",
+                "current_property": "active_leaf_id",
+                "previous_property": "previous_active_leaf_id",
+            }
+        ],
+    )
+    unreverted = _named_definition(definitions, "RpcSessionTreeUnreverted")
+    unreverted["x-wisp-cross-field-invariants"] = cast(
+        JsonValue,
+        [
+            {
+                "kind": "properties-not-equal",
+                "left_property": "previous_active_leaf_id",
+                "right_property": "active_leaf_id",
             }
         ],
     )
