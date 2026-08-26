@@ -11,7 +11,8 @@ negotiation encloses every measured Wisp payload write in exactly one balanced C
 Nine native samples now confirm the same behavior in WezTerm directly and through tmux, while Apple
 Terminal retains the unsupported fallback without emitting CSI 2026 controls. This evidence pass is
 explicitly scoped to Apple Terminal, WezTerm, tmux on WezTerm, and Windows Terminal; Windows results
-and manual flicker observations remain required before deciding the production policy.
+manual flicker observations, and native process-wide teardown balance remain required before deciding
+the production policy.
 
 ## Automated paired PTY run
 
@@ -114,12 +115,12 @@ Terminal environment:
 
 Current summary:
 
-| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Unbalanced | Payload outside sync | Source complete | Manual flicker | Cleanup |
-|---|---|---|---:|---:|---:|---:|---:|---|---|
-| WezTerm | 20240203-110809-5046fc22 | macOS 26.5.2 / direct | 3 / 3 | 31 / 31 frames | 0 | 0 | 3 / 3 | pending | process exited normally; cursor/input not manually checked |
-| Apple Terminal | 2.15 | macOS 26.5.2 / direct | 0 / 3 | 0 / 37 frames | 0 | 37 | 3 / 3 | pending | shell prompt restored; cursor/input not manually checked |
-| tmux | 3.7b | WezTerm 20240203-110809-5046fc22 | 3 / 3 | 35 / 35 frames | 0 | 0 | 3 / 3 | pending | 100x24 pane and shell prompt restored; cursor/input not manually checked |
-| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending | pending | pending |
+| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Unbalanced | Payload outside sync | Source complete | Process-wide balance | Manual flicker | Cleanup |
+|---|---|---|---:|---:|---:|---:|---:|---|---|---|
+| WezTerm | 20240203-110809-5046fc22 | macOS 26.5.2 / direct | 3 / 3 | 31 / 31 frames | 0 | 0 | 3 / 3 | pending | pending | process exited normally; cursor/input not manually checked |
+| Apple Terminal | 2.15 | macOS 26.5.2 / direct | 0 / 3 | 0 / 37 frames | 0 | 37 | 3 / 3 | pending | pending | shell prompt restored; cursor/input not manually checked |
+| tmux | 3.7b | WezTerm 20240203-110809-5046fc22 | 3 / 3 | 35 / 35 frames | 0 | 0 | 3 / 3 | pending | pending | 100x24 pane and shell prompt restored; cursor/input not manually checked |
+| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending | pending | pending | pending |
 
 For supported samples, require exact pairs to equal observed driver frames, unbalanced frames and
 payload writes outside synchronization to equal zero, at least one full layout and partial update, and
@@ -131,11 +132,17 @@ and shell prompt; they remain separate from automated framing counts.
 The native matrix cannot be automated by the headless benchmark runner because visual flicker and the
 actual emulator capability response are properties of the user's interactive terminal.
 
-The nine completed samples satisfy their automated gates: supporting environments detected capability
-in every run, wrapped every observed frame exactly once, and emitted no payload outside
+Native mode leaves `process_sync_begin_count`, `process_sync_end_count`, and
+`process_sync_balanced` unset because it does not capture the process-wide terminal stream through
+restored shutdown. Decision-gate item 4 therefore remains unverified in every native environment.
+A normal process exit or restored shell prompt is cleanup evidence, not proof of balanced CSI 2026
+controls across teardown.
+
+The nine completed samples satisfy their per-frame automated gates: supporting environments detected
+capability in every run, wrapped every observed frame exactly once, and emitted no payload outside
 synchronization; Apple Terminal consistently retained unsynchronized fallback behavior. This is not
-yet the production decision because Windows Terminal and all manual flicker checks
-remain pending.
+yet the production decision because Windows Terminal, all manual flicker checks, and native
+process-wide balance remain pending.
 
 ## Decision gate for the next PR
 
@@ -163,5 +170,5 @@ The automated evidence favors Textual ownership and positive capability detectio
 - no force-on mode;
 - no synchronization for inline, headless, line, print, JSONL-RPC, or other noninteractive output.
 
-This recommendation remains provisional until Windows Terminal and manual flicker evidence finish
-this scoped evidence pass.
+This recommendation remains provisional until Windows Terminal, manual flicker evidence, and native
+process-wide teardown balance finish this scoped evidence pass.
