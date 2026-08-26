@@ -71,15 +71,16 @@ def pop_rpc_frame(buffer: bytearray, *, max_frame_bytes: int) -> bytes | None:
 
     newline_index = buffer.find(b"\n")
     if newline_index < 0:
-        if len(buffer) > max_frame_bytes:
+        awaiting_crlf_terminator = len(buffer) == max_frame_bytes + 1 and buffer.endswith(b"\r")
+        if len(buffer) > max_frame_bytes and not awaiting_crlf_terminator:
             raise RpcFrameError(f"RPC frame exceeds the {max_frame_bytes}-byte limit")
         return None
-    if newline_index > max_frame_bytes:
-        raise RpcFrameError(f"RPC frame exceeds the {max_frame_bytes}-byte limit")
     frame = bytes(buffer[:newline_index])
-    del buffer[: newline_index + 1]
     if frame.endswith(b"\r"):
         frame = frame[:-1]
+    if len(frame) > max_frame_bytes:
+        raise RpcFrameError(f"RPC frame exceeds the {max_frame_bytes}-byte limit")
+    del buffer[: newline_index + 1]
     return frame
 
 

@@ -361,6 +361,25 @@ def test_fd_transport_rejects_unterminated_final_line_at_eof() -> None:
     anyio.run(scenario)
 
 
+def test_frame_parser_accepts_max_sized_crlf_frame_across_chunks() -> None:
+    limit = 64
+    buffer = bytearray(b"x" * limit + b"\r")
+
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) is None
+
+    buffer.extend(b"\nnext\n")
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) == b"x" * limit
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) == b"next"
+
+
+def test_frame_parser_rejects_oversized_crlf_frame() -> None:
+    limit = 64
+    buffer = bytearray(b"x" * (limit + 1) + b"\r\n")
+
+    with pytest.raises(rpc_framing.RpcFrameError, match="64-byte limit"):
+        rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit)
+
+
 def test_transport_dispatches_buffered_pipe_lines() -> None:
     read_fd, write_fd = os.pipe()
     stdin = os.fdopen(read_fd, "r", encoding="utf-8")
