@@ -22,6 +22,8 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     ToolCallSnapshot,
+    ToolExecutionEnded,
+    ToolResultReady,
     UsageCost,
     UsageCostRates,
 )
@@ -480,6 +482,26 @@ def test_event_decimal_schema_accepts_serialized_exponent_notation() -> None:
     assert Draft202012Validator(_artifact("events.schema.json")).is_valid(payload)
 
 
+def test_event_decimal_schema_rejects_negative_financial_values() -> None:
+    schema = _artifact("events.schema.json")
+    definitions = cast(dict[str, dict[str, object]], schema["$defs"])
+
+    for definition_name, field_name in (
+        ("SessionCostSummary", "known_usd"),
+        ("UsageCost", "estimated_usd"),
+        ("UsageCostRates", "input_usd_per_million"),
+        ("UsageCostRates", "output_usd_per_million"),
+        ("UsageCostRates", "cache_read_usd_per_million"),
+        ("UsageCostRates", "cache_write_usd_per_million"),
+    ):
+        properties = cast(dict[str, dict[str, object]], definitions[definition_name]["properties"])
+        validator = Draft202012Validator(properties[field_name])
+        assert validator.is_valid("1E+3")
+        assert validator.is_valid("-0E+3")
+        assert not validator.is_valid("-1")
+        assert not validator.is_valid("-1E+3")
+
+
 def test_event_schema_enforces_priced_and_unpriced_usage_cost_states() -> None:
     validator = Draft202012Validator(_artifact("events.schema.json"))
     priced = MessageCompleted(
@@ -521,6 +543,37 @@ def test_event_schema_enforces_priced_and_unpriced_usage_cost_states() -> None:
     assert validator.is_valid(unpriced_payload)
     unpriced_payload["cost"]["unavailable_reason"] = None
     assert not validator.is_valid(unpriced_payload)
+
+
+@pytest.mark.parametrize("event_type", [ToolExecutionEnded, ToolResultReady])
+def test_event_schema_enforces_tool_failure_metadata(event_type: type[ToolExecutionEnded]) -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    success = event_type(call_id="call-1", name="bash", output="ok", is_error=False)
+    success_payload = json.loads(success.model_dump_json())
+    assert validator.is_valid(success_payload)
+
+    for field, value in (
+        ("failure_code", "invalid_arguments"),
+        ("retryable", True),
+        ("recovery_hint", "Retry with valid arguments."),
+    ):
+        malformed = dict(success_payload)
+        malformed[field] = value
+        assert not validator.is_valid(malformed)
+
+    failure = event_type(
+        call_id="call-1",
+        name="bash",
+        output="invalid arguments",
+        is_error=True,
+        failure_code="invalid_arguments",
+        retryable=True,
+        recovery_hint="Retry with valid arguments.",
+    )
+    failure_payload = json.loads(failure.model_dump_json())
+    assert validator.is_valid(failure_payload)
+    failure_payload["failure_code"] = None
+    assert not validator.is_valid(failure_payload)
 
 
 def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:

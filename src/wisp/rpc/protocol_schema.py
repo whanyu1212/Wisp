@@ -43,7 +43,9 @@ _SERVER_HANDSHAKE_SCHEMA = "server-handshake.schema.json"
 _COMMAND_SCHEMA = "commands.schema.json"
 _EVENT_SCHEMA = "events.schema.json"
 _MANIFEST = "manifest.json"
-_DECIMAL_STRING_PATTERN = r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?![\s\S])"
+_DECIMAL_STRING_PATTERN = (
+    r"^(?:[+]?(?:\d+(?:\.\d*)?|\.\d+)|-0+(?:\.0*)?)(?:[eE][+-]?\d+)?(?![\s\S])"
+)
 _SCHEMA_FILENAMES = (
     _CLIENT_HANDSHAKE_SCHEMA,
     _SERVER_HANDSHAKE_SCHEMA,
@@ -512,6 +514,32 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
             }
         ],
     )
+    for name in ("ToolExecutionEnded", "ToolResultReady"):
+        tool_result = _named_definition(definitions, name)
+        tool_result["allOf"] = cast(
+            JsonValue,
+            [
+                {
+                    "if": {"properties": {"is_error": {"const": False}}},
+                    "then": {
+                        "properties": {
+                            "failure_code": {"type": "null"},
+                            "retryable": {"const": False},
+                            "recovery_hint": {"type": "null"},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"failure_code": {"type": "null"}}},
+                    "then": {
+                        "properties": {
+                            "retryable": {"const": False},
+                            "recovery_hint": {"type": "null"},
+                        }
+                    },
+                },
+            ],
+        )
 
 
 def _adapter_models[T](adapter: TypeAdapter[T]) -> dict[str, type[BaseModel]]:
