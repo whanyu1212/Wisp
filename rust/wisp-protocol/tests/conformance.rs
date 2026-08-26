@@ -102,6 +102,83 @@ fn canonical_command_cross_field_constraints_fail_closed() {
 }
 
 #[test]
+fn canonical_event_cross_field_constraints_fail_closed() {
+    let mut event_fixtures = fixtures(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/live-rpc/v2/events.schema.json"
+    )));
+    let mut invalid_events = Vec::new();
+
+    let mut commands = event_fixtures.remove("rpc.commands").unwrap();
+    commands["commands"] = serde_json::json!([{
+        "name": "inspect",
+        "title": "Inspect",
+        "description": "Inspect state",
+        "category": "general",
+        "aliases": [],
+        "slash_command": "/wrong",
+        "slash_aliases": [],
+        "arguments": [],
+        "accepts_arguments": false,
+        "prefill_on_partial_enter": false,
+        "order": 1
+    }]);
+    invalid_events.push(commands);
+
+    let mut cloned = event_fixtures.remove("rpc.session.cloned").unwrap();
+    cloned["session_id"] = cloned["source_session_id"].clone();
+    invalid_events.push(cloned);
+
+    let mut navigated = event_fixtures.remove("rpc.session.tree.navigated").unwrap();
+    navigated["changed"] = serde_json::json!(false);
+    invalid_events.push(navigated);
+
+    let mut unreverted = event_fixtures
+        .remove("rpc.session.tree.unreverted")
+        .unwrap();
+    unreverted["active_leaf_id"] = unreverted["previous_active_leaf_id"].clone();
+    invalid_events.push(unreverted);
+
+    let tree_node = serde_json::json!({
+        "entry_id": "entry-1",
+        "parent_id": null,
+        "operation_id": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "kind": "event",
+        "role": null,
+        "preview": "fixture",
+        "preview_truncated": false
+    });
+    let tree_fixture = event_fixtures.remove("rpc.session.tree").unwrap();
+
+    let mut oversized_page = tree_fixture.clone();
+    oversized_page["session_id"] = serde_json::json!("session-1");
+    oversized_page["session_path"] = serde_json::json!("fixture.jsonl");
+    oversized_page["nodes"] = serde_json::json!([tree_node.clone()]);
+    invalid_events.push(oversized_page);
+
+    let mut duplicate_page = tree_fixture.clone();
+    duplicate_page["session_id"] = serde_json::json!("session-1");
+    duplicate_page["session_path"] = serde_json::json!("fixture.jsonl");
+    duplicate_page["total_node_count"] = serde_json::json!(2);
+    duplicate_page["nodes"] = serde_json::json!([tree_node.clone(), tree_node.clone()]);
+    invalid_events.push(duplicate_page);
+
+    let mut mismatched_cursor = tree_fixture;
+    mismatched_cursor["session_id"] = serde_json::json!("session-1");
+    mismatched_cursor["session_path"] = serde_json::json!("fixture.jsonl");
+    mismatched_cursor["total_node_count"] = serde_json::json!(2);
+    mismatched_cursor["nodes"] = serde_json::json!([tree_node]);
+    mismatched_cursor["truncated"] = serde_json::json!(true);
+    mismatched_cursor["next_after_entry_id"] = serde_json::json!("wrong-entry");
+    invalid_events.push(mismatched_cursor);
+
+    for event in invalid_events {
+        assert!(events::deserialize(event).is_err());
+    }
+}
+
+#[test]
 fn generated_handshake_types_preserve_the_v2_contract() {
     let request_value = serde_json::json!({
         "type": "rpc.handshake.request",
@@ -126,9 +203,76 @@ fn generated_handshake_types_preserve_the_v2_contract() {
     });
 
     let request: handshake_request::RpcHandshakeRequest =
-        serde_json::from_value(request_value.clone()).expect("request must deserialize");
+        handshake_request::deserialize(request_value.clone()).expect("request must deserialize");
     let accepted: handshake_response::RpcHandshakeResponse =
-        serde_json::from_value(accepted_value.clone()).expect("response must deserialize");
+        handshake_response::deserialize(accepted_value.clone()).expect("response must deserialize");
     assert_eq!(serde_json::to_value(request).unwrap(), request_value);
     assert_eq!(serde_json::to_value(accepted).unwrap(), accepted_value);
+}
+
+#[test]
+fn handshake_cross_field_invariants_fail_closed() {
+    let invalid_requests = [
+        serde_json::json!({
+            "type": "rpc.handshake.request",
+            "frontend_name": "fixture",
+            "frontend_version": "0.1.0",
+            "min_protocol_version": 3,
+            "max_protocol_version": 2,
+            "min_event_schema_version": 34,
+            "max_event_schema_version": 34,
+            "supported_capabilities": [],
+            "required_capabilities": []
+        }),
+        serde_json::json!({
+            "type": "rpc.handshake.request",
+            "frontend_name": "fixture",
+            "frontend_version": "0.1.0",
+            "min_protocol_version": 2,
+            "max_protocol_version": 2,
+            "min_event_schema_version": 35,
+            "max_event_schema_version": 34,
+            "supported_capabilities": [],
+            "required_capabilities": []
+        }),
+        serde_json::json!({
+            "type": "rpc.handshake.request",
+            "frontend_name": "fixture",
+            "frontend_version": "0.1.0",
+            "min_protocol_version": 2,
+            "max_protocol_version": 2,
+            "min_event_schema_version": 34,
+            "max_event_schema_version": 34,
+            "supported_capabilities": [],
+            "required_capabilities": ["missing"]
+        }),
+    ];
+    for request in invalid_requests {
+        assert!(handshake_request::deserialize(request).is_err());
+    }
+
+    let invalid_responses = [
+        serde_json::json!({
+            "type": "rpc.handshake.accepted",
+            "backend_package_version": "0.1.0",
+            "protocol_version": 3,
+            "event_schema_version": 34,
+            "min_protocol_version": 2,
+            "max_protocol_version": 2,
+            "capabilities": [],
+            "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
+        }),
+        serde_json::json!({
+            "type": "rpc.handshake.rejected",
+            "code": "protocol_version_mismatch",
+            "message": "No compatible protocol.",
+            "backend_package_version": "0.1.0",
+            "min_protocol_version": 3,
+            "max_protocol_version": 2,
+            "event_schema_version": 34
+        }),
+    ];
+    for response in invalid_responses {
+        assert!(handshake_response::deserialize(response).is_err());
+    }
 }

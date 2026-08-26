@@ -34,8 +34,25 @@ impl SchemaContract {
             .expect("embedded RPC schema must be valid Draft 2020-12");
         Self { schema, validator }
     }
+
+    fn validate(&self, value: &Value) -> Result<(), ProtocolDecodeError> {
+        self.validator
+            .validate(value)
+            .map_err(|_| ProtocolDecodeError("RPC value violates the canonical schema".into()))?;
+        validate_cross_field_invariants(&self.schema, value)
+    }
 }
 
+static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
+    SchemaContract::new(include_str!(
+        "../../../schemas/live-rpc/v2/client-handshake.schema.json"
+    ))
+});
+static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
+    SchemaContract::new(include_str!(
+        "../../../schemas/live-rpc/v2/server-handshake.schema.json"
+    ))
+});
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
         "../../../schemas/live-rpc/v2/commands.schema.json"
@@ -46,6 +63,177 @@ static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
         "../../../schemas/live-rpc/v2/events.schema.json"
     ))
 });
+
+fn validate_cross_field_invariants(
+    schema: &Value,
+    value: &Value,
+) -> Result<(), ProtocolDecodeError> {
+    let selected_schema = value
+        .get("type")
+        .and_then(Value::as_str)
+        .and_then(|discriminator| schema["discriminator"]["mapping"][discriminator].as_str())
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|definition| schema["$defs"].get(definition))
+        .unwrap_or(schema);
+    validate_invariant_list(selected_schema, value)?;
+
+    if value.get("type").and_then(Value::as_str) == Some("rpc.commands") {
+        let descriptor_schema = &schema["$defs"]["RpcCommandDescriptor"];
+        let descriptors = value["commands"].as_array().ok_or_else(|| {
+            ProtocolDecodeError("RPC command report has no descriptor array".into())
+        })?;
+        for descriptor in descriptors {
+            validate_invariant_list(descriptor_schema, descriptor)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_invariant_list(schema: &Value, value: &Value) -> Result<(), ProtocolDecodeError> {
+    let Some(invariants) = schema["x-wisp-cross-field-invariants"].as_array() else {
+        return Ok(());
+    };
+
+    for invariant in invariants {
+        let valid = match invariant["kind"].as_str() {
+            Some("ordered-range") => {
+                let minimum = invariant["minimum_property"].as_str();
+                let maximum = invariant["maximum_property"].as_str();
+                match (minimum, maximum) {
+                    (Some(minimum), Some(maximum)) => value[minimum]
+                        .as_u64()
+                        .zip(value[maximum].as_u64())
+                        .is_some_and(|(minimum, maximum)| minimum <= maximum),
+                    _ => false,
+                }
+            }
+            Some("value-in-range") => {
+                let minimum = invariant["minimum_property"].as_str();
+                let maximum = invariant["maximum_property"].as_str();
+                let selected = invariant["value_property"].as_str();
+                match (minimum, maximum, selected) {
+                    (Some(minimum), Some(maximum), Some(selected)) => value[minimum]
+                        .as_u64()
+                        .zip(value[maximum].as_u64())
+                        .zip(value[selected].as_u64())
+                        .is_some_and(|((minimum, maximum), selected)| {
+                            minimum <= selected && selected <= maximum
+                        }),
+                    _ => false,
+                }
+            }
+            Some("array-subset") => {
+                let subset = invariant["subset_property"].as_str();
+                let superset = invariant["superset_property"].as_str();
+                match (subset, superset) {
+                    (Some(subset), Some(superset)) => value[subset]
+                        .as_array()
+                        .zip(value[superset].as_array())
+                        .is_some_and(|(subset, superset)| {
+                            subset.iter().all(|member| superset.contains(member))
+                        }),
+                    _ => false,
+                }
+            }
+            Some("properties-not-equal") => {
+                let left = invariant["left_property"].as_str();
+                let right = invariant["right_property"].as_str();
+                match (left, right) {
+                    (Some(left), Some(right)) => value.get(left) != value.get(right),
+                    _ => false,
+                }
+            }
+            Some("value-equals-prefixed-property") => {
+                let prefix = invariant["prefix"].as_str();
+                let source = invariant["source_property"].as_str();
+                let target = invariant["value_property"].as_str();
+                match (prefix, source, target) {
+                    (Some(prefix), Some(source), Some(target)) => value[source]
+                        .as_str()
+                        .zip(value[target].as_str())
+                        .is_some_and(|(source, target)| format!("{prefix}{source}") == target),
+                    _ => false,
+                }
+            }
+            Some("boolean-reports-property-change") => {
+                let reported = invariant["boolean_property"].as_str();
+                let previous = invariant["previous_property"].as_str();
+                let current = invariant["current_property"].as_str();
+                match (reported, previous, current) {
+                    (Some(reported), Some(previous), Some(current)) => value[reported]
+                        .as_bool()
+                        .is_some_and(|reported| reported == (value[previous] != value[current])),
+                    _ => false,
+                }
+            }
+            Some("array-length-at-most-property") => {
+                let array = invariant["array_property"].as_str();
+                let maximum = invariant["maximum_property"].as_str();
+                match (array, maximum) {
+                    (Some(array), Some(maximum)) => value[array]
+                        .as_array()
+                        .zip(value[maximum].as_u64())
+                        .is_some_and(|(array, maximum)| array.len() as u64 <= maximum),
+                    _ => false,
+                }
+            }
+            Some("array-item-property-unique") => {
+                let array = invariant["array_property"].as_str();
+                let item_property = invariant["item_property"].as_str();
+                match (array, item_property) {
+                    (Some(array), Some(item_property)) => {
+                        value[array].as_array().is_some_and(|array| {
+                            let mut observed = std::collections::BTreeSet::new();
+                            array.iter().all(|item| {
+                                item[item_property]
+                                    .as_str()
+                                    .is_some_and(|member| observed.insert(member))
+                            })
+                        })
+                    }
+                    _ => false,
+                }
+            }
+            Some("value-equals-last-array-item-property") => {
+                let when = invariant["when_property"].as_str();
+                let array = invariant["array_property"].as_str();
+                let item_property = invariant["item_property"].as_str();
+                let target = invariant["value_property"].as_str();
+                match (when, array, item_property, target) {
+                    (Some(when), Some(array), Some(item_property), Some(target)) => {
+                        value[when].as_bool().is_some_and(|enabled| {
+                            !enabled
+                                || value[array]
+                                    .as_array()
+                                    .and_then(|items| items.last())
+                                    .is_some_and(|item| value[target] == item[item_property])
+                        })
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(ProtocolDecodeError(
+                "RPC value violates a canonical cross-field invariant".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn deserialize_contract<T>(
+    contract: &SchemaContract,
+    value: Value,
+) -> Result<T, ProtocolDecodeError>
+where
+    T: DeserializeOwned,
+{
+    contract.validate(&value)?;
+    serde_json::from_value(value)
+        .map_err(|error| ProtocolDecodeError(format!("invalid RPC value: {error}")))
+}
 
 fn deserialize_known<T>(contract: &SchemaContract, value: Value) -> Result<T, ProtocolDecodeError>
 where
@@ -63,20 +251,27 @@ where
             "unknown RPC discriminator: {discriminator}"
         )));
     }
-    contract
-        .validator
-        .validate(&value)
-        .map_err(|_| ProtocolDecodeError("RPC value violates the canonical schema".into()))?;
-    serde_json::from_value(value)
-        .map_err(|error| ProtocolDecodeError(format!("invalid RPC value: {error}")))
+    deserialize_contract(contract, value)
 }
 
 pub mod handshake_request {
     typify::import_types!(schema = "../../schemas/live-rpc/v2/client-handshake.schema.json");
+
+    pub fn deserialize(
+        value: serde_json::Value,
+    ) -> Result<RpcHandshakeRequest, super::ProtocolDecodeError> {
+        super::deserialize_contract(&super::HANDSHAKE_REQUEST_CONTRACT, value)
+    }
 }
 
 pub mod handshake_response {
     typify::import_types!(schema = "../../schemas/live-rpc/v2/server-handshake.schema.json");
+
+    pub fn deserialize(
+        value: serde_json::Value,
+    ) -> Result<RpcHandshakeResponse, super::ProtocolDecodeError> {
+        super::deserialize_known(&super::HANDSHAKE_RESPONSE_CONTRACT, value)
+    }
 }
 
 pub mod commands {
