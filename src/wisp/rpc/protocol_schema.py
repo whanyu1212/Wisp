@@ -105,6 +105,7 @@ def generate_protocol_artifacts() -> dict[str, str]:
 
     events = _schema_for_model(KnownWispEventAdapter, title="Wisp current live event output")
     _shape_current_event_output_schema(events)
+    _add_event_semantic_constraints(events)
 
     schemas = {
         _CLIENT_HANDSHAKE_SCHEMA: _serialize(client_handshake),
@@ -484,6 +485,30 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
                     "required": ["approved"],
                 },
                 "then": {"not": {"required": ["scope"]}},
+            }
+        ],
+    )
+
+
+def _add_event_semantic_constraints(schema: JsonObject) -> None:
+    definitions = _object_member(schema, "$defs")
+    usage_cost = _named_definition(definitions, "UsageCost")
+    usage_cost["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {
+                    "properties": {"estimated_usd": {"type": "null"}},
+                    "required": ["estimated_usd"],
+                },
+                "then": {"properties": {"unavailable_reason": {"not": {"type": "null"}}}},
+                "else": {
+                    "properties": {
+                        "billable": {"not": {"type": "null"}},
+                        "rates": {"not": {"type": "null"}},
+                        "unavailable_reason": {"type": "null"},
+                    }
+                },
             }
         ],
     )

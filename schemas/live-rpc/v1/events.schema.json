@@ -5025,6 +5025,46 @@
     },
     "UsageCost": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "billable": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "rates": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "unavailable_reason": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "estimated_usd": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "estimated_usd"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unavailable_reason": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
       "description": "Immutable list-price estimate captured with one successful response.",
       "properties": {
         "billable": {

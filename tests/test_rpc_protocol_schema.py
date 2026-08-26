@@ -480,6 +480,49 @@ def test_event_decimal_schema_accepts_serialized_exponent_notation() -> None:
     assert Draft202012Validator(_artifact("events.schema.json")).is_valid(payload)
 
 
+def test_event_schema_enforces_priced_and_unpriced_usage_cost_states() -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    priced = MessageCompleted(
+        turn=1,
+        content="done",
+        finish_reason="stop",
+        cost=UsageCost(
+            provider="custom",
+            billable=BillableTokenUsage(
+                input_tokens=1,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=1,
+            ),
+            rates=UsageCostRates(
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("1"),
+            ),
+            estimated_usd=Decimal("0.000002"),
+        ),
+    )
+    priced_payload = json.loads(priced.model_dump_json())
+    assert validator.is_valid(priced_payload)
+    for field in ("billable", "rates"):
+        malformed = json.loads(priced.model_dump_json())
+        malformed["cost"][field] = None
+        assert not validator.is_valid(malformed)
+    malformed = json.loads(priced.model_dump_json())
+    malformed["cost"]["unavailable_reason"] = "pricing_unavailable"
+    assert not validator.is_valid(malformed)
+
+    unpriced = MessageCompleted(
+        turn=1,
+        content="done",
+        finish_reason="stop",
+        cost=UsageCost(provider="custom", unavailable_reason="pricing_unavailable"),
+    )
+    unpriced_payload = json.loads(unpriced.model_dump_json())
+    assert validator.is_valid(unpriced_payload)
+    unpriced_payload["cost"]["unavailable_reason"] = None
+    assert not validator.is_valid(unpriced_payload)
+
+
 def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:
     validator = Draft202012Validator(_artifact("events.schema.json"))
     event = RpcCommandFinished(command_id="command-1", command_type="prompt", ok=True)
