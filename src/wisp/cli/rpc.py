@@ -162,6 +162,7 @@ def _rpc_stdin_transport() -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]
         thread_factory=Thread,
         wait_readable=anyio.wait_readable,
         read_fd=os.read,
+        needs_thread_reader=lambda _stdin_mode: True,
         max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_client_frame_bytes,
     )
 

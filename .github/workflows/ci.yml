@@ -151,13 +151,25 @@ jobs:
       matrix:
         include:
           - suite: core
+            target: tests
             marker: not (slow or tui or process or benchmark or production_fault)
-          - suite: tui
+            extra_args: ""
+          - suite: tui-integration
+            target: tests/test_tui_integration_cli.py
             marker: tui and not production_fault
+            extra_args: ""
+          - suite: tui-components
+            target: tests
+            marker: tui and not production_fault
+            extra_args: --ignore=tests/test_tui_integration_cli.py
           - suite: system-and-slow
+            target: tests
             marker: (slow or process or benchmark) and not (tui or production_fault)
+            extra_args: ""
           - suite: production-fault
+            target: tests
             marker: production_fault
+            extra_args: ""
 
     steps:
       - name: Check out repository
@@ -182,7 +194,11 @@ jobs:
           WISP_EFFORT: xhigh
           WISP_CONTEXT_RESERVE_TOKENS: "4096"
           WISP_AUTO_COMPACTION: "0"
-        run: uv run pytest tests -m '${{ matrix.marker }}' --durations=20
+        run: >-
+          uv run pytest ${{ matrix.target }}
+          -m '${{ matrix.marker }}'
+          ${{ matrix.extra_args }}
+          --durations=20
 
   macos-smoke:
     name: Platform smoke (macOS)
