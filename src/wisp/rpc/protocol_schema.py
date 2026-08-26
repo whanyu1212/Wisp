@@ -541,6 +541,42 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
             ],
         )
 
+    messages = _named_definition(definitions, "RpcMessagesReported")
+    messages["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"truncated": {"const": False}}},
+                "then": {
+                    "properties": {
+                        "next_before_entry_id": {"type": "null"},
+                        "next_after_entry_id": {"type": "null"},
+                    }
+                },
+            },
+            {
+                "not": {
+                    "properties": {
+                        "next_before_entry_id": {"not": {"type": "null"}},
+                        "next_after_entry_id": {"not": {"type": "null"}},
+                    }
+                }
+            },
+        ],
+    )
+
+    mcp_server = _named_definition(definitions, "RpcMcpServerSnapshot")
+    mcp_server["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"status": {"const": "unavailable"}}},
+                "then": {"properties": {"error": {"not": {"type": "null"}}}},
+                "else": {"properties": {"error": {"type": "null"}}},
+            }
+        ],
+    )
+
 
 def _adapter_models[T](adapter: TypeAdapter[T]) -> dict[str, type[BaseModel]]:
     models: dict[str, type[BaseModel]] = {}

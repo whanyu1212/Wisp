@@ -21,6 +21,10 @@ from wisp.events import (
     MessageCompleted,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcMcpServerSnapshot,
+    RpcMcpStatusReported,
+    RpcMcpStatusSnapshot,
+    RpcMessagesReported,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
@@ -574,6 +578,59 @@ def test_event_schema_enforces_tool_failure_metadata(event_type: type[ToolExecut
     assert validator.is_valid(failure_payload)
     failure_payload["failure_code"] = None
     assert not validator.is_valid(failure_payload)
+
+
+def test_event_schema_enforces_rpc_message_cursor_invariants() -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    untruncated = RpcMessagesReported(command_id="command-1")
+    untruncated_payload = json.loads(untruncated.model_dump_json())
+    assert validator.is_valid(untruncated_payload)
+    for cursor in ("next_before_entry_id", "next_after_entry_id"):
+        malformed = dict(untruncated_payload)
+        malformed[cursor] = "entry-1"
+        assert not validator.is_valid(malformed)
+
+    backward = RpcMessagesReported(
+        command_id="command-1",
+        truncated=True,
+        next_before_entry_id="entry-1",
+    )
+    backward_payload = json.loads(backward.model_dump_json())
+    assert validator.is_valid(backward_payload)
+    backward_payload["next_after_entry_id"] = "entry-2"
+    assert not validator.is_valid(backward_payload)
+
+    forward = RpcMessagesReported(
+        command_id="command-1",
+        truncated=True,
+        next_after_entry_id="entry-2",
+    )
+    assert validator.is_valid(json.loads(forward.model_dump_json()))
+
+
+def test_event_schema_enforces_mcp_status_error_coupling() -> None:
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    connected = RpcMcpStatusReported(
+        command_id="command-1",
+        status=RpcMcpStatusSnapshot(
+            servers=(RpcMcpServerSnapshot(name="docs", status="connected"),)
+        ),
+    )
+    connected_payload = json.loads(connected.model_dump_json())
+    assert validator.is_valid(connected_payload)
+    connected_payload["status"]["servers"][0]["error"] = "unexpected"
+    assert not validator.is_valid(connected_payload)
+
+    unavailable = RpcMcpStatusReported(
+        command_id="command-1",
+        status=RpcMcpStatusSnapshot(
+            servers=(RpcMcpServerSnapshot(name="docs", status="unavailable", error="offline"),)
+        ),
+    )
+    unavailable_payload = json.loads(unavailable.model_dump_json())
+    assert validator.is_valid(unavailable_payload)
+    unavailable_payload["status"]["servers"][0]["error"] = None
+    assert not validator.is_valid(unavailable_payload)
 
 
 def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:

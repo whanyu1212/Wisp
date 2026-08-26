@@ -8,7 +8,7 @@
   "schema_hashes": {
     "client-handshake.schema.json": "331c560ea2e7d6a6d6c1da951a75ed8c23c81d14f03d6badf3cba928d613a628",
     "commands.schema.json": "457c4470026ada504d0b1af0ad55075639758af605607457c8b951ddb73f69a0",
-    "events.schema.json": "91f80b46bf5b7b5ed19adf0469438b3c13f888dd1deabaa1dc8b0a8150fd430c",
+    "events.schema.json": "f964d3b04cbed3d575e7a06a6dd11f36ccb055375fbfb29f014ae8a1ed4d757a",
     "server-handshake.schema.json": "c9f8006c590420e46dd4dd3a2b456a25d3459e6464300efa5cdc9408d670fae3"
   },
   "schemas": {
