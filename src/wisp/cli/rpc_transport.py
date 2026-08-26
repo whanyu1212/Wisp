@@ -258,8 +258,6 @@ class RpcStdinTransport[TControlEvent]:
             frame = frame[:-1]
         if frame.endswith(b"\r"):
             frame = frame[:-1]
-        if not frame.strip():
-            return True
         if len(frame) > self._max_frame_bytes:
             self._write_event(
                 ErrorEvent(message=f"RPC frame exceeds the {self._max_frame_bytes}-byte limit")

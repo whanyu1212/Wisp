@@ -355,6 +355,26 @@ macro_rules! validated_wire_wrapper {
         #[serde(transparent)]
         pub struct $wrapper($inner);
 
+        impl $wrapper {
+            /// Serialize this validated protocol value for transport or inspection.
+            pub fn to_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+                serde_json::to_value(self)
+            }
+
+            /// Consume this validated protocol value and return its JSON representation.
+            pub fn into_value(self) -> Result<serde_json::Value, serde_json::Error> {
+                serde_json::to_value(self)
+            }
+        }
+
+        impl TryFrom<serde_json::Value> for $wrapper {
+            type Error = $crate::ProtocolDecodeError;
+
+            fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+                deserialize(value)
+            }
+        }
+
         impl<'de> serde::Deserialize<'de> for $wrapper {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where

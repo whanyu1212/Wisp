@@ -203,11 +203,11 @@ fn generated_handshake_types_preserve_the_v2_contract() {
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     });
 
-    let request: handshake_request::RpcHandshakeRequest =
-        handshake_request::deserialize(request_value.clone()).expect("request must deserialize");
+    let request = handshake_request::RpcHandshakeRequest::try_from(request_value.clone())
+        .expect("request must deserialize");
     let accepted: handshake_response::RpcHandshakeResponse =
         handshake_response::deserialize(accepted_value.clone()).expect("response must deserialize");
-    assert_eq!(serde_json::to_value(request).unwrap(), request_value);
+    assert_eq!(request.into_value().unwrap(), request_value);
     assert_eq!(serde_json::to_value(accepted).unwrap(), accepted_value);
 }
 

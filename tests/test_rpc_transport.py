@@ -227,6 +227,8 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
 @pytest.mark.parametrize(
     "bad_frame",
     [
+        "",
+        "   ",
         "not json",
         '{"value":NaN}',
         '{"value":Infinity}',
