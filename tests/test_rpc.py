@@ -5,9 +5,11 @@ import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import anyio
 import pytest
+from anyio.abc import Process
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
@@ -91,6 +93,7 @@ from wisp.rpc.commands import (
     TrustCommand,
     rpc_command_from_json,
 )
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 
 
 class RecordingTransport:
@@ -1733,6 +1736,41 @@ def test_rpc_controller_exposes_transport_events() -> None:
         events = [event async for event in controller.events()]
 
         assert events == expected_events
+
+    anyio.run(run)
+
+
+def test_jsonl_subprocess_rpc_transport_times_out_while_writing_handshake(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class BlockingSendStream:
+        async def send(self, _item: bytes) -> None:
+            await anyio.sleep_forever()
+
+    class BlockingProcess:
+        stdin = BlockingSendStream()
+        stdout = object()
+
+    async def run() -> None:
+        request = RpcHandshakeRequest(
+            frontend_name="fixture",
+            frontend_version="0.1.0",
+            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            min_event_schema_version=EVENT_SCHEMA_VERSION,
+            max_event_schema_version=EVENT_SCHEMA_VERSION,
+            supported_capabilities=(),
+            required_capabilities=(),
+        )
+        transport = JsonlSubprocessRpcTransport(
+            cast(Process, BlockingProcess()),
+            request,
+        )
+        monkeypatch.setattr(rpc_client_module, "_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
+
+        with anyio.fail_after(1):
+            with pytest.raises(RpcHandshakeError, match="did not complete handshake in time"):
+                await transport._perform_handshake()
 
     anyio.run(run)
 

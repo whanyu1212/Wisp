@@ -633,11 +633,11 @@ class JsonlSubprocessRpcTransport:
     async def _perform_handshake(self) -> None:
         if self._process.stdin is None or self._process.stdout is None:
             raise RpcHandshakeError("RPC subprocess has no handshake streams")
-        await self._process.stdin.send(
-            encode_rpc_frame(self._request, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
-        )
         try:
             with anyio.fail_after(_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS):
+                await self._process.stdin.send(
+                    encode_rpc_frame(self._request, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+                )
                 while True:
                     try:
                         frame = pop_rpc_frame(
