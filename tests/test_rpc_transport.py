@@ -11,6 +11,7 @@ import pytest
 
 from wisp.cli.rpc_transport import RpcStdinTransport, read_rpc_stdin_handshake
 from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
+from wisp.rpc import framing as rpc_framing
 from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
@@ -52,11 +53,6 @@ def _handshake_line() -> bytes:
     ).encode()
 
 
-def _recursive_json_line() -> bytes:
-    nesting = 2_000
-    return b'{"value":' + (b"[" * nesting) + b"0" + (b"]" * nesting) + b"}\n"
-
-
 def _limits() -> RpcTransportLimits:
     return RpcTransportLimits(max_client_frame_bytes=1024, max_server_frame_bytes=2048)
 
@@ -86,7 +82,6 @@ def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
         b'{"type":"rpc.handshake.request","type":"rpc.handshake.request"}\n',
         b"\xff\n",
         b"{}",
-        _recursive_json_line(),
         b"x" * (MAX_HANDSHAKE_FRAME_BYTES + 1) + b"\n",
     ],
 )
@@ -228,14 +223,7 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
     anyio.run(scenario)
 
 
-@pytest.mark.parametrize(
-    "bad_frame",
-    [
-        "not json",
-        _recursive_json_line().decode("utf-8").rstrip("\n"),
-    ],
-)
-def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str) -> None:
+def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
     async def scenario() -> None:
         events: list[object] = []
         transport = RpcStdinTransport(
@@ -246,8 +234,43 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
-            await transport.send_line(send, bad_frame)
+            await transport.send_line(send, "not json")
             await transport.send_line(send, '  {"id":"ok","type":"shutdown"}  ')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC frame is not valid JSON"
+        ]
+
+    anyio.run(scenario)
+
+
+def test_transport_recovers_when_json_nesting_exhausts_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_recursion_error(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError
+
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    rpc_framing.json,
+                    "loads",
+                    raise_recursion_error,
+                )
+                await transport.send_line(send, '{"value": []}')
+            await transport.send_line(send, '{"id":"ok","type":"shutdown"}')
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
