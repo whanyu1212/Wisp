@@ -154,7 +154,7 @@ jobs:
       - name: Build live RPC schema bundle
         run: |
           protocol_version="$(
-            PYTHONPATH=src python -c \
+            uv run python -c \
               'from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION; print(LIVE_RPC_PROTOCOL_VERSION)'
           )"
           uv run python -m wisp.rpc.protocol_schema \
