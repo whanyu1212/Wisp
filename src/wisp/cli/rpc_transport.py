@@ -73,7 +73,9 @@ async def read_rpc_stdin_handshake(
         frame = encoded_line[:-1]
         if frame.endswith(b"\r"):
             frame = frame[:-1]
-        decode_rpc_object(frame, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+        payload = decode_rpc_object(frame, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+        if "type" not in payload:
+            raise RpcFrameError("RPC handshake frame is missing its type discriminator")
         request = RpcHandshakeRequestAdapter.validate_json(frame)
     except (RpcFrameError, ValidationError, ValueError):
         response = RpcHandshakeRejected(

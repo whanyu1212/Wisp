@@ -79,6 +79,7 @@ def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
     "frame",
     [
         b'{"id":"command-1","type":"shutdown"}\n',
+        _handshake_line().replace(b'"type":"rpc.handshake.request",', b""),
         b'{"type":"rpc.handshake.request","type":"rpc.handshake.request"}\n',
         b"\xff\n",
         b"{}",
