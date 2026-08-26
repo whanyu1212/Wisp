@@ -97,7 +97,8 @@ fn canonical_command_cross_field_constraints_fail_closed() {
     ];
 
     for command in invalid_commands {
-        assert!(commands::deserialize(command).is_err());
+        assert!(commands::deserialize(command.clone()).is_err());
+        assert!(serde_json::from_value::<commands::WispTypedClientRpcCommands>(command).is_err());
     }
 }
 

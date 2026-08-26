@@ -1875,6 +1875,36 @@ print(json.dumps({
 
 
 @pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_rejects_empty_event_frame(tmp_path: Path) -> None:
+    async def run() -> None:
+        script = """
+import json
+import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
+print("", flush=True)
+"""
+        transport = await JsonlSubprocessRpcTransport.start(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+        )
+        with pytest.raises(RpcProtocolError, match="empty RPC event frame"):
+            await anext(transport.events())
+        await transport.close()
+
+    anyio.run(run)
+
+
+@pytest.mark.process
 def test_jsonl_subprocess_rpc_transport_surfaces_handshake_rejection(tmp_path: Path) -> None:
     async def run() -> None:
         script = """

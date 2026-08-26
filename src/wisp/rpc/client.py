@@ -603,7 +603,7 @@ class JsonlSubprocessRpcTransport:
                 if frame is None:
                     break
                 if not frame:
-                    continue
+                    raise RpcProtocolError("Backend emitted an empty RPC event frame")
                 try:
                     payload = decode_rpc_object(
                         frame,
