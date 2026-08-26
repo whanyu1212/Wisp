@@ -4,24 +4,52 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from queue import Queue
 from threading import Thread
+from typing import cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
+from wisp import __version__
 from wisp.config import WispConfig
+from wisp.events import WispEvent
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
+from wisp.rpc.framing import encode_rpc_frame
 from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
+from wisp.rpc.protocol import (
+    MAX_HANDSHAKE_FRAME_BYTES,
+    MAX_LIVE_RPC_FRAME_BYTES,
+    RpcHandshakeResponse,
+    RpcTransportLimits,
+)
 from wisp.runtime.api import WispRuntime
 
 from . import output as _cli_output
 from . import rpc_transport as _rpc_transport
 
-_render_json_events = _cli_output._render_json_events
-_write_json_event = _cli_output._write_json_event
+_RPC_CAPABILITIES: tuple[str, ...] = ()
+_RPC_TRANSPORT_LIMITS = RpcTransportLimits(
+    max_client_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
+    max_server_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
+)
+
+
+def _write_json_event(event: WispEvent) -> None:
+    encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
+    _cli_output._write_json_event(event)
+
+
+async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
+    async def bounded_events() -> AsyncIterator[WispEvent]:
+        async for event in events:
+            encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
+            yield event
+
+    await _cli_output._render_json_events(bounded_events())
 
 
 async def _run_rpc(
@@ -37,6 +65,8 @@ async def _run_rpc(
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
 ) -> None:
+    if not await _negotiate_rpc_connection():
+        return
     runtime = await build_runtime_for_config(config)
     try:
         await _run_rpc_with_runtime(
@@ -55,6 +85,17 @@ async def _run_rpc(
         )
     finally:
         await runtime.aclose()
+
+
+async def _negotiate_rpc_connection() -> bool:
+    handshake = await _rpc_transport.read_rpc_stdin_handshake(
+        _rpc_binary_stdin(),
+        backend_package_version=__version__,
+        supported_capabilities=_RPC_CAPABILITIES,
+        limits=_RPC_TRANSPORT_LIMITS,
+        write_response=_write_rpc_handshake,
+    )
+    return handshake is not None
 
 
 async def _run_rpc_with_runtime(
@@ -113,7 +154,7 @@ async def _read_rpc_stdin(
 
 def _rpc_stdin_transport() -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]:
     return _rpc_transport.RpcStdinTransport(
-        stdin=sys.stdin,
+        stdin=_rpc_binary_stdin(),
         write_event=_write_json_event,
         input_command_factory=_RpcInputCommand,
         input_closed_factory=_RpcInputClosed,
@@ -121,4 +162,15 @@ def _rpc_stdin_transport() -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]
         thread_factory=Thread,
         wait_readable=anyio.wait_readable,
         read_fd=os.read,
+        max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_client_frame_bytes,
     )
+
+
+def _rpc_binary_stdin() -> _rpc_transport.RpcTextInput:
+    return cast(_rpc_transport.RpcTextInput, getattr(sys.stdin, "buffer", sys.stdin))
+
+
+def _write_rpc_handshake(response: RpcHandshakeResponse) -> None:
+    frame = encode_rpc_frame(response, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+    sys.stdout.write(frame.decode("utf-8"))
+    sys.stdout.flush()

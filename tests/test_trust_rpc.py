@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from tests.cli_support import *
-from tests.cli_support import _test_model_registry
+from tests.cli_support import _read_rpc_test_handshake, _test_model_registry
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc.configuration import _ConfigOverrides
@@ -113,6 +113,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
 
     monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+    monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
     async def scenario() -> None:
         with redirect_stdout(io.StringIO()):
@@ -181,6 +182,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
 
     monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+    monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
     async def scenario() -> list[dict[str, object]]:
         output = io.StringIO()
@@ -282,6 +284,7 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+    monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
     async def scenario() -> list[dict[str, object]]:
         output = io.StringIO()
@@ -355,6 +358,7 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+    monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
     async def scenario() -> list[dict[str, object]]:
         output = io.StringIO()

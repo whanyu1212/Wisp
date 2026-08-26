@@ -9,9 +9,10 @@ import pytest
 import wisp.coding.tool_execution as tool_execution
 import wisp.rpc.execution as rpc_execution_module
 from tests.cli_support import *
+from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
+from wisp.events import EVENT_SCHEMA_VERSION, ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
     ModelCatalog,
@@ -32,12 +33,73 @@ from wisp.rpc.execution import (
     run_rpc_prompt_command,
 )
 from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
     MessageSessionEntry,
 )
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
+
+_BaseCliRunner = RawCliRunner
+
+
+def _base_jsonl_records(output: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in output.splitlines()]
+
+
+_RPC_TEST_HANDSHAKE = (
+    RpcHandshakeRequest(
+        frontend_name="wisp-python-tests",
+        frontend_version=__version__,
+        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        min_event_schema_version=EVENT_SCHEMA_VERSION,
+        max_event_schema_version=EVENT_SCHEMA_VERSION,
+        supported_capabilities=(),
+        required_capabilities=(),
+    ).model_dump_json()
+    + "\n"
+)
+
+
+def test_rpc_mode_requires_handshake_before_ordinary_commands(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fail_build_runtime(_config: object) -> object:
+        raise AssertionError("runtime must not start before negotiation")
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime_for_config", fail_build_runtime)
+    result = _BaseCliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"shutdown-1","type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.rejected"]
+    assert records[0]["code"] == "invalid_handshake"
+
+
+def test_rpc_mode_accepts_handshake_before_any_runtime_event(tmp_path: Path) -> None:
+    result = _BaseCliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _base_jsonl_records(result.stdout)
+    assert records[0]["type"] == "rpc.handshake.accepted"
+    assert [record["type"] for record in records[1:]] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+
 
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
@@ -2076,8 +2138,8 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     error_messages = [record["message"] for record in records if record["type"] == "error"]
     assert error_messages[:5] == [
-        "Invalid RPC JSON: Expecting value",
-        "RPC command must be a JSON object",
+        "RPC frame is not valid JSON",
+        "RPC frame must be a JSON object",
         "Unknown RPC command: missing",
         "RPC prompt command requires string field: prompt",
         "RPC command id must be a non-empty string",

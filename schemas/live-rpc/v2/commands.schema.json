@@ -1,0 +1,1435 @@
+{
+  "$defs": {
+    "AgentMode": {
+      "enum": [
+        "build",
+        "plan"
+      ],
+      "type": "string"
+    },
+    "ApprovalCommand": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "approved": {
+                "const": false
+              }
+            },
+            "required": [
+              "approved"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "scope"
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Resolve a pending tool approval request.",
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "call_id": {
+          "minLength": 1,
+          "title": "Call Id",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Reason"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalScope"
+            }
+          ]
+        },
+        "type": {
+          "const": "approval",
+          "default": "approval",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "call_id",
+        "approved"
+      ],
+      "title": "ApprovalCommand",
+      "type": "object"
+    },
+    "ApprovalScope": {
+      "enum": [
+        "once",
+        "tool_session",
+        "all_session"
+      ],
+      "type": "string"
+    },
+    "CancelCommand": {
+      "additionalProperties": false,
+      "description": "Cancel a running prompt or compact command.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "target_id": {
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "cancel",
+          "default": "cancel",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "target_id"
+      ],
+      "title": "CancelCommand",
+      "type": "object"
+    },
+    "ClearQueueCommand": {
+      "additionalProperties": false,
+      "description": "Clear one or both active queues.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "steering",
+                "follow_up"
+              ],
+              "type": "string"
+            }
+          ],
+          "title": "Kind"
+        },
+        "type": {
+          "const": "clear_queue",
+          "default": "clear_queue",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ClearQueueCommand",
+      "type": "object"
+    },
+    "CloneSessionCommand": {
+      "additionalProperties": false,
+      "description": "Clone the selected session's active path and select the clone.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "clone_session",
+          "default": "clone_session",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "CloneSessionCommand",
+      "type": "object"
+    },
+    "CompactCommand": {
+      "additionalProperties": false,
+      "description": "Compact the active persisted session context.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Instructions"
+        },
+        "type": {
+          "const": "compact",
+          "default": "compact",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "CompactCommand",
+      "type": "object"
+    },
+    "ConfigureCommand": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "provider"
+              ]
+            },
+            {
+              "required": [
+                "model"
+              ]
+            },
+            {
+              "required": [
+                "effort"
+              ]
+            },
+            {
+              "required": [
+                "auto_compaction_enabled"
+              ]
+            },
+            {
+              "required": [
+                "mode"
+              ]
+            },
+            {
+              "properties": {
+                "clear_effort": {
+                  "const": true
+                }
+              },
+              "required": [
+                "clear_effort"
+              ]
+            }
+          ]
+        },
+        {
+          "not": {
+            "properties": {
+              "clear_effort": {
+                "const": true
+              }
+            },
+            "required": [
+              "clear_effort",
+              "effort"
+            ]
+          }
+        }
+      ],
+      "description": "Update configuration in sequence, rejecting unresolved model-provider ambiguity.",
+      "properties": {
+        "auto_compaction_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Auto Compaction Enabled"
+        },
+        "clear_effort": {
+          "default": false,
+          "title": "Clear Effort",
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Effort"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMode"
+            }
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Provider"
+        },
+        "type": {
+          "const": "configure",
+          "default": "configure",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "clear_effort"
+      ],
+      "title": "ConfigureCommand",
+      "type": "object"
+    },
+    "FollowUpCommand": {
+      "additionalProperties": false,
+      "description": "Queue text for when the active run would otherwise stop.",
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "follow_up",
+          "default": "follow_up",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "content"
+      ],
+      "title": "FollowUpCommand",
+      "type": "object"
+    },
+    "ForkSessionCommand": {
+      "additionalProperties": false,
+      "description": "Fork before a persisted user message and select the fork.",
+      "properties": {
+        "entry_id": {
+          "minLength": 1,
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "fork_session",
+          "default": "fork_session",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "entry_id"
+      ],
+      "title": "ForkSessionCommand",
+      "type": "object"
+    },
+    "GetCommandsCommand": {
+      "additionalProperties": false,
+      "description": "Return an immediate in-memory command registry snapshot.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_commands",
+          "default": "get_commands",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetCommandsCommand",
+      "type": "object"
+    },
+    "GetMcpStatusCommand": {
+      "additionalProperties": false,
+      "description": "Return sanitized MCP server and registered-tool status.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_mcp_status",
+          "default": "get_mcp_status",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetMcpStatusCommand",
+      "type": "object"
+    },
+    "GetMessagesCommand": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "before_entry_id",
+              "after_entry_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "entry_ids"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "before_entry_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "after_entry_id"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "full_content": {
+                "const": true
+              }
+            },
+            "required": [
+              "full_content"
+            ]
+          },
+          "then": {
+            "properties": {
+              "entry_ids": {
+                "maxItems": 1,
+                "minItems": 1
+              }
+            },
+            "required": [
+              "entry_ids"
+            ]
+          }
+        }
+      ],
+      "description": "Return a bounded persisted transcript page.",
+      "properties": {
+        "after_entry_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "After Entry Id"
+        },
+        "allow_during_prompt": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Allow During Prompt"
+        },
+        "before_entry_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Before Entry Id"
+        },
+        "complete_structure": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Complete Structure"
+        },
+        "entry_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            }
+          ],
+          "title": "Entry Ids"
+        },
+        "full_content": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Full Content"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Session Id"
+        },
+        "type": {
+          "const": "get_messages",
+          "default": "get_messages",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "limit"
+      ],
+      "title": "GetMessagesCommand",
+      "type": "object"
+    },
+    "GetQueueStateCommand": {
+      "additionalProperties": false,
+      "description": "Return the active or retained queue state.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_queue_state",
+          "default": "get_queue_state",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetQueueStateCommand",
+      "type": "object"
+    },
+    "GetSessionStatsCommand": {
+      "additionalProperties": false,
+      "description": "Return lifetime usage and current context-budget statistics.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_session_stats",
+          "default": "get_session_stats",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetSessionStatsCommand",
+      "type": "object"
+    },
+    "GetSessionTreeCommand": {
+      "additionalProperties": false,
+      "description": "Return a bounded page of the selected session's tree.",
+      "properties": {
+        "after_entry_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "After Entry Id"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "type": {
+          "const": "get_session_tree",
+          "default": "get_session_tree",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "limit"
+      ],
+      "title": "GetSessionTreeCommand",
+      "type": "object"
+    },
+    "GetSessionsCommand": {
+      "additionalProperties": false,
+      "description": "Return a bounded catalog of persisted sessions.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "limit": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "type": {
+          "const": "get_sessions",
+          "default": "get_sessions",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "limit"
+      ],
+      "title": "GetSessionsCommand",
+      "type": "object"
+    },
+    "GetSkillsCommand": {
+      "additionalProperties": false,
+      "description": "Return the active immutable skill catalog snapshot.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_skills",
+          "default": "get_skills",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetSkillsCommand",
+      "type": "object"
+    },
+    "GetStateCommand": {
+      "additionalProperties": false,
+      "description": "Return an immediate in-memory RPC state snapshot.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_state",
+          "default": "get_state",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetStateCommand",
+      "type": "object"
+    },
+    "InitCommand": {
+      "additionalProperties": false,
+      "description": "Inspect the active project and create its root AGENTS.md.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "init",
+          "default": "init",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "InitCommand",
+      "type": "object"
+    },
+    "NavigateSessionTreeCommand": {
+      "additionalProperties": false,
+      "description": "Navigate the selected session to one persisted tree entry.",
+      "properties": {
+        "entry_id": {
+          "minLength": 1,
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "navigate_session_tree",
+          "default": "navigate_session_tree",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "entry_id"
+      ],
+      "title": "NavigateSessionTreeCommand",
+      "type": "object"
+    },
+    "NewSessionCommand": {
+      "additionalProperties": false,
+      "description": "Deselect the active session so the next prompt starts a fresh one.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "new_session",
+          "default": "new_session",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "NewSessionCommand",
+      "type": "object"
+    },
+    "PopQueueCommand": {
+      "additionalProperties": false,
+      "description": "Remove the latest item from one active queue.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "kind": {
+          "enum": [
+            "steering",
+            "follow_up"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "type": {
+          "const": "pop_queue",
+          "default": "pop_queue",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "kind"
+      ],
+      "title": "PopQueueCommand",
+      "type": "object"
+    },
+    "PromptCommand": {
+      "additionalProperties": false,
+      "description": "Run one agent turn.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "type": {
+          "const": "prompt",
+          "default": "prompt",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "prompt"
+      ],
+      "title": "PromptCommand",
+      "type": "object"
+    },
+    "SelectSessionCommand": {
+      "additionalProperties": false,
+      "description": "Select a persisted session as the active RPC session.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "select_session",
+          "default": "select_session",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "session_id"
+      ],
+      "title": "SelectSessionCommand",
+      "type": "object"
+    },
+    "SetQueueModeCommand": {
+      "additionalProperties": false,
+      "description": "Set one active queue's drain mode.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "kind": {
+          "enum": [
+            "steering",
+            "follow_up"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "type": {
+          "const": "set_queue_mode",
+          "default": "set_queue_mode",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "kind",
+        "mode"
+      ],
+      "title": "SetQueueModeCommand",
+      "type": "object"
+    },
+    "SetSessionNameCommand": {
+      "additionalProperties": false,
+      "description": "Set or clear one session's display name.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Session Id"
+        },
+        "type": {
+          "const": "set_session_name",
+          "default": "set_session_name",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "SetSessionNameCommand",
+      "type": "object"
+    },
+    "ShutdownCommand": {
+      "additionalProperties": false,
+      "description": "Ask the RPC process to exit cleanly.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "shutdown",
+          "default": "shutdown",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ShutdownCommand",
+      "type": "object"
+    },
+    "SteerCommand": {
+      "additionalProperties": false,
+      "description": "Queue text after the active run's current assistant/tool batch.",
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "steer",
+          "default": "steer",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "content"
+      ],
+      "title": "SteerCommand",
+      "type": "object"
+    },
+    "TrustCommand": {
+      "additionalProperties": false,
+      "description": "Resolve a pending project-trust request.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Reason"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "transient": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Transient"
+        },
+        "trusted": {
+          "title": "Trusted",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "trust",
+          "default": "trust",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "trusted"
+      ],
+      "title": "TrustCommand",
+      "type": "object"
+    },
+    "UnrevertSessionTreeCommand": {
+      "additionalProperties": false,
+      "description": "Reverse the selected session's latest explicit tree navigation.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "unrevert_session_tree",
+          "default": "unrevert_session_tree",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "UnrevertSessionTreeCommand",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "approval": "#/$defs/ApprovalCommand",
+      "cancel": "#/$defs/CancelCommand",
+      "clear_queue": "#/$defs/ClearQueueCommand",
+      "clone_session": "#/$defs/CloneSessionCommand",
+      "compact": "#/$defs/CompactCommand",
+      "configure": "#/$defs/ConfigureCommand",
+      "follow_up": "#/$defs/FollowUpCommand",
+      "fork_session": "#/$defs/ForkSessionCommand",
+      "get_commands": "#/$defs/GetCommandsCommand",
+      "get_mcp_status": "#/$defs/GetMcpStatusCommand",
+      "get_messages": "#/$defs/GetMessagesCommand",
+      "get_queue_state": "#/$defs/GetQueueStateCommand",
+      "get_session_stats": "#/$defs/GetSessionStatsCommand",
+      "get_session_tree": "#/$defs/GetSessionTreeCommand",
+      "get_sessions": "#/$defs/GetSessionsCommand",
+      "get_skills": "#/$defs/GetSkillsCommand",
+      "get_state": "#/$defs/GetStateCommand",
+      "init": "#/$defs/InitCommand",
+      "navigate_session_tree": "#/$defs/NavigateSessionTreeCommand",
+      "new_session": "#/$defs/NewSessionCommand",
+      "pop_queue": "#/$defs/PopQueueCommand",
+      "prompt": "#/$defs/PromptCommand",
+      "select_session": "#/$defs/SelectSessionCommand",
+      "set_queue_mode": "#/$defs/SetQueueModeCommand",
+      "set_session_name": "#/$defs/SetSessionNameCommand",
+      "shutdown": "#/$defs/ShutdownCommand",
+      "steer": "#/$defs/SteerCommand",
+      "trust": "#/$defs/TrustCommand",
+      "unrevert_session_tree": "#/$defs/UnrevertSessionTreeCommand"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/PromptCommand"
+    },
+    {
+      "$ref": "#/$defs/InitCommand"
+    },
+    {
+      "$ref": "#/$defs/CompactCommand"
+    },
+    {
+      "$ref": "#/$defs/GetSessionStatsCommand"
+    },
+    {
+      "$ref": "#/$defs/GetStateCommand"
+    },
+    {
+      "$ref": "#/$defs/GetCommandsCommand"
+    },
+    {
+      "$ref": "#/$defs/GetSkillsCommand"
+    },
+    {
+      "$ref": "#/$defs/GetMcpStatusCommand"
+    },
+    {
+      "$ref": "#/$defs/GetMessagesCommand"
+    },
+    {
+      "$ref": "#/$defs/GetSessionsCommand"
+    },
+    {
+      "$ref": "#/$defs/NewSessionCommand"
+    },
+    {
+      "$ref": "#/$defs/SelectSessionCommand"
+    },
+    {
+      "$ref": "#/$defs/CloneSessionCommand"
+    },
+    {
+      "$ref": "#/$defs/ForkSessionCommand"
+    },
+    {
+      "$ref": "#/$defs/GetSessionTreeCommand"
+    },
+    {
+      "$ref": "#/$defs/NavigateSessionTreeCommand"
+    },
+    {
+      "$ref": "#/$defs/UnrevertSessionTreeCommand"
+    },
+    {
+      "$ref": "#/$defs/SetSessionNameCommand"
+    },
+    {
+      "$ref": "#/$defs/SteerCommand"
+    },
+    {
+      "$ref": "#/$defs/FollowUpCommand"
+    },
+    {
+      "$ref": "#/$defs/GetQueueStateCommand"
+    },
+    {
+      "$ref": "#/$defs/SetQueueModeCommand"
+    },
+    {
+      "$ref": "#/$defs/PopQueueCommand"
+    },
+    {
+      "$ref": "#/$defs/ClearQueueCommand"
+    },
+    {
+      "$ref": "#/$defs/CancelCommand"
+    },
+    {
+      "$ref": "#/$defs/ApprovalCommand"
+    },
+    {
+      "$ref": "#/$defs/TrustCommand"
+    },
+    {
+      "$ref": "#/$defs/ShutdownCommand"
+    },
+    {
+      "$ref": "#/$defs/ConfigureCommand"
+    }
+  ],
+  "title": "Wisp typed-client RPC commands",
+  "x-wisp-conformance-fixtures": {
+    "approval": {
+      "approved": true,
+      "call_id": "call-1",
+      "type": "approval"
+    },
+    "cancel": {
+      "target_id": "command-1",
+      "type": "cancel"
+    },
+    "clear_queue": {
+      "type": "clear_queue"
+    },
+    "clone_session": {
+      "type": "clone_session"
+    },
+    "compact": {
+      "type": "compact"
+    },
+    "configure": {
+      "clear_effort": false,
+      "provider": "fixture",
+      "type": "configure"
+    },
+    "follow_up": {
+      "content": "follow up",
+      "type": "follow_up"
+    },
+    "fork_session": {
+      "entry_id": "entry-1",
+      "type": "fork_session"
+    },
+    "get_commands": {
+      "type": "get_commands"
+    },
+    "get_mcp_status": {
+      "type": "get_mcp_status"
+    },
+    "get_messages": {
+      "limit": 200,
+      "type": "get_messages"
+    },
+    "get_queue_state": {
+      "type": "get_queue_state"
+    },
+    "get_session_stats": {
+      "type": "get_session_stats"
+    },
+    "get_session_tree": {
+      "limit": 200,
+      "type": "get_session_tree"
+    },
+    "get_sessions": {
+      "limit": 50,
+      "type": "get_sessions"
+    },
+    "get_skills": {
+      "type": "get_skills"
+    },
+    "get_state": {
+      "type": "get_state"
+    },
+    "init": {
+      "type": "init"
+    },
+    "navigate_session_tree": {
+      "entry_id": "entry-1",
+      "type": "navigate_session_tree"
+    },
+    "new_session": {
+      "type": "new_session"
+    },
+    "pop_queue": {
+      "kind": "steering",
+      "type": "pop_queue"
+    },
+    "prompt": {
+      "prompt": "fixture, 世界",
+      "type": "prompt"
+    },
+    "select_session": {
+      "session_id": "session-1",
+      "type": "select_session"
+    },
+    "set_queue_mode": {
+      "kind": "steering",
+      "mode": "one_at_a_time",
+      "type": "set_queue_mode"
+    },
+    "set_session_name": {
+      "name": "Fixture",
+      "type": "set_session_name"
+    },
+    "shutdown": {
+      "type": "shutdown"
+    },
+    "steer": {
+      "content": "steer",
+      "type": "steer"
+    },
+    "trust": {
+      "request_id": "trust-1",
+      "trusted": true,
+      "type": "trust"
+    },
+    "unrevert_session_tree": {
+      "type": "unrevert_session_tree"
+    }
+  }
+}
