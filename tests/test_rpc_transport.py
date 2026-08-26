@@ -223,7 +223,16 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
     anyio.run(scenario)
 
 
-def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        "not json",
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        '{"value":-Infinity}',
+    ],
+)
+def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str) -> None:
     async def scenario() -> None:
         events: list[object] = []
         transport = RpcStdinTransport(
@@ -234,7 +243,7 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
-            await transport.send_line(send, "not json")
+            await transport.send_line(send, bad_frame)
             await transport.send_line(send, '  {"id":"ok","type":"shutdown"}  ')
             command = await receive.receive()
 

@@ -1149,6 +1149,59 @@ def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_bounds_aggregate_queued_command_bytes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_bytes=128,
+        )
+        coordinator.running_command = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        first = {"id": "queued-1", "type": "prompt", "prompt": "x" * 64}
+        second = {"id": "queued-2", "type": "prompt", "prompt": "y" * 64}
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            _command: dict[str, object],
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            raise AssertionError("queued commands must not dispatch while a prompt is active")
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(first),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert list(coordinator.queued_commands) == [first]
+        assert rejected == [
+            (
+                "queued-2",
+                "RPC command queue byte limit exceeded while another RPC command is running",
+            )
+        ]
+
+        assert coordinator.cancel("queued-1").outcome == "queued"
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        assert list(coordinator.queued_commands) == [second]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_ignores_stale_completion_and_closes_decisions_once() -> None:
     async def scenario() -> None:
         closed = 0

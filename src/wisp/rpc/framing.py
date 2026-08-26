@@ -40,11 +40,18 @@ def decode_rpc_object(frame: bytes, *, max_frame_bytes: int) -> dict[str, object
             value[key] = member
         return value
 
+    def reject_constant(_constant: str) -> object:
+        raise ValueError("non-standard numeric constant")
+
     try:
-        value = json.loads(text, object_pairs_hook=cast(Callable[..., object], object_pairs))
+        value = json.loads(
+            text,
+            object_pairs_hook=cast(Callable[..., object], object_pairs),
+            parse_constant=reject_constant,
+        )
     except RpcFrameError:
         raise
-    except (json.JSONDecodeError, RecursionError, UnicodeError) as exc:
+    except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as exc:
         raise RpcFrameError("RPC frame is not valid JSON") from exc
     if not isinstance(value, dict):
         raise RpcFrameError("RPC frame must be a JSON object")
