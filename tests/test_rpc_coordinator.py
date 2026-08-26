@@ -816,6 +816,68 @@ def test_coordinator_bounds_concurrent_message_read_bytes_during_a_prompt() -> N
     anyio.run(scenario)
 
 
+def test_coordinator_bounds_shutdown_queued_behind_an_auxiliary_read() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_commands=1,
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        message_read = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert command["type"] == "get_messages"
+            assert running is prompt
+            return _RpcDispatchResult(message_read)
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(
+                {
+                    "id": "messages",
+                    "type": "get_messages",
+                    "allow_during_prompt": True,
+                }
+            ),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcCommandCompleted("prompt", "prompt", True, (), 0),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        shutdown = {"id": "shutdown", "type": "shutdown"}
+        await coordinator.handle_event(
+            _RpcInputCommand(shutdown),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is None
+        assert coordinator.auxiliary_commands == {"messages": message_read}
+        assert not coordinator.queued_commands
+        assert rejected == [
+            (
+                shutdown,
+                "RPC command queue is full while another RPC command is running",
+            )
+        ]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))

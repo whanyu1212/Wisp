@@ -357,7 +357,11 @@ class RpcCoordinator:
         selected_type = command_type(command)
         running = self.running_command
         if running is None and selected_type == "shutdown":
-            self._append_queued_command(self.queued_commands, command)
+            await self._enqueue_command(
+                command,
+                queue=self.queued_commands,
+                reject=reject,
+            )
             return False
         prompt_queue_not_ready = (
             running is not None
@@ -498,14 +502,6 @@ class RpcCoordinator:
             return
         queue.append(command)
         self._queued_command_bytes += command_bytes
-
-    def _append_queued_command(
-        self,
-        queue: deque[dict[str, object]],
-        command: dict[str, object],
-    ) -> None:
-        queue.append(command)
-        self._queued_command_bytes += self._command_payload_size(command)
 
     def _pop_queued_command(
         self,
