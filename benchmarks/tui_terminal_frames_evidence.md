@@ -1,6 +1,6 @@
 # TUI Terminal-Frame Evidence
 
-**Date:** 2026-08-25
+**Date:** 2026-08-26
 **POC:** Hanyu Wu
 **Issue:** #443
 
@@ -8,9 +8,11 @@
 
 A deterministic three-run PTY comparison on Textual 8.2.8 found that positive synchronized-output
 negotiation encloses every measured Wisp payload write in exactly one balanced CSI 2026 pair.
-Unsupported runs emitted no CSI 2026 controls and retained their unsynchronized write behavior.
-This supports keeping Textual as the frame owner, but the native emulator matrix and manual flicker
-observations remain required before deciding the production policy in the next PR.
+Nine native samples now confirm the same behavior in WezTerm directly and through tmux, while Apple
+Terminal retains the unsupported fallback without emitting CSI 2026 controls. This evidence pass is
+explicitly scoped to Apple Terminal, WezTerm, tmux on WezTerm, and Windows Terminal; Windows results
+manual flicker observations, and native process-wide teardown balance remain required before deciding
+the production policy.
 
 ## Automated paired PTY run
 
@@ -59,7 +61,7 @@ Observed automated properties:
 Frame counts vary slightly because paced Textual refreshes may coalesce; synchronization invariants
 do not depend on a fixed refresh count.
 
-## Native emulator matrix
+## Scoped native emulator matrix
 
 Run native mode three times in each environment before the production policy PR. Use the explicit
 fixture below in every terminal so later default changes cannot alter the comparison:
@@ -77,17 +79,48 @@ Resize the usable terminal or multiplexer pane to exactly 100x24 before running 
 mode now rejects a mismatched real viewport and records the validated dimensions as
 `terminal_columns` and `terminal_lines`. Keep raw JSON reports local under ignored `profiles/`.
 
-The final evidence update must include one row for each of the 15 samples, retaining capability,
-observed-frame, exact-pair, unbalanced-frame, inside/outside-write, complete-layout, partial-update,
-and source-completeness fields. The summary matrix remains pending until those individual rows exist:
+This evidence pass intentionally revises the original five-environment plan to a four-environment
+matrix: Apple Terminal and WezTerm directly on macOS, tmux hosted by WezTerm, and Windows Terminal.
+iTerm2 is excluded because it is unavailable in the test environment, rather than being counted as
+completed or pending evidence. Conclusions from this matrix are representative of only these scoped
+environments, not exhaustive native-terminal coverage.
 
-| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Unbalanced | Payload outside sync | Source complete | Manual flicker | Cleanup |
-|---|---|---|---:|---:|---:|---:|---:|---|---|
-| iTerm2 | pending | macOS / direct | pending | pending | pending | pending | pending | pending | pending |
-| Kitty or WezTerm | pending | direct | pending | pending | pending | pending | pending | pending | pending |
-| Apple Terminal | pending | macOS / direct | expected no | expected 0 | expected 0 | pending | pending | pending | pending |
-| tmux | pending | representative host | pending | pending | pending | pending | pending | pending | pending |
-| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending | pending | pending |
+Recorded native environment:
+
+- macOS 26.5.2, arm64
+- Python 3.12.2
+- Textual 8.2.8
+- validated 100x24 terminal or multiplexer pane
+- 20 fixture messages, 10 retained history entries
+- 12 paced stream chunks and 2 pending tool cards per sample
+
+Every recorded row came from a real terminal stream without assigning Textual's private capability
+state. Raw reports remain machine-local. Three rows are still pending from the unavailable Windows
+Terminal environment:
+
+| Emulator | Run | Capability | Full layouts | Chops updates | Observed frames | Exact pairs | Unbalanced | Writes inside | Writes outside | Source complete |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| WezTerm 20240203-110809-5046fc22 | 1 | yes | 1 | 11 | 11 | 11 | 0 | 11 | 0 | yes |
+| WezTerm 20240203-110809-5046fc22 | 2 | yes | 1 | 8 | 9 | 9 | 0 | 9 | 0 | yes |
+| WezTerm 20240203-110809-5046fc22 | 3 | yes | 1 | 10 | 11 | 11 | 0 | 11 | 0 | yes |
+| Apple Terminal 2.15 | 1 | no | 1 | 12 | 13 | 0 | 0 | 0 | 13 | yes |
+| Apple Terminal 2.15 | 2 | no | 1 | 11 | 12 | 0 | 0 | 0 | 12 | yes |
+| Apple Terminal 2.15 | 3 | no | 1 | 11 | 12 | 0 | 0 | 0 | 12 | yes |
+| tmux 3.7b / WezTerm 20240203-110809-5046fc22 | 1 | yes | 1 | 11 | 12 | 12 | 0 | 12 | 0 | yes |
+| tmux 3.7b / WezTerm 20240203-110809-5046fc22 | 2 | yes | 1 | 11 | 11 | 11 | 0 | 11 | 0 | yes |
+| tmux 3.7b / WezTerm 20240203-110809-5046fc22 | 3 | yes | 1 | 11 | 12 | 12 | 0 | 12 | 0 | yes |
+| Windows Terminal | 1 | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| Windows Terminal | 2 | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| Windows Terminal | 3 | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+
+Current summary:
+
+| Emulator | Version | Host / multiplexer | Capability detected | Exact pairs | Unbalanced | Payload outside sync | Source complete | Process-wide balance | Manual flicker | Cleanup |
+|---|---|---|---:|---:|---:|---:|---:|---|---|---|
+| WezTerm | 20240203-110809-5046fc22 | macOS 26.5.2 / direct | 3 / 3 | 31 / 31 frames | 0 | 0 | 3 / 3 | pending | pending | process exited normally; cursor/input not manually checked |
+| Apple Terminal | 2.15 | macOS 26.5.2 / direct | 0 / 3 | 0 / 37 frames | 0 | 37 | 3 / 3 | pending | pending | shell prompt restored; cursor/input not manually checked |
+| tmux | 3.7b | WezTerm 20240203-110809-5046fc22 | 3 / 3 | 35 / 35 frames | 0 | 0 | 3 / 3 | pending | pending | 100x24 pane and shell prompt restored; cursor/input not manually checked |
+| Windows Terminal | pending | Windows / direct | pending | pending | pending | pending | pending | pending | pending | pending |
 
 For supported samples, require exact pairs to equal observed driver frames, unbalanced frames and
 payload writes outside synchronization to equal zero, at least one full layout and partial update, and
@@ -98,6 +131,18 @@ and shell prompt; they remain separate from automated framing counts.
 
 The native matrix cannot be automated by the headless benchmark runner because visual flicker and the
 actual emulator capability response are properties of the user's interactive terminal.
+
+Native mode leaves `process_sync_begin_count`, `process_sync_end_count`, and
+`process_sync_balanced` unset because it does not capture the process-wide terminal stream through
+restored shutdown. Decision-gate item 4 therefore remains unverified in every native environment.
+A normal process exit or restored shell prompt is cleanup evidence, not proof of balanced CSI 2026
+controls across teardown.
+
+The nine completed samples satisfy their per-frame automated gates: supporting environments detected
+capability in every run, wrapped every observed frame exactly once, and emitted no payload outside
+synchronization; Apple Terminal consistently retained unsynchronized fallback behavior. This is not
+yet the production decision because Windows Terminal, all manual flicker checks, and native
+process-wide balance remain pending.
 
 ## Decision gate for the next PR
 
@@ -125,4 +170,5 @@ The automated evidence favors Textual ownership and positive capability detectio
 - no force-on mode;
 - no synchronization for inline, headless, line, print, JSONL-RPC, or other noninteractive output.
 
-This recommendation remains provisional until the native emulator matrix is complete.
+This recommendation remains provisional until Windows Terminal, manual flicker evidence, and native
+process-wide teardown balance finish this scoped evidence pass.
