@@ -13,6 +13,7 @@ provider, session, approval, or RPC policy.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, replace
@@ -21,7 +22,8 @@ from time import perf_counter
 from typing import cast
 
 from rich.console import RenderableType
-from textual import events, on, work
+from rich.segment import Segment
+from textual import events, messages, on, work
 from textual._compositor import ChopsUpdate, Compositor, CompositorMap, LayoutUpdate
 from textual.app import App, ComposeResult
 from textual.await_remove import AwaitRemove
@@ -134,6 +136,61 @@ from wisp.tui.widgets import (
     WorkingIndicator,
 )
 from wisp.update_check import UpdateAvailable
+
+_TERMINAL_CONTROL_INITIATORS = re.compile(r"[\x1b\x80-\x9f]")
+
+
+def _sanitize_terminal_strip(strip: Strip) -> Strip:
+    """Remove terminal-sequence initiators from ordinary rendered cells."""
+
+    sanitized: list[Segment] = []
+    changed = False
+    for segment in strip:
+        if segment.control or _TERMINAL_CONTROL_INITIATORS.search(segment.text) is None:
+            sanitized.append(segment)
+            continue
+        changed = True
+        sanitized.append(
+            Segment(
+                _TERMINAL_CONTROL_INITIATORS.sub("", segment.text),
+                segment.style,
+                segment.control,
+            )
+        )
+    return Strip(sanitized, cell_length=strip.cell_length) if changed else strip
+
+
+def _sanitize_terminal_update(renderable: RenderableType | None) -> RenderableType | None:
+    """Neutralize untrusted terminal controls before cache comparison and output."""
+
+    if isinstance(renderable, LayoutUpdate):
+        changed = False
+        layout_lines: list[Iterable[Strip]] = []
+        for line in renderable.strips:
+            sanitized_layout_line = tuple(_sanitize_terminal_strip(strip) for strip in line)
+            changed = changed or any(
+                sanitized is not original
+                for sanitized, original in zip(sanitized_layout_line, line, strict=True)
+            )
+            layout_lines.append(sanitized_layout_line)
+        return LayoutUpdate(layout_lines, renderable.region) if changed else renderable
+    if isinstance(renderable, ChopsUpdate):
+        changed = False
+        chop_lines: list[dict[int, Strip | None]] = []
+        for chop_line in renderable.chops:
+            sanitized_chop_line: dict[int, Strip | None] = {}
+            for start, strip in chop_line.items():
+                sanitized = None if strip is None else _sanitize_terminal_strip(strip)
+                changed = changed or sanitized is not strip
+                sanitized_chop_line[start] = sanitized
+            chop_lines.append(sanitized_chop_line)
+        return (
+            ChopsUpdate(chop_lines, renderable.spans, renderable.chop_ends)
+            if changed
+            else renderable
+        )
+    return renderable
+
 
 # The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
 # BLOCK rather than box-drawing or ASCII art: a single, near-universally
@@ -499,6 +556,15 @@ class TextualTui(App[None]):
     # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
 
+    def _on_terminal_supports_synchronized_output(
+        self,
+        message: messages.TerminalSupportsSynchronizedOutput,
+    ) -> None:
+        """Let Textual own synchronized frames unless the user opted out."""
+
+        if not self._synchronized_output:
+            message.prevent_default()
+
     def get_default_screen(self) -> Screen[object]:
         """Use the compositor that keeps routine transcript scrolling local."""
 
@@ -517,6 +583,7 @@ class TextualTui(App[None]):
                     history_prepend_suppressed=True,
                 )
             return
+        renderable = _sanitize_terminal_update(renderable)
         if renderable is None or self.is_inline or self._batch_count:
             display_started, displayed_at = self._emit_display(screen, renderable)
             if renderable is not None and not self._batch_count:
@@ -1022,8 +1089,10 @@ class TextualTui(App[None]):
         protected_paths: tuple[str, ...] | None = None,
         diagnostics: TuiDiagnosticsSink | None = None,
         defer_headless_terminal_write_models: bool = False,
+        synchronized_output: bool = True,
     ) -> None:
         super().__init__()
+        self._synchronized_output = synchronized_output
         self._diagnostics = diagnostics
         terminal_write_recorder = (
             getattr(diagnostics, "record_terminal_write", None) if diagnostics is not None else None
@@ -2548,7 +2617,11 @@ class TextualTui(App[None]):
         # reach the Transcript. Keep this explicit: the default is also True, but
         # silently reverting to mouse=False breaks real-terminal scrolling while
         # headless widget tests continue to pass.
-        await self.run_async(mouse=True)
+        try:
+            await self.run_async(mouse=True)
+        finally:
+            if self._terminal_writes is not None:
+                self._terminal_writes.detach()
         for line in self._exit_unsent:
             self.console.print(line, markup=False, highlight=False)
         self._exit_unsent.clear()
@@ -2570,8 +2643,6 @@ class TextualTui(App[None]):
             try:
                 await self._stream.shutdown()
             finally:
-                if self._terminal_writes is not None:
-                    self._terminal_writes.detach()
                 self.exit()
 
     async def close(self) -> None:
@@ -4833,6 +4904,7 @@ def create_textual_tui(
     protected_paths: tuple[str, ...] | None = None,
     diagnostics: TuiDiagnosticsSink | None = None,
     defer_headless_terminal_write_models: bool = False,
+    synchronized_output: bool = True,
 ) -> tuple[TextualTui, TuiRenderer]:
     """Create a Textual app and renderer pair for `TuiShell`.
 
@@ -4846,6 +4918,7 @@ def create_textual_tui(
         protected_paths=protected_paths,
         diagnostics=diagnostics,
         defer_headless_terminal_write_models=defer_headless_terminal_write_models,
+        synchronized_output=synchronized_output,
     )
     return app, TextualTuiRenderer(app)
 

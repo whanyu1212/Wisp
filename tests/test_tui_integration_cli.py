@@ -675,6 +675,58 @@ def test_cli_tui_command_resolves_trust_before_starting_ui(
     assert order == ["trust", "tui"]
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["tui", "--no-synchronized-output"],
+        ["--mode", "tui", "--no-synchronized-output"],
+    ],
+)
+def test_cli_tui_synchronized_output_opt_out_reaches_textual_app(
+    arguments: list[str],
+    monkeypatch: MonkeyPatch,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+
+    result = CliRunner().invoke(
+        app,
+        arguments,
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].synchronized_output is False
+
+
+@pytest.mark.parametrize("arguments", [["tui"], ["--mode", "tui"]])
+def test_cli_tui_synchronized_output_defaults_on(
+    arguments: list[str],
+    monkeypatch: MonkeyPatch,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+
+    result = CliRunner().invoke(
+        app,
+        arguments,
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].synchronized_output is True
+
+
 def test_cli_tui_command_rejects_invalid_auto_compaction_env(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

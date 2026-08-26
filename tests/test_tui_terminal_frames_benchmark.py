@@ -42,6 +42,7 @@ def test_sequence_counter_handles_fragmented_terminal_controls() -> None:
     assert counter.query_count == 1
     assert counter.sync_begin_count == 1
     assert counter.sync_end_count == 1
+    assert counter.max_sync_depth == 1
     assert not hasattr(counter, "payload")
     assert not hasattr(counter, "output")
 
@@ -68,6 +69,15 @@ def test_sequence_counter_rejects_end_before_begin() -> None:
     assert counter.sync_end_count == 1
     assert not counter.sync_order_valid
     assert not counter.sync_balanced
+
+
+def test_sequence_counter_tracks_nested_synchronization_depth() -> None:
+    counter = _SequenceCounter()
+
+    counter.feed(_SYNC_START + _SYNC_START + _SYNC_END + _SYNC_END)
+
+    assert counter.sync_balanced
+    assert counter.max_sync_depth == 2
 
 
 def test_native_capability_wait_uses_configured_negotiation_window() -> None:
@@ -126,6 +136,7 @@ def test_terminal_frame_collector_rejects_misordered_exact_pair() -> None:
 
     assert collector.exact_sync_pair_frame_count == 0
     assert collector.unbalanced_sync_frame_count == 1
+    assert not collector.process_sync_balanced
 
 
 def test_terminal_frame_fixture_capacity_accounts_for_collapsed_tool_pairs() -> None:
@@ -325,6 +336,10 @@ def test_native_terminal_frame_report_records_validated_viewport(
             "writes_inside_sync": 1,
             "writes_outside_sync": 0,
             "out_of_band_writes": {},
+            "diagnostic_process_sync_begin_count": 1,
+            "diagnostic_process_sync_end_count": 1,
+            "diagnostic_process_sync_balanced": True,
+            "diagnostic_process_sync_max_depth": 1,
             "source_complete": True,
         }
 
@@ -347,6 +362,8 @@ def test_native_terminal_frame_report_records_validated_viewport(
     assert payload["environment"]["terminal_columns"] == "100"
     assert payload["environment"]["terminal_lines"] == "24"
     assert payload["samples"][0]["emulator_label"] == "test-terminal 1.0 / direct"
+    assert payload["samples"][0]["process_sync_balanced"] is True
+    assert payload["samples"][0]["process_sync_max_depth"] == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX pseudo-terminals")
@@ -384,6 +401,7 @@ def test_terminal_frame_benchmark_observes_supported_and_unsupported_modes() -> 
     assert supported.process_sync_begin_count > 0
     assert supported.process_sync_begin_count == supported.process_sync_end_count
     assert supported.process_sync_balanced
+    assert supported.process_sync_max_depth == 1
     assert supported.source_complete
 
     assert unsupported.capability_query_observed
@@ -397,6 +415,7 @@ def test_terminal_frame_benchmark_observes_supported_and_unsupported_modes() -> 
     assert unsupported.process_sync_begin_count == 0
     assert unsupported.process_sync_end_count == 0
     assert unsupported.process_sync_balanced
+    assert unsupported.process_sync_max_depth == 0
     assert unsupported.source_complete
 
     assert supported.display_updates
@@ -419,3 +438,35 @@ def test_terminal_frame_benchmark_observes_supported_and_unsupported_modes() -> 
     assert "\x1b" not in payload
     assert "Terminal frame 0" not in payload
     assert "measured item" not in payload
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX pseudo-terminals")
+def test_terminal_frame_benchmark_opt_out_emits_no_synchronization_controls() -> None:
+    report = run_paired_benchmark(
+        TerminalFrameConfig(
+            message_count=4,
+            retained_history_entries=2,
+            stream_chunks=2,
+            stream_interval_seconds=0.02,
+            viewport_width=80,
+            viewport_height=16,
+            runs=1,
+            pending_tool_cards=0,
+            negotiation_timeout_seconds=5,
+            process_timeout_seconds=20,
+            synchronized_output_enabled=False,
+        ),
+        emulator_label="pytest-pty-disabled",
+    )
+
+    assert len(report.samples) == 2
+    for sample in report.samples:
+        assert sample.capability_query_observed
+        assert not sample.capability_detected
+        assert sample.exact_sync_pair_frame_count == 0
+        assert sample.unbalanced_sync_frame_count == 0
+        assert sample.process_sync_begin_count == 0
+        assert sample.process_sync_end_count == 0
+        assert sample.process_sync_balanced
+        assert sample.process_sync_max_depth == 0
+        assert sample.source_complete

@@ -58,6 +58,7 @@ class TerminalFrameConfig:
     pending_tool_cards: int = 2
     negotiation_timeout_seconds: float = 5.0
     process_timeout_seconds: float = 30.0
+    synchronized_output_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class TerminalFrameSample:
     process_sync_begin_count: int | None
     process_sync_end_count: int | None
     process_sync_balanced: bool | None
+    process_sync_max_depth: int | None
     source_complete: bool
 
 
@@ -123,6 +125,19 @@ class _FrameCollector:
     writes_outside_sync: int = 0
     capability_detected: bool = False
     out_of_band_writes: dict[str, int] = field(default_factory=dict)
+    process_sync_begin_count: int = 0
+    process_sync_end_count: int = 0
+    process_sync_order_valid: bool = True
+    process_sync_max_depth: int = 0
+    _process_sync_depth: int = 0
+
+    @property
+    def process_sync_balanced(self) -> bool:
+        return (
+            self.process_sync_order_valid
+            and self._process_sync_depth == 0
+            and self.process_sync_begin_count == self.process_sync_end_count
+        )
 
     def reset(self) -> None:
         self.display_updates.clear()
@@ -163,6 +178,7 @@ class _FrameCollector:
         self.suppressed_spans += diagnostic.suppressed_spans
 
     def record_terminal_write(self, diagnostic: TerminalWriteDiagnostic) -> None:
+        self._record_process_sync(diagnostic)
         if not self.collecting:
             return
         if diagnostic.out_of_band:
@@ -189,6 +205,25 @@ class _FrameCollector:
         elif has_sync_controls:
             self.unbalanced_sync_frame_count += 1
 
+    def _record_process_sync(self, diagnostic: TerminalWriteDiagnostic) -> None:
+        begin_count = diagnostic.sync_begin_count
+        end_count = diagnostic.sync_end_count
+        self.process_sync_begin_count += begin_count
+        self.process_sync_end_count += end_count
+        self.process_sync_order_valid = (
+            self.process_sync_order_valid and diagnostic.sync_order_valid
+        )
+        self._process_sync_depth += begin_count
+        self.process_sync_max_depth = max(
+            self.process_sync_max_depth,
+            self._process_sync_depth,
+        )
+        if end_count > self._process_sync_depth:
+            self.process_sync_order_valid = False
+            self._process_sync_depth = 0
+        else:
+            self._process_sync_depth -= end_count
+
 
 class _SequenceCounter:
     """Count selected terminal controls without retaining terminal output."""
@@ -199,6 +234,7 @@ class _SequenceCounter:
         self.sync_end_count = 0
         self.sync_order_valid = True
         self._sync_depth = 0
+        self.max_sync_depth = 0
         self._tail = b""
 
     @property
@@ -227,6 +263,7 @@ class _SequenceCounter:
             if kind == "begin":
                 self.sync_begin_count += 1
                 self._sync_depth += 1
+                self.max_sync_depth = max(self.max_sync_depth, self._sync_depth)
             else:
                 self.sync_end_count += 1
                 if self._sync_depth == 0:
@@ -317,8 +354,13 @@ async def _wait_for_capability_state(
     *,
     mode: CapabilityMode,
     timeout: float,
+    synchronized_output_enabled: bool = True,
 ) -> None:
-    if mode in ("supported", "native"):
+    if not synchronized_output_enabled:
+        await asyncio.sleep(0.05)
+        if bool(getattr(app, "_sync_available", False)):
+            raise RuntimeError("synchronized-output opt-out unexpectedly enabled support")
+    elif mode in ("supported", "native"):
         deadline = asyncio.get_running_loop().time() + timeout
         while not bool(getattr(app, "_sync_available", False)):
             if asyncio.get_running_loop().time() >= deadline:
@@ -342,7 +384,10 @@ async def _run_child_workload(
     control_fd: int | None,
 ) -> dict[str, object]:
     collector = _FrameCollector()
-    app, renderer = create_textual_tui(diagnostics=collector)
+    app, renderer = create_textual_tui(
+        diagnostics=collector,
+        synchronized_output=config.synchronized_output_enabled,
+    )
     assert isinstance(renderer, TextualTuiRenderer)
     source_complete = False
 
@@ -365,6 +410,7 @@ async def _run_child_workload(
                 app,
                 mode=mode,
                 timeout=config.negotiation_timeout_seconds,
+                synchronized_output_enabled=config.synchronized_output_enabled,
             )
             renderer.replace_history_entries(entries, session_label="Terminal frame benchmark")
             await app.wait_for_history_render()
@@ -424,6 +470,10 @@ async def _run_child_workload(
         "writes_inside_sync": collector.writes_inside_sync,
         "writes_outside_sync": collector.writes_outside_sync,
         "out_of_band_writes": dict(sorted(collector.out_of_band_writes.items())),
+        "diagnostic_process_sync_begin_count": collector.process_sync_begin_count,
+        "diagnostic_process_sync_end_count": collector.process_sync_end_count,
+        "diagnostic_process_sync_balanced": collector.process_sync_balanced,
+        "diagnostic_process_sync_max_depth": collector.process_sync_max_depth,
         "source_complete": source_complete,
     }
 
@@ -560,6 +610,8 @@ def _run_pty_sample(
             ]
             if emulator_label is not None:
                 command.extend(("--emulator-label", emulator_label))
+            if not config.synchronized_output_enabled:
+                command.append("--disable-synchronized-output")
             child_environment = os.environ.copy()
             child_environment["TERM"] = "xterm-256color"
             child_environment.pop("TERM_PROGRAM", None)
@@ -596,6 +648,23 @@ def _run_pty_sample(
         if process is not None:
             _stop_process(process)
         _close_descriptors(master_fd, slave_fd, control_read_fd, control_write_fd)
+    diagnostic_process = (
+        child.pop("diagnostic_process_sync_begin_count"),
+        child.pop("diagnostic_process_sync_end_count"),
+        child.pop("diagnostic_process_sync_balanced"),
+        child.pop("diagnostic_process_sync_max_depth"),
+    )
+    raw_process = (
+        counter.sync_begin_count,
+        counter.sync_end_count,
+        counter.sync_balanced,
+        counter.max_sync_depth,
+    )
+    if diagnostic_process != raw_process:
+        raise RuntimeError(
+            "terminal diagnostics disagreed with raw process synchronization counts: "
+            f"diagnostics={diagnostic_process!r}, raw={raw_process!r}"
+        )
     return TerminalFrameSample(
         **child,
         capability_query_observed=counter.query_count > 0,
@@ -603,6 +672,7 @@ def _run_pty_sample(
         process_sync_begin_count=counter.sync_begin_count,
         process_sync_end_count=counter.sync_end_count,
         process_sync_balanced=counter.sync_balanced,
+        process_sync_max_depth=counter.max_sync_depth,
     )
 
 
@@ -660,14 +730,19 @@ async def run_native_benchmark(
             emulator_label=emulator_label,
             control_fd=None,
         )
+        process_sync_begin_count = int(child.pop("diagnostic_process_sync_begin_count"))
+        process_sync_end_count = int(child.pop("diagnostic_process_sync_end_count"))
+        process_sync_balanced = bool(child.pop("diagnostic_process_sync_balanced"))
+        process_sync_max_depth = int(child.pop("diagnostic_process_sync_max_depth"))
         samples.append(
             TerminalFrameSample(
                 **child,
                 capability_query_observed=None,
                 capability_response_supplied=False,
-                process_sync_begin_count=None,
-                process_sync_end_count=None,
-                process_sync_balanced=None,
+                process_sync_begin_count=process_sync_begin_count,
+                process_sync_end_count=process_sync_end_count,
+                process_sync_balanced=process_sync_balanced,
+                process_sync_max_depth=process_sync_max_depth,
             )
         )
     report_environment = environment()
@@ -695,6 +770,7 @@ def _config_from_args(parsed: argparse.Namespace) -> TerminalFrameConfig:
         pending_tool_cards=parsed.pending_tool_cards,
         negotiation_timeout_seconds=parsed.negotiation_timeout_seconds,
         process_timeout_seconds=parsed.process_timeout_seconds,
+        synchronized_output_enabled=not parsed.disable_synchronized_output,
     )
 
 
@@ -732,6 +808,7 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         default=TerminalFrameConfig.process_timeout_seconds,
     )
     parser.add_argument("--emulator-label")
+    parser.add_argument("--disable-synchronized-output", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(

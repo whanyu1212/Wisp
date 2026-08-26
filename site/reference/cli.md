@@ -37,6 +37,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
 | `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
 | `--tui-renderer line\|fullscreen\|textual` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
+| `--no-synchronized-output` | Disable capability-gated synchronized frames in the Textual TUI | — |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
 | `--allow-tool NAME` | Expose one named tool; repeat for multiple tools | — |
@@ -64,6 +65,7 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 | Option | Meaning |
 |---|---|
 | `--line` | Use the simple line renderer instead of Textual |
+| `--no-synchronized-output` | Disable capability-gated synchronized frames in Textual |
 | `--session-dir PATH` | Override the JSONL session directory |
 | `--auth-file PATH` | Override the provider auth file |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry |

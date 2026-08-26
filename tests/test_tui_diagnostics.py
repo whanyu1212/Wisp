@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 import anyio
 import pytest
 from rich.console import Console
-from rich.segment import Segment
-from textual import events
+from rich.segment import ControlType, Segment
+from textual import events, messages
 from textual._compositor import ChopsUpdate, LayoutUpdate
 from textual.app import App
 from textual.geometry import Region
@@ -22,9 +22,11 @@ from wisp.tui.diagnostics import (
 )
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import TuiViewSnapshot
+from wisp.tui.state import TuiExitReason
 from wisp.tui.textual_app import (
     _DisplayedFrame,
     _PendingInputLatency,
+    _sanitize_terminal_update,
     _slash_enter_prefills,
     create_textual_tui,
 )
@@ -706,6 +708,8 @@ def test_history_prepend_diagnostics_never_report_an_escaped_unsettled_paint() -
 
 
 class _FakeDriver:
+    is_inline = False
+
     def __init__(self) -> None:
         self.writes: list[str] = []
         self.flush_count = 0
@@ -734,6 +738,56 @@ def test_classify_terminal_write_uses_prefixes_only() -> None:
     multibyte_payload = "界" * 4100
     assert len(multibyte_payload.encode("utf-8")) > 8192
     assert windows_chunk_count(len(multibyte_payload)) == 1
+
+
+def test_synchronized_output_policy_requires_enablement_and_terminal_support() -> None:
+    enabled, _renderer = create_textual_tui(synchronized_output=True)
+    disabled, _renderer = create_textual_tui(synchronized_output=False)
+    enabled._driver = _FakeDriver()  # type: ignore[assignment]
+    disabled._driver = _FakeDriver()  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        await enabled._dispatch_message(messages.TerminalSupportsSynchronizedOutput())
+        await disabled._dispatch_message(messages.TerminalSupportsSynchronizedOutput())
+
+    anyio.run(scenario)
+
+    assert enabled._sync_available
+    assert not disabled._sync_available
+
+
+def test_terminal_updates_neutralize_untrusted_controls_but_preserve_framework_controls() -> None:
+    safe_layout = LayoutUpdate(
+        [[Strip([Segment("ordinary cells")], cell_length=14)]],
+        Region(0, 0, 14, 1),
+    )
+    untrusted = Strip(
+        [
+            Segment("before\x1b[?2026hinside\x9b?2026lafter"),
+            Segment("\a", control=[(ControlType.BELL,)]),
+        ],
+        cell_length=32,
+    )
+    layout = LayoutUpdate([[untrusted]], Region(0, 0, 32, 1))
+    chops = ChopsUpdate([{0: untrusted}], [(0, 0, 32)], [[32]])
+
+    sanitized_layout = _sanitize_terminal_update(layout)
+    sanitized_chops = _sanitize_terminal_update(chops)
+
+    assert _sanitize_terminal_update(safe_layout) is safe_layout
+    assert isinstance(sanitized_layout, LayoutUpdate)
+    assert isinstance(sanitized_chops, ChopsUpdate)
+    layout_segments = list(sanitized_layout.strips[0][0])
+    chops_strip = sanitized_chops.chops[0][0]
+    assert chops_strip is not None
+    chops_segments = list(chops_strip)
+    for segments in (layout_segments, chops_segments):
+        assert segments[0].text == "before[?2026hinside?2026lafter"
+        assert segments[0].control is None
+        assert segments[1].text == "\a"
+        assert segments[1].control == [(ControlType.BELL,)]
+    assert sanitized_layout.strips[0][0].cell_length == untrusted.cell_length
+    assert chops_strip.cell_length == untrusted.cell_length
 
 
 def test_headless_write_model_chunks_windows_payloads_by_character_count() -> None:
@@ -934,6 +988,39 @@ def test_observed_driver_counts_balanced_sync_writes_and_restores_methods() -> N
     assert sample.writes_inside_sync == 1
     assert sample.writes_outside_sync == 0
     assert not sample.out_of_band
+
+
+def test_run_shell_keeps_terminal_observer_attached_through_run_async_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics = _Diagnostics()
+    app, _renderer = create_textual_tui(diagnostics=diagnostics)
+    observer = app._terminal_writes
+    assert observer is not None
+    driver = _FakeDriver()
+    observer.attach(driver)
+
+    async def fake_run_async(*, mouse: bool) -> None:
+        assert mouse
+        assert getattr(driver.write, "__func__", driver.write) is not _FakeDriver.write
+        driver.write("\x1b[?2026h")
+        driver.write("\x1b[?2026l")
+
+    monkeypatch.setattr(app, "run_async", fake_run_async)
+
+    async def scenario() -> None:
+        async def runner() -> TuiExitReason:
+            return TuiExitReason.exited
+
+        await app.run_shell(runner)
+
+    anyio.run(scenario)
+
+    assert getattr(driver.write, "__func__", driver.write) is _FakeDriver.write
+    assert [sample.out_of_band_kind for sample in diagnostics.terminal_writes] == [
+        "sync_begin",
+        "sync_end",
+    ]
 
 
 def test_observer_rejects_end_before_begin_as_an_exact_sync_pair() -> None:

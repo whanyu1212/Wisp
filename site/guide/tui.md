@@ -183,6 +183,7 @@ wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
+wisp tui --no-synchronized-output        # disable atomic Textual frame presentation
 ```
 
 At process startup, `--continue` or `--resume` hydrates at most 500 active-path persisted messages
@@ -194,6 +195,12 @@ bounded paging behavior.
 The Textual TUI targets truecolor terminals and degrades gracefully — 256-color and 16-color
 terminals are handled by Textual's own detection. Setting `NO_COLOR` switches to deterministic
 grayscale.
+
+Textual also queries the terminal for synchronized-output support. A positive response lets Textual
+present each display update atomically; unsupported terminals retain ordinary output. If a terminal
+or multiplexer shows rendering artifacts, retry with `--no-synchronized-output`. The flag affects only
+the Textual TUI and has no environment-variable equivalent; line, print, JSONL-RPC, and SDK output do
+not use synchronized frames.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
