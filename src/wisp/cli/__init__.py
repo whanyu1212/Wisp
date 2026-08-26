@@ -138,6 +138,13 @@ def cli_callback(
             help="TUI renderer to use with --mode tui.",
         ),
     ] = TuiRendererKind.line,
+    no_synchronized_output: Annotated[
+        bool,
+        typer.Option(
+            "--no-synchronized-output",
+            help="Disable capability-gated synchronized frames in the Textual TUI.",
+        ),
+    ] = False,
     all_tools: Annotated[
         bool,
         typer.Option(
@@ -300,6 +307,7 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 renderer=resolved_tui_renderer,
+                synchronized_output=not no_synchronized_output,
                 project_trusted=trusted,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so the legacy `--mode tui` path keeps honoring
@@ -343,6 +351,13 @@ def tui_command(
     line: Annotated[
         bool,
         typer.Option("--line", help="Use the simple line renderer instead of the Textual TUI."),
+    ] = False,
+    no_synchronized_output: Annotated[
+        bool,
+        typer.Option(
+            "--no-synchronized-output",
+            help="Disable capability-gated synchronized frames in the Textual TUI.",
+        ),
     ] = False,
     session_dir: Annotated[
         Path | None,
@@ -429,6 +444,7 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            synchronized_output=not no_synchronized_output,
             project_trusted=trusted,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
@@ -489,6 +505,7 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     renderer: TuiRendererKind,
+    synchronized_output: bool,
     project_trusted: bool,
     user_provider: str | None = None,
     user_model: str | None = None,
@@ -512,6 +529,7 @@ def _run_tui_from_cli_options(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            synchronized_output=synchronized_output,
             project_trusted=project_trusted,
             user_provider=user_provider,
             user_model=user_model,

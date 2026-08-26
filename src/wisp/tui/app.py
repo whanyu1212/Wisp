@@ -127,6 +127,7 @@ async def run_tui(
             # `from_config` also guarantees `auth_path` is in the returned globs.
             textual_tui, selected_renderer = create_textual_tui(
                 protected_paths=ToolContext.from_config(options.config).protected_paths,
+                synchronized_output=options.synchronized_output,
             )
             selected_prompt_reader = textual_tui.read_prompt
         else:

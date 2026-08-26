@@ -59,6 +59,7 @@ class TuiOptions:
     approve_unsafe_tools: bool = False
     max_tool_iterations: int | None = None
     renderer: TuiRendererKind = TuiRendererKind.line
+    synchronized_output: bool = True
     project_trusted: bool | None = None
     user_provider: str | None = None
     user_model: str | None = None

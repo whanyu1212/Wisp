@@ -139,6 +139,10 @@ write model:
 ```bash
 uv run python -m benchmarks.tui_terminal_frames --mode paired --runs 3 \
   --output profiles/tui-terminal-frames-paired.json
+
+uv run python -m benchmarks.tui_terminal_frames --mode paired --runs 3 \
+  --disable-synchronized-output \
+  --output profiles/tui-terminal-frames-paired-disabled.json
 ```
 
 Paired mode is POSIX-only. It launches each workload under a fixed-size pseudo-terminal, waits for
@@ -163,9 +167,11 @@ uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
 Native mode requires an interactive terminal and lets that emulator answer Textual's query. It waits
 until support is detected or `--negotiation-timeout-seconds` expires before collecting frames. Reports
 contain only environment metadata, display/cache counts, payload sizes, write/flush counts,
-frame-level synchronization balance, and coarse out-of-band classes. The PTY reader keeps only a
-short control-sequence tail and discards terminal payload bytes. Paired reports additionally count
-process-wide begin/end controls from startup through restored shutdown.
+frame-level synchronization balance, coarse out-of-band classes, and process-wide synchronization
+counts from startup through restored shutdown. The observer remains attached until Textual restores
+the terminal. Paired mode independently counts the raw PTY stream and rejects a sample if raw and
+diagnostic begin/end, balance, or maximum-depth results disagree. The PTY reader keeps only a short
+control-sequence tail and discards terminal payload bytes.
 
 Before each native run, resize the usable terminal or multiplexer pane to exactly 100 columns by 24
 rows. Native mode validates the real TTY dimensions against `--width` and `--height` and aborts rather
@@ -176,8 +182,11 @@ multiplexer name and version in `--emulator-label`; for tmux, include both tmux 
 Retain one row per sample when transcribing evidence. Every sample must complete its source and include
 at least one full layout and one partial update. On a supporting terminal, every observed driver frame
 must have one ordered synchronization pair, no unbalanced frame, and no payload write outside
-synchronization. On an unsupported terminal, capability detection and synchronization-pair counts must
-remain zero. A mixed capability result across the three runs is a failure, not an aggregate pass.
+synchronization. Process-wide begin/end totals must balance with a maximum depth of one. On an
+unsupported terminal, capability detection and synchronization-pair counts must remain zero. A mixed
+capability result across the three runs is a failure, not an aggregate pass. Repeat native mode with
+`--disable-synchronized-output`; every frame and process synchronization count must then remain zero,
+even when the emulator reports support.
 
 Observe the cold full-layout frame and subsequent streaming updates separately from those automated
 counts. Record whether any intermediate frame or residual whole-screen flicker was visible, then verify
@@ -186,9 +195,10 @@ Raw reports under `profiles/` remain machine-local and ignored; commit only priv
 and factual manual observations.
 
 Counts demonstrate whether intermediate writes are exposed; they do not by themselves prove a
-perceptual flicker improvement. Compare native runs on the same machine, record the emulator version
-and multiplexer, and keep manual observations separate from automated framing evidence. Windows does
-not use the POSIX paired harness and must be covered through a native Windows Terminal run.
+perceptual flicker improvement. Compare default and disabled native runs on the same machine, record
+the emulator version and multiplexer, and keep manual observations separate from automated framing
+evidence. Windows does not use the POSIX paired harness; if Windows Terminal is unavailable, record
+that limitation and make no Windows compatibility claim.
 
 See `benchmarks/tui_terminal_frames_evidence.md` for the current automated table, manual emulator
 matrix, and the decision gate for #443.
