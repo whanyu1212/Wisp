@@ -173,7 +173,7 @@ class ProviderRetrying(WispEvent):
     provider: str
     attempt: int
     max_attempts: int
-    delay_seconds: float
+    delay_seconds: float = Field(ge=0, allow_inf_nan=False)
     reason: RetryReason
     status_code: int | None = None
 
@@ -316,7 +316,7 @@ class ContextBudget(BaseModel):
     context_window: int | None = Field(default=None, gt=0)
     reserve_tokens: int = Field(ge=0)
     remaining_tokens: int | None = None
-    estimated_percent: float | None = Field(default=None, ge=0)
+    estimated_percent: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     over_budget: bool | None = None
 
     @model_validator(mode="after")
@@ -651,7 +651,7 @@ class ContextPressure(WispEvent):
     context_window: int = Field(gt=0)
     observed_tokens: int = Field(ge=0)
     remaining_tokens: int = Field(ge=0)
-    pressure_ratio: float = Field(ge=0)
+    pressure_ratio: float = Field(ge=0, allow_inf_nan=False)
 
 
 class ContextEstimated(WispEvent):

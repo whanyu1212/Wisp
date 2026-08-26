@@ -42,6 +42,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check live RPC schemas
+        run: uv run python -m wisp.rpc.protocol_schema --check
+
       - name: Type-check
         run: uv run mypy
 
@@ -148,6 +151,15 @@ jobs:
       - name: Build
         run: uv build --no-sources
 
+      - name: Build live RPC schema bundle
+        run: |
+          protocol_version="$(
+            PYTHONPATH=src python -c \
+              'from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION; print(LIVE_RPC_PROTOCOL_VERSION)'
+          )"
+          uv run python -m wisp.rpc.protocol_schema \
+            --archive "release-assets/wisp-live-rpc-v${protocol_version}.tar.gz"
+
       - name: Check distribution metadata
         run: uvx twine check dist/*
 
@@ -195,6 +207,13 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+      - name: Upload live RPC schema bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-rpc-schema
+          path: release-assets/
+          if-no-files-found: error
+
   publish:
     name: Publish to PyPI
     needs: build
@@ -239,6 +258,12 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Download live RPC schema bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: live-rpc-schema
+          path: release-assets/
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -247,7 +272,7 @@ jobs:
           if [ "${{ needs.build.outputs.prerelease }}" = "true" ]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "$GITHUB_REF_NAME" dist/* release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             "${release_flags[@]}" \

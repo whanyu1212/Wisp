@@ -1,0 +1,69 @@
+name: Live RPC schema history
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - ready_for_review
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  immutable-history:
+    name: Preserve committed protocol versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # pull_request_target is safe here because this checks out only the trusted
+      # base revision and never executes or checks out pull-request code.
+      - name: Check out trusted schema history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: schemas/live-rpc
+
+      - name: Reject changes inside existing version directories
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$CHANGED_FILES" -gt 3000 ]; then
+            printf 'Cannot verify immutable protocol history for a PR with more than 3,000 files.\n' >&2
+            exit 1
+          fi
+          if ! changed_files="$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+              --jq '.[] | [.status, .filename, (.previous_filename // "")] | @tsv'
+          )"; then
+            printf 'Failed to retrieve the complete pull-request file list.\n' >&2
+            exit 1
+          fi
+          violations=()
+          while IFS=$'\t' read -r status filename previous_filename; do
+            for path in "$filename" "$previous_filename"; do
+              if [[ "$path" =~ ^schemas/live-rpc/([^/]+)/ ]]; then
+                directory_name="${BASH_REMATCH[1]}"
+                if [[ ! "$directory_name" =~ ^v[1-9][0-9]*$ ]]; then
+                  violations+=("$path")
+                  continue
+                fi
+                version_directory="schemas/live-rpc/$directory_name"
+                if [ -d "$version_directory" ] || [ "$status" != "added" ]; then
+                  violations+=("$path")
+                fi
+              fi
+            done
+          done <<< "$changed_files"
+          if [ "${#violations[@]}" -ne 0 ]; then
+            printf 'Committed live RPC protocol artifacts are immutable:\n' >&2
+            printf '  %s\n' "${violations[@]}" >&2
+            exit 1
+          fi
