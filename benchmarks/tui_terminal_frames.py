@@ -210,9 +210,10 @@ class _FrameCollector:
         end_count = diagnostic.sync_end_count
         self.process_sync_begin_count += begin_count
         self.process_sync_end_count += end_count
-        self.process_sync_order_valid = (
-            self.process_sync_order_valid and diagnostic.sync_order_valid
-        )
+        if not diagnostic.out_of_band:
+            self.process_sync_order_valid = (
+                self.process_sync_order_valid and diagnostic.sync_order_valid
+            )
         self._process_sync_depth += begin_count
         self.process_sync_max_depth = max(
             self.process_sync_max_depth,

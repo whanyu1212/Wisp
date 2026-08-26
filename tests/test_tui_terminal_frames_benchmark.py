@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import subprocess
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -137,6 +138,43 @@ def test_terminal_frame_collector_rejects_misordered_exact_pair() -> None:
     assert collector.exact_sync_pair_frame_count == 0
     assert collector.unbalanced_sync_frame_count == 1
     assert not collector.process_sync_balanced
+
+
+def test_terminal_frame_collector_reconstructs_out_of_band_sync_order() -> None:
+    collector = _FrameCollector()
+    begin = TerminalWriteDiagnostic(
+        display_kind="none",
+        sync_available=False,
+        write_count=1,
+        flush_count=0,
+        payload_bytes=0,
+        max_write_bytes=0,
+        posix_write_count=0,
+        windows_chunk_count=0,
+        sync_begin_count=1,
+        sync_end_count=0,
+        sync_order_valid=False,
+        writes_inside_sync=0,
+        writes_outside_sync=1,
+        observed_driver=True,
+        out_of_band=True,
+        out_of_band_kind="sync_begin",
+    )
+
+    collector.record_terminal_write(begin)
+    collector.record_terminal_write(
+        replace(
+            begin,
+            sync_begin_count=0,
+            sync_end_count=1,
+            out_of_band_kind="sync_end",
+        )
+    )
+
+    assert collector.process_sync_begin_count == 1
+    assert collector.process_sync_end_count == 1
+    assert collector.process_sync_balanced
+    assert collector.process_sync_max_depth == 1
 
 
 def test_terminal_frame_fixture_capacity_accounts_for_collapsed_tool_pairs() -> None:
