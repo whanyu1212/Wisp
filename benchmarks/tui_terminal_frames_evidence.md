@@ -9,8 +9,9 @@
 A deterministic three-run PTY comparison on Textual 8.2.8 found that positive synchronized-output
 negotiation encloses every measured Wisp payload write in exactly one balanced CSI 2026 pair.
 Nine native samples now confirm the same behavior in WezTerm directly and through tmux, while Apple
-Terminal retains the unsupported fallback without emitting CSI 2026 controls. Windows Terminal and
-manual flicker observations remain required before deciding the production policy.
+Terminal retains the unsupported fallback without emitting CSI 2026 controls. This evidence pass is
+explicitly scoped to Apple Terminal, WezTerm, tmux on WezTerm, and Windows Terminal; Windows results
+and manual flicker observations remain required before deciding the production policy.
 
 ## Automated paired PTY run
 
@@ -59,7 +60,7 @@ Observed automated properties:
 Frame counts vary slightly because paced Textual refreshes may coalesce; synchronization invariants
 do not depend on a fixed refresh count.
 
-## Native emulator matrix
+## Scoped native emulator matrix
 
 Run native mode three times in each environment before the production policy PR. Use the explicit
 fixture below in every terminal so later default changes cannot alter the comparison:
@@ -76,6 +77,12 @@ uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
 Resize the usable terminal or multiplexer pane to exactly 100x24 before running the command. Native
 mode now rejects a mismatched real viewport and records the validated dimensions as
 `terminal_columns` and `terminal_lines`. Keep raw JSON reports local under ignored `profiles/`.
+
+This evidence pass intentionally revises the original five-environment plan to a four-environment
+matrix: Apple Terminal and WezTerm directly on macOS, tmux hosted by WezTerm, and Windows Terminal.
+iTerm2 is excluded because it is unavailable in the test environment, rather than being counted as
+completed or pending evidence. Conclusions from this matrix are representative of only these scoped
+environments, not exhaustive native-terminal coverage.
 
 Recorded native environment:
 
@@ -156,5 +163,5 @@ The automated evidence favors Textual ownership and positive capability detectio
 - no force-on mode;
 - no synchronization for inline, headless, line, print, JSONL-RPC, or other noninteractive output.
 
-This recommendation remains provisional until Windows Terminal and manual flicker evidence complete
-the native matrix.
+This recommendation remains provisional until Windows Terminal and manual flicker evidence finish
+this scoped evidence pass.
