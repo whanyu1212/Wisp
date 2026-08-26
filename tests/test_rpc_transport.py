@@ -381,6 +381,33 @@ def test_thread_transport_uses_configured_bounded_queue() -> None:
     assert created_queue_sizes == [7]
 
 
+def test_thread_transport_defaults_to_single_frame_queue() -> None:
+    created_queue_sizes: list[int] = []
+
+    class RecordingQueue(Queue[str | bytes | Exception]):
+        def __init__(self, maxsize: int = 0) -> None:
+            created_queue_sizes.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    async def scenario() -> None:
+        stop_reader = anyio.Event()
+        stop_reader.set()
+        transport = RpcStdinTransport(
+            stdin=_Input([""]),
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            queue_factory=RecordingQueue,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.read_thread(send, stop_reader)
+
+    anyio.run(scenario)
+
+    assert created_queue_sizes == [1]
+
+
 def test_transport_uses_thread_reader_for_windows_pipe() -> None:
     read_fd, write_fd = os.pipe()
     stdin = os.fdopen(read_fd, "r", encoding="utf-8")

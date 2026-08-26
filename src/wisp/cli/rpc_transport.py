@@ -31,7 +31,10 @@ from wisp.rpc.protocol import (
 
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
-_STDIN_THREAD_QUEUE_SIZE = 100
+# Keep at most one complete raw frame ahead of async parsing. Each negotiated
+# frame may be large, so a deeper queue would multiply the per-frame limit into
+# an unsafe aggregate allocation while the coordinator is backpressured.
+_STDIN_THREAD_QUEUE_SIZE = 1
 _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
 
 type RpcEventWriter = Callable[[WispEvent], None]
