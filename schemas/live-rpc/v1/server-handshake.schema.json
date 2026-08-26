@@ -62,7 +62,14 @@
         "type"
       ],
       "title": "RpcHandshakeRejected",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "ordered-range",
+          "maximum_property": "max_protocol_version",
+          "minimum_property": "min_protocol_version"
+        }
+      ]
     },
     "RpcHandshakeRejectionCode": {
       "enum": [
@@ -138,7 +145,20 @@
         "type"
       ],
       "title": "RpcServerHello",
-      "type": "object"
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "ordered-range",
+          "maximum_property": "max_frontend_protocol_version",
+          "minimum_property": "min_frontend_protocol_version"
+        },
+        {
+          "kind": "value-in-range",
+          "maximum_property": "max_frontend_protocol_version",
+          "minimum_property": "min_frontend_protocol_version",
+          "value_property": "protocol_version"
+        }
+      ]
     },
     "RpcTransportLimits": {
       "additionalProperties": false,

@@ -53,8 +53,9 @@ nullable fields. Stateful lifecycle invariants remain model-level protocol requi
 JSON Schema constraints.
 
 JSON Schema cannot compare two properties or express that one array is a subset of another. The
-client handshake artifact therefore records its ordered-range and required-capability-subset rules in
-`x-wisp-cross-field-invariants`; every implementation must enforce those rules during decoding.
+handshake artifacts therefore record ordered ranges, selected-version containment, and the client
+required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce
+those rules during decoding.
 
 The live event artifact includes only the version emitted by the current package even though Python
 retains historical event parsing for persisted sessions. The handshake negotiates protocol and event

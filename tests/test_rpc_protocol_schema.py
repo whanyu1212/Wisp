@@ -221,8 +221,9 @@ def test_generated_json_schemas_are_valid_draft_2020_12() -> None:
 
 def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -> None:
     client_schema = _artifact("client-handshake.schema.json")
+    server_schema = _artifact("server-handshake.schema.json")
     client = Draft202012Validator(client_schema)
-    server = Draft202012Validator(_artifact("server-handshake.schema.json"))
+    server = Draft202012Validator(server_schema)
     client_payload = {
         "type": "rpc.client.hello",
         "frontend_name": "wisp-rust-tui",
@@ -277,6 +278,29 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
     assert not server.is_valid(
         {key: value for key, value in hello.items() if key != "protocol_version"}
     )
+    server_mapping = _mapping(server_schema)
+    server_hello = _definition(server_schema, server_mapping["rpc.server.hello"])
+    assert server_hello["x-wisp-cross-field-invariants"] == [
+        {
+            "kind": "ordered-range",
+            "maximum_property": "max_frontend_protocol_version",
+            "minimum_property": "min_frontend_protocol_version",
+        },
+        {
+            "kind": "value-in-range",
+            "maximum_property": "max_frontend_protocol_version",
+            "minimum_property": "min_frontend_protocol_version",
+            "value_property": "protocol_version",
+        },
+    ]
+    rejection = _definition(server_schema, server_mapping["rpc.handshake.rejected"])
+    assert rejection["x-wisp-cross-field-invariants"] == [
+        {
+            "kind": "ordered-range",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
+        }
+    ]
 
 
 def test_command_schema_contains_every_discriminator_once() -> None:

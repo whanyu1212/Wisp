@@ -97,6 +97,7 @@ def generate_protocol_artifacts() -> dict[str, str]:
     )
     _harden_capability_schema(server_handshake)
     _require_discriminator_property(server_handshake, "type")
+    _annotate_server_handshake_invariants(server_handshake)
 
     commands = _schema_for_model(RpcCommandAdapter, title="Wisp typed-client RPC commands")
     _shape_command_output_schema(commands)
@@ -338,6 +339,32 @@ def _harden_capability_schema(schema: JsonObject) -> None:
     capability = definitions.get("RpcCapability")
     if isinstance(capability, dict):
         capability["pattern"] = r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\s\S])"
+
+
+def _annotate_server_handshake_invariants(schema: JsonObject) -> None:
+    definitions = _object_member(schema, "$defs")
+    hello = _named_definition(definitions, "RpcServerHello")
+    hello["x-wisp-cross-field-invariants"] = [
+        {
+            "kind": "ordered-range",
+            "maximum_property": "max_frontend_protocol_version",
+            "minimum_property": "min_frontend_protocol_version",
+        },
+        {
+            "kind": "value-in-range",
+            "maximum_property": "max_frontend_protocol_version",
+            "minimum_property": "min_frontend_protocol_version",
+            "value_property": "protocol_version",
+        },
+    ]
+    rejection = _named_definition(definitions, "RpcHandshakeRejected")
+    rejection["x-wisp-cross-field-invariants"] = [
+        {
+            "kind": "ordered-range",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
+        }
+    ]
 
 
 def _shape_current_event_output_schema(schema: JsonObject) -> None:
