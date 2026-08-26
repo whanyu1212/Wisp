@@ -94,6 +94,8 @@ from .coordinator import (
 )
 from .errors import RpcOutputAlreadyReportedError
 
+_MAX_RPC_COMMAND_ERROR_CHARS = 1_000
+
 type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
@@ -3769,6 +3771,8 @@ def write_rpc_command_error(
     message: str,
     write_event: RpcEventWriter,
 ) -> None:
+    if len(message) > _MAX_RPC_COMMAND_ERROR_CHARS:
+        message = message[: _MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
     write_event(ErrorEvent(message=message))
     write_event(
         RpcCommandFinished(

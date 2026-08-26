@@ -103,6 +103,32 @@ def test_rpc_command_identity_replaces_oversized_ids_before_lifecycle_events() -
     assert error == "RPC command id must contain at most 256 characters"
 
 
+def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
+    events: list[WispEvent] = []
+    oversized_reference = "x" * (rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS + 1)
+
+    rpc_execution_module.handle_rpc_approval_command(
+        {
+            "id": "approval-1",
+            "type": "approval",
+            "call_id": oversized_reference,
+            "approved": True,
+        },
+        command_id="approval-1",
+        command_type="approval",
+        approval_policy=_ApprovalResolver(),
+        write_event=events.append,
+    )
+
+    assert len(events) == 2
+    error, finished = events
+    assert isinstance(error, ErrorEvent)
+    assert isinstance(finished, RpcCommandFinished)
+    assert len(error.message) == rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS
+    assert error.message.endswith("...")
+    assert finished.error == error.message
+
+
 def test_approval_resolution_waits_for_lifecycle_flush() -> None:
     events: list[WispEvent] = []
     deferred: list[Callable[[], None]] = []
