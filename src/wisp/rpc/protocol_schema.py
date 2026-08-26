@@ -43,6 +43,7 @@ _SERVER_HANDSHAKE_SCHEMA = "server-handshake.schema.json"
 _COMMAND_SCHEMA = "commands.schema.json"
 _EVENT_SCHEMA = "events.schema.json"
 _MANIFEST = "manifest.json"
+_DECIMAL_STRING_PATTERN = r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?![\s\S])"
 _SCHEMA_FILENAMES = (
     _CLIENT_HANDSHAKE_SCHEMA,
     _SERVER_HANDSHAKE_SCHEMA,
@@ -603,13 +604,18 @@ def _single_non_null_variant(schema: JsonObject) -> JsonObject:
 def _remove_number(schema: JsonObject) -> None:
     variants = schema.get("anyOf")
     if isinstance(variants, list):
-        schema["anyOf"] = [
+        string_variants = [
             variant
             for variant in variants
             if not isinstance(variant, dict) or variant.get("type") != "number"
         ]
+        for variant in string_variants:
+            if isinstance(variant, dict) and variant.get("type") == "string":
+                variant["pattern"] = _DECIMAL_STRING_PATTERN
+        schema["anyOf"] = string_variants
     elif schema.get("type") == "number":
         schema["type"] = "string"
+        schema["pattern"] = _DECIMAL_STRING_PATTERN
 
 
 def _contains_type(annotation: object, target: type[object]) -> bool:

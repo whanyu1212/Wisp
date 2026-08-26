@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 import wisp.rpc.protocol_schema as protocol_schema
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
+    BillableTokenUsage,
     ContextBudget,
     ContextEstimate,
     ContextPressure,
@@ -20,6 +22,8 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     ToolCallSnapshot,
+    UsageCost,
+    UsageCostRates,
 )
 from wisp.rpc.commands import (
     CompactCommand,
@@ -448,6 +452,32 @@ def test_event_decimal_fields_are_string_only_on_the_wire() -> None:
     ):
         properties = cast(dict[str, dict[str, object]], definitions[definition_name]["properties"])
         assert '"type": "number"' not in json.dumps(properties[field_name])
+
+
+def test_event_decimal_schema_accepts_serialized_exponent_notation() -> None:
+    event = MessageCompleted(
+        turn=1,
+        content="done",
+        finish_reason="stop",
+        cost=UsageCost(
+            provider="custom",
+            billable=BillableTokenUsage(
+                input_tokens=1,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=1,
+            ),
+            rates=UsageCostRates(
+                input_usd_per_million=Decimal("1E+3"),
+                output_usd_per_million=Decimal("2E-3"),
+            ),
+            estimated_usd=Decimal("1E-3"),
+        ),
+    )
+    payload = json.loads(event.model_dump_json())
+
+    assert payload["cost"]["rates"]["input_usd_per_million"] == "1E+3"
+    assert Draft202012Validator(_artifact("events.schema.json")).is_valid(payload)
 
 
 def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:
