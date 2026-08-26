@@ -63,6 +63,10 @@ _RPC_TEST_HANDSHAKE = (
 )
 
 
+def test_rpc_control_stream_buffers_at_most_one_parsed_event() -> None:
+    assert cli_module.rpc._RPC_CONTROL_STREAM_BUFFER_SIZE == 1
+
+
 def test_rpc_mode_requires_handshake_before_ordinary_commands(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

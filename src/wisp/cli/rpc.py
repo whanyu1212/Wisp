@@ -36,6 +36,10 @@ _RPC_TRANSPORT_LIMITS = RpcTransportLimits(
     max_client_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
     max_server_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
 )
+# Commands may contain a full negotiated frame. Keep only one parsed control
+# event ahead of the coordinator so the per-frame limit also bounds aggregate
+# transport memory under downstream backpressure.
+_RPC_CONTROL_STREAM_BUFFER_SIZE = 1
 
 
 def _write_json_event(event: WispEvent) -> None:
@@ -137,7 +141,9 @@ async def _run_rpc_with_runtime(
         config_overrides=config_overrides,
         runtime_builder=build_runtime_for_config,
     )
-    send, receive = anyio.create_memory_object_stream[_RpcControlEvent](100)
+    send, receive = anyio.create_memory_object_stream[_RpcControlEvent](
+        _RPC_CONTROL_STREAM_BUFFER_SIZE
+    )
     stop_reader = anyio.Event()
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_read_rpc_stdin, send.clone(), stop_reader)
