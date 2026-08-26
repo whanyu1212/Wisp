@@ -64,8 +64,10 @@ async def _run_rpc(
     startup_trusted: bool = False,
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
+    *,
+    handshake_complete: bool = False,
 ) -> None:
-    if not await _negotiate_rpc_connection():
+    if not handshake_complete and not await _negotiate_rpc_connection():
         return
     runtime = await build_runtime_for_config(config)
     try:

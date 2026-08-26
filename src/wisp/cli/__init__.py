@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 
@@ -223,6 +224,12 @@ def cli_callback(
         if not _option_was_provided(ctx, "all_tools"):
             resolved_all_tools = True
 
+    rpc_handshake_complete = False
+    if resolved_mode is OutputMode.rpc:
+        rpc_handshake_complete = anyio.run(_cli_rpc._negotiate_rpc_connection)
+        if not rpc_handshake_complete:
+            return
+
     if prompt is None and resolved_mode is not OutputMode.tui and not _has_callback_cli_args(ctx):
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
@@ -283,18 +290,21 @@ def cli_callback(
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
-                _cli_rpc._run_rpc,
-                config,
-                resolved_all_tools,
-                allow_read_tools,
-                tuple(allow_tool or ()),
-                resume,
-                continue_latest,
-                approve_unsafe_tools,
-                max_tool_iterations,
-                trusted,
-                config_overrides,
-                project_context_root,
+                partial(
+                    _cli_rpc._run_rpc,
+                    config,
+                    resolved_all_tools,
+                    allow_read_tools,
+                    tuple(allow_tool or ()),
+                    resume,
+                    continue_latest,
+                    approve_unsafe_tools,
+                    max_tool_iterations,
+                    trusted,
+                    config_overrides,
+                    project_context_root,
+                    handshake_complete=rpc_handshake_complete,
+                )
             )
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(

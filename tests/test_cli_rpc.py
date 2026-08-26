@@ -2259,16 +2259,52 @@ def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:
     result = runner.invoke(
         app,
         ["-p", "hello", "--mode", "rpc", "--session-dir", str(tmp_path)],
+        input="",
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
 
     assert result.exit_code == 1, result.output
     assert result.stderr == ""
-    records = _jsonl_records(result.stdout)
-    assert [record["type"] for record in records] == ["error"]
-    assert records[0]["message"] == (
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    assert records[1]["message"] == (
         "--prompt is not used with --mode rpc; send prompt commands on stdin"
     )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment", "message"),
+    [
+        (
+            ["--resume", "missing", "--continue"],
+            {"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+            "use either --resume or --continue, not both",
+        ),
+        (
+            [],
+            {"WISP_PROVIDER": "fake", "WISP_AUTO_COMPACTION": "sometimes"},
+            "WISP_AUTO_COMPACTION must be one of",
+        ),
+    ],
+)
+def test_rpc_mode_negotiates_before_startup_errors(
+    tmp_path: Path,
+    arguments: list[str],
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", *arguments, "--session-dir", str(tmp_path)],
+        input="",
+        env=environment,
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    assert message in records[1]["message"]
 
 
 def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
