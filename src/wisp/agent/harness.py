@@ -38,6 +38,7 @@ from wisp.events import (
 from wisp.providers.base import Provider, ToolSpec, prepare_provider_history
 
 _MAX_PENDING_QUEUE_MESSAGES = 100
+_MAX_PENDING_QUEUE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,7 @@ class AgentHarnessConfig:
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
     max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
+    max_pending_queue_bytes: int = _MAX_PENDING_QUEUE_BYTES
     prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
@@ -71,6 +73,8 @@ class AgentHarnessConfig:
         _require_queue_mode(self.follow_up_mode)
         if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:
             raise ValueError("max_pending_queue_messages must be a non-negative integer")
+        if type(self.max_pending_queue_bytes) is not int or self.max_pending_queue_bytes < 0:
+            raise ValueError("max_pending_queue_bytes must be a non-negative integer")
 
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
@@ -227,6 +231,15 @@ class AgentHarness:
         """Return the total number of pending steering and follow-up messages."""
         return self.queued_messages.count
 
+    @property
+    def pending_message_bytes(self) -> int:
+        """Return serialized bytes retained across both pending queues."""
+
+        return sum(
+            self._queued_message_size(message)
+            for message in (*self._steering_queue, *self._follow_up_queue)
+        )
+
     def has_queued_messages(self) -> bool:
         """Return whether either queue contains a pending message."""
         return bool(self._steering_queue or self._follow_up_queue)
@@ -270,7 +283,7 @@ class AgentHarness:
     def steer_message(self, message: Message) -> QueueUpdated:
         """Queue a user message for steering without changing the transcript."""
         self._require_user_queue_message(message)
-        self._require_queue_capacity()
+        self._require_queue_capacity(message)
         self._steering_queue.append(message)
         return self.queue_updated_event()
 
@@ -281,7 +294,7 @@ class AgentHarness:
     def follow_up_message(self, message: Message) -> QueueUpdated:
         """Queue a user message for follow-up without changing the transcript."""
         self._require_user_queue_message(message)
-        self._require_queue_capacity()
+        self._require_queue_capacity(message)
         self._follow_up_queue.append(message)
         return self.queue_updated_event()
 
@@ -681,11 +694,22 @@ class AgentHarness:
             return self._follow_up_queue
         raise ValueError(f"Unsupported queue kind: {kind!r}")
 
-    def _require_queue_capacity(self) -> None:
+    def _require_queue_capacity(self, message: Message) -> None:
         pending = len(self._steering_queue) + len(self._follow_up_queue)
         maximum = self._config.max_pending_queue_messages
         if pending >= maximum:
             raise RuntimeError(f"Agent queue is full (maximum {maximum} pending messages)")
+        pending_bytes = self.pending_message_bytes
+        message_bytes = self._queued_message_size(message)
+        maximum_bytes = self._config.max_pending_queue_bytes
+        if message_bytes > maximum_bytes - pending_bytes:
+            raise RuntimeError(
+                f"Agent queue byte limit exceeded (maximum {maximum_bytes} pending bytes)"
+            )
+
+    @staticmethod
+    def _queued_message_size(message: Message) -> int:
+        return len(message.model_dump_json().encode("utf-8"))
 
     @staticmethod
     def _require_user_queue_message(message: Message) -> None:
