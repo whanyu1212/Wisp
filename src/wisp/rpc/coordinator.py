@@ -152,6 +152,7 @@ class RpcCoordinator:
         self.session_state = session_state
         self.running_command: _RpcRunningCommand | None = None
         self.auxiliary_commands: dict[str, _RpcRunningCommand] = {}
+        self._auxiliary_command_bytes: dict[str, int] = {}
         self.queued_commands: deque[dict[str, object]] = deque()
         self.pending_prompt_queue_commands: deque[dict[str, object]] = deque()
         self.input_closed = False
@@ -307,6 +308,9 @@ class RpcCoordinator:
             auxiliary = self.auxiliary_commands.get(completed.command_id)
             if auxiliary is not None and completed.command_type == auxiliary.command_type:
                 del self.auxiliary_commands[completed.command_id]
+                self._release_command_bytes(
+                    self._auxiliary_command_bytes.pop(completed.command_id, 0)
+                )
                 return False
             if (
                 running is not None
@@ -380,12 +384,27 @@ class RpcCoordinator:
                     "RPC command queue is full while another RPC command is running",
                 )
                 return False
+            command_bytes = self._command_payload_size(command)
+            if command_bytes > self._max_queued_bytes - self._queued_command_bytes:
+                await reject(
+                    command,
+                    "RPC command queue byte limit exceeded while another RPC command is running",
+                )
+                return False
+            self._queued_command_bytes += command_bytes
             previous_running = running
-            result = await dispatch(command, running)
+            try:
+                result = await dispatch(command, running)
+            except BaseException:
+                self._release_command_bytes(command_bytes)
+                raise
             auxiliary = result.running_command
             self.running_command = previous_running
             if auxiliary is not None and auxiliary is not previous_running:
                 self.auxiliary_commands[auxiliary.command_id] = auxiliary
+                self._auxiliary_command_bytes[auxiliary.command_id] = command_bytes
+            else:
+                self._release_command_bytes(command_bytes)
             return result.should_shutdown
         auxiliary_read_pending = bool(self.auxiliary_commands)
         new_session_waits_for_ordered_operation = selected_type == "new_session" and (
@@ -497,9 +516,12 @@ class RpcCoordinator:
         return command
 
     def _release_queued_command(self, command: dict[str, object]) -> None:
+        self._release_command_bytes(self._command_payload_size(command))
+
+    def _release_command_bytes(self, command_bytes: int) -> None:
         self._queued_command_bytes = max(
             0,
-            self._queued_command_bytes - self._command_payload_size(command),
+            self._queued_command_bytes - command_bytes,
         )
 
     @staticmethod

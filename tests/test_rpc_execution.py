@@ -103,6 +103,30 @@ def test_rpc_command_identity_replaces_oversized_ids_before_lifecycle_events() -
     assert error == "RPC command id must contain at most 256 characters"
 
 
+def test_rpc_control_bounds_oversized_types_before_lifecycle_events() -> None:
+    events: list[WispEvent] = []
+    oversized_type = "x" * (rpc_execution_module._MAX_RPC_COMMAND_TYPE_CHARS + 1)
+
+    should_shutdown = rpc_execution_module.handle_rpc_control_command(
+        {"id": "command-1", "type": oversized_type},
+        running_command=None,
+        approval_policy=_ApprovalResolver(),
+        write_event=events.append,
+    )
+
+    assert should_shutdown is False
+    assert [type(event) for event in events] == [
+        RpcCommandStarted,
+        ErrorEvent,
+        RpcCommandFinished,
+    ]
+    assert all(
+        event.command_type == "unknown"
+        for event in events
+        if isinstance(event, (RpcCommandStarted, RpcCommandFinished))
+    )
+
+
 def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
     events: list[WispEvent] = []
     oversized_reference = "x" * (rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS + 1)

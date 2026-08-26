@@ -95,6 +95,7 @@ from .coordinator import (
 from .errors import RpcOutputAlreadyReportedError
 
 _MAX_RPC_COMMAND_ERROR_CHARS = 1_000
+_MAX_RPC_COMMAND_TYPE_CHARS = 64
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
@@ -3792,7 +3793,11 @@ def rpc_command_identity(command: dict[str, object]) -> tuple[str, str, str | No
 
 def rpc_command_type(command: dict[str, object]) -> str:
     command_type = command.get("type")
-    return command_type if isinstance(command_type, str) and command_type else "unknown"
+    return (
+        command_type
+        if isinstance(command_type, str) and 0 < len(command_type) <= _MAX_RPC_COMMAND_TYPE_CHARS
+        else "unknown"
+    )
 
 
 def rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
