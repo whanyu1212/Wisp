@@ -85,6 +85,7 @@ from wisp.rpc import (
 )
 from wisp.rpc import client as rpc_client_module
 from wisp.rpc.commands import (
+    MAX_RPC_COMMAND_ID_CHARS,
     ApprovalCommand,
     CancelCommand,
     PromptCommand,
@@ -142,6 +143,11 @@ def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
         "reason": "not safe",
     }
     assert rpc_command_from_json(line) == command
+
+
+def test_rpc_commands_bound_ids_that_are_echoed_in_server_events() -> None:
+    with pytest.raises(ValidationError, match="String should have at most 256 characters"):
+        PromptCommand(id="x" * (MAX_RPC_COMMAND_ID_CHARS + 1), prompt="hello")
 
 
 @pytest.mark.parametrize("instructions", [None, "Keep exact paths"])

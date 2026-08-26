@@ -59,7 +59,7 @@ from wisp.events import (
 )
 from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
-from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
+from wisp.rpc.commands import MAX_RPC_COMMAND_ID_CHARS, QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
 from wisp.runtime.registry import UnknownProviderError
@@ -3796,7 +3796,12 @@ def rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
     if command_id is None:
         return uuid4().hex, None
     if isinstance(command_id, str) and command_id:
-        return command_id, None
+        if len(command_id) <= MAX_RPC_COMMAND_ID_CHARS:
+            return command_id, None
+        return (
+            uuid4().hex,
+            f"RPC command id must contain at most {MAX_RPC_COMMAND_ID_CHARS} characters",
+        )
     return uuid4().hex, "RPC command id must be a non-empty string"
 
 

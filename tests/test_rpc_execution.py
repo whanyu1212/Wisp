@@ -93,6 +93,16 @@ def _enable_project_init(fixture: RpcExecutorFixture, project_root: Path) -> Non
     )
 
 
+def test_rpc_command_identity_replaces_oversized_ids_before_lifecycle_events() -> None:
+    oversized_id = "x" * 257
+
+    command_id, error = rpc_execution_module.rpc_command_id({"id": oversized_id, "type": "prompt"})
+
+    assert command_id != oversized_id
+    assert len(command_id) == 32
+    assert error == "RPC command id must contain at most 256 characters"
+
+
 def test_approval_resolution_waits_for_lifecycle_flush() -> None:
     events: list[WispEvent] = []
     deferred: list[Callable[[], None]] = []
