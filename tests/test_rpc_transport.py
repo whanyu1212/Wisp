@@ -230,6 +230,7 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
         '{"value":NaN}',
         '{"value":Infinity}',
         '{"value":-Infinity}',
+        '{"value":1e400}',
     ],
 )
 def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str) -> None:

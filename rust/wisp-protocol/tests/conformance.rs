@@ -64,6 +64,44 @@ fn future_and_malformed_types_fail_closed() {
 }
 
 #[test]
+fn canonical_command_cross_field_constraints_fail_closed() {
+    let invalid_commands = [
+        serde_json::json!({
+            "type": "approval",
+            "call_id": "call-1",
+            "approved": false,
+            "scope": "all_session"
+        }),
+        serde_json::json!({
+            "type": "get_messages",
+            "before_entry_id": "before",
+            "after_entry_id": "after"
+        }),
+        serde_json::json!({
+            "type": "get_messages",
+            "entry_ids": ["entry-1", "entry-1"]
+        }),
+        serde_json::json!({
+            "type": "get_messages",
+            "full_content": true
+        }),
+        serde_json::json!({
+            "type": "configure",
+            "clear_effort": false
+        }),
+        serde_json::json!({
+            "type": "configure",
+            "effort": "high",
+            "clear_effort": true
+        }),
+    ];
+
+    for command in invalid_commands {
+        assert!(commands::deserialize(command).is_err());
+    }
+}
+
+#[test]
 fn generated_handshake_types_preserve_the_v2_contract() {
     let request_value = serde_json::json!({
         "type": "rpc.handshake.request",

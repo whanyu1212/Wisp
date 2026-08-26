@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from typing import cast
 
@@ -43,11 +44,18 @@ def decode_rpc_object(frame: bytes, *, max_frame_bytes: int) -> dict[str, object
     def reject_constant(_constant: str) -> object:
         raise ValueError("non-standard numeric constant")
 
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite numeric value")
+        return parsed
+
     try:
         value = json.loads(
             text,
             object_pairs_hook=cast(Callable[..., object], object_pairs),
             parse_constant=reject_constant,
+            parse_float=parse_finite_float,
         )
     except RpcFrameError:
         raise

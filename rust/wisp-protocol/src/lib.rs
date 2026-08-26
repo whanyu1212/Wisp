@@ -9,6 +9,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fmt;
+use std::sync::LazyLock;
 
 #[derive(Debug)]
 pub struct ProtocolDecodeError(String);
@@ -21,7 +22,32 @@ impl fmt::Display for ProtocolDecodeError {
 
 impl std::error::Error for ProtocolDecodeError {}
 
-fn deserialize_known<T>(schema: &str, value: Value) -> Result<T, ProtocolDecodeError>
+struct SchemaContract {
+    schema: Value,
+    validator: jsonschema::Validator,
+}
+
+impl SchemaContract {
+    fn new(schema: &str) -> Self {
+        let schema: Value = serde_json::from_str(schema).expect("embedded RPC schema must be JSON");
+        let validator = jsonschema::draft202012::new(&schema)
+            .expect("embedded RPC schema must be valid Draft 2020-12");
+        Self { schema, validator }
+    }
+}
+
+static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
+    SchemaContract::new(include_str!(
+        "../../../schemas/live-rpc/v2/commands.schema.json"
+    ))
+});
+static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
+    SchemaContract::new(include_str!(
+        "../../../schemas/live-rpc/v2/events.schema.json"
+    ))
+});
+
+fn deserialize_known<T>(contract: &SchemaContract, value: Value) -> Result<T, ProtocolDecodeError>
 where
     T: DeserializeOwned,
 {
@@ -29,9 +55,7 @@ where
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| ProtocolDecodeError("RPC value has no string discriminator".into()))?;
-    let schema: Value = serde_json::from_str(schema)
-        .map_err(|error| ProtocolDecodeError(format!("invalid embedded schema: {error}")))?;
-    let known = schema["discriminator"]["mapping"]
+    let known = contract.schema["discriminator"]["mapping"]
         .as_object()
         .is_some_and(|mapping| mapping.contains_key(discriminator));
     if !known {
@@ -39,6 +63,10 @@ where
             "unknown RPC discriminator: {discriminator}"
         )));
     }
+    contract
+        .validator
+        .validate(&value)
+        .map_err(|_| ProtocolDecodeError("RPC value violates the canonical schema".into()))?;
     serde_json::from_value(value)
         .map_err(|error| ProtocolDecodeError(format!("invalid RPC value: {error}")))
 }
@@ -57,10 +85,7 @@ pub mod commands {
     pub fn deserialize(
         value: serde_json::Value,
     ) -> Result<WispTypedClientRpcCommands, super::ProtocolDecodeError> {
-        super::deserialize_known(
-            include_str!("../../../schemas/live-rpc/v2/commands.schema.json"),
-            value,
-        )
+        super::deserialize_known(&super::COMMAND_CONTRACT, value)
     }
 }
 
@@ -70,9 +95,6 @@ pub mod events {
     pub fn deserialize(
         value: serde_json::Value,
     ) -> Result<WispCurrentLiveEventOutput, super::ProtocolDecodeError> {
-        super::deserialize_known(
-            include_str!("../../../schemas/live-rpc/v2/events.schema.json"),
-            value,
-        )
+        super::deserialize_known(&super::EVENT_CONTRACT, value)
     }
 }
