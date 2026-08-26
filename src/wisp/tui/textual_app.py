@@ -1402,9 +1402,9 @@ class TextualTui(App[None]):
             self.run_worker(self._run_and_exit(), exclusive=True)
 
     def on_unmount(self) -> None:
-        """Drop any diagnostics-only driver wrap before Textual tears the app down."""
+        """Release standalone diagnostics while shell runs observe full teardown."""
 
-        if self._terminal_writes is not None:
+        if self._terminal_writes is not None and self._runner is None:
             self._terminal_writes.detach()
 
     def on_resize(self, event: events.Resize) -> None:

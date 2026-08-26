@@ -1003,6 +1003,8 @@ def test_run_shell_keeps_terminal_observer_attached_through_run_async_teardown(
     async def fake_run_async(*, mouse: bool) -> None:
         assert mouse
         assert getattr(driver.write, "__func__", driver.write) is not _FakeDriver.write
+        app.on_unmount()
+        assert getattr(driver.write, "__func__", driver.write) is not _FakeDriver.write
         driver.write("\x1b[?2026h")
         driver.write("\x1b[?2026l")
 
