@@ -121,6 +121,99 @@
       "x-wisp-max-depth": 8,
       "x-wisp-max-nodes": 1024
     },
+    "TraceInitialInteractionState": {
+      "additionalProperties": false,
+      "properties": {
+        "cancel_requested": {
+          "default": false,
+          "title": "Cancel Requested",
+          "type": "boolean"
+        },
+        "current_command_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Command Id"
+        },
+        "current_command_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "prompt",
+                "init",
+                "compact"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Command Type"
+        },
+        "exit_requested": {
+          "default": false,
+          "title": "Exit Requested",
+          "type": "boolean"
+        },
+        "pending_approval_call_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending Approval Call Id"
+        },
+        "pending_trust_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending Trust Request Id"
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "running",
+            "compacting",
+            "waiting_for_approval",
+            "waiting_for_trust"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "TraceInitialInteractionState",
+      "type": "object"
+    },
     "TraceInitialState": {
       "additionalProperties": false,
       "properties": {
@@ -141,7 +234,7 @@
         "interaction": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TraceInteractionProjection"
+              "$ref": "#/$defs/TraceInitialInteractionState"
             },
             {
               "type": "null"
@@ -192,6 +285,7 @@
       "description": "View fields with independent shell backing state.",
       "properties": {
         "input_ready": {
+          "const": true,
           "default": true,
           "title": "Input Ready",
           "type": "boolean"

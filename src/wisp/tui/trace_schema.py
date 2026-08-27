@@ -120,9 +120,19 @@ class TraceInteractionProjection(_TraceModel):
 class TraceInitialViewState(_TraceModel):
     """View fields with independent shell backing state."""
 
-    input_ready: bool = True
+    input_ready: Literal[True] = True
     mode: Literal["build", "plan"] = "build"
     last_session: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class TraceInitialInteractionState(TraceInteractionProjection):
+    status: Literal[
+        "idle",
+        "running",
+        "compacting",
+        "waiting_for_approval",
+        "waiting_for_trust",
+    ]
 
 
 class TraceInitialState(_TraceModel):
@@ -130,7 +140,7 @@ class TraceInitialState(_TraceModel):
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=64)
     view: TraceInitialViewState | None = None
-    interaction: TraceInteractionProjection | None = None
+    interaction: TraceInitialInteractionState | None = None
 
 
 class TraceLocalSubmit(_TraceModel):

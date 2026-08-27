@@ -57,6 +57,37 @@ def test_initial_view_schema_excludes_derived_state() -> None:
         Draft202012Validator(schema).validate(data)
 
 
+def test_initial_state_schema_rejects_pre_hydration_and_exiting_snapshots() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    initial = _default_initial()
+    initial["view"] = {"input_ready": False, "mode": "build", "last_session": None}
+    not_ready = _inline_trace(
+        "pre_hydration_initial_view",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema).validate(not_ready)
+
+    initial = _default_initial()
+    initial["interaction"] = {
+        "status": "exiting",
+        "current_command_id": None,
+        "current_command_type": None,
+        "pending_approval_call_id": None,
+        "pending_trust_request_id": None,
+        "cancel_requested": False,
+        "exit_requested": True,
+    }
+    exiting = _inline_trace(
+        "exiting_initial_interaction",
+        [{"type": "rpc.closed", "error": None, "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema).validate(exiting)
+
+
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
 def test_trace_fixture_validates_against_schema(path: Path) -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))

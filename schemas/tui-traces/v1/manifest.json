@@ -2,7 +2,7 @@
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "schema_format_version": 1,
   "schema_hashes": {
-    "trace.schema.json": "04de9caed73b9181b4dc2e9e0a2e00e044057add5081e0e78b84625e3e52f4e6"
+    "trace.schema.json": "f632945e95a012e544c27ae098f3308d030f9774aa78745b05ff71f14818414f"
   },
   "schemas": {
     "trace": "trace.schema.json"
