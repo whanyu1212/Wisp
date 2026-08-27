@@ -6,13 +6,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 const MAX_COMPOSER_HEIGHT: u16 = 8;
-const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 8;
-const MIN_TRANSCRIPT_TAIL_SCAN_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -322,27 +320,52 @@ fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str 
     if content.is_empty() {
         return content;
     }
-    let visible_cells = width.max(1).saturating_mul(max_lines.max(1));
-    let scan_bytes = visible_cells
-        .saturating_mul(TRANSCRIPT_TAIL_BYTES_PER_CELL)
-        .max(MIN_TRANSCRIPT_TAIL_SCAN_BYTES);
-    if content.len() <= scan_bytes {
-        return content;
-    }
-    let mut start = content.len() - scan_bytes;
-    while start < content.len() && !content.is_char_boundary(start) {
-        start += 1;
-    }
+    let width = width.max(1);
+    let max_lines = max_lines.max(1);
+    let visible_cells = width.saturating_mul(max_lines);
+    let mut display_cells = 0_usize;
     let mut hard_lines = 0_usize;
-    for (offset, character) in content[start..].char_indices().rev() {
-        if character == '\n' {
+
+    for (offset, grapheme) in content.grapheme_indices(true).rev() {
+        if is_line_break_grapheme(grapheme) {
             hard_lines += 1;
-            if hard_lines >= max_lines.max(1) {
-                return &content[start + offset + 1..];
+            if hard_lines >= max_lines {
+                return &content[offset + grapheme.len()..];
             }
+            continue;
+        }
+
+        display_cells =
+            display_cells.saturating_add(transcript_tail_grapheme_width(grapheme).max(1));
+        if display_cells >= visible_cells {
+            return &content[offset..];
         }
     }
-    &content[start..]
+
+    content
+}
+
+fn is_line_break_grapheme(grapheme: &str) -> bool {
+    matches!(grapheme, "\n" | "\r\n" | "\r")
+}
+
+fn transcript_tail_grapheme_width(grapheme: &str) -> usize {
+    if grapheme == "\t" {
+        return 4;
+    }
+    if grapheme.chars().any(terminal_control_character) {
+        return grapheme
+            .chars()
+            .map(|character| {
+                if terminal_control_character(character) {
+                    '�'.width().unwrap_or(0)
+                } else {
+                    character.width().unwrap_or(0)
+                }
+            })
+            .sum();
+    }
+    grapheme.width()
 }
 
 #[cfg(test)]
@@ -467,8 +490,17 @@ mod tests {
         let tail = transcript_tail_slice(&content, 80, 5);
         assert!(!tail.contains("HEAD"));
         assert!(tail.ends_with("TAIL"));
-        let scan_bytes =
-            (80 * 5 * TRANSCRIPT_TAIL_BYTES_PER_CELL).max(MIN_TRANSCRIPT_TAIL_SCAN_BYTES);
-        assert!(tail.len() <= scan_bytes + "TAIL".len());
+        assert!(tail.len() <= 80 * 5);
+    }
+
+    #[test]
+    fn transcript_tail_slice_uses_grapheme_display_width() {
+        let family = "👨‍👩‍👧‍👦";
+        let content = format!("HEAD{}TAIL", family.repeat(240));
+        let tail = transcript_tail_slice(&content, 80, 5);
+        assert!(!tail.contains("HEAD"));
+        assert!(tail.starts_with(family));
+        assert!(tail.ends_with("TAIL"));
+        assert!(tail.len() > 80 * 5 * 8);
     }
 }
