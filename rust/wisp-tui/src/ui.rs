@@ -11,6 +11,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 const MAX_COMPOSER_HEIGHT: u16 = 8;
+const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 16;
+const TRANSCRIPT_TAIL_MIN_BYTES: usize = 4 * 1024;
+const TRANSCRIPT_TAIL_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -322,7 +325,9 @@ fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str 
     }
     let width = width.max(1);
     let max_lines = max_lines.max(1);
-    let candidate_start = transcript_tail_candidate_start(content, width, max_lines);
+    let candidate_start = transcript_tail_candidate_start(content, width, max_lines).max(
+        transcript_tail_byte_start(content, transcript_tail_byte_budget(width, max_lines)),
+    );
     let candidate = &content[candidate_start..];
     let mut line_starts = vec![candidate_start];
     let mut column = 0_usize;
@@ -375,6 +380,24 @@ fn transcript_tail_candidate_start(content: &str, width: usize, max_lines: usize
     }
 
     0
+}
+
+fn transcript_tail_byte_budget(width: usize, max_lines: usize) -> usize {
+    width
+        .saturating_mul(max_lines)
+        .saturating_mul(TRANSCRIPT_TAIL_BYTES_PER_CELL)
+        .clamp(TRANSCRIPT_TAIL_MIN_BYTES, TRANSCRIPT_TAIL_MAX_BYTES)
+}
+
+fn transcript_tail_byte_start(content: &str, budget: usize) -> usize {
+    if content.len() <= budget {
+        return 0;
+    }
+    let mut start = content.len() - budget;
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    start
 }
 
 fn is_line_break_grapheme(grapheme: &str) -> bool {
@@ -550,5 +573,14 @@ mod tests {
         assert!(!tail.contains("HEAD"));
         assert!(tail.ends_with("TAIL"));
         assert!(tail.matches("abc\t").count() >= 75);
+    }
+
+    #[test]
+    fn transcript_tail_slice_bounds_enormous_grapheme_by_bytes() {
+        let content = format!("HEADa{}TAIL", "\u{301}".repeat(200_000));
+        let tail = transcript_tail_slice(&content, 80, 5);
+        assert!(!tail.contains("HEAD"));
+        assert!(tail.ends_with("TAIL"));
+        assert!(tail.len() <= transcript_tail_byte_budget(80, 5));
     }
 }

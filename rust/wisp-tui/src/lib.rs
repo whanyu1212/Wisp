@@ -316,7 +316,15 @@ impl LiveUi {
         }
         let id = self.ids.next_prefixed_id("cancel");
         let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
-        send_value(writer, &command, limit).await?;
+        let payload = Bytes::from(serde_json::to_vec(&command)?);
+        if payload.len() > limit {
+            self.notice = Some(format!(
+                "Skipped prompt cancellation because the negotiated {limit}-byte RPC frame limit is too small."
+            ));
+            self.render_pending = true;
+            return Ok(());
+        }
+        send_payload(writer, payload, limit).await?;
         self.state.cancel_requested = true;
         self.render_pending = true;
         Ok(())
@@ -1504,6 +1512,43 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
             json!({"type": "cancel", "id": "cancel-1", "target_id": "prompt-1"})
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn oversized_ctrl_c_cancel_frame_does_not_abort_exit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let cancel = WispTypedClientRpcCommands::cancel("cancel-1", "prompt-1").unwrap();
+        let encoded_len = serde_json::to_vec(&cancel).unwrap().len();
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(!live_ui.state.cancel_requested);
+        assert!(live_ui.render_pending);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("prompt cancellation"))
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
