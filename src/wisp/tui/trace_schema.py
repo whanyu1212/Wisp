@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_FORMAT_VERSION = 1
@@ -27,6 +27,7 @@ _MAX_TRACE_COMMANDS = 32
 _MAX_TRACE_EVENTS = 32
 _TRACE_NAME_PATTERN = r"^[a-z][a-z0-9_.-]*$"
 _TRACE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*$"
+_SlashArgument = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 
@@ -50,7 +51,14 @@ class TraceViewProjection(_TraceModel):
 
 
 class TraceInteractionProjection(_TraceModel):
-    status: str = Field(min_length=1, max_length=32)
+    status: Literal[
+        "idle",
+        "running",
+        "compacting",
+        "waiting_for_approval",
+        "waiting_for_trust",
+        "exiting",
+    ]
     current_command_id: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN
     )
@@ -82,7 +90,7 @@ class TraceLocalSubmit(_TraceModel):
 class TraceLocalSlash(_TraceModel):
     type: Literal["local.slash"] = "local.slash"
     command: str = Field(min_length=1, max_length=64, pattern=r"^[a-z/][a-z0-9/_-]*$")
-    args: tuple[str, ...] = Field(default=(), strict=False)
+    args: tuple[_SlashArgument, ...] = Field(default=(), max_length=8, strict=False)
     clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
 
 

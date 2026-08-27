@@ -13,7 +13,13 @@ from typing import Any, cast
 import anyio
 
 from wisp.agent.mode import AgentMode
-from wisp.events import KnownWispEventAdapter, ToolApprovalRequested, TrustRequested
+from wisp.events import (
+    KnownWispEvent,
+    KnownWispEventAdapter,
+    MessageCompleted,
+    ToolApprovalRequested,
+    TrustRequested,
+)
 from wisp.rpc.commands import ApprovalScope
 from wisp.tui.input_types import SubmissionId, new_submission_id
 from wisp.tui.rendering import LineTuiRenderer
@@ -91,6 +97,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.notices: list[str] = []
         self.errors: list[str] = []
         self.tokens: list[str] = []
+        self.completed_responses: list[str] = []
 
     def view_updated(self, snapshot: Any) -> None:
         self.view_snapshots.append(snapshot)
@@ -103,6 +110,11 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def token_delta(self, delta: str) -> None:
         self.tokens.append(delta)
+
+    def event(self, event: KnownWispEvent) -> None:
+        if isinstance(event, MessageCompleted) and event.content:
+            self.completed_responses.append(event.content)
+        super().event(event)
 
 
 class TraceController:
@@ -173,6 +185,12 @@ class TraceController:
                 "id": cid,
                 "session_id": session_id,
                 "limit": limit,
+                "before_entry_id": before_entry_id,
+                "after_entry_id": after_entry_id,
+                "entry_ids": list(entry_ids),
+                "complete_structure": complete_structure,
+                "full_content": full_content,
+                "allow_during_prompt": allow_during_prompt,
             }
         )
         return cid
@@ -397,11 +415,12 @@ class TraceRunner:
                 self.shell.view.last_session = v.last_session
         if trace.initial.interaction is not None:
             inter = trace.initial.interaction
-            # Map string status to TuiStatus if possible; fallback to keep.
             try:
                 self.shell.state.status = TuiStatus(inter.status)
-            except ValueError:
-                self.shell.state.status = TuiStatus.idle
+            except ValueError as exc:  # defensive for programmatically constructed traces
+                raise TraceReplayError(
+                    f"invalid initial interaction status: {inter.status!r}"
+                ) from exc
             self.shell.state.current_command_id = inter.current_command_id
             if inter.current_command_type is not None:
                 # Literal narrow: prompt|init|compact; keep if matches else None.
@@ -522,7 +541,11 @@ class TraceRunner:
 
         view = _view_projection(self.shell)
         interaction = _interaction_projection(self.shell)
-        retained = "".join(self.renderer.tokens) if self.renderer.tokens else None
+        retained = (
+            "".join(self.renderer.tokens)
+            if self.renderer.tokens
+            else next(reversed(self.renderer.completed_responses), None)
+        )
         return TraceRunResult(
             commands=tuple(self.controller.commands),
             view=view,

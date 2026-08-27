@@ -264,6 +264,23 @@ def test_slash_arguments_keep_token_boundaries() -> None:
     anyio.run(run)
 
 
+def test_slash_argument_vectors_are_bounded() -> None:
+    too_many = _inline_trace(
+        "slash_arg_limit",
+        [
+            {
+                "type": "local.slash",
+                "command": "resume",
+                "args": [f"arg-{index}" for index in range(9)],
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+    with pytest.raises(ValueError, match="inputs.0.*args"):
+        TraceFileAdapter.validate_python(too_many)
+
+
 def test_replay_stops_at_exit_and_rejects_trailing_inputs() -> None:
     async def run() -> None:
         data = _inline_trace(
@@ -317,6 +334,26 @@ def test_initial_pending_requests_are_seeded_and_resolvable() -> None:
     anyio.run(run)
 
 
+def test_invalid_initial_interaction_status_is_rejected() -> None:
+    initial = _default_initial()
+    initial["interaction"] = {
+        "status": "paused",
+        "current_command_id": None,
+        "current_command_type": None,
+        "pending_approval_call_id": None,
+        "pending_trust_request_id": None,
+        "cancel_requested": False,
+        "exit_requested": False,
+    }
+    data = _inline_trace(
+        "invalid_interaction_status",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(ValueError, match="interaction.status"):
+        TraceFileAdapter.validate_python(data)
+
+
 def test_configure_recorder_captures_every_argument() -> None:
     from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
 
@@ -342,6 +379,65 @@ def test_configure_recorder_captures_every_argument() -> None:
                 "mode": "plan",
             }
         ]
+
+    anyio.run(run)
+
+
+def test_get_messages_recorder_captures_every_argument() -> None:
+    from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
+
+    async def run() -> None:
+        controller = TraceController(DeterministicIdFactory())
+        await controller.get_messages(
+            session_id="session-1",
+            limit=1,
+            before_entry_id="before-1",
+            entry_ids=("entry-1",),
+            complete_structure=True,
+            full_content=True,
+            allow_during_prompt=True,
+        )
+        assert controller.commands == [
+            {
+                "type": "get_messages",
+                "id": "get_messages-1",
+                "session_id": "session-1",
+                "limit": 1,
+                "before_entry_id": "before-1",
+                "after_entry_id": None,
+                "entry_ids": ["entry-1"],
+                "complete_structure": True,
+                "full_content": True,
+                "allow_during_prompt": True,
+            }
+        ]
+
+    anyio.run(run)
+
+
+def test_completed_response_without_deltas_is_retained() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "completed_without_deltas",
+            [
+                {"type": "local.submit", "content": "hello", "clock_ms": 0},
+                {
+                    "type": "rpc.event",
+                    "event": {
+                        "type": "message.completed",
+                        "turn": 1,
+                        "content": "complete response",
+                        "finish_reason": "stop",
+                    },
+                    "clock_ms": 10,
+                },
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+        assert result.tokens == ()
+        assert result.retained_text == "complete response"
 
     anyio.run(run)
 
