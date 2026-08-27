@@ -1,0 +1,11 @@
+{
+  "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_format_version": 1,
+  "schema_hashes": {
+    "trace.schema.json": "3f438277b36ae09ae505e433ea316d2ebc5910aafccd33b54c5198297ed8ee81"
+  },
+  "schemas": {
+    "trace": "trace.schema.json"
+  },
+  "trace_schema_version": 1
+}

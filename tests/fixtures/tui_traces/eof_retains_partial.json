@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "name": "eof_retains_partial",
+  "description": "Stream produces partial output then backend closes; partial is retained.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": null
+  },
+  "inputs": [
+    {
+      "type": "local.submit",
+      "content": "hello world",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "message.delta",
+        "turn": 1,
+        "delta": "partial output"
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "rpc.closed",
+      "error": null,
+      "clock_ms": 20
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "prompt",
+        "id": "prompt-1"
+      }
+    ],
+    "view": {
+      "status": "error",
+      "input_mode": "running",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": "partial output"
+  }
+}

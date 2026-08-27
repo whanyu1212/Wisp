@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -371,6 +372,8 @@ class TuiShell:
         manual_update_checker: UpdateStatusChecker = get_update_status,
         update_installer: UpdateInstaller = install_update,
         quit_press_window: float = 1.5,
+        command_id_factory: Callable[[str], str] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.controller = controller
         self.renderer = (
@@ -380,6 +383,8 @@ class TuiShell:
         self.state = state or TuiInteractionState()
         self._quit_press_window = quit_press_window
         self._quit_armed_at: float | None = None
+        self._command_id_factory = command_id_factory
+        self._clock = clock or time.monotonic
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_mode: AgentMode = "build"
@@ -492,6 +497,11 @@ class TuiShell:
             "set_update_action_hook",
             self._handle_update_prompt_action,
         )
+
+    def _next_command_id(self, prefix: str) -> str:
+        if self._command_id_factory is not None:
+            return self._command_id_factory(prefix)
+        return f"{prefix}-{uuid4().hex}"
 
     async def run(self) -> TuiExitReason:
         """Run the interactive prompt/event loop."""
@@ -873,7 +883,7 @@ class TuiShell:
             return
         if entry_id in self._history_detail_commands_by_entry_id:
             return
-        command_id = f"history-detail-{uuid4().hex}"
+        command_id = self._next_command_id("history-detail")
         pending = _PendingHistoryDetail(entry_id=entry_id, session_id=session_id)
         self._pending_history_details[command_id] = pending
         self._history_detail_commands_by_entry_id[entry_id] = command_id
@@ -1020,7 +1030,7 @@ class TuiShell:
         submission: TuiSubmission,
         kind: QueueKind,
     ) -> None:
-        command_id = f"tui-{kind}-{uuid4().hex}"
+        command_id = self._next_command_id(f"tui-{kind}")
         pending = _PendingQueueSubmission(command_id, kind, submission)
         self._pending_queue_submissions[command_id] = pending
         try:
@@ -1054,7 +1064,7 @@ class TuiShell:
             self.renderer.notice("No queued steering or follow-up to restore.")
             return
         kind, submission = local
-        command_id = f"tui-queue-restore-{uuid4().hex}"
+        command_id = self._next_command_id("tui-queue-restore")
         self._pending_queue_restore = _PendingQueueRestore(command_id, kind, submission)
         try:
             await self.controller.pop_queue(kind, command_id=command_id)
@@ -2875,7 +2885,7 @@ class TuiShell:
         ):
             return
 
-        command_id = f"history-page-{uuid4().hex}"
+        command_id = self._next_command_id("history-page")
         pagination.command_id = command_id
         try:
             await self.controller.get_messages(
@@ -2903,7 +2913,7 @@ class TuiShell:
             self._call_renderer_optional("history_newer_page_request_failed")
             return
 
-        command_id = f"history-newer-{uuid4().hex}"
+        command_id = self._next_command_id("history-newer")
         pagination.newer_command_id = command_id
         try:
             await self.controller.get_messages(
@@ -2925,7 +2935,7 @@ class TuiShell:
             if self._history_recovery_command_id is not None:
                 return
             self._call_renderer_optional("capture_latest_history_reload")
-            command_id = f"history-recovery-{uuid4().hex}"
+            command_id = self._next_command_id("history-recovery")
             self._history_recovery_command_id = command_id
             self._history_recovery_report_received = False
             if await self._request_session_history(command_id=command_id) is None:
@@ -2943,7 +2953,7 @@ class TuiShell:
             pagination.latest_reload_pending = True
             return
 
-        command_id = f"history-latest-{uuid4().hex}"
+        command_id = self._next_command_id("history-latest")
         pagination.latest_reload_pending = False
         pagination.latest_command_id = command_id
         try:
