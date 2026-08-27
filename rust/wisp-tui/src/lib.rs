@@ -211,13 +211,21 @@ struct SequentialCommandIds {
     next: u64,
 }
 
-impl CommandIdSource for SequentialCommandIds {
-    fn next_id(&mut self, kind: CommandKind) -> String {
-        self.next = self
+impl SequentialCommandIds {
+    fn peek_id(&self, kind: CommandKind) -> String {
+        let next = self
             .next
             .checked_add(1)
             .expect("a frontend process cannot exhaust u64 command IDs");
-        format!("{}-{}", kind.prefix(), self.next)
+        format!("{}-{next}", kind.prefix())
+    }
+}
+
+impl CommandIdSource for SequentialCommandIds {
+    fn next_id(&mut self, kind: CommandKind) -> String {
+        let id = self.peek_id(kind);
+        self.next += 1;
+        id
     }
 }
 
@@ -305,6 +313,22 @@ impl LiveUi {
         false
     }
 
+    fn prompt_frame_limit_notice(
+        &self,
+        prompt: &str,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let id = self.ids.peek_id(CommandKind::Prompt);
+        let command = WispTypedClientRpcCommands::prompt(&id, prompt)?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len <= limit {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Prompt encoded RPC frame is {encoded_len} bytes, exceeding the negotiated {limit}-byte limit; shorten it and try again."
+        )))
+    }
+
     async fn handle_input(
         &mut self,
         input: Input,
@@ -316,13 +340,18 @@ impl LiveUi {
             Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
                     let prompt = self.editor.text().to_owned();
-                    let effects =
-                        reducer::reduce(&mut self.state, UiAction::Submit(prompt), &mut self.ids)?;
-                    if effects.is_empty() {
+                    if prompt.trim().is_empty() {
                         self.notice = Some("Enter a non-empty prompt before sending.".into());
                         self.render_pending = true;
                         return Ok(LoopControl::Continue);
                     }
+                    if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
+                        self.notice = Some(notice);
+                        self.render_pending = true;
+                        return Ok(LoopControl::Continue);
+                    }
+                    let effects =
+                        reducer::reduce(&mut self.state, UiAction::Submit(prompt), &mut self.ids)?;
                     let control = self.apply_effects(effects, writer, limit).await?;
                     self.editor.clear();
                     self.notice = None;
@@ -1390,6 +1419,40 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
             json!({"type": "prompt", "id": "prompt-1", "prompt": "hello\nworld"})
         );
+    }
+
+    #[tokio::test]
+    async fn live_submit_rejects_prompt_that_exceeds_negotiated_frame_limit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("hello");
+        let command = WispTypedClientRpcCommands::prompt("prompt-1", "hello").unwrap();
+        let encoded_len = serde_json::to_vec(&command).unwrap().len();
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert_eq!(live_ui.editor.text(), "hello");
+        assert!(live_ui.state.current_command.is_none());
+        assert_eq!(live_ui.state.last_submitted_prompt, None);
+        assert!(live_ui.render_pending);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("negotiated"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]

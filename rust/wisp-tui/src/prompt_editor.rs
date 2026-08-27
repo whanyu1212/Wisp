@@ -126,7 +126,7 @@ impl PromptEditor {
         let mut safe = String::with_capacity(normalized.len());
         let mut ignored_controls = 0;
         for character in normalized.chars() {
-            if character == '\n' || character == '\t' || !character.is_control() {
+            if is_safe_prompt_character(character) {
                 safe.push(character);
             } else {
                 ignored_controls += 1;
@@ -240,6 +240,12 @@ impl PromptEditor {
             .map_or(self.text.len(), |index| self.cursor + index);
         (start, end)
     }
+}
+
+fn is_safe_prompt_character(character: char) -> bool {
+    character == '\n'
+        || character == '\t'
+        || (!character.is_control() && !crate::is_bidi_control(character))
 }
 
 fn previous_grapheme_boundary(text: &str, cursor: usize) -> Option<usize> {
@@ -373,10 +379,10 @@ mod tests {
     #[test]
     fn paste_normalizes_newlines_preserves_tabs_and_filters_controls() {
         let mut editor = PromptEditor::default();
-        let outcome = editor.insert_paste("a\r\nb\rc\t\u{1b}d");
-        assert_eq!(editor.text(), "a\nb\nc\td");
-        assert_eq!(outcome.ignored_controls, 1);
-        assert_eq!(editor.display_text(), "a\nb\nc   d");
+        let outcome = editor.insert_paste("a\r\nb\rc\t\u{1b}d\u{202e}e");
+        assert_eq!(editor.text(), "a\nb\nc\tde");
+        assert_eq!(outcome.ignored_controls, 2);
+        assert_eq!(editor.display_text(), "a\nb\nc   de");
     }
 
     #[test]
