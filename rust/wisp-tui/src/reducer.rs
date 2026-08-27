@@ -247,6 +247,8 @@ pub enum UiEffect {
 
 #[derive(Debug, Error)]
 pub enum ReduceError {
+    #[error("cannot submit a prompt while command {0:?} is active")]
+    PromptAlreadyActive(String),
     #[error("no pending approval matches call {0:?}")]
     NoMatchingApproval(String),
     #[error("invalid generated RPC command: {0}")]
@@ -283,6 +285,9 @@ fn submit(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     if content.trim().is_empty() {
         return Ok(Vec::new());
+    }
+    if let Some(current) = &state.current_command {
+        return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
     let id = ids.next_id(CommandKind::Prompt);
     let command = WispTypedClientRpcCommands::prompt(&id, &content)?;
@@ -622,6 +627,39 @@ mod tests {
         .unwrap();
         assert!(effects.is_empty());
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn submission_during_an_active_command_is_rejected_without_mutation() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.interaction_status = InteractionStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            safety: "read".into(),
+        });
+        let before = state.clone();
+        let mut ids = DeterministicIds::default();
+
+        assert!(matches!(
+            reduce(
+                &mut state,
+                UiAction::Submit("second prompt".into()),
+                &mut ids,
+            ),
+            Err(ReduceError::PromptAlreadyActive(id)) if id == "prompt-1"
+        ));
+        assert_eq!(state, before);
+        assert!(
+            ids.0.is_empty(),
+            "a rejected submission must not consume an ID"
+        );
     }
 
     #[test]
