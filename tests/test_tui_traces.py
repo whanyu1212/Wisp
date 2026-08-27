@@ -121,10 +121,15 @@ def _diff_commands(actual: tuple[dict[str, Any], ...], expected: list[dict[str, 
     for index, expected_command in enumerate(expected):
         actual_command = actual[index]
         for key, value in expected_command.items():
-            if actual_command.get(key) != value:
+            if key not in actual_command:
+                lines.append(
+                    f"  command[{index}] {actual_command.get('type')} "
+                    f"missing expected field {key!r}"
+                )
+            elif actual_command[key] != value:
                 lines.append(
                     f"  command[{index}] {actual_command.get('type')} field {key!r}: "
-                    f"actual {actual_command.get(key)!r} != expected {value!r}"
+                    f"actual {actual_command[key]!r} != expected {value!r}"
                 )
     return "\n".join(lines)
 
@@ -142,6 +147,11 @@ def test_trace_replay_is_deterministic(path: Path) -> None:
         assert r1.tokens == r2.tokens
 
     anyio.run(run_twice)
+
+
+def test_command_diff_distinguishes_missing_fields_from_null() -> None:
+    diff = _diff_commands(({"type": "approval"},), [{"type": "approval", "reason": None}])
+    assert "missing expected field 'reason'" in diff
 
 
 def test_trace_replay_determinism_across_repeated_runs() -> None:
@@ -398,6 +408,28 @@ def test_interaction_status_is_preserved_when_initial_view_is_omitted() -> None:
     anyio.run(run)
 
 
+def test_unrepresentable_initial_view_state_is_rejected() -> None:
+    initial = _default_initial()
+    initial["view"] = {
+        "status": "idle",
+        "input_mode": "idle",
+        "input_ready": True,
+        "queued_steering": 1,
+        "queued_follow_ups": 0,
+        "provider": "other-provider",
+        "model": None,
+        "mode": "build",
+        "last_session": None,
+    }
+    data = _inline_trace(
+        "unrepresentable_initial_view",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(ValueError, match="initial"):
+        TraceFileAdapter.validate_python(data)
+
+
 def test_configure_recorder_captures_every_argument() -> None:
     from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
 
@@ -555,6 +587,13 @@ def test_finalized_partial_stream_does_not_absorb_later_response() -> None:
     renderer.end_token_stream()
     renderer.token_delta("second response")
     assert renderer.retained_text == "second response"
+
+
+def test_partial_response_retention_is_bounded_across_deltas() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.token_delta("x" * 3000)
+    with pytest.raises(TraceReplayError, match="retained characters"):
+        renderer.token_delta("y" * 1001)
 
 
 def test_rpc_event_payloads_are_bounded() -> None:

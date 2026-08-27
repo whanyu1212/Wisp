@@ -28,7 +28,7 @@ DEFAULT_TRACE_SCHEMA_ROOT = Path("schemas/tui-traces")
 _TRACE_SCHEMA = "trace.schema.json"
 _MANIFEST = "manifest.json"
 
-_MAX_TRACE_CONTENT_CHARS = 4000
+MAX_TRACE_CONTENT_CHARS = 4000
 _MAX_TRACE_DESCRIPTION_CHARS = 500
 _MAX_TRACE_INPUTS = 64
 _MAX_TRACE_COMMANDS = 32
@@ -39,7 +39,7 @@ _MAX_JSON_NODES = 1024
 _TRACE_NAME_PATTERN = r"^[a-z][a-z0-9_.-]*$"
 _TRACE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*$"
 _SlashArgument = Annotated[str, StringConstraints(min_length=1, max_length=512)]
-_JsonString = Annotated[str, StringConstraints(max_length=_MAX_TRACE_CONTENT_CHARS)]
+_JsonString = Annotated[str, StringConstraints(max_length=MAX_TRACE_CONTENT_CHARS)]
 _JsonKey = Annotated[str, StringConstraints(max_length=128)]
 type JsonValue = (
     None
@@ -90,7 +90,7 @@ class TraceViewProjection(_TraceModel):
     queued_follow_ups: int = Field(ge=0, le=32, strict=True)
     provider: str | None = Field(default=None, min_length=1, max_length=64)
     model: str | None = Field(default=None, min_length=1, max_length=128)
-    mode: str = Field(default="build", min_length=1, max_length=32)
+    mode: Literal["build", "plan"] = "build"
     last_session: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -124,10 +124,36 @@ class TraceInitialState(_TraceModel):
     view: TraceViewProjection | None = None
     interaction: TraceInteractionProjection | None = None
 
+    @model_validator(mode="after")
+    def _require_representable_view(self) -> TraceInitialState:
+        view = self.view
+        if view is None:
+            return self
+        if view.provider != self.provider or view.model != self.model:
+            raise ValueError("initial view provider/model must match initial shell configuration")
+        if view.queued_steering or view.queued_follow_ups:
+            raise ValueError("initial view queues require submissions and must be empty")
+
+        status = self.interaction.status if self.interaction is not None else "idle"
+        expected_view_status = {
+            "waiting_for_approval": "waiting for approval",
+            "waiting_for_trust": "waiting for trust",
+        }.get(status, status)
+        expected_input_mode = {
+            "running": "running",
+            "compacting": "running",
+            "waiting_for_approval": "approval",
+            "waiting_for_trust": "trust",
+            "exiting": "exiting",
+        }.get(status, "idle")
+        if view.status != expected_view_status or view.input_mode != expected_input_mode:
+            raise ValueError("initial view status/input mode must match initial interaction")
+        return self
+
 
 class TraceLocalSubmit(_TraceModel):
     type: Literal["local.submit"] = "local.submit"
-    content: str = Field(min_length=1, max_length=_MAX_TRACE_CONTENT_CHARS)
+    content: str = Field(min_length=1, max_length=MAX_TRACE_CONTENT_CHARS)
     clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
 
 
@@ -222,7 +248,7 @@ class TraceExpected(_TraceModel):
     commands: tuple[TraceExpectedCommand, ...] = Field(max_length=_MAX_TRACE_COMMANDS, strict=False)
     view: TraceViewProjection
     interaction: TraceInteractionProjection
-    retained_text: str | None = Field(default=None, max_length=_MAX_TRACE_CONTENT_CHARS)
+    retained_text: str | None = Field(default=None, max_length=MAX_TRACE_CONTENT_CHARS)
 
 
 class TraceFile(_TraceModel):

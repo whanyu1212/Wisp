@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 
@@ -32,6 +32,7 @@ from wisp.tui.state import (
     _RpcEventsClosed,
 )
 from wisp.tui.trace_schema import (
+    MAX_TRACE_CONTENT_CHARS,
     TraceFile,
     TraceFileAdapter,
     TraceInteractionProjection,
@@ -114,7 +115,12 @@ class RecordingTraceRenderer(LineTuiRenderer):
         if not self._streaming:
             self.retained_text = ""
             self._streaming = True
-        self.retained_text = (self.retained_text or "") + delta
+        retained_text = (self.retained_text or "") + delta
+        if len(retained_text) > MAX_TRACE_CONTENT_CHARS:
+            raise TraceReplayError(
+                f"partial response exceeds {MAX_TRACE_CONTENT_CHARS} retained characters"
+            )
+        self.retained_text = retained_text
 
     def end_token_stream_with_content(self, content: str) -> None:
         self.retained_text = content
@@ -368,7 +374,7 @@ def _view_projection(shell: TuiShell) -> TraceViewProjection:
         queued_follow_ups=snap.queued_follow_ups,
         provider=snap.provider,
         model=snap.model,
-        mode=str(snap.mode),
+        mode=snap.mode,
         last_session=snap.last_session,
     )
 
@@ -424,8 +430,8 @@ class TraceRunner:
             # _sync_view() calls keep replaying the seeded values faithfully.
             if v.mode not in ("build", "plan"):
                 raise TraceReplayError(f"invalid initial view mode: {v.mode!r}")
-            self.shell.current_mode = cast(AgentMode, v.mode)
-            self.shell.view.mode = cast(AgentMode, v.mode)
+            self.shell.current_mode = v.mode
+            self.shell.view.mode = v.mode
             if v.last_session is not None:
                 self.shell.view.last_session = v.last_session
         if trace.initial.interaction is not None:

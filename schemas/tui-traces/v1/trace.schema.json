@@ -583,8 +583,10 @@
         },
         "mode": {
           "default": "build",
-          "maxLength": 32,
-          "minLength": 1,
+          "enum": [
+            "build",
+            "plan"
+          ],
           "title": "Mode",
           "type": "string"
         },
