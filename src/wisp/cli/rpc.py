@@ -44,8 +44,9 @@ _MAX_RPC_STARTUP_ERROR_CHARS = 1_000
 
 
 def _write_json_event(event: WispEvent) -> None:
-    encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
-    _cli_output._write_json_event(event)
+    _write_rpc_frame(
+        encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
+    )
 
 
 def _write_startup_error(message: str) -> None:
@@ -57,12 +58,7 @@ def _write_startup_error(message: str) -> None:
 
 
 async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
-    async def bounded_events() -> AsyncIterator[WispEvent]:
-        async for event in events:
-            encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
-            yield event
-
-    await _cli_output._render_json_events(bounded_events())
+    await _cli_output._render_json_events(events, write_event=_write_json_event)
 
 
 async def _run_rpc(
@@ -190,5 +186,14 @@ def _rpc_binary_stdin() -> _rpc_transport.RpcTextInput:
 
 def _write_rpc_handshake(response: RpcHandshakeResponse) -> None:
     frame = encode_rpc_frame(response, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
-    sys.stdout.write(frame.decode("utf-8"))
-    sys.stdout.flush()
+    _write_rpc_frame(frame)
+
+
+def _write_rpc_frame(frame: bytes) -> None:
+    binary_stdout = getattr(sys.stdout, "buffer", None)
+    if binary_stdout is None:
+        sys.stdout.write(frame.decode("utf-8"))
+        sys.stdout.flush()
+        return
+    binary_stdout.write(frame)
+    binary_stdout.flush()

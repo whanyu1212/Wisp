@@ -170,6 +170,52 @@ def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) ->
     ]
 
 
+@pytest.mark.process
+def test_rpc_mode_writes_utf8_frames_with_non_utf8_stdio_encoding(tmp_path: Path) -> None:
+    async def scenario() -> bytes:
+        process = await anyio.open_process(
+            [
+                sys.executable,
+                "-m",
+                "wisp",
+                "--mode",
+                "rpc",
+                "--session-dir",
+                str(tmp_path),
+            ],
+            env={
+                **os.environ,
+                "PYTHONIOENCODING": "utf-16",
+                "WISP_PROVIDER": "fake",
+                "WISP_MODEL": "",
+            },
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        await process.stdin.send(
+            (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
+        )
+        await process.stdin.aclose()
+        output = bytearray()
+        with anyio.fail_after(10):
+            while True:
+                try:
+                    output.extend(await process.stdout.receive())
+                except anyio.EndOfStream:
+                    break
+            await process.wait()
+        assert process.returncode == 0
+        return bytes(output)
+
+    output = anyio.run(scenario)
+    records = _base_jsonl_records(output.decode("utf-8"))
+    assert [record["type"] for record in records] == [
+        "rpc.handshake.accepted",
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+
+
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
 ## Constraints & Preferences
