@@ -1857,6 +1857,8 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
  "wisp-protocol",
 ]
 

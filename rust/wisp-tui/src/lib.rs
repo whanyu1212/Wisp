@@ -5,6 +5,7 @@
 mod cli;
 mod framing;
 mod process;
+mod prompt_editor;
 pub mod reducer;
 mod terminal;
 mod ui;
@@ -12,10 +13,14 @@ mod ui;
 use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use framing::FrameReader;
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
+use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
+use reducer::{
+    BackendEvent, CommandIdSource, CommandKind, UiAction, UiEffect, UiState, ViewStatus,
+};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::future::pending;
@@ -25,11 +30,11 @@ use std::time::Duration;
 use terminal::{PanicHookGuard, TerminalGuard};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, interval, timeout};
-use ui::DiagnosticState;
+use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
+use ui::ConnectionInfo;
 use wisp_protocol::commands::WispTypedClientRpcCommands;
 use wisp_protocol::events::{CommandFinishedOutcome, WispCurrentLiveEventOutput};
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
@@ -53,6 +58,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_COMMAND_ID: &str = "rust-tui-shutdown";
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -79,6 +85,10 @@ pub enum Error {
     HandshakeTimeout,
     #[error("invalid RPC protocol value: {0}")]
     Protocol(#[from] ProtocolDecodeError),
+    #[error("failed to project RPC event into UI state: {0}")]
+    EventProjection(#[from] reducer::EventProjectionError),
+    #[error("invalid UI state transition: {0}")]
+    Reducer(#[from] reducer::ReduceError),
     #[error("invalid UTF-8 JSON RPC object: {0}")]
     InvalidProtocolFrame(serde_json::Error),
     #[error("failed to encode RPC protocol value: {0}")]
@@ -196,6 +206,186 @@ impl ShutdownObservation {
     }
 }
 
+#[derive(Default)]
+struct SequentialCommandIds {
+    next: u64,
+}
+
+impl CommandIdSource for SequentialCommandIds {
+    fn next_id(&mut self, kind: CommandKind) -> String {
+        self.next = self
+            .next
+            .checked_add(1)
+            .expect("a frontend process cannot exhaust u64 command IDs");
+        format!("{}-{}", kind.prefix(), self.next)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopControl {
+    Continue,
+    Exit,
+}
+
+struct LiveUi {
+    state: UiState,
+    editor: PromptEditor,
+    ids: SequentialCommandIds,
+    notice: Option<String>,
+    render_pending: bool,
+}
+
+impl Default for LiveUi {
+    fn default() -> Self {
+        Self {
+            state: UiState::unconfigured(),
+            editor: PromptEditor::default(),
+            ids: SequentialCommandIds::default(),
+            notice: None,
+            render_pending: true,
+        }
+    }
+}
+
+impl LiveUi {
+    async fn apply_effects(
+        &mut self,
+        effects: Vec<UiEffect>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let mut control = LoopControl::Continue;
+        for effect in effects {
+            match effect {
+                UiEffect::SendCommand(command) => send_value(writer, &command, limit).await?,
+                UiEffect::RequestRender => self.render_pending = true,
+                UiEffect::Exit => control = LoopControl::Exit,
+            }
+        }
+        Ok(control)
+    }
+
+    async fn dispatch(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        self.apply_effects(effects, writer, limit).await
+    }
+
+    fn prompt_editable(&self) -> bool {
+        self.state.input_ready
+            && self.state.current_command.is_none()
+            && self.state.view_status == ViewStatus::Idle
+    }
+
+    fn update_edit_notice(&mut self, outcome: EditOutcome) -> bool {
+        if outcome.rejected_limit {
+            self.notice = Some(format!(
+                "Prompt limit is {} MiB or {} lines; edit rejected.",
+                prompt_editor::MAX_PROMPT_BYTES / (1024 * 1024),
+                prompt_editor::MAX_PROMPT_LINES
+            ));
+            return true;
+        }
+        if outcome.ignored_controls > 0 {
+            self.notice = Some(format!(
+                "Ignored {} unsafe terminal control character(s).",
+                outcome.ignored_controls
+            ));
+            return true;
+        }
+        if outcome.changed {
+            let changed = self.notice.is_some();
+            self.notice = None;
+            return changed;
+        }
+        false
+    }
+
+    async fn handle_input(
+        &mut self,
+        input: Input,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match input {
+            Input::Key(key) if is_ctrl_c(key) => Ok(LoopControl::Exit),
+            Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
+                EditorAction::Submit => {
+                    let prompt = self.editor.text().to_owned();
+                    let effects =
+                        reducer::reduce(&mut self.state, UiAction::Submit(prompt), &mut self.ids)?;
+                    if effects.is_empty() {
+                        self.notice = Some("Enter a non-empty prompt before sending.".into());
+                        self.render_pending = true;
+                        return Ok(LoopControl::Continue);
+                    }
+                    let control = self.apply_effects(effects, writer, limit).await?;
+                    self.editor.clear();
+                    self.notice = None;
+                    Ok(control)
+                }
+                EditorAction::Edit(outcome) => {
+                    let notice_changed = self.update_edit_notice(outcome);
+                    if outcome.changed || notice_changed {
+                        self.render_pending = true;
+                    }
+                    Ok(LoopControl::Continue)
+                }
+                EditorAction::Ignored => Ok(LoopControl::Continue),
+            },
+            Input::Paste(pasted) if self.prompt_editable() => {
+                let outcome = self.editor.insert_paste(&pasted);
+                let notice_changed = self.update_edit_notice(outcome);
+                if outcome.changed || notice_changed {
+                    self.render_pending = true;
+                }
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key) if key_can_edit(key) => {
+                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) => {
+                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Redraw => {
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Error(error) => Err(Error::Io(error)),
+            Input::Key(_) => Ok(LoopControl::Continue),
+        }
+    }
+}
+
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn key_can_edit(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Enter
+            | KeyCode::Tab
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+    )
+}
+
 pub async fn run_from_env() -> Result<(), Error> {
     run(Cli::parse()).await
 }
@@ -251,33 +441,53 @@ async fn run(cli: Cli) -> Result<(), Error> {
         let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let (input_stop_tx, input_stop_rx) = watch::channel(false);
         let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx));
-        let mut state = DiagnosticState {
+        let connection = ConnectionInfo {
             backend_version: actual_version,
             protocol_version: protocol,
             event_schema_version: events,
-            event_count: 0,
-            last_event: None,
-            status: "connected",
         };
-        let mut redraw = interval(Duration::from_millis(100));
+        let mut live_ui = LiveUi::default();
+        let mut redraw = interval(FRAME_INTERVAL);
+        redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let loop_result = loop {
-            terminal
-                .terminal()
-                .draw(|frame| ui::render(frame, &state))?;
+            match input_rx.try_recv() {
+                Ok(input) => {
+                    if live_ui
+                        .handle_input(input, &writer_tx, max_client_frame)
+                        .await?
+                        == LoopControl::Exit
+                    {
+                        break Ok(());
+                    }
+                    continue;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => break Ok(()),
+            }
             tokio::select! {
-                _ = redraw.tick() => {}
                 input = input_rx.recv() => {
                     match input {
-                        Some(Input::Quit) | None => break Ok(()),
-                        Some(Input::Redraw) => {}
-                        Some(Input::Error(error)) => break Err(Error::Io(error)),
+                        Some(input) => {
+                            if live_ui.handle_input(input, &writer_tx, max_client_frame).await?
+                                == LoopControl::Exit
+                            {
+                                break Ok(());
+                            }
+                        }
+                        None => break Ok(()),
                     }
                 }
                 event = receive_event(&mut event_rx, events_open) => {
                     match event {
                         Some(event) => {
-                            state.event_count += 1;
-                            state.last_event = Some(event.event.event_type());
+                            let event = BackendEvent::from_live(&event.event)?;
+                            if live_ui.dispatch(
+                                UiAction::BackendEvent(event),
+                                &writer_tx,
+                                max_client_frame,
+                            ).await? == LoopControl::Exit {
+                                break Ok(());
+                            }
                         }
                         None => events_open = false,
                     }
@@ -290,11 +500,26 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     signal?;
                     break Ok(());
                 }
+                _ = redraw.tick() => {
+                    if live_ui.render_pending {
+                        terminal.terminal().draw(|frame| {
+                            ui::render(
+                                frame,
+                                &live_ui.state,
+                                &live_ui.editor,
+                                &connection,
+                                live_ui.notice.as_deref(),
+                            );
+                        })?;
+                        live_ui.render_pending = false;
+                    }
+                }
             }
         };
         let _ = input_stop_tx.send(true);
-        drop(terminal);
+        drop(input_rx);
         input.await??;
+        drop(terminal);
         loop_result?;
 
         queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
@@ -697,7 +922,8 @@ fn is_bidi_control(character: char) -> bool {
 }
 
 enum Input {
-    Quit,
+    Key(KeyEvent),
+    Paste(String),
     Redraw,
     Error(io::Error),
 }
@@ -715,12 +941,15 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
             continue;
         }
         match event::read() {
-            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                let quit = key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL));
-                if quit {
-                    let _ = sender.blocking_send(Input::Quit);
+            Ok(Event::Key(key))
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                if sender.blocking_send(Input::Key(key)).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(Event::Paste(pasted)) => {
+                if sender.blocking_send(Input::Paste(pasted)).is_err() {
                     return Ok(());
                 }
             }
@@ -1127,6 +1356,59 @@ mod tests {
             classify_backend_exit(exit_status(9)),
             Error::BackendExitFailure(status) if status.code() == Some(9)
         ));
+    }
+
+    #[tokio::test]
+    async fn live_submit_queues_exact_prompt_and_clears_editor() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("hello\nworld");
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert!(live_ui.editor.text().is_empty());
+        assert_eq!(
+            live_ui.state.last_submitted_prompt.as_deref(),
+            Some("hello\nworld")
+        );
+        assert!(live_ui.render_pending);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("prompt submission must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({"type": "prompt", "id": "prompt-1", "prompt": "hello\nworld"})
+        );
+    }
+
+    #[tokio::test]
+    async fn render_effects_coalesce_into_one_pending_flag() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let control = live_ui
+            .apply_effects(
+                vec![UiEffect::RequestRender, UiEffect::RequestRender],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert!(live_ui.render_pending);
     }
 
     #[tokio::test]

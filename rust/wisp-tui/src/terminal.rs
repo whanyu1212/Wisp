@@ -1,4 +1,5 @@
 use crossterm::cursor::{Hide, Show};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -21,7 +22,7 @@ impl TerminalGuard {
     pub fn enter() -> Result<Self, Error> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
             restore_terminal();
             return Err(Error::Io(error));
         }
@@ -71,5 +72,10 @@ impl Drop for PanicHookGuard {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    let _ = execute!(
+        io::stdout(),
+        Show,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
 }
