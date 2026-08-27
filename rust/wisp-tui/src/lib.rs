@@ -217,9 +217,17 @@ impl SequentialCommandIds {
     }
 
     fn peek_prefixed_id(&self, prefix: &str) -> String {
+        self.peek_prefixed_offset_id(prefix, 1)
+    }
+
+    fn peek_following_prefixed_id(&self, prefix: &str) -> String {
+        self.peek_prefixed_offset_id(prefix, 2)
+    }
+
+    fn peek_prefixed_offset_id(&self, prefix: &str, offset: u64) -> String {
         let next = self
             .next
-            .checked_add(1)
+            .checked_add(offset)
             .expect("a frontend process cannot exhaust u64 command IDs");
         format!("{prefix}-{next}")
     }
@@ -369,7 +377,15 @@ impl LiveUi {
         let command = WispTypedClientRpcCommands::prompt(&id, prompt)?;
         let encoded_len = serde_json::to_vec(&command)?.len();
         if encoded_len <= limit {
-            return Ok(None);
+            let cancel_id = self.ids.peek_following_prefixed_id("cancel");
+            let cancel = WispTypedClientRpcCommands::cancel(&cancel_id, &id)?;
+            let cancel_len = serde_json::to_vec(&cancel)?.len();
+            if cancel_len <= limit {
+                return Ok(None);
+            }
+            return Ok(Some(format!(
+                "Prompt cancellation encoded RPC frame is {cancel_len} bytes, exceeding the negotiated {limit}-byte limit; cannot safely start this prompt."
+            )));
         }
         Ok(Some(format!(
             "Prompt encoded RPC frame is {encoded_len} bytes, exceeding the negotiated {limit}-byte limit; shorten it and try again."
@@ -1583,6 +1599,43 @@ mod tests {
                 .notice
                 .as_deref()
                 .is_some_and(|notice| notice.contains("negotiated"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn live_submit_rejects_prompt_when_cancel_would_exceed_negotiated_frame_limit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("x");
+        let prompt = WispTypedClientRpcCommands::prompt("prompt-1", "x").unwrap();
+        let prompt_len = serde_json::to_vec(&prompt).unwrap().len();
+        let cancel = WispTypedClientRpcCommands::cancel("cancel-2", "prompt-1").unwrap();
+        let cancel_len = serde_json::to_vec(&cancel).unwrap().len();
+        assert!(prompt_len < cancel_len);
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                prompt_len,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert_eq!(live_ui.editor.text(), "x");
+        assert!(live_ui.state.current_command.is_none());
+        assert_eq!(live_ui.state.last_submitted_prompt, None);
+        assert!(live_ui.render_pending);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("cancellation"))
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
