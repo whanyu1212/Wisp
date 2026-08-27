@@ -5,6 +5,7 @@
 mod cli;
 mod framing;
 mod process;
+pub mod reducer;
 mod terminal;
 mod ui;
 

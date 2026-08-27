@@ -504,7 +504,64 @@ pub mod commands {
         generated::WispTypedClientRpcCommands
     );
 
+    /// Lifetime granted by an approved tool request.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ApprovalScope {
+        Once,
+        ToolSession,
+        AllSession,
+    }
+
+    impl ApprovalScope {
+        fn as_wire_value(self) -> &'static str {
+            match self {
+                Self::Once => "once",
+                Self::ToolSession => "tool_session",
+                Self::AllSession => "all_session",
+            }
+        }
+    }
+
     impl WispTypedClientRpcCommands {
+        /// Construct one agent-turn request.
+        pub fn prompt(id: &str, prompt: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}))
+        }
+
+        /// Construct a response to one pending tool approval request.
+        pub fn approval(
+            id: &str,
+            call_id: &str,
+            approved: bool,
+            reason: Option<&str>,
+            scope: Option<ApprovalScope>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "approval",
+                "id": id,
+                "call_id": call_id,
+                "approved": approved,
+            });
+            let object = value
+                .as_object_mut()
+                .expect("command constructors create JSON objects");
+            if let Some(reason) = reason {
+                object.insert("reason".into(), serde_json::Value::String(reason.into()));
+            }
+            if let Some(scope) = scope {
+                object.insert(
+                    "scope".into(),
+                    serde_json::Value::String(scope.as_wire_value().into()),
+                );
+            }
+            deserialize(value)
+        }
+
+        /// Construct a request for the active session's usage snapshot.
+        pub fn get_session_stats(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_session_stats", "id": id}))
+        }
+
         /// Construct the typed command used to request graceful backend shutdown.
         pub fn shutdown(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "shutdown", "id": id}))

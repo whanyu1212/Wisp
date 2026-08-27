@@ -40,6 +40,115 @@ fn every_python_command_fixture_round_trips_in_rust() {
 }
 
 #[test]
+fn tui_command_builders_preserve_the_canonical_wire_contract() {
+    let prompt = commands::WispTypedClientRpcCommands::prompt("prompt-1", "hello")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        prompt,
+        serde_json::json!({"type": "prompt", "id": "prompt-1", "prompt": "hello"})
+    );
+
+    let approval = commands::WispTypedClientRpcCommands::approval(
+        "approval-1",
+        "call-1",
+        true,
+        None,
+        Some(commands::ApprovalScope::ToolSession),
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        approval,
+        serde_json::json!({
+            "type": "approval",
+            "id": "approval-1",
+            "call_id": "call-1",
+            "approved": true,
+            "scope": "tool_session"
+        })
+    );
+
+    let denial = commands::WispTypedClientRpcCommands::approval(
+        "approval-2",
+        "call-2",
+        false,
+        Some("Denied from TUI"),
+        None,
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        denial,
+        serde_json::json!({
+            "type": "approval",
+            "id": "approval-2",
+            "call_id": "call-2",
+            "approved": false,
+            "reason": "Denied from TUI"
+        })
+    );
+
+    let stats = commands::WispTypedClientRpcCommands::get_session_stats("stats-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        stats,
+        serde_json::json!({"type": "get_session_stats", "id": "stats-1"})
+    );
+}
+
+#[test]
+fn approval_builder_rejects_denied_scopes_and_invalid_ids() {
+    assert!(
+        commands::WispTypedClientRpcCommands::approval(
+            "approval-1",
+            "call-1",
+            false,
+            None,
+            Some(commands::ApprovalScope::AllSession),
+        )
+        .is_err()
+    );
+    assert!(commands::WispTypedClientRpcCommands::prompt("", "hello").is_err());
+    assert!(
+        commands::WispTypedClientRpcCommands::approval(
+            "approval-1",
+            "",
+            true,
+            None,
+            Some(commands::ApprovalScope::Once),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn approval_builder_serializes_every_approved_scope() {
+    for (scope, expected) in [
+        (commands::ApprovalScope::Once, "once"),
+        (commands::ApprovalScope::ToolSession, "tool_session"),
+        (commands::ApprovalScope::AllSession, "all_session"),
+    ] {
+        let command = commands::WispTypedClientRpcCommands::approval(
+            "approval-1",
+            "call-1",
+            true,
+            None,
+            Some(scope),
+        )
+        .unwrap()
+        .into_value()
+        .unwrap();
+        assert_eq!(command["scope"], expected);
+    }
+}
+
+#[test]
 fn every_python_event_fixture_round_trips_in_rust() {
     let fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
