@@ -11,6 +11,7 @@ pub use event_projection::EventProjectionError;
 
 const DEFAULT_DENIAL_REASON: &str = "Denied from TUI";
 const CANCELLED_APPROVAL_REASON: &str = "Denied from TUI: cancelled";
+const CANCELLING_APPROVAL_REASON: &str = "Denied from TUI: cancelling";
 const CANCELLED_TRUST_REASON: &str = "Trust prompt cancelled";
 const RPC_CANCELLED_PREFIX: &str = "RPC command cancelled:";
 
@@ -525,6 +526,21 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolApprovalRequested(pending) => {
+            if state.cancel_requested {
+                let id = ids.next_id(CommandKind::Approval);
+                let command = WispTypedClientRpcCommands::approval(
+                    &id,
+                    &pending.call_id,
+                    false,
+                    Some(CANCELLING_APPROVAL_REASON),
+                    None,
+                )?;
+                state.pending_approval = None;
+                return Ok(vec![
+                    UiEffect::SendCommand(command),
+                    UiEffect::RequestRender,
+                ]);
+            }
             state.pending_approval = Some(pending);
             state.view_status = ViewStatus::WaitingForApproval;
             state.interaction_status = InteractionStatus::WaitingForApproval;
@@ -1010,6 +1026,41 @@ mod tests {
         let repeated = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
         assert!(repeated.is_empty());
         assert_eq!(ids.0.get("cancel"), Some(&1));
+    }
+
+    #[test]
+    fn late_approval_after_cancel_is_denied_without_reopening_the_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.cancel_requested = true;
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "rm -rf /tmp/example"}),
+                safety: "ask".into(),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "approval");
+        assert_eq!(command["call_id"], "call-1");
+        assert_eq!(command["approved"], false);
+        assert_eq!(command["reason"], CANCELLING_APPROVAL_REASON);
+        assert!(state.cancel_requested);
+        assert!(state.pending_approval.is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
     }
 
     #[test]
