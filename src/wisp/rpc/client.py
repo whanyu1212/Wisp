@@ -11,9 +11,17 @@ from uuid import uuid4
 
 import anyio
 from anyio.abc import Process
+from pydantic import ValidationError
 
+from wisp import __version__
 from wisp.agent.mode import AgentMode
-from wisp.events import KnownWispEvent, QueueKind, QueueMode, wisp_event_from_json
+from wisp.events import (
+    EVENT_SCHEMA_VERSION,
+    KnownWispEvent,
+    QueueKind,
+    QueueMode,
+    wisp_event_from_json,
+)
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
@@ -46,6 +54,24 @@ from wisp.rpc.commands import (
     SteerCommand,
     TrustCommand,
     UnrevertSessionTreeCommand,
+)
+from wisp.rpc.framing import (
+    RpcFrameError,
+    decode_rpc_object,
+    encode_rpc_frame,
+    pop_rpc_frame,
+    require_complete_rpc_stream,
+)
+from wisp.rpc.protocol import (
+    LIVE_RPC_PROTOCOL_VERSION,
+    MAX_HANDSHAKE_FRAME_BYTES,
+    MAX_LIVE_RPC_FRAME_BYTES,
+    RpcHandshakeAccepted,
+    RpcHandshakeRejected,
+    RpcHandshakeRequest,
+    RpcHandshakeResponseAdapter,
+    RpcTransportLimits,
+    validate_rpc_handshake_response,
 )
 
 
@@ -426,13 +452,33 @@ class RpcController:
 
 
 _SUBPROCESS_CLOSE_TIMEOUT_SECONDS = 2
+_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS = 5
+
+
+class RpcHandshakeError(RuntimeError):
+    """The external backend rejected or violated RPC negotiation."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class RpcProtocolError(RuntimeError):
+    """The negotiated external RPC stream violated its framing or type contract."""
 
 
 class JsonlSubprocessRpcTransport:
     """Subprocess transport for `wisp --mode rpc` JSONL stdin/stdout."""
 
-    def __init__(self, process: Process) -> None:
+    def __init__(self, process: Process, request: RpcHandshakeRequest) -> None:
         self._process = process
+        self._request = request
+        self._limits = RpcTransportLimits(
+            max_client_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
+            max_server_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
+        )
+        self._event_schema_version = request.max_event_schema_version
+        self._stdout_buffer = bytearray()
         self._close_lock = anyio.Lock()
         self._closed = False
         self._close_error: RuntimeError | None = None
@@ -445,6 +491,7 @@ class JsonlSubprocessRpcTransport:
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         stderr: int | None = subprocess.DEVNULL,
+        handshake_request: RpcHandshakeRequest | None = None,
     ) -> JsonlSubprocessRpcTransport:
         """Start a subprocess running Wisp RPC mode.
 
@@ -460,14 +507,37 @@ class JsonlSubprocessRpcTransport:
             env=dict(env) if env is not None else None,
             stderr=stderr,
         )
-        return cls(process)
+        request = handshake_request or RpcHandshakeRequest(
+            frontend_name="wisp-python",
+            frontend_version=__version__,
+            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            min_event_schema_version=EVENT_SCHEMA_VERSION,
+            max_event_schema_version=EVENT_SCHEMA_VERSION,
+            supported_capabilities=(),
+            required_capabilities=(),
+        )
+        transport = cls(process, request)
+        try:
+            await transport._perform_handshake()
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await transport.close()
+            raise
+        return transport
 
     async def send(self, command: RpcCommand) -> None:
         """Send one command as a JSONL line to subprocess stdin."""
 
         if self._process.stdin is None:
             raise RuntimeError("RPC subprocess stdin is closed")
-        await self._process.stdin.send(command.to_json_line().encode("utf-8"))
+        frame = command.to_json_line().encode("utf-8")
+        payload = frame[:-1] if frame.endswith(b"\n") else frame
+        if len(payload) > self._limits.max_client_frame_bytes:
+            raise RpcProtocolError(
+                f"RPC command exceeds the {self._limits.max_client_frame_bytes}-byte limit"
+            )
+        await self._process.stdin.send(frame)
 
     async def close(self) -> None:
         """Close the subprocess through bounded graceful, terminate, and kill stages."""
@@ -519,8 +589,35 @@ class JsonlSubprocessRpcTransport:
     async def _events(self) -> AsyncIterator[KnownWispEvent]:
         if self._process.stdout is None:
             return
-        buffer = bytearray()
+        buffer = self._stdout_buffer
+        self._stdout_buffer = bytearray()
         while True:
+            while True:
+                try:
+                    frame = pop_rpc_frame(
+                        buffer,
+                        max_frame_bytes=self._limits.max_server_frame_bytes,
+                    )
+                except RpcFrameError as exc:
+                    raise RpcProtocolError(str(exc)) from exc
+                if frame is None:
+                    break
+                if not frame:
+                    raise RpcProtocolError("Backend emitted an empty RPC event frame")
+                try:
+                    payload = decode_rpc_object(
+                        frame,
+                        max_frame_bytes=self._limits.max_server_frame_bytes,
+                    )
+                    if payload.get("schema_version") != self._event_schema_version:
+                        raise RpcProtocolError(
+                            "Backend event schema version does not match the negotiated version"
+                        )
+                    yield wisp_event_from_json(frame.decode("utf-8"))
+                except RpcProtocolError:
+                    raise
+                except (RpcFrameError, ValidationError, ValueError) as exc:
+                    raise RpcProtocolError("Backend emitted an invalid RPC event") from exc
             try:
                 chunk = await self._process.stdout.receive()
             except anyio.EndOfStream:
@@ -528,18 +625,52 @@ class JsonlSubprocessRpcTransport:
             if not chunk:
                 break
             buffer.extend(chunk)
-            while True:
-                newline_index = buffer.find(b"\n")
-                if newline_index < 0:
-                    break
-                line = bytes(buffer[:newline_index]).decode("utf-8", errors="replace")
-                del buffer[: newline_index + 1]
-                if line:
-                    yield wisp_event_from_json(line)
-        if buffer:
-            line = bytes(buffer).decode("utf-8", errors="replace")
-            if line:
-                yield wisp_event_from_json(line)
+        try:
+            require_complete_rpc_stream(buffer)
+        except RpcFrameError as exc:
+            raise RpcProtocolError(str(exc)) from exc
+
+    async def _perform_handshake(self) -> None:
+        if self._process.stdin is None or self._process.stdout is None:
+            raise RpcHandshakeError("RPC subprocess has no handshake streams")
+        try:
+            with anyio.fail_after(_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS):
+                await self._process.stdin.send(
+                    encode_rpc_frame(self._request, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+                )
+                while True:
+                    try:
+                        frame = pop_rpc_frame(
+                            self._stdout_buffer,
+                            max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES,
+                        )
+                    except RpcFrameError as exc:
+                        raise RpcHandshakeError(str(exc)) from exc
+                    if frame is not None:
+                        break
+                    try:
+                        chunk = await self._process.stdout.receive()
+                    except anyio.EndOfStream as exc:
+                        raise RpcHandshakeError("RPC backend closed before handshake") from exc
+                    if not chunk:
+                        raise RpcHandshakeError("RPC backend closed before handshake")
+                    self._stdout_buffer.extend(chunk)
+        except TimeoutError as exc:
+            raise RpcHandshakeError("RPC backend did not complete handshake in time") from exc
+        try:
+            decode_rpc_object(frame, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
+            response = RpcHandshakeResponseAdapter.validate_json(frame)
+        except (RpcFrameError, ValidationError, ValueError) as exc:
+            raise RpcHandshakeError("RPC backend returned an invalid handshake response") from exc
+        if isinstance(response, RpcHandshakeRejected):
+            raise RpcHandshakeError(response.message, code=response.code)
+        assert isinstance(response, RpcHandshakeAccepted)
+        try:
+            validate_rpc_handshake_response(self._request, response)
+        except ValueError as exc:
+            raise RpcHandshakeError(str(exc)) from exc
+        self._limits = response.limits
+        self._event_schema_version = response.event_schema_version
 
 
 def _default_command_id(prefix: str) -> str:

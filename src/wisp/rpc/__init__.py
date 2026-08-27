@@ -1,6 +1,12 @@
 """Typed client/controller helpers for Wisp JSONL RPC."""
 
-from wisp.rpc.client import JsonlSubprocessRpcTransport, RpcController, RpcTransport
+from wisp.rpc.client import (
+    JsonlSubprocessRpcTransport,
+    RpcController,
+    RpcHandshakeError,
+    RpcProtocolError,
+    RpcTransport,
+)
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
@@ -62,6 +68,8 @@ __all__ = [
     "PromptCommand",
     "RpcCommand",
     "RpcController",
+    "RpcHandshakeError",
+    "RpcProtocolError",
     "RpcTransport",
     "SelectSessionCommand",
     "SetSessionNameCommand",

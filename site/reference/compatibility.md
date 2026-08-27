@@ -41,12 +41,13 @@ Package organization beyond `wisp-ai` remains tracked by
 
 The proposed external frontend protocol is a separate compatibility domain. Python models remain
 its semantic source of truth, and deterministic current-version artifacts are checked in under
-`schemas/live-rpc/v1/`. Once runtime negotiation lands, ordinary command envelopes will inherit the
-selected connection version rather than carrying their own version. Events continue to carry the
-independently negotiated `schema_version` described below.
+`schemas/live-rpc/v2/`. Ordinary command envelopes inherit the selected connection version rather
+than carrying their own version. Events continue to carry the independently negotiated
+`schema_version` described below.
 
-The v1 schema bundle contains client and server handshake messages, the complete typed-client command
-output union, and the complete current live event output union. Command schemas describe payloads
+The v2 schema bundle contains handshake request and response messages, the complete typed-client
+command output union, the complete current live event output union, deterministic conformance
+fixtures, and validation-only projections consumed by Rust type generation. Command schemas describe payloads
 produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
 superset. Event schemas describe the exact current serialized shape, including required defaulted and
 nullable fields. Stateful lifecycle invariants remain model-level protocol requirements rather than
@@ -79,11 +80,22 @@ artifacts with the trusted base revision and rejects modifications, deletions, o
 protocol directories may only be added. A separate `pull_request_target` guard performs the same
 check from default-branch workflow code without checking out or executing pull-request code.
 
+The external JSONL adapter requires `rpc.handshake.request` as its first frame and emits
+exactly one `rpc.handshake.accepted` or `rpc.handshake.rejected` response before ordinary events.
+Protocol version, event schema version, capabilities, and directional frame limits are negotiated
+before the RPC host is constructed. The in-process Python SDK does not negotiate because it has no
+serialization boundary.
+
+Handshake frames are limited to 64 KiB. Negotiated application frames are limited to the directional
+limits in the accepted response, currently 64 MiB. Frames are UTF-8 JSON objects terminated by LF;
+duplicate object fields, invalid UTF-8, oversized frames, and incomplete final lines are rejected.
+Clean EOF on a frame boundary closes input normally. Unknown commands receive the ordinary typed
+command error lifecycle, while unknown events are fatal to clients for an already-negotiated version.
+
 Schema bundles are repository build inputs and versioned GitHub release assets named
 `wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
-models define the contract for the optional Rust frontend experiment, but the currently shipped
-JSONL-RPC adapter does not perform negotiation until the remaining work in
-[#458](https://github.com/whanyu1212/Wisp/issues/458) lands.
+models and compile-time generated Serde crate define the contract for external frontends. Protocol
+v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version.
 
 ## Deprecation and removal
 

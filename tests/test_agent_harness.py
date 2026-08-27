@@ -22,7 +22,7 @@ from wisp.agent.execution import (
     ToolExecutor,
     ToolPreparationEvent,
 )
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
 from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
@@ -922,13 +922,14 @@ def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
             tool_executor=RecordingToolExecutor(),
             steering_mode=cast(QueueMode, ["all"]),
         )
-    for invalid_limit in (-1, True):
-        with pytest.raises(ValueError, match="non-negative integer"):
-            AgentHarnessConfig(
-                provider=ScriptedProvider([]),
-                tool_executor=RecordingToolExecutor(),
-                max_pending_queue_messages=invalid_limit,
-            )
+    for field in ("max_pending_queue_messages", "max_pending_queue_bytes"):
+        for invalid_limit in (-1, True):
+            with pytest.raises(ValueError, match="non-negative integer"):
+                AgentHarnessConfig(
+                    provider=ScriptedProvider([]),
+                    tool_executor=RecordingToolExecutor(),
+                    **cast(dict[str, object], {field: invalid_limit}),
+                )
 
     with pytest.raises(ValueError, match="Unsupported queue mode"):
         harness.set_steering_mode(cast(QueueMode, "invalid"))
@@ -937,6 +938,22 @@ def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
 
     assert harness.config.steering_mode == "all"
     assert harness.config.follow_up_mode == "all"
+
+
+def test_harness_queue_byte_limit_rejects_before_mutation() -> None:
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            max_pending_queue_bytes=1,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="queue byte limit exceeded"):
+        harness.steer("oversized")
+
+    assert harness.queued_messages == QueuedMessages()
+    assert harness.pending_message_bytes == 0
 
 
 def test_queue_updated_event_is_versioned_and_round_trips() -> None:

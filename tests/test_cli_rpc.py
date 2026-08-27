@@ -9,9 +9,10 @@ import pytest
 import wisp.coding.tool_execution as tool_execution
 import wisp.rpc.execution as rpc_execution_module
 from tests.cli_support import *
+from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
+from wisp.events import EVENT_SCHEMA_VERSION, ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
     ModelCatalog,
@@ -32,12 +33,188 @@ from wisp.rpc.execution import (
     run_rpc_prompt_command,
 )
 from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
     MessageSessionEntry,
 )
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
+
+_BaseCliRunner = RawCliRunner
+
+
+def _base_jsonl_records(output: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in output.splitlines()]
+
+
+_RPC_TEST_HANDSHAKE = (
+    RpcHandshakeRequest(
+        frontend_name="wisp-python-tests",
+        frontend_version=__version__,
+        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        min_event_schema_version=EVENT_SCHEMA_VERSION,
+        max_event_schema_version=EVENT_SCHEMA_VERSION,
+        supported_capabilities=(),
+        required_capabilities=(),
+    ).model_dump_json()
+    + "\n"
+)
+
+
+def test_rpc_control_stream_buffers_at_most_one_parsed_event() -> None:
+    assert cli_module.rpc._RPC_CONTROL_STREAM_BUFFER_SIZE == 1
+
+
+def test_rpc_mode_requires_handshake_before_ordinary_commands(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fail_build_runtime(_config: object) -> object:
+        raise AssertionError("runtime must not start before negotiation")
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime_for_config", fail_build_runtime)
+    result = _BaseCliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"shutdown-1","type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.rejected"]
+    assert records[0]["code"] == "invalid_handshake"
+
+
+def test_rpc_mode_accepts_handshake_before_any_runtime_event(tmp_path: Path) -> None:
+    result = _BaseCliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _base_jsonl_records(result.stdout)
+    assert records[0]["type"] == "rpc.handshake.accepted"
+    assert [record["type"] for record in records[1:]] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+
+
+def test_rpc_mode_selected_from_environment_skips_plaintext_help(tmp_path: Path) -> None:
+    result = _BaseCliRunner().invoke(
+        app,
+        [],
+        input=_RPC_TEST_HANDSHAKE + '{"id":"bye","type":"shutdown"}\n',
+        env={
+            "WISP_MODE": "rpc",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+            "WISP_SESSION_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.handshake.accepted",
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+    assert records[-1]["command_id"] == "bye"
+    assert records[-1]["ok"] is True
+
+
+@pytest.mark.process
+def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) -> None:
+    async def scenario() -> list[dict[str, object]]:
+        process = await anyio.open_process(
+            [
+                sys.executable,
+                "-m",
+                "wisp",
+                "--mode",
+                "rpc",
+                "--session-dir",
+                str(tmp_path),
+            ],
+            env={**os.environ, "WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        await process.stdin.send(
+            (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
+        )
+        await process.stdin.aclose()
+        output = bytearray()
+        with anyio.fail_after(10):
+            while True:
+                try:
+                    output.extend(await process.stdout.receive())
+                except anyio.EndOfStream:
+                    break
+            await process.wait()
+        assert process.returncode == 0
+        return _base_jsonl_records(output.decode())
+
+    records = anyio.run(scenario)
+    assert [record["type"] for record in records] == [
+        "rpc.handshake.accepted",
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+
+
+@pytest.mark.process
+def test_rpc_mode_writes_utf8_frames_with_non_utf8_stdio_encoding(tmp_path: Path) -> None:
+    async def scenario() -> bytes:
+        process = await anyio.open_process(
+            [
+                sys.executable,
+                "-m",
+                "wisp",
+                "--mode",
+                "rpc",
+                "--session-dir",
+                str(tmp_path),
+            ],
+            env={
+                **os.environ,
+                "PYTHONIOENCODING": "utf-16",
+                "WISP_PROVIDER": "fake",
+                "WISP_MODEL": "",
+            },
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        await process.stdin.send(
+            (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
+        )
+        await process.stdin.aclose()
+        output = bytearray()
+        with anyio.fail_after(10):
+            while True:
+                try:
+                    output.extend(await process.stdout.receive())
+                except anyio.EndOfStream:
+                    break
+            await process.wait()
+        assert process.returncode == 0
+        return bytes(output)
+
+    output = anyio.run(scenario)
+    records = _base_jsonl_records(output.decode("utf-8"))
+    assert [record["type"] for record in records] == [
+        "rpc.handshake.accepted",
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+
 
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
@@ -460,18 +637,14 @@ def test_rpc_compact_rejects_non_string_instructions_and_remains_usable(
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    compact = next(
-        record
-        for record in records
-        if record["type"] == "rpc.command.finished" and record["command_id"] == "compact-1"
-    )
     prompt = next(
         record
         for record in records
         if record["type"] == "rpc.command.finished" and record["command_id"] == "prompt-1"
     )
-    assert compact["ok"] is False
-    assert compact["error"] == "RPC compact command field instructions must be a string"
+    assert [record["message"] for record in records if record["type"] == "error"] == [
+        "RPC command does not match the negotiated schema"
+    ]
     assert prompt["ok"] is True
 
 
@@ -940,16 +1113,12 @@ def test_rpc_rejects_container_queue_fields_and_remains_usable(tmp_path: Path) -
     records = _jsonl_records(result.stdout)
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
     assert [(record["command_id"], record["ok"]) for record in finished] == [
-        ("kind", False),
-        ("mode", False),
         ("state", True),
     ]
-    assert finished[0]["error"] == (
-        "RPC pop_queue command field kind must be 'steering' or 'follow_up'"
-    )
-    assert finished[1]["error"] == (
-        "RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'"
-    )
+    assert [record["message"] for record in records if record["type"] == "error"] == [
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
+    ]
 
 
 def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
@@ -2076,19 +2245,18 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     error_messages = [record["message"] for record in records if record["type"] == "error"]
     assert error_messages[:5] == [
-        "Invalid RPC JSON: Expecting value",
-        "RPC command must be a JSON object",
+        "RPC frame is not valid JSON",
+        "RPC frame must be a JSON object",
         "Unknown RPC command: missing",
-        "RPC prompt command requires string field: prompt",
-        "RPC command id must be a non-empty string",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
     ]
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
-    assert [(record["command_id"], record["ok"], record["error"]) for record in finished[:2]] == [
-        ("bad", False, "Unknown RPC command: missing"),
-        ("missing-prompt", False, "RPC prompt command requires string field: prompt"),
-    ]
-    assert finished[2]["ok"] is False
-    assert finished[2]["error"] == "RPC command id must be a non-empty string"
+    assert (finished[0]["command_id"], finished[0]["ok"], finished[0]["error"]) == (
+        "bad",
+        False,
+        "Unknown RPC command: missing",
+    )
     assert any(
         record["type"] == "message.completed" and record["content"] == "fake response to: ok"
         for record in records
@@ -2157,16 +2325,72 @@ def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:
     result = runner.invoke(
         app,
         ["-p", "hello", "--mode", "rpc", "--session-dir", str(tmp_path)],
+        input="",
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
 
     assert result.exit_code == 1, result.output
     assert result.stderr == ""
-    records = _jsonl_records(result.stdout)
-    assert [record["type"] for record in records] == ["error"]
-    assert records[0]["message"] == (
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    assert records[1]["message"] == (
         "--prompt is not used with --mode rpc; send prompt commands on stdin"
     )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment", "message"),
+    [
+        (
+            ["--resume", "missing", "--continue"],
+            {"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+            "use either --resume or --continue, not both",
+        ),
+        (
+            [],
+            {"WISP_PROVIDER": "fake", "WISP_AUTO_COMPACTION": "sometimes"},
+            "WISP_AUTO_COMPACTION must be one of",
+        ),
+    ],
+)
+def test_rpc_mode_negotiates_before_startup_errors(
+    tmp_path: Path,
+    arguments: list[str],
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", *arguments, "--session-dir", str(tmp_path)],
+        input="",
+        env=environment,
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    assert message in records[1]["message"]
+
+
+def test_rpc_mode_bounds_post_handshake_startup_errors(tmp_path: Path) -> None:
+    provider = "x" * 5_000
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--provider", provider, "--session-dir", str(tmp_path)],
+        input="",
+        env={"WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    message = records[1]["message"]
+    assert isinstance(message, str)
+    assert len(message) == cli_module.rpc._MAX_RPC_STARTUP_ERROR_CHARS
+    assert message.startswith("Unknown provider: ")
+    assert message.endswith("...")
 
 
 def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
@@ -2588,9 +2812,8 @@ def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert records[1]["message"] == "RPC cancel command requires string field: target_id"
-    assert records[2]["command_id"] == "cancel-1"
-    assert records[2]["ok"] is False
+    assert [record["type"] for record in records] == ["error"]
+    assert records[0]["message"] == "RPC command does not match the negotiated schema"
 
 
 def test_rpc_approval_policy_approves_waiting_tool_call(tmp_path: Path) -> None:
@@ -2850,9 +3073,9 @@ def test_rpc_mode_approval_requires_valid_fields(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     errors = [record["message"] for record in records if record["type"] == "error"]
     assert errors == [
-        "RPC approval command requires string field: call_id",
-        "RPC approval command requires boolean field: approved",
-        "RPC approval command field reason must be a string",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
     ]
 
 

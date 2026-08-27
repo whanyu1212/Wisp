@@ -741,6 +741,143 @@ def test_coordinator_bounds_concurrent_message_reads_during_a_prompt() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_bounds_concurrent_message_read_bytes_during_a_prompt() -> None:
+    async def scenario() -> None:
+        first = {
+            "id": "messages-0",
+            "type": "get_messages",
+            "allow_during_prompt": True,
+            "entry_ids": ["x" * 64],
+        }
+        second = {
+            "id": "messages-1",
+            "type": "get_messages",
+            "allow_during_prompt": True,
+            "entry_ids": ["y" * 64],
+        }
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_bytes=RpcCoordinator._command_payload_size(first),
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        dispatched: list[str] = []
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert running is prompt
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, "get_messages", anyio.CancelScope())
+            )
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(first),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == ["messages-0"]
+        assert rejected == [
+            (
+                "messages-1",
+                "RPC command queue byte limit exceeded while another RPC command is running",
+            )
+        ]
+
+        await coordinator.handle_event(
+            _RpcCommandCompleted("messages-0", "get_messages", True, (), 0),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        assert dispatched == ["messages-0", "messages-1"]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_bounds_shutdown_queued_behind_an_auxiliary_read() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_commands=1,
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        message_read = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert command["type"] == "get_messages"
+            assert running is prompt
+            return _RpcDispatchResult(message_read)
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(
+                {
+                    "id": "messages",
+                    "type": "get_messages",
+                    "allow_during_prompt": True,
+                }
+            ),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcCommandCompleted("prompt", "prompt", True, (), 0),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        shutdown = {"id": "shutdown", "type": "shutdown"}
+        await coordinator.handle_event(
+            _RpcInputCommand(shutdown),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is None
+        assert coordinator.auxiliary_commands == {"messages": message_read}
+        assert not coordinator.queued_commands
+        assert rejected == [
+            (
+                shutdown,
+                "RPC command queue is full while another RPC command is running",
+            )
+        ]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
@@ -1145,6 +1282,59 @@ def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
         assert rejected == [
             ("overflow", "RPC command queue is full while another RPC command is running")
         ]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_bounds_aggregate_queued_command_bytes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            max_queued_bytes=128,
+        )
+        coordinator.running_command = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        first = {"id": "queued-1", "type": "prompt", "prompt": "x" * 64}
+        second = {"id": "queued-2", "type": "prompt", "prompt": "y" * 64}
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            _command: dict[str, object],
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            raise AssertionError("queued commands must not dispatch while a prompt is active")
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((str(command["id"]), message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(first),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert list(coordinator.queued_commands) == [first]
+        assert rejected == [
+            (
+                "queued-2",
+                "RPC command queue byte limit exceeded while another RPC command is running",
+            )
+        ]
+
+        assert coordinator.cancel("queued-1").outcome == "queued"
+        await coordinator.handle_event(
+            _RpcInputCommand(second),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        assert list(coordinator.queued_commands) == [second]
 
     anyio.run(scenario)
 

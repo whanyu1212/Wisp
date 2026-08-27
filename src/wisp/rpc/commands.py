@@ -11,6 +11,8 @@ from wisp.events import QueueKind, QueueMode
 
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
 
+MAX_RPC_COMMAND_ID_CHARS = 256
+
 QUEUE_RPC_COMMAND_TYPES = frozenset(
     {
         "clear_queue",
@@ -28,7 +30,11 @@ class RpcCommandModel(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    id: str | None = Field(default=None, min_length=1)
+    id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_COMMAND_ID_CHARS,
+    )
 
     def to_json_line(self) -> str:
         """Serialize this command as one JSONL command line."""

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import io
 import os
 from collections import deque
 from pathlib import Path
 from queue import Queue
 
 import anyio
+import pytest
 
-from wisp.cli.rpc_transport import RpcStdinTransport
-from wisp.events import ErrorEvent
+from wisp.cli.rpc_transport import RpcStdinTransport, read_rpc_stdin_handshake
+from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
+from wisp.rpc import framing as rpc_framing
 from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
+from wisp.rpc.protocol import (
+    LIVE_RPC_PROTOCOL_VERSION,
+    MAX_HANDSHAKE_FRAME_BYTES,
+    RpcHandshakeAccepted,
+    RpcHandshakeRejected,
+    RpcHandshakeRequest,
+    RpcTransportLimits,
+)
 
 
 class _Input:
@@ -19,11 +30,95 @@ class _Input:
     def fileno(self) -> int:
         raise OSError("no file descriptor")
 
-    def readline(self) -> str:
+    def readline(self, _size: int = -1) -> str:
         item = self._lines.popleft()
         if isinstance(item, Exception):
             raise item
         return item
+
+
+def _handshake_line() -> bytes:
+    return (
+        RpcHandshakeRequest(
+            frontend_name="fixture",
+            frontend_version="0.1.0",
+            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            min_event_schema_version=EVENT_SCHEMA_VERSION,
+            max_event_schema_version=EVENT_SCHEMA_VERSION,
+            supported_capabilities=(),
+            required_capabilities=(),
+        ).model_dump_json()
+        + "\n"
+    ).encode()
+
+
+def _limits() -> RpcTransportLimits:
+    return RpcTransportLimits(max_client_frame_bytes=1024, max_server_frame_bytes=2048)
+
+
+def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
+    async def scenario() -> None:
+        responses: list[object] = []
+        accepted = await read_rpc_stdin_handshake(
+            io.BytesIO(_handshake_line()),
+            backend_package_version="0.1.0",
+            supported_capabilities=(),
+            limits=_limits(),
+            write_response=responses.append,
+        )
+
+        assert isinstance(accepted, RpcHandshakeAccepted)
+        assert responses == [accepted]
+        assert accepted.type == "rpc.handshake.accepted"
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        b'{"id":"command-1","type":"shutdown"}\n',
+        _handshake_line().replace(b'"type":"rpc.handshake.request",', b""),
+        b'{"type":"rpc.handshake.request","type":"rpc.handshake.request"}\n',
+        b"\xff\n",
+        b"{}",
+        b"x" * (MAX_HANDSHAKE_FRAME_BYTES + 1) + b"\n",
+    ],
+)
+def test_stdin_handshake_rejects_invalid_first_frames(frame: bytes) -> None:
+    async def scenario() -> None:
+        responses: list[object] = []
+        accepted = await read_rpc_stdin_handshake(
+            io.BytesIO(frame),
+            backend_package_version="0.1.0",
+            supported_capabilities=(),
+            limits=_limits(),
+            write_response=responses.append,
+        )
+
+        assert accepted is None
+        assert len(responses) == 1
+        assert isinstance(responses[0], RpcHandshakeRejected)
+        assert responses[0].code == "invalid_handshake"
+
+    anyio.run(scenario)
+
+
+def test_stdin_handshake_clean_eof_emits_no_response() -> None:
+    async def scenario() -> None:
+        responses: list[object] = []
+        accepted = await read_rpc_stdin_handshake(
+            io.BytesIO(),
+            backend_package_version="0.1.0",
+            supported_capabilities=(),
+            limits=_limits(),
+            write_response=responses.append,
+        )
+        assert accepted is None
+        assert responses == []
+
+    anyio.run(scenario)
 
 
 def test_text_transport_reports_bounded_source_failure_and_closes() -> None:
@@ -100,7 +195,48 @@ def test_thread_transport_reports_reader_failure_and_closes() -> None:
     anyio.run(scenario)
 
 
-def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
+@pytest.mark.parametrize("reader_name", ["read_text", "read_thread"])
+def test_line_transport_rejects_oversized_frame_without_executing_suffix(
+    reader_name: str,
+) -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        limit = 64
+        stdin = io.BytesIO(b" " * (limit + 2) + b'{"id":"bad","type":"shutdown"}\n')
+        transport = RpcStdinTransport(
+            stdin=stdin,
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            max_frame_bytes=limit,
+        )
+        send, receive = anyio.create_memory_object_stream(2)
+        async with send, receive:
+            with anyio.fail_after(1):
+                await getattr(transport, reader_name)(send, anyio.Event())
+                closed = await receive.receive()
+
+        assert isinstance(closed, _RpcInputClosed)
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC frame exceeds the 64-byte limit"
+        ]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        "",
+        "   ",
+        "not json",
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        '{"value":-Infinity}',
+        '{"value":1e400}',
+    ],
+)
+def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str) -> None:
     async def scenario() -> None:
         events: list[object] = []
         transport = RpcStdinTransport(
@@ -111,14 +247,122 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands() -> None:
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
-            await transport.send_line(send, "not json")
+            await transport.send_line(send, bad_frame)
             await transport.send_line(send, '  {"id":"ok","type":"shutdown"}  ')
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
         assert command.command == {"id": "ok", "type": "shutdown"}
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
-            "Invalid RPC JSON: Expecting value"
+            "RPC frame is not valid JSON"
+        ]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        '{"id":"bad","type":"shutdown","extra":true}',
+        '{"id":"bad","type":"configure","effort":"high","clear_effort":true}',
+    ],
+)
+def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, bad_frame)
+            await transport.send_line(send, '{"id":"ok","type":"shutdown"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC command does not match the negotiated schema"
+        ]
+
+    anyio.run(scenario)
+
+
+def test_transport_forwards_unknown_command_discriminators() -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, '{"id":"future","type":"future_command"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "future", "type": "future_command"}
+        assert events == []
+
+    anyio.run(scenario)
+
+
+def test_transport_validates_commands_with_json_semantics() -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, '{"id":"mode","type":"configure","mode":"plan"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "mode", "type": "configure", "mode": "plan"}
+        assert events == []
+
+    anyio.run(scenario)
+
+
+def test_transport_recovers_when_json_nesting_exhausts_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_recursion_error(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError
+
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    rpc_framing.json,
+                    "loads",
+                    raise_recursion_error,
+                )
+                await transport.send_line(send, '{"value": []}')
+            await transport.send_line(send, '{"id":"ok","type":"shutdown"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC frame is not valid JSON"
         ]
 
     anyio.run(scenario)
@@ -164,8 +408,9 @@ def test_fd_transport_delivers_valid_command_before_later_source_failure() -> No
     anyio.run(scenario)
 
 
-def test_fd_transport_flushes_unterminated_final_line_at_eof() -> None:
+def test_fd_transport_rejects_unterminated_final_line_at_eof() -> None:
     async def scenario() -> None:
+        events: list[object] = []
         chunks = deque([b'{"id":"last","type":"shutdown"}', b""])
 
         async def wait_readable(_fd: int) -> None:
@@ -173,7 +418,7 @@ def test_fd_transport_flushes_unterminated_final_line_at_eof() -> None:
 
         transport = RpcStdinTransport(
             stdin=_Input([]),
-            write_event=lambda _event: None,
+            write_event=events.append,
             input_command_factory=_RpcInputCommand,
             input_closed_factory=_RpcInputClosed,
             wait_readable=wait_readable,
@@ -182,14 +427,33 @@ def test_fd_transport_flushes_unterminated_final_line_at_eof() -> None:
         send, receive = anyio.create_memory_object_stream(2)
         async with send, receive:
             await transport.read_fd(send, anyio.Event(), 7)
-            command = await receive.receive()
             closed = await receive.receive()
 
-        assert isinstance(command, _RpcInputCommand)
-        assert command.command["id"] == "last"
         assert isinstance(closed, _RpcInputClosed)
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC stream ended with an incomplete frame"
+        ]
 
     anyio.run(scenario)
+
+
+def test_frame_parser_accepts_max_sized_crlf_frame_across_chunks() -> None:
+    limit = 64
+    buffer = bytearray(b"x" * limit + b"\r")
+
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) is None
+
+    buffer.extend(b"\nnext\n")
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) == b"x" * limit
+    assert rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit) == b"next"
+
+
+def test_frame_parser_rejects_oversized_crlf_frame() -> None:
+    limit = 64
+    buffer = bytearray(b"x" * (limit + 1) + b"\r\n")
+
+    with pytest.raises(rpc_framing.RpcFrameError, match="64-byte limit"):
+        rpc_framing.pop_rpc_frame(buffer, max_frame_bytes=limit)
 
 
 def test_transport_dispatches_buffered_pipe_lines() -> None:
@@ -256,6 +520,33 @@ def test_thread_transport_uses_configured_bounded_queue() -> None:
     anyio.run(scenario)
 
     assert created_queue_sizes == [7]
+
+
+def test_thread_transport_defaults_to_single_frame_queue() -> None:
+    created_queue_sizes: list[int] = []
+
+    class RecordingQueue(Queue[str | bytes | Exception]):
+        def __init__(self, maxsize: int = 0) -> None:
+            created_queue_sizes.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    async def scenario() -> None:
+        stop_reader = anyio.Event()
+        stop_reader.set()
+        transport = RpcStdinTransport(
+            stdin=_Input([""]),
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            queue_factory=RecordingQueue,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.read_thread(send, stop_reader)
+
+    anyio.run(scenario)
+
+    assert created_queue_sizes == [1]
 
 
 def test_transport_uses_thread_reader_for_windows_pipe() -> None:

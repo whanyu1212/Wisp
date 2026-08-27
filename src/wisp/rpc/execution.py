@@ -59,7 +59,7 @@ from wisp.events import (
 )
 from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
-from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
+from wisp.rpc.commands import MAX_RPC_COMMAND_ID_CHARS, QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
 from wisp.runtime.registry import UnknownProviderError
@@ -93,6 +93,9 @@ from .coordinator import (
     _RpcSessionState,
 )
 from .errors import RpcOutputAlreadyReportedError
+
+_MAX_RPC_COMMAND_ERROR_CHARS = 1_000
+_MAX_RPC_COMMAND_TYPE_CHARS = 64
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
@@ -3769,6 +3772,8 @@ def write_rpc_command_error(
     message: str,
     write_event: RpcEventWriter,
 ) -> None:
+    if len(message) > _MAX_RPC_COMMAND_ERROR_CHARS:
+        message = message[: _MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
     write_event(ErrorEvent(message=message))
     write_event(
         RpcCommandFinished(
@@ -3788,7 +3793,11 @@ def rpc_command_identity(command: dict[str, object]) -> tuple[str, str, str | No
 
 def rpc_command_type(command: dict[str, object]) -> str:
     command_type = command.get("type")
-    return command_type if isinstance(command_type, str) and command_type else "unknown"
+    return (
+        command_type
+        if isinstance(command_type, str) and 0 < len(command_type) <= _MAX_RPC_COMMAND_TYPE_CHARS
+        else "unknown"
+    )
 
 
 def rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
@@ -3796,7 +3805,12 @@ def rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
     if command_id is None:
         return uuid4().hex, None
     if isinstance(command_id, str) and command_id:
-        return command_id, None
+        if len(command_id) <= MAX_RPC_COMMAND_ID_CHARS:
+            return command_id, None
+        return (
+            uuid4().hex,
+            f"RPC command id must contain at most {MAX_RPC_COMMAND_ID_CHARS} characters",
+        )
     return uuid4().hex, "RPC command id must be a non-empty string"
 
 

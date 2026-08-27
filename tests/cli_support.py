@@ -12,13 +12,19 @@ from queue import Queue
 
 import anyio
 from pytest import MonkeyPatch
-from typer.testing import CliRunner
+from typer.testing import CliRunner as RawCliRunner
 
+from wisp import __version__
 from wisp import cli as cli_module
 from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.coding import CodingSession
-from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady
+from wisp.events import (
+    EVENT_SCHEMA_VERSION,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolResultReady,
+)
 from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import (
@@ -30,6 +36,13 @@ from wisp.providers.events import (
     ProviderToolCallCompleted,
 )
 from wisp.rpc import host as rpc_host_module
+from wisp.rpc.protocol import (
+    LIVE_RPC_PROTOCOL_VERSION,
+    RpcHandshakeAccepted,
+    RpcHandshakeRequest,
+    RpcTransportLimits,
+    negotiate_rpc_handshake,
+)
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
@@ -39,6 +52,47 @@ from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
+
+_RPC_TEST_HANDSHAKE = (
+    RpcHandshakeRequest(
+        frontend_name="wisp-python-tests",
+        frontend_version=__version__,
+        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        min_event_schema_version=EVENT_SCHEMA_VERSION,
+        max_event_schema_version=EVENT_SCHEMA_VERSION,
+        supported_capabilities=(),
+        required_capabilities=(),
+    ).model_dump_json()
+    + "\n"
+)
+
+
+class CliRunner(RawCliRunner):
+    def invoke(self, cli, args=None, input=None, env=None, **extra):  # type: ignore[no-untyped-def,override]
+        selected_args = list(args or ())
+        if "--mode" in selected_args and "rpc" in selected_args and input is not None:
+            input = _RPC_TEST_HANDSHAKE + input
+        return super().invoke(cli, args=args, input=input, env=env, **extra)
+
+
+async def _read_rpc_test_handshake(
+    _stdin: object,
+    *,
+    backend_package_version: str,
+    supported_capabilities: Sequence[str],
+    limits: RpcTransportLimits,
+    write_response: object,
+) -> RpcHandshakeAccepted:
+    del write_response
+    response = negotiate_rpc_handshake(
+        RpcHandshakeRequest.model_validate_json(_RPC_TEST_HANDSHAKE),
+        backend_package_version=backend_package_version,
+        supported_capabilities=supported_capabilities,
+        limits=limits,
+    )
+    assert isinstance(response, RpcHandshakeAccepted)
+    return response
 
 
 class MixedTextToolProvider:
@@ -297,7 +351,11 @@ async def build_mixed_tool_runtime() -> WispRuntime:
 
 
 def _jsonl_records(output: str) -> list[dict[str, object]]:
-    return [json.loads(line) for line in output.splitlines()]
+    return [
+        record
+        for line in output.splitlines()
+        if (record := json.loads(line)).get("type") != "rpc.handshake.accepted"
+    ]
 
 
 def _last_user_prompt(messages: Sequence[object]) -> str:
@@ -337,6 +395,7 @@ __all__ = [
     "ProviderRegistry",
     "ProviderEvent",
     "Queue",
+    "RawCliRunner",
     "ReadTool",
     "Sequence",
     "ToolApprovalPolicy",
@@ -358,6 +417,7 @@ __all__ = [
     "_last_user_prompt",
     "_print_mode_tool_approval_policy",
     "_print_mode_tool_registry",
+    "_read_rpc_test_handshake",
     "_user_prompts",
     "anyio",
     "app",

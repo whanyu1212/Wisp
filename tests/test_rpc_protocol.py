@@ -8,10 +8,10 @@ from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
-    RpcClientHello,
+    RpcHandshakeAccepted,
     RpcHandshakeRejected,
-    RpcServerHandshakeAdapter,
-    RpcServerHello,
+    RpcHandshakeRequest,
+    RpcHandshakeResponseAdapter,
     RpcTransportLimits,
     negotiate_rpc_handshake,
 )
@@ -26,14 +26,14 @@ def _limits() -> RpcTransportLimits:
 
 def _client_hello(
     *,
-    min_protocol_version: int = 1,
-    max_protocol_version: int = 1,
+    min_protocol_version: int = LIVE_RPC_PROTOCOL_VERSION,
+    max_protocol_version: int = LIVE_RPC_PROTOCOL_VERSION,
     min_event_schema_version: int = EVENT_SCHEMA_VERSION,
     max_event_schema_version: int = EVENT_SCHEMA_VERSION,
     supported_capabilities: tuple[str, ...] = ("streaming.text", "tools"),
     required_capabilities: tuple[str, ...] = ("streaming.text",),
-) -> RpcClientHello:
-    return RpcClientHello(
+) -> RpcHandshakeRequest:
+    return RpcHandshakeRequest(
         frontend_name="wisp-rust-tui",
         frontend_version="0.1.0",
         min_protocol_version=min_protocol_version,
@@ -47,11 +47,12 @@ def _client_hello(
 
 def test_client_hello_canonicalizes_capabilities_and_keeps_independent_ranges() -> None:
     hello = _client_hello(
+        min_protocol_version=1,
         max_protocol_version=2,
         supported_capabilities=("tools", "streaming.text"),
     )
 
-    assert hello.type == "rpc.client.hello"
+    assert hello.type == "rpc.handshake.request"
     assert hello.min_protocol_version == 1
     assert hello.max_protocol_version == 2
     assert hello.min_event_schema_version == EVENT_SCHEMA_VERSION
@@ -100,8 +101,8 @@ def test_client_hello_rejects_unsafe_identity_text(field: str, value: str) -> No
     payload = {
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
-        "min_protocol_version": 1,
-        "max_protocol_version": 1,
+        "min_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
+        "max_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
         "min_event_schema_version": EVENT_SCHEMA_VERSION,
         "max_event_schema_version": EVENT_SCHEMA_VERSION,
         "supported_capabilities": (),
@@ -110,7 +111,7 @@ def test_client_hello_rejects_unsafe_identity_text(field: str, value: str) -> No
     payload[field] = value
 
     with pytest.raises(ValidationError, match="safe"):
-        RpcClientHello.model_validate(payload)
+        RpcHandshakeRequest.model_validate(payload)
 
 
 def test_transport_limits_are_directional_and_portably_bounded() -> None:
@@ -123,12 +124,12 @@ def test_transport_limits_are_directional_and_portably_bounded() -> None:
 
 
 def test_server_hello_requires_and_reports_the_complete_contract() -> None:
-    hello = RpcServerHello(
+    hello = RpcHandshakeAccepted(
         backend_package_version="0.1.0",
         protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         event_schema_version=EVENT_SCHEMA_VERSION,
-        min_frontend_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        max_frontend_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         capabilities=("streaming.text",),
         limits=_limits(),
     )
@@ -139,10 +140,10 @@ def test_server_hello_requires_and_reports_the_complete_contract() -> None:
     assert hello.limits.max_client_frame_bytes == 8 * 1024 * 1024
 
     with pytest.raises(ValidationError, match="protocol_version"):
-        RpcServerHandshakeAdapter.validate_json(
-            '{"type":"rpc.server.hello","backend_package_version":"0.1.0",'
-            '"event_schema_version":34,"min_frontend_protocol_version":1,'
-            '"max_frontend_protocol_version":1,"capabilities":[],"limits":'
+        RpcHandshakeResponseAdapter.validate_json(
+            '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
+            '"event_schema_version":34,"min_protocol_version":2,'
+            '"max_protocol_version":2,"capabilities":[],"limits":'
             '{"max_client_frame_bytes":1024,"max_server_frame_bytes":1024}}'
         )
 
@@ -162,7 +163,7 @@ def test_negotiation_selects_highest_common_versions_and_capability_intersection
         max_protocol_version=2,
     )
 
-    assert isinstance(result, RpcServerHello)
+    assert isinstance(result, RpcHandshakeAccepted)
     assert result.protocol_version == 2
     assert result.event_schema_version == EVENT_SCHEMA_VERSION
     assert result.capabilities == ("sessions", "streaming.text")
@@ -172,7 +173,7 @@ def test_negotiation_selects_highest_common_versions_and_capability_intersection
     ("client", "backend_capabilities", "expected_code"),
     [
         (
-            _client_hello(min_protocol_version=2, max_protocol_version=2),
+            _client_hello(min_protocol_version=3, max_protocol_version=3),
             ("streaming.text",),
             "protocol_version_mismatch",
         ),
@@ -192,7 +193,7 @@ def test_negotiation_selects_highest_common_versions_and_capability_intersection
     ],
 )
 def test_negotiation_returns_bounded_structured_rejections(
-    client: RpcClientHello,
+    client: RpcHandshakeRequest,
     backend_capabilities: tuple[str, ...],
     expected_code: str,
 ) -> None:
@@ -210,21 +211,21 @@ def test_negotiation_returns_bounded_structured_rejections(
 
 
 def test_server_handshake_adapter_parses_complete_success_and_rejection() -> None:
-    success = RpcServerHandshakeAdapter.validate_json(
-        '{"type":"rpc.server.hello","backend_package_version":"0.1.0",'
-        '"protocol_version":1,"event_schema_version":34,'
-        '"min_frontend_protocol_version":1,"max_frontend_protocol_version":1,'
+    success = RpcHandshakeResponseAdapter.validate_json(
+        '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
+        '"protocol_version":2,"event_schema_version":34,'
+        '"min_protocol_version":2,"max_protocol_version":2,'
         '"capabilities":[],"limits":{"max_client_frame_bytes":1024,'
         '"max_server_frame_bytes":2048}}'
     )
-    rejection = RpcServerHandshakeAdapter.validate_json(
+    rejection = RpcHandshakeResponseAdapter.validate_json(
         '{"type":"rpc.handshake.rejected","code":"protocol_version_mismatch",'
         '"message":"No compatible live RPC protocol version.",'
         '"backend_package_version":"0.1.0","min_protocol_version":1,'
         '"max_protocol_version":1,"event_schema_version":34}'
     )
 
-    assert isinstance(success, RpcServerHello)
+    assert isinstance(success, RpcHandshakeAccepted)
     assert isinstance(rejection, RpcHandshakeRejected)
 
 

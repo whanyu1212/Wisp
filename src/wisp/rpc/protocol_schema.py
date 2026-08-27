@@ -12,6 +12,7 @@ import sys
 import tarfile
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import UnionType
@@ -27,8 +28,8 @@ from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
-    RpcClientHello,
-    RpcServerHandshakeAdapter,
+    RpcHandshakeRequest,
+    RpcHandshakeResponseAdapter,
 )
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -36,23 +37,20 @@ SCHEMA_FORMAT_VERSION = 1
 DEFAULT_SCHEMA_ROOT = Path("schemas/live-rpc")
 # On a protocol bump, pin every older manifest here before generating the new directory.
 # The manifest transitively pins all schemas and version metadata in that immutable bundle.
-HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = ()
+HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
+    (1, "06581c7cdbed14f6af08e1e67b1e0cdf4c8a1288a64238c342a61d2f8ced5a75"),
+)
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
 _SERVER_HANDSHAKE_SCHEMA = "server-handshake.schema.json"
 _COMMAND_SCHEMA = "commands.schema.json"
 _EVENT_SCHEMA = "events.schema.json"
+_RUST_COMMAND_SCHEMA = "rust-commands.schema.json"
+_RUST_EVENT_SCHEMA = "rust-events.schema.json"
 _MANIFEST = "manifest.json"
 _DECIMAL_STRING_PATTERN = (
     r"^(?:[+]?(?:\d+(?:\.\d*)?|\.\d+)|-0+(?:\.0*)?)(?:[eE][+-]?\d+)?(?![\s\S])"
 )
-_SCHEMA_FILENAMES = (
-    _CLIENT_HANDSHAKE_SCHEMA,
-    _SERVER_HANDSHAKE_SCHEMA,
-    _COMMAND_SCHEMA,
-    _EVENT_SCHEMA,
-)
-
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 
@@ -73,7 +71,10 @@ DEFAULT_SCHEMA_DIRECTORY = protocol_schema_directory()
 def generate_protocol_artifacts() -> dict[str, str]:
     """Return every generated protocol artifact keyed by relative filename."""
 
-    client_handshake = _schema_for_model(TypeAdapter(RpcClientHello), title="RPC client handshake")
+    client_handshake = _schema_for_model(
+        TypeAdapter(RpcHandshakeRequest),
+        title="RPC handshake request",
+    )
     _harden_capability_schema(client_handshake)
     _require_root_property(client_handshake, "type")
     client_handshake["x-wisp-cross-field-invariants"] = [
@@ -95,8 +96,8 @@ def generate_protocol_artifacts() -> dict[str, str]:
     ]
 
     server_handshake = _schema_for_model(
-        RpcServerHandshakeAdapter,
-        title="RPC server handshake",
+        RpcHandshakeResponseAdapter,
+        title="RPC handshake response",
     )
     _harden_capability_schema(server_handshake)
     _require_discriminator_property(server_handshake, "type")
@@ -104,16 +105,30 @@ def generate_protocol_artifacts() -> dict[str, str]:
 
     commands = _schema_for_model(RpcCommandAdapter, title="Wisp typed-client RPC commands")
     _shape_command_output_schema(commands)
+    commands["x-wisp-conformance-fixtures"] = _conformance_fixtures(
+        RpcCommandAdapter,
+        commands,
+        _COMMAND_FIXTURE_VALUES,
+        event_output=False,
+    )
 
     events = _schema_for_model(KnownWispEventAdapter, title="Wisp current live event output")
     _shape_current_event_output_schema(events)
     _add_event_semantic_constraints(events)
+    events["x-wisp-conformance-fixtures"] = _conformance_fixtures(
+        KnownWispEventAdapter,
+        events,
+        _EVENT_FIXTURE_VALUES,
+        event_output=True,
+    )
 
     schemas = {
         _CLIENT_HANDSHAKE_SCHEMA: _serialize(client_handshake),
         _SERVER_HANDSHAKE_SCHEMA: _serialize(server_handshake),
         _COMMAND_SCHEMA: _serialize(commands),
         _EVENT_SCHEMA: _serialize(events),
+        _RUST_COMMAND_SCHEMA: _serialize(_rust_type_projection(commands)),
+        _RUST_EVENT_SCHEMA: _serialize(_rust_type_projection(events)),
     }
     schema_hashes: JsonObject = {
         filename: _sha256(content) for filename, content in schemas.items()
@@ -130,6 +145,8 @@ def generate_protocol_artifacts() -> dict[str, str]:
             "client_handshake": _CLIENT_HANDSHAKE_SCHEMA,
             "commands": _COMMAND_SCHEMA,
             "events": _EVENT_SCHEMA,
+            "rust_commands": _RUST_COMMAND_SCHEMA,
+            "rust_events": _RUST_EVENT_SCHEMA,
             "server_handshake": _SERVER_HANDSHAKE_SCHEMA,
         },
     }
@@ -241,11 +258,11 @@ def invalid_protocol_history(
         if not isinstance(hashes, dict):
             diagnostics.append(f"missing protocol schema hashes: {directory.name}")
             continue
-        expected_names = {*_SCHEMA_FILENAMES, _MANIFEST}
+        expected_names = {*hashes, _MANIFEST}
         actual_names = {entry.name for entry in directory.iterdir()}
         if actual_names != expected_names:
             diagnostics.append(f"unexpected protocol artifact set: {directory.name}")
-        for filename in _SCHEMA_FILENAMES:
+        for filename in sorted(hashes):
             expected_hash = hashes.get(filename)
             try:
                 content = (directory / filename).read_text(encoding="utf-8")
@@ -336,6 +353,275 @@ def _shape_command_output_schema(schema: JsonObject) -> None:
     _add_command_semantic_constraints(schema)
 
 
+def _rust_type_projection(schema: JsonObject) -> JsonObject:
+    """Remove validation-only keywords unsupported by constructive Rust codegen."""
+
+    projected = deepcopy(schema)
+
+    def visit(value: JsonValue) -> None:
+        if isinstance(value, dict):
+            value.pop("x-wisp-cross-field-invariants", None)
+            value.pop("x-wisp-conformance-fixtures", None)
+            value.pop("if", None)
+            value.pop("then", None)
+            value.pop("else", None)
+            value.pop("not", None)
+            value.pop("uniqueItems", None)
+            all_of = value.get("allOf")
+            if isinstance(all_of, list):
+                references: list[JsonValue] = [
+                    member
+                    for member in all_of
+                    if isinstance(member, dict) and isinstance(member.get("$ref"), str)
+                ]
+                if references:
+                    value["allOf"] = references
+                else:
+                    value.pop("allOf", None)
+            for member in tuple(value.values()):
+                visit(member)
+        elif isinstance(value, list):
+            for member in value:
+                visit(member)
+
+    visit(projected)
+    definitions = projected.get("$defs")
+    if isinstance(definitions, dict):
+        for model_name, raw_definition in definitions.items():
+            if not isinstance(raw_definition, dict):
+                continue
+            properties = raw_definition.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            for property_name, raw_property in properties.items():
+                if isinstance(raw_property, dict):
+                    raw_property["title"] = (
+                        f"{model_name}{''.join(part.title() for part in property_name.split('_'))}"
+                    )
+    return projected
+
+
+_FIXTURE_TIMESTAMP = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+_COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
+    "approval": {"call_id": "call-1", "approved": True},
+    "cancel": {"target_id": "command-1"},
+    "clear_queue": {},
+    "clone_session": {},
+    "compact": {},
+    "configure": {"provider": "fixture"},
+    "follow_up": {"content": "follow up"},
+    "fork_session": {"entry_id": "entry-1"},
+    "get_commands": {},
+    "get_mcp_status": {},
+    "get_messages": {},
+    "get_queue_state": {},
+    "get_session_stats": {},
+    "get_session_tree": {},
+    "get_sessions": {},
+    "get_skills": {},
+    "get_state": {},
+    "init": {},
+    "navigate_session_tree": {"entry_id": "entry-1"},
+    "new_session": {},
+    "pop_queue": {"kind": "steering"},
+    "prompt": {"prompt": "fixture, 世界"},
+    "select_session": {"session_id": "session-1"},
+    "set_queue_mode": {"kind": "steering", "mode": "one_at_a_time"},
+    "set_session_name": {"name": "Fixture"},
+    "shutdown": {},
+    "steer": {"content": "steer"},
+    "trust": {"request_id": "trust-1", "trusted": True},
+    "unrevert_session_tree": {},
+}
+_CONTEXT_ESTIMATE = {
+    "system_tokens": 0,
+    "message_tokens": 0,
+    "tool_schema_tokens": 0,
+    "total_tokens": 0,
+}
+_CONTEXT_BUDGET = {"estimate": _CONTEXT_ESTIMATE, "reserve_tokens": 0}
+_TOKEN_USAGE = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+_SESSION_STATS = {
+    "entry_count": 0,
+    "active_message_count": 0,
+    "compaction_count": 0,
+    "usage_record_count": 0,
+    "usage": _TOKEN_USAGE,
+    "context": _CONTEXT_BUDGET,
+}
+_RPC_STATE = {
+    "provider": "fixture",
+    "auto_compaction_enabled": False,
+    "steering_mode": "one_at_a_time",
+    "follow_up_mode": "one_at_a_time",
+    "pending_steering_count": 0,
+    "pending_follow_up_count": 0,
+}
+_EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
+    "agent.completed": {"session_id": "session-1", "turns": 1, "outcome": "completed"},
+    "agent.started": {"session_id": "session-1"},
+    "compaction.completed": {
+        "session_id": "session-1",
+        "outcome": "completed",
+        "replaced_entry_count": 0,
+        "retained_entry_count": 0,
+    },
+    "compaction.started": {"session_id": "session-1", "source_entry_count": 0},
+    "context.estimated": {"turn": 1, "provider": "fixture", "budget": _CONTEXT_BUDGET},
+    "context.overflow": {"turn": 1, "provider": "fixture", "message": "overflow"},
+    "context.pressure": {
+        "turn": 1,
+        "provider": "fixture",
+        "context_window": 2,
+        "observed_tokens": 1,
+        "remaining_tokens": 1,
+        "pressure_ratio": 0.5,
+    },
+    "error": {"message": "fixture error"},
+    "message.completed": {"turn": 1, "content": "fixture", "finish_reason": "stop"},
+    "message.delta": {"turn": 1, "delta": "fixture"},
+    "message.started": {"turn": 1},
+    "model.provider_auto_switched": {
+        "command_id": "command-1",
+        "provider": "fixture",
+        "model": "fixture-model",
+    },
+    "project.config.applied": {"provider": "fixture", "auth_path": Path("fixture.jsonl")},
+    "provider.retrying": {
+        "turn": 1,
+        "provider": "fixture",
+        "attempt": 1,
+        "max_attempts": 1,
+        "delay_seconds": 0.5,
+        "reason": "network",
+    },
+    "queue.items.removed": {"command_id": "command-1", "operation": "clear"},
+    "queue.message.injected": {"kind": "steering", "content": "fixture"},
+    "queue.updated": {},
+    "rpc.command.finished": {"command_id": "command-1", "command_type": "prompt", "ok": True},
+    "rpc.command.started": {"command_id": "command-1", "command_type": "prompt"},
+    "rpc.commands": {"command_id": "command-1"},
+    "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
+    "rpc.messages": {"command_id": "command-1"},
+    "rpc.session.cloned": {
+        "command_id": "command-1",
+        "source_session_id": "source-session",
+        "source_session_path": Path("source.jsonl"),
+        "session_id": "target-session",
+        "session_path": Path("target.jsonl"),
+        "active_leaf_id": "entry-1",
+        "entry_count": 1,
+    },
+    "rpc.session.forked": {
+        "command_id": "command-1",
+        "source_session_id": "source-session",
+        "source_session_path": Path("source.jsonl"),
+        "session_id": "target-session",
+        "session_path": Path("target.jsonl"),
+        "entry_count": 0,
+        "selected_entry_id": "entry-1",
+        "selected_prompt": "fixture",
+    },
+    "rpc.session.name_changed": {
+        "command_id": "command-1",
+        "session_id": "session-1",
+        "session_path": Path("fixture.jsonl"),
+        "entry_count": 0,
+    },
+    "rpc.session.selected": {
+        "command_id": "command-1",
+        "session_id": "session-1",
+        "session_path": Path("fixture.jsonl"),
+        "entry_count": 0,
+    },
+    "rpc.session.tree": {"command_id": "command-1", "total_node_count": 0},
+    "rpc.session.tree.navigated": {
+        "command_id": "command-1",
+        "session_id": "session-1",
+        "session_path": Path("fixture.jsonl"),
+        "selected_entry_id": "entry-1",
+        "previous_active_leaf_id": None,
+        "active_leaf_id": "entry-1",
+        "changed": True,
+        "entry_count": 1,
+    },
+    "rpc.session.tree.unreverted": {
+        "command_id": "command-1",
+        "session_id": "session-1",
+        "session_path": Path("fixture.jsonl"),
+        "source_transition_id": "transition-1",
+        "previous_active_leaf_id": "entry-1",
+        "active_leaf_id": "entry-2",
+        "entry_count": 1,
+    },
+    "rpc.sessions": {"command_id": "command-1"},
+    "rpc.skills": {"command_id": "command-1", "catalog": {}},
+    "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "session.saved": {"session_id": "session-1", "path": Path("fixture.jsonl")},
+    "session.stats": {"command_id": "command-1", "stats": _SESSION_STATS},
+    "skill.catalog.updated": {"catalog": {}},
+    "skill.invoked": {
+        "session_id": "session-1",
+        "message_entry_id": "entry-1",
+        "invocation": {
+            "name": "fixture",
+            "original_content": "$fixture request",
+            "request": "request",
+            "content_sha256": "0" * 64,
+        },
+        "provider_content": "fixture",
+    },
+    "tool.approval.requested": {
+        "call_id": "call-1",
+        "name": "read",
+        "arguments": {},
+        "safety": "read",
+    },
+    "tool.approval.resolved": {"call_id": "call-1", "name": "read", "approved": True},
+    "tool.call": {"call_id": "call-1", "name": "read", "arguments": {}},
+    "tool.execution.ended": {"call_id": "call-1", "name": "read", "output": "", "is_error": False},
+    "tool.execution.started": {"call_id": "call-1", "name": "read", "arguments": {}},
+    "tool.result": {"call_id": "call-1", "name": "read", "output": "", "is_error": False},
+    "trust.requested": {"request_id": "trust-1", "project_path": Path("fixture.jsonl")},
+    "trust.resolved": {
+        "request_id": "trust-1",
+        "project_path": Path("fixture.jsonl"),
+        "trusted": True,
+    },
+    "turn.completed": {"turn": 1, "outcome": "completed", "finish_reason": "stop"},
+    "turn.started": {"turn": 1},
+}
+
+
+def _conformance_fixtures[T](
+    adapter: TypeAdapter[T],
+    schema: JsonObject,
+    values: Mapping[str, Mapping[str, object]],
+    *,
+    event_output: bool,
+) -> JsonObject:
+    mapping = _discriminator_mapping(schema)
+    if set(values) != set(mapping):
+        missing = sorted(set(mapping).difference(values))
+        extra = sorted(set(values).difference(mapping))
+        raise RuntimeError(f"protocol fixture coverage mismatch: missing={missing}, extra={extra}")
+    models = _adapter_models(adapter)
+    fixtures: JsonObject = {}
+    for discriminator in sorted(mapping):
+        model_name = mapping[discriminator].removeprefix("#/$defs/")
+        model = models[model_name]
+        payload_values = dict(values[discriminator])
+        if event_output:
+            payload_values["timestamp"] = _FIXTURE_TIMESTAMP
+        instance = model.model_validate(payload_values)
+        serialized = instance.model_dump_json(exclude_none=not event_output)
+        payload = json.loads(serialized)
+        if not isinstance(payload, dict) or payload.get("type") != discriminator:
+            raise RuntimeError(f"invalid generated fixture for {discriminator}")
+        fixtures[discriminator] = cast(JsonValue, payload)
+    return fixtures
+
+
 def _harden_capability_schema(schema: JsonObject) -> None:
     definitions = schema.get("$defs")
     if not isinstance(definitions, dict):
@@ -347,17 +633,17 @@ def _harden_capability_schema(schema: JsonObject) -> None:
 
 def _annotate_server_handshake_invariants(schema: JsonObject) -> None:
     definitions = _object_member(schema, "$defs")
-    hello = _named_definition(definitions, "RpcServerHello")
-    hello["x-wisp-cross-field-invariants"] = [
+    accepted = _named_definition(definitions, "RpcHandshakeAccepted")
+    accepted["x-wisp-cross-field-invariants"] = [
         {
             "kind": "ordered-range",
-            "maximum_property": "max_frontend_protocol_version",
-            "minimum_property": "min_frontend_protocol_version",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
         },
         {
             "kind": "value-in-range",
-            "maximum_property": "max_frontend_protocol_version",
-            "minimum_property": "min_frontend_protocol_version",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
             "value_property": "protocol_version",
         },
     ]

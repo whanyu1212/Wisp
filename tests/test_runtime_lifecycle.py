@@ -99,7 +99,12 @@ def test_cli_frontends_close_runtime_when_execution_fails(
             await cli_module._run_print("hello", config)
 
     else:
+
+        async def accept_handshake() -> bool:
+            return True
+
         monkeypatch.setattr(rpc_module, "build_runtime_for_config", fake_build)
+        monkeypatch.setattr(rpc_module, "_negotiate_rpc_connection", accept_handshake)
         monkeypatch.setattr(rpc_module, "_run_rpc_with_runtime", fail)
 
         async def run() -> None:

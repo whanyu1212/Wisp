@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import anyio
 from wisp.agent.messages import Message
 from wisp.events import WispEvent
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
+from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.sessions.jsonl import JsonlSession
 
 _PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init"})
@@ -136,6 +138,7 @@ class RpcCoordinator:
         *,
         input_closed_handlers: tuple[Callable[[], None], ...] = (),
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
+        max_queued_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
         input_closed_type: type[object] = _RpcInputClosed,
         command_completed_type: type[object] = _RpcCommandCompleted,
         prompt_ready_type: type[object] = _RpcPromptReady,
@@ -144,14 +147,19 @@ class RpcCoordinator:
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
+        if max_queued_bytes < 0:
+            raise ValueError("max_queued_bytes must be non-negative")
         self.session_state = session_state
         self.running_command: _RpcRunningCommand | None = None
         self.auxiliary_commands: dict[str, _RpcRunningCommand] = {}
+        self._auxiliary_command_bytes: dict[str, int] = {}
         self.queued_commands: deque[dict[str, object]] = deque()
         self.pending_prompt_queue_commands: deque[dict[str, object]] = deque()
         self.input_closed = False
         self._input_closed_handlers = input_closed_handlers
         self._max_queued_commands = max_queued_commands
+        self._max_queued_bytes = max_queued_bytes
+        self._queued_command_bytes = 0
         self._input_closed_type = input_closed_type
         self._command_completed_type = command_completed_type
         self._prompt_ready_type = prompt_ready_type
@@ -179,6 +187,7 @@ class RpcCoordinator:
             )
             if queued_target is not None:
                 queue.remove(queued_target)
+                self._release_queued_command(queued_target)
                 return _RpcCancelResult("queued", command=queued_target)
         return _RpcCancelResult("missing")
 
@@ -211,7 +220,8 @@ class RpcCoordinator:
                 and self.pending_prompt_queue_commands
             ):
                 if await self._dispatch(
-                    self.pending_prompt_queue_commands.popleft(), dispatch=dispatch
+                    self._pop_queued_command(self.pending_prompt_queue_commands),
+                    dispatch=dispatch,
                 ):
                     return True
                 continue
@@ -220,7 +230,9 @@ class RpcCoordinator:
                 and not self.auxiliary_commands
                 and self.queued_commands
             ):
-                if await self._dispatch(self.queued_commands.popleft(), dispatch=dispatch):
+                if await self._dispatch(
+                    self._pop_queued_command(self.queued_commands), dispatch=dispatch
+                ):
                     return True
                 continue
             if (
@@ -296,6 +308,9 @@ class RpcCoordinator:
             auxiliary = self.auxiliary_commands.get(completed.command_id)
             if auxiliary is not None and completed.command_type == auxiliary.command_type:
                 del self.auxiliary_commands[completed.command_id]
+                self._release_command_bytes(
+                    self._auxiliary_command_bytes.pop(completed.command_id, 0)
+                )
                 return False
             if (
                 running is not None
@@ -342,7 +357,11 @@ class RpcCoordinator:
         selected_type = command_type(command)
         running = self.running_command
         if running is None and selected_type == "shutdown":
-            self.queued_commands.append(command)
+            await self._enqueue_command(
+                command,
+                queue=self.queued_commands,
+                reject=reject,
+            )
             return False
         prompt_queue_not_ready = (
             running is not None
@@ -369,12 +388,27 @@ class RpcCoordinator:
                     "RPC command queue is full while another RPC command is running",
                 )
                 return False
+            command_bytes = self._command_payload_size(command)
+            if command_bytes > self._max_queued_bytes - self._queued_command_bytes:
+                await reject(
+                    command,
+                    "RPC command queue byte limit exceeded while another RPC command is running",
+                )
+                return False
+            self._queued_command_bytes += command_bytes
             previous_running = running
-            result = await dispatch(command, running)
+            try:
+                result = await dispatch(command, running)
+            except BaseException:
+                self._release_command_bytes(command_bytes)
+                raise
             auxiliary = result.running_command
             self.running_command = previous_running
             if auxiliary is not None and auxiliary is not previous_running:
                 self.auxiliary_commands[auxiliary.command_id] = auxiliary
+                self._auxiliary_command_bytes[auxiliary.command_id] = command_bytes
+            else:
+                self._release_command_bytes(command_bytes)
             return result.should_shutdown
         auxiliary_read_pending = bool(self.auxiliary_commands)
         new_session_waits_for_ordered_operation = selected_type == "new_session" and (
@@ -444,7 +478,7 @@ class RpcCoordinator:
         dispatch: RpcDispatch,
     ) -> bool:
         while self.pending_prompt_queue_commands:
-            command = self.pending_prompt_queue_commands.popleft()
+            command = self._pop_queued_command(self.pending_prompt_queue_commands)
             if await self._dispatch(command, dispatch=dispatch):
                 return True
         return False
@@ -459,7 +493,43 @@ class RpcCoordinator:
         if self._outstanding_command_count() >= self._max_queued_commands:
             await reject(command, "RPC command queue is full while another RPC command is running")
             return
+        command_bytes = self._command_payload_size(command)
+        if command_bytes > self._max_queued_bytes - self._queued_command_bytes:
+            await reject(
+                command,
+                "RPC command queue byte limit exceeded while another RPC command is running",
+            )
+            return
         queue.append(command)
+        self._queued_command_bytes += command_bytes
+
+    def _pop_queued_command(
+        self,
+        queue: deque[dict[str, object]],
+    ) -> dict[str, object]:
+        command = queue.popleft()
+        self._release_queued_command(command)
+        return command
+
+    def _release_queued_command(self, command: dict[str, object]) -> None:
+        self._release_command_bytes(self._command_payload_size(command))
+
+    def _release_command_bytes(self, command_bytes: int) -> None:
+        self._queued_command_bytes = max(
+            0,
+            self._queued_command_bytes - command_bytes,
+        )
+
+    @staticmethod
+    def _command_payload_size(command: dict[str, object]) -> int:
+        return len(
+            json.dumps(
+                command,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
 
     def _outstanding_command_count(self) -> int:
         """Count queued and concurrent auxiliary work sharing the configured bound."""

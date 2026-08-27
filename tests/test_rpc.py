@@ -5,9 +5,11 @@ import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import anyio
 import pytest
+from anyio.abc import Process
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
@@ -73,6 +75,8 @@ from wisp.rpc import (
     NewSessionCommand,
     PopQueueCommand,
     RpcController,
+    RpcHandshakeError,
+    RpcProtocolError,
     SelectSessionCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
@@ -81,6 +85,7 @@ from wisp.rpc import (
 )
 from wisp.rpc import client as rpc_client_module
 from wisp.rpc.commands import (
+    MAX_RPC_COMMAND_ID_CHARS,
     ApprovalCommand,
     CancelCommand,
     PromptCommand,
@@ -89,6 +94,7 @@ from wisp.rpc.commands import (
     TrustCommand,
     rpc_command_from_json,
 )
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 
 
 class RecordingTransport:
@@ -137,6 +143,11 @@ def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
         "reason": "not safe",
     }
     assert rpc_command_from_json(line) == command
+
+
+def test_rpc_commands_bound_ids_that_are_echoed_in_server_events() -> None:
+    with pytest.raises(ValidationError, match="String should have at most 256 characters"):
+        PromptCommand(id="x" * (MAX_RPC_COMMAND_ID_CHARS + 1), prompt="hello")
 
 
 @pytest.mark.parametrize("instructions", [None, "Keep exact paths"])
@@ -1735,21 +1746,67 @@ def test_rpc_controller_exposes_transport_events() -> None:
     anyio.run(run)
 
 
+def test_jsonl_subprocess_rpc_transport_times_out_while_writing_handshake(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class BlockingSendStream:
+        async def send(self, _item: bytes) -> None:
+            await anyio.sleep_forever()
+
+    class BlockingProcess:
+        stdin = BlockingSendStream()
+        stdout = object()
+
+    async def run() -> None:
+        request = RpcHandshakeRequest(
+            frontend_name="fixture",
+            frontend_version="0.1.0",
+            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+            min_event_schema_version=EVENT_SCHEMA_VERSION,
+            max_event_schema_version=EVENT_SCHEMA_VERSION,
+            supported_capabilities=(),
+            required_capabilities=(),
+        )
+        transport = JsonlSubprocessRpcTransport(
+            cast(Process, BlockingProcess()),
+            request,
+        )
+        monkeypatch.setattr(rpc_client_module, "_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
+
+        with anyio.fail_after(1):
+            with pytest.raises(RpcHandshakeError, match="did not complete handshake in time"):
+                await transport._perform_handshake()
+
+    anyio.run(run)
+
+
 @pytest.mark.process
 def test_jsonl_subprocess_rpc_transport_round_trips_events(tmp_path: Path) -> None:
     async def run() -> None:
         script = """
 import json
 import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
 command = json.loads(sys.stdin.readline())
 started = {
-    "schema_version": 6,
+    "schema_version": 34,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
-    "schema_version": 6,
+    "schema_version": 34,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -1781,6 +1838,100 @@ print(json.dumps(finished), flush=True)
 
 
 @pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_rejects_wrong_event_schema_version(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        script = """
+import json
+import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
+print(json.dumps({
+    "schema_version": 6,
+    "type": "rpc.command.started",
+    "command_id": "command-1",
+    "command_type": "prompt",
+}), flush=True)
+"""
+        transport = await JsonlSubprocessRpcTransport.start(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+        )
+        with pytest.raises(RpcProtocolError, match="negotiated version"):
+            await anext(transport.events())
+        await transport.close()
+
+    anyio.run(run)
+
+
+@pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_rejects_empty_event_frame(tmp_path: Path) -> None:
+    async def run() -> None:
+        script = """
+import json
+import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
+print("", flush=True)
+"""
+        transport = await JsonlSubprocessRpcTransport.start(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+        )
+        with pytest.raises(RpcProtocolError, match="empty RPC event frame"):
+            await anext(transport.events())
+        await transport.close()
+
+    anyio.run(run)
+
+
+@pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_surfaces_handshake_rejection(tmp_path: Path) -> None:
+    async def run() -> None:
+        script = """
+import json
+import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.rejected",
+    "code": "protocol_version_mismatch",
+    "message": "No compatible live RPC protocol version.",
+    "backend_package_version": "0.1.0",
+    "min_protocol_version": 3,
+    "max_protocol_version": 3,
+    "event_schema_version": 34,
+}), flush=True)
+"""
+        with pytest.raises(RpcHandshakeError, match="No compatible") as error:
+            await JsonlSubprocessRpcTransport.start(
+                [sys.executable, "-c", script],
+                cwd=tmp_path,
+            )
+        assert error.value.code == "protocol_version_mismatch"
+
+    anyio.run(run)
+
+
+@pytest.mark.process
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal behavior")
 def test_jsonl_subprocess_rpc_transport_kills_sigterm_resistant_child(
     tmp_path: Path,
@@ -1788,10 +1939,22 @@ def test_jsonl_subprocess_rpc_transport_kills_sigterm_resistant_child(
 ) -> None:
     async def run() -> None:
         script = """
+import json
 import signal
 import sys
 import time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
 sys.stdin.read()
 time.sleep(60)
 """
@@ -1816,9 +1979,20 @@ import json
 import sys
 sys.stderr.write("x" * 200000)
 sys.stderr.flush()
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": "0.1.0",
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "schema_version": 6,
+    "schema_version": 34,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

@@ -61,6 +61,45 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+  rust-protocol:
+    name: Rust protocol conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Check generated protocol artifacts
+        run: uv run python -m wisp.rpc.protocol_schema --check
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint Rust protocol crate
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test Rust protocol conformance
+        run: cargo test --workspace --all-features
+
   package:
     name: Build and verify package
     runs-on: ubuntu-latest
@@ -112,13 +151,25 @@ jobs:
       matrix:
         include:
           - suite: core
+            target: tests
             marker: not (slow or tui or process or benchmark or production_fault)
-          - suite: tui
+            extra_args: ""
+          - suite: tui-integration
+            target: tests/test_tui_integration_cli.py
             marker: tui and not production_fault
+            extra_args: ""
+          - suite: tui-components
+            target: tests
+            marker: tui and not production_fault
+            extra_args: --ignore=tests/test_tui_integration_cli.py
           - suite: system-and-slow
+            target: tests
             marker: (slow or process or benchmark) and not (tui or production_fault)
+            extra_args: ""
           - suite: production-fault
+            target: tests
             marker: production_fault
+            extra_args: ""
 
     steps:
       - name: Check out repository
@@ -143,7 +194,24 @@ jobs:
           WISP_EFFORT: xhigh
           WISP_CONTEXT_RESERVE_TOKENS: "4096"
           WISP_AUTO_COMPACTION: "0"
-        run: uv run pytest tests -m '${{ matrix.marker }}' --durations=20
+        run: >-
+          uv run pytest ${{ matrix.target }}
+          -m '${{ matrix.marker }}'
+          ${{ matrix.extra_args }}
+          --durations=20
+
+  tui-status:
+    name: Test (tui)
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require the split test matrix to pass
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
 
   macos-smoke:
     name: Platform smoke (macOS)

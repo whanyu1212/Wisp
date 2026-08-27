@@ -12,6 +12,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Added the enforced live JSONL-RPC v2 handshake, bounded strict framing, immutable generated schemas,
+  generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
+
 ## 0.1.0 — 2026-08-23
 
 - Added active-run steering and follow-up controls to the TUI, including queue previews,

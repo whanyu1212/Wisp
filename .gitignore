@@ -43,6 +43,9 @@ build/
 dist/
 /profiles/
 
+# Rust
+/target/
+
 # Local code index
 .codegraph/
 

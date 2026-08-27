@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tarfile
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,6 +37,7 @@ from wisp.events import (
     ToolResultReady,
     UsageCost,
     UsageCostRates,
+    wisp_event_from_dict,
 )
 from wisp.rpc.commands import (
     CompactCommand,
@@ -48,7 +50,7 @@ from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
-    RpcServerHello,
+    RpcHandshakeAccepted,
     RpcTransportLimits,
 )
 from wisp.rpc.protocol_schema import (
@@ -66,6 +68,8 @@ _SCHEMA_FILES = (
     "server-handshake.schema.json",
     "commands.schema.json",
     "events.schema.json",
+    "rust-commands.schema.json",
+    "rust-events.schema.json",
 )
 _REPOSITORY_SCHEMA_ROOT = Path(__file__).parents[1] / "schemas" / "live-rpc"
 _REPOSITORY_SCHEMA_DIRECTORY = protocol_schema_directory(_REPOSITORY_SCHEMA_ROOT)
@@ -116,26 +120,30 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
 
     write_protocol_artifacts(directory)
     assert stale_protocol_artifacts(directory) == ()
-    assert invalid_protocol_history(tmp_path) == ()
+    assert invalid_protocol_history(tmp_path) == ("missing protocol schema directory: v1",)
 
     (directory / "commands.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("commands.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "protocol schema hash mismatch: v1/commands.schema.json",
-        "protocol schema dialect mismatch: v1/commands.schema.json",
+        "protocol schema hash mismatch: v2/commands.schema.json",
+        "protocol schema dialect mismatch: v2/commands.schema.json",
+        "missing protocol schema directory: v1",
     )
 
     write_protocol_artifacts(directory)
     (directory / "obsolete.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("obsolete.schema.json",)
-    assert invalid_protocol_history(tmp_path) == ("unexpected protocol artifact set: v1",)
+    assert invalid_protocol_history(tmp_path) == (
+        "unexpected protocol artifact set: v2",
+        "missing protocol schema directory: v1",
+    )
 
 
 def test_historical_protocol_manifest_is_pinned_outside_its_version_directory(
     tmp_path: Path,
 ) -> None:
-    directory = protocol_schema_directory(tmp_path)
-    write_protocol_artifacts(directory)
+    directory = tmp_path / "v1"
+    shutil.copytree(_REPOSITORY_SCHEMA_ROOT / "v1", directory)
     manifest_path = directory / "manifest.json"
     manifest_content = manifest_path.read_text(encoding="utf-8")
     manifest_hash = hashlib.sha256(manifest_content.encode()).hexdigest()
@@ -170,6 +178,7 @@ def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
     assert invalid_protocol_history(tmp_path) == (
         "unexpected protocol schema directory: v01",
         "missing protocol schema directory: v1",
+        "missing protocol schema directory: v2",
     )
 
     monkeypatch.setattr(
@@ -206,10 +215,10 @@ def test_git_history_check_reports_modified_committed_version_artifacts(
 
 
 def test_protocol_version_directories_cannot_be_cross_written(tmp_path: Path) -> None:
-    assert protocol_schema_directory(tmp_path, protocol_version=2) == tmp_path / "v2"
+    assert protocol_schema_directory(tmp_path, protocol_version=3) == tmp_path / "v3"
 
-    with pytest.raises(RuntimeError, match="refusing to write protocol v1 into v2"):
-        write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=2))
+    with pytest.raises(RuntimeError, match="refusing to write protocol v2 into v3"):
+        write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=3))
 
 
 def test_protocol_release_archive_is_deterministic_and_versioned(tmp_path: Path) -> None:
@@ -241,7 +250,7 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
     client = Draft202012Validator(client_schema)
     server = Draft202012Validator(server_schema)
     client_payload = {
-        "type": "rpc.client.hello",
+        "type": "rpc.handshake.request",
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
         "min_protocol_version": 1,
@@ -278,12 +287,12 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
         },
     ]
 
-    hello = RpcServerHello(
+    hello = RpcHandshakeAccepted(
         backend_package_version="0.1.0",
-        protocol_version=1,
+        protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         event_schema_version=EVENT_SCHEMA_VERSION,
-        min_frontend_protocol_version=1,
-        max_frontend_protocol_version=1,
+        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         capabilities=(),
         limits=RpcTransportLimits(
             max_client_frame_bytes=1024,
@@ -295,17 +304,17 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
         {key: value for key, value in hello.items() if key != "protocol_version"}
     )
     server_mapping = _mapping(server_schema)
-    server_hello = _definition(server_schema, server_mapping["rpc.server.hello"])
+    server_hello = _definition(server_schema, server_mapping["rpc.handshake.accepted"])
     assert server_hello["x-wisp-cross-field-invariants"] == [
         {
             "kind": "ordered-range",
-            "maximum_property": "max_frontend_protocol_version",
-            "minimum_property": "min_frontend_protocol_version",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
         },
         {
             "kind": "value-in-range",
-            "maximum_property": "max_frontend_protocol_version",
-            "minimum_property": "min_frontend_protocol_version",
+            "maximum_property": "max_protocol_version",
+            "minimum_property": "min_protocol_version",
             "value_property": "protocol_version",
         },
     ]
@@ -328,6 +337,39 @@ def test_command_schema_contains_every_discriminator_once() -> None:
     assert len(mapping) == 29
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
+
+
+def test_conformance_fixtures_cover_and_round_trip_every_wire_discriminator() -> None:
+    command_schema = _artifact("commands.schema.json")
+    event_schema = _artifact("events.schema.json")
+    command_fixtures = cast(
+        dict[str, dict[str, object]],
+        command_schema["x-wisp-conformance-fixtures"],
+    )
+    event_fixtures = cast(
+        dict[str, dict[str, object]],
+        event_schema["x-wisp-conformance-fixtures"],
+    )
+
+    assert set(command_fixtures) == set(_mapping(command_schema))
+    assert set(event_fixtures) == set(_mapping(event_schema))
+    assert tuple(command_fixtures) == tuple(sorted(command_fixtures))
+    assert tuple(event_fixtures) == tuple(sorted(event_fixtures))
+
+    command_validator = Draft202012Validator(command_schema)
+    for discriminator, payload in command_fixtures.items():
+        assert payload["type"] == discriminator
+        assert command_validator.is_valid(payload)
+        command = RpcCommandAdapter.validate_json(json.dumps(payload))
+        assert json.loads(command.to_json_line()) == payload
+
+    event_validator = Draft202012Validator(event_schema)
+    for discriminator, payload in event_fixtures.items():
+        assert payload["type"] == discriminator
+        assert payload["schema_version"] == EVENT_SCHEMA_VERSION
+        assert event_validator.is_valid(payload)
+        event = wisp_event_from_dict(payload)
+        assert json.loads(event.model_dump_json()) == payload
 
 
 def test_typed_command_output_validates_but_none_is_never_a_wire_value() -> None:

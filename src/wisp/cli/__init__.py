@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import partial
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import anyio
 import typer
@@ -54,7 +55,6 @@ _resolve_tui_renderer = _cli_options._resolve_tui_renderer
 _terminal_is_interactive = _cli_options._terminal_is_interactive
 _tui_renderer_from_env = _cli_options._tui_renderer_from_env
 
-_exit_with_error = _cli_output._exit_with_error
 _format_event_arguments = _cli_output._format_event_arguments
 _format_event_output = _cli_output._format_event_output
 _format_usage_cost = _cli_output._format_usage_cost
@@ -68,6 +68,13 @@ _writes_json_events = _cli_output._writes_json_events
 _print_mode_tool_approval_policy = _cli_tools._print_mode_tool_approval_policy
 _print_mode_tool_registry = _cli_tools._print_mode_tool_registry
 _session_for_print_run = _cli_tools._session_for_print_run
+
+
+def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
+    if mode is OutputMode.rpc:
+        _cli_rpc._write_startup_error(message)
+        raise typer.Exit(1)
+    _cli_output._exit_with_error(message, mode=mode, console=console)
 
 
 def _version_callback(value: bool) -> None:
@@ -223,7 +230,17 @@ def cli_callback(
         if not _option_was_provided(ctx, "all_tools"):
             resolved_all_tools = True
 
-    if prompt is None and resolved_mode is not OutputMode.tui and not _has_callback_cli_args(ctx):
+    rpc_handshake_complete = False
+    if resolved_mode is OutputMode.rpc:
+        rpc_handshake_complete = anyio.run(_cli_rpc._negotiate_rpc_connection)
+        if not rpc_handshake_complete:
+            return
+
+    if (
+        prompt is None
+        and resolved_mode not in {OutputMode.rpc, OutputMode.tui}
+        and not _has_callback_cli_args(ctx)
+    ):
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
@@ -283,18 +300,21 @@ def cli_callback(
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
-                _cli_rpc._run_rpc,
-                config,
-                resolved_all_tools,
-                allow_read_tools,
-                tuple(allow_tool or ()),
-                resume,
-                continue_latest,
-                approve_unsafe_tools,
-                max_tool_iterations,
-                trusted,
-                config_overrides,
-                project_context_root,
+                partial(
+                    _cli_rpc._run_rpc,
+                    config,
+                    resolved_all_tools,
+                    allow_read_tools,
+                    tuple(allow_tool or ()),
+                    resume,
+                    continue_latest,
+                    approve_unsafe_tools,
+                    max_tool_iterations,
+                    trusted,
+                    config_overrides,
+                    project_context_root,
+                    handshake_complete=rpc_handshake_complete,
+                )
             )
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(
@@ -339,6 +359,8 @@ def cli_callback(
     except (ProviderError, SessionError, ToolError, UnknownProviderError, UnknownToolError) as exc:
         if isinstance(exc, _RenderedPrintError):
             pass
+        elif resolved_mode is OutputMode.rpc:
+            _cli_rpc._write_startup_error(str(exc))
         elif _writes_json_events(resolved_mode):
             _write_json_event(ErrorEvent(message=str(exc)))
         else:
