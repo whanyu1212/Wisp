@@ -43,6 +43,14 @@ def test_trace_schema_is_valid_json_schema() -> None:
     Draft202012Validator.check_schema(schema)
 
 
+def test_trace_schema_publishes_initial_state_invariants() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    invariants = schema["$defs"]["TraceInitialState"]["x-wisp-invariants"]
+    assert invariants["view.provider"] == {"equalsField": "provider"}
+    assert invariants["view.queued_steering"] == {"const": 0}
+    assert invariants["view.status"]["derivedFrom"] == "interaction.status ?? 'idle'"
+
+
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
 def test_trace_fixture_validates_against_schema(path: Path) -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))

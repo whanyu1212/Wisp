@@ -185,7 +185,40 @@
         "provider"
       ],
       "title": "TraceInitialState",
-      "type": "object"
+      "type": "object",
+      "x-wisp-invariants": {
+        "view.input_mode": {
+          "derivedFrom": "interaction.status ?? 'idle'",
+          "valueMap": {
+            "compacting": "running",
+            "exiting": "exiting",
+            "idle": "idle",
+            "running": "running",
+            "waiting_for_approval": "approval",
+            "waiting_for_trust": "trust"
+          }
+        },
+        "view.model": {
+          "equalsField": "model"
+        },
+        "view.provider": {
+          "equalsField": "provider"
+        },
+        "view.queued_follow_ups": {
+          "const": 0
+        },
+        "view.queued_steering": {
+          "const": 0
+        },
+        "view.status": {
+          "defaultIdentity": true,
+          "derivedFrom": "interaction.status ?? 'idle'",
+          "valueMap": {
+            "waiting_for_approval": "waiting for approval",
+            "waiting_for_trust": "waiting for trust"
+          }
+        }
+      }
     },
     "TraceInteractionProjection": {
       "additionalProperties": false,

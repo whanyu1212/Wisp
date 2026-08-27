@@ -118,6 +118,39 @@ class TraceInteractionProjection(_TraceModel):
 
 
 class TraceInitialState(_TraceModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        json_schema_extra={
+            "x-wisp-invariants": {
+                "view.provider": {"equalsField": "provider"},
+                "view.model": {"equalsField": "model"},
+                "view.queued_steering": {"const": 0},
+                "view.queued_follow_ups": {"const": 0},
+                "view.status": {
+                    "derivedFrom": "interaction.status ?? 'idle'",
+                    "valueMap": {
+                        "waiting_for_approval": "waiting for approval",
+                        "waiting_for_trust": "waiting for trust",
+                    },
+                    "defaultIdentity": True,
+                },
+                "view.input_mode": {
+                    "derivedFrom": "interaction.status ?? 'idle'",
+                    "valueMap": {
+                        "idle": "idle",
+                        "running": "running",
+                        "compacting": "running",
+                        "waiting_for_approval": "approval",
+                        "waiting_for_trust": "trust",
+                        "exiting": "exiting",
+                    },
+                },
+            }
+        },
+    )
+
     provider: str = Field(min_length=1, max_length=64)
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=64)
