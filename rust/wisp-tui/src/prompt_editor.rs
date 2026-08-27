@@ -63,10 +63,6 @@ impl PromptEditor {
         self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
     }
 
-    pub fn display_text(&self) -> String {
-        expand_tabs(&self.text)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent) -> EditorAction {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alternate = key.modifiers.contains(KeyModifiers::ALT);
@@ -290,29 +286,6 @@ fn byte_at_display_column(text: &str, target: usize) -> usize {
     text.len()
 }
 
-fn expand_tabs(text: &str) -> String {
-    let mut expanded = String::with_capacity(text.len());
-    let mut column = 0;
-    for grapheme in text.graphemes(true) {
-        match grapheme {
-            "\n" => {
-                expanded.push('\n');
-                column = 0;
-            }
-            "\t" => {
-                let spaces = TAB_WIDTH - (column % TAB_WIDTH);
-                expanded.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            }
-            _ => {
-                expanded.push_str(grapheme);
-                column += grapheme.width();
-            }
-        }
-    }
-    expanded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,7 +355,6 @@ mod tests {
         let outcome = editor.insert_paste("a\r\nb\rc\t\u{1b}d\u{202e}e");
         assert_eq!(editor.text(), "a\nb\nc\tde");
         assert_eq!(outcome.ignored_controls, 2);
-        assert_eq!(editor.display_text(), "a\nb\nc   de");
     }
 
     #[test]

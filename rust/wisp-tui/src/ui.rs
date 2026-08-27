@@ -11,6 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 const MAX_COMPOSER_HEIGHT: u16 = 8;
+const COMPOSER_TAB_WIDTH: usize = 4;
 const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 16;
 const TRANSCRIPT_TAIL_MIN_BYTES: usize = 4 * 1024;
 const TRANSCRIPT_TAIL_MAX_BYTES: usize = 64 * 1024;
@@ -244,12 +245,12 @@ fn composer_visible_text(
     height: usize,
     cursor_visible_row: usize,
 ) -> ComposerVisibleText {
-    let display_text = editor.display_text();
+    let source_text = editor.text();
     let mut visible = String::new();
     let visible_width = width.max(1);
     let visible_height = height.max(1);
     let mut cursor_horizontal_scroll = horizontal_scroll;
-    for (index, line) in display_text
+    for (index, line) in source_text
         .split('\n')
         .skip(vertical_scroll)
         .take(visible_height)
@@ -258,12 +259,11 @@ fn composer_visible_text(
         if index > 0 {
             visible.push('\n');
         }
-        let (slice, effective_start) =
-            display_column_window(line, horizontal_scroll, visible_width);
+        let window = source_display_column_window(line, horizontal_scroll, visible_width);
         if index == cursor_visible_row {
-            cursor_horizontal_scroll = effective_start;
+            cursor_horizontal_scroll = window.effective_start;
         }
-        visible.push_str(slice);
+        visible.push_str(&window.text);
     }
     ComposerVisibleText {
         text: visible,
@@ -271,36 +271,80 @@ fn composer_visible_text(
     }
 }
 
-fn display_column_window(line: &str, start: usize, width: usize) -> (&str, usize) {
+struct SourceDisplayColumnWindow {
+    text: String,
+    effective_start: usize,
+}
+
+fn source_display_column_window(
+    line: &str,
+    start: usize,
+    width: usize,
+) -> SourceDisplayColumnWindow {
     if width == 0 {
-        return ("", start);
+        return SourceDisplayColumnWindow {
+            text: String::new(),
+            effective_start: start,
+        };
     }
     let mut column = 0_usize;
-    let mut start_byte = None;
-    let mut effective_start = start;
-    let mut end = start.saturating_add(width);
-    for (offset, grapheme) in line.grapheme_indices(true) {
-        if start_byte.is_none() && column >= start {
-            start_byte = Some(offset);
-            effective_start = column;
-            end = effective_start.saturating_add(width);
-        }
-        let grapheme_width = grapheme.width();
+    let mut visible = String::new();
+    let mut effective_start = None;
+    let end = start.saturating_add(width);
+    for grapheme in line.graphemes(true) {
+        let grapheme_width = source_grapheme_display_width(grapheme, column);
         let next_column = column.saturating_add(grapheme_width);
-        if let Some(start) = start_byte {
-            if column >= end {
-                return (&line[start..offset], effective_start);
-            }
+        if column >= end {
+            break;
+        }
+        if next_column > start {
+            let grapheme_start = push_source_grapheme_window(
+                &mut visible,
+                grapheme,
+                column,
+                next_column,
+                start,
+                end,
+            );
+            effective_start = effective_start.or(grapheme_start);
         }
         column = next_column;
     }
-    let start_byte = start_byte.unwrap_or(line.len());
-    let effective_start = if start_byte == line.len() {
-        column
-    } else {
-        effective_start
-    };
-    (&line[start_byte..], effective_start)
+    SourceDisplayColumnWindow {
+        text: visible,
+        effective_start: effective_start.unwrap_or(column),
+    }
+}
+
+fn source_grapheme_display_width(grapheme: &str, column: usize) -> usize {
+    if grapheme == "\t" {
+        return COMPOSER_TAB_WIDTH - (column % COMPOSER_TAB_WIDTH);
+    }
+    grapheme.width()
+}
+
+fn push_source_grapheme_window(
+    output: &mut String,
+    grapheme: &str,
+    column: usize,
+    next_column: usize,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    if grapheme == "\t" {
+        let visible_start = column.max(start);
+        let visible_end = next_column.min(end);
+        if visible_start < visible_end {
+            output.extend(std::iter::repeat_n(' ', visible_end - visible_start));
+            return Some(visible_start);
+        }
+        return None;
+    }
+    if column < start || column >= end {
+        return None;
+    }
+    output.push_str(grapheme);
+    Some(column)
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
@@ -624,7 +668,10 @@ mod tests {
         let mut editor = PromptEditor::default();
         let prompt = format!("{}TAIL", "x".repeat(70_000));
         editor.insert_paste(&prompt);
-        assert_eq!(display_column_window(&prompt, 70_000, 4).0, "TAIL");
+        assert_eq!(
+            source_display_column_window(&prompt, 70_000, 4).text,
+            "TAIL"
+        );
         let rendered = render_to_string(40, 14, &state, &editor);
         assert!(rendered.contains("TAIL"));
     }
@@ -634,10 +681,24 @@ mod tests {
         let line = format!("{}TAIL", "🙂".repeat(35_000));
         let width = 38;
         let requested_start = line.width().saturating_sub(width - 1);
-        let (slice, effective_start) = display_column_window(&line, requested_start, width);
-        assert!(effective_start >= requested_start);
-        assert!(line.width().saturating_sub(effective_start) < width);
-        assert!(slice.ends_with("TAIL"));
+        let window = source_display_column_window(&line, requested_start, width);
+        assert!(window.effective_start >= requested_start);
+        assert!(line.width().saturating_sub(window.effective_start) < width);
+        assert!(window.text.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn composer_window_expands_only_visible_tabs() {
+        let line = format!("{}A\tB", "x".repeat(70_000));
+        let window = source_display_column_window(&line, 70_000, 8);
+        assert_eq!(window.text, "A   B");
+    }
+
+    #[test]
+    fn composer_window_slices_inside_visible_tabs() {
+        let window = source_display_column_window("A\tB", 2, 3);
+        assert_eq!(window.effective_start, 2);
+        assert_eq!(window.text, "  B");
     }
 
     #[test]
