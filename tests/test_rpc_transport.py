@@ -260,6 +260,79 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
     anyio.run(scenario)
 
 
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        '{"id":"bad","type":"shutdown","extra":true}',
+        '{"id":"bad","type":"configure","effort":"high","clear_effort":true}',
+    ],
+)
+def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, bad_frame)
+            await transport.send_line(send, '{"id":"ok","type":"shutdown"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+            "RPC command does not match the negotiated schema"
+        ]
+
+    anyio.run(scenario)
+
+
+def test_transport_forwards_unknown_command_discriminators() -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, '{"id":"future","type":"future_command"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "future", "type": "future_command"}
+        assert events == []
+
+    anyio.run(scenario)
+
+
+def test_transport_validates_commands_with_json_semantics() -> None:
+    async def scenario() -> None:
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(send, '{"id":"mode","type":"configure","mode":"plan"}')
+            command = await receive.receive()
+
+        assert isinstance(command, _RpcInputCommand)
+        assert command.command == {"id": "mode", "type": "configure", "mode": "plan"}
+        assert events == []
+
+    anyio.run(scenario)
+
+
 def test_transport_recovers_when_json_nesting_exhausts_parser(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -566,18 +566,14 @@ def test_rpc_compact_rejects_non_string_instructions_and_remains_usable(
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    compact = next(
-        record
-        for record in records
-        if record["type"] == "rpc.command.finished" and record["command_id"] == "compact-1"
-    )
     prompt = next(
         record
         for record in records
         if record["type"] == "rpc.command.finished" and record["command_id"] == "prompt-1"
     )
-    assert compact["ok"] is False
-    assert compact["error"] == "RPC compact command field instructions must be a string"
+    assert [record["message"] for record in records if record["type"] == "error"] == [
+        "RPC command does not match the negotiated schema"
+    ]
     assert prompt["ok"] is True
 
 
@@ -1046,16 +1042,12 @@ def test_rpc_rejects_container_queue_fields_and_remains_usable(tmp_path: Path) -
     records = _jsonl_records(result.stdout)
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
     assert [(record["command_id"], record["ok"]) for record in finished] == [
-        ("kind", False),
-        ("mode", False),
         ("state", True),
     ]
-    assert finished[0]["error"] == (
-        "RPC pop_queue command field kind must be 'steering' or 'follow_up'"
-    )
-    assert finished[1]["error"] == (
-        "RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'"
-    )
+    assert [record["message"] for record in records if record["type"] == "error"] == [
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
+    ]
 
 
 def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
@@ -2185,16 +2177,15 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
         "RPC frame is not valid JSON",
         "RPC frame must be a JSON object",
         "Unknown RPC command: missing",
-        "RPC prompt command requires string field: prompt",
-        "RPC command id must be a non-empty string",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
     ]
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
-    assert [(record["command_id"], record["ok"], record["error"]) for record in finished[:2]] == [
-        ("bad", False, "Unknown RPC command: missing"),
-        ("missing-prompt", False, "RPC prompt command requires string field: prompt"),
-    ]
-    assert finished[2]["ok"] is False
-    assert finished[2]["error"] == "RPC command id must be a non-empty string"
+    assert (finished[0]["command_id"], finished[0]["ok"], finished[0]["error"]) == (
+        "bad",
+        False,
+        "Unknown RPC command: missing",
+    )
     assert any(
         record["type"] == "message.completed" and record["content"] == "fake response to: ok"
         for record in records
@@ -2730,9 +2721,8 @@ def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert records[1]["message"] == "RPC cancel command requires string field: target_id"
-    assert records[2]["command_id"] == "cancel-1"
-    assert records[2]["ok"] is False
+    assert [record["type"] for record in records] == ["error"]
+    assert records[0]["message"] == "RPC command does not match the negotiated schema"
 
 
 def test_rpc_approval_policy_approves_waiting_tool_call(tmp_path: Path) -> None:
@@ -2992,9 +2982,9 @@ def test_rpc_mode_approval_requires_valid_fields(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     errors = [record["message"] for record in records if record["type"] == "error"]
     assert errors == [
-        "RPC approval command requires string field: call_id",
-        "RPC approval command requires boolean field: approved",
-        "RPC approval command field reason must be a string",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
+        "RPC command does not match the negotiated schema",
     ]
 
 

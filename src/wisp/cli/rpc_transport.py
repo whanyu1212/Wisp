@@ -15,6 +15,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import ValidationError
 
 from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent, WispEvent
+from wisp.rpc.commands import RpcCommandAdapter
 from wisp.rpc.framing import RpcFrameError, decode_rpc_object, pop_rpc_frame
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
@@ -291,10 +292,25 @@ class RpcStdinTransport[TControlEvent]:
 
     def parse_command(self, frame: bytes) -> dict[str, object] | None:
         try:
-            return decode_rpc_object(frame, max_frame_bytes=self._max_frame_bytes)
+            command = decode_rpc_object(frame, max_frame_bytes=self._max_frame_bytes)
         except RpcFrameError as exc:
             self._write_event(ErrorEvent(message=str(exc)))
             return None
+        try:
+            RpcCommandAdapter.validate_json(frame)
+        except ValidationError as exc:
+            command_type = command.get("type")
+            unknown_discriminator = isinstance(command_type, str) and any(
+                error["type"] == "union_tag_invalid"
+                for error in exc.errors(include_input=False, include_url=False)
+            )
+            if unknown_discriminator:
+                return command
+            self._write_event(
+                ErrorEvent(message="RPC command does not match the negotiated schema")
+            )
+            return None
+        return command
 
     async def _report_failure(
         self,
