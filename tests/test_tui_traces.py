@@ -10,7 +10,7 @@ import anyio
 import pytest
 from jsonschema import Draft202012Validator
 
-from wisp.tui.trace_runner import TraceReplayError, load_trace, run_trace
+from wisp.tui.trace_runner import RecordingTraceRenderer, TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
     DEFAULT_TRACE_SCHEMA_DIRECTORY,
     TraceFileAdapter,
@@ -549,6 +549,14 @@ def test_later_partial_response_overrides_older_completion() -> None:
     anyio.run(run)
 
 
+def test_finalized_partial_stream_does_not_absorb_later_response() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.token_delta("first partial")
+    renderer.end_token_stream()
+    renderer.token_delta("second response")
+    assert renderer.retained_text == "second response"
+
+
 def test_rpc_event_payloads_are_bounded() -> None:
     oversized = _inline_trace(
         "oversized_rpc_event",
@@ -580,6 +588,17 @@ def test_rpc_event_payloads_are_bounded() -> None:
     )
     with pytest.raises(ValueError, match="depth 8"):
         TraceFileAdapter.validate_python(too_deep)
+
+
+def test_expected_command_payloads_are_bounded() -> None:
+    data = _inline_trace(
+        "oversized_expected_command",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        _default_initial(),
+    )
+    data["expected"]["commands"] = [{"type": "prompt", "id": "prompt-1", "prompt": "x" * 4001}]
+    with pytest.raises(ValueError, match="expected.commands.0.prompt"):
+        TraceFileAdapter.validate_python(data)
 
 
 def test_local_approve_with_wrong_call_id_is_rejected() -> None:

@@ -10,7 +10,15 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_FORMAT_VERSION = 1
@@ -43,6 +51,29 @@ type JsonValue = (
     | Annotated[dict[_JsonKey, "JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
 )
 type JsonObject = Annotated[dict[_JsonKey, JsonValue], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
+
+
+def _bound_json_structure(value: Any, *, label: str) -> Any:
+    nodes = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES:
+            raise ValueError(f"{label} exceeds {_MAX_JSON_NODES} JSON nodes")
+        if depth > _MAX_JSON_DEPTH:
+            raise ValueError(f"{label} exceeds JSON depth {_MAX_JSON_DEPTH}")
+        if isinstance(node, dict):
+            if len(node) > _MAX_JSON_COLLECTION_ITEMS:
+                raise ValueError(f"{label} object exceeds {_MAX_JSON_COLLECTION_ITEMS} properties")
+            if any(not isinstance(key, str) or len(key) > 128 for key in node):
+                raise ValueError(f"{label} has an invalid JSON object key")
+            stack.extend((child, depth + 1) for child in node.values())
+        elif isinstance(node, list):
+            if len(node) > _MAX_JSON_COLLECTION_ITEMS:
+                raise ValueError(f"{label} array exceeds {_MAX_JSON_COLLECTION_ITEMS} items")
+            stack.extend((child, depth + 1) for child in node)
+    return value
 
 
 class _TraceModel(BaseModel):
@@ -143,20 +174,7 @@ class TraceRpcEvent(_TraceModel):
     @field_validator("event", mode="before")
     @classmethod
     def _bound_event_structure(cls, value: Any) -> Any:
-        nodes = 0
-        stack: list[tuple[Any, int]] = [(value, 1)]
-        while stack:
-            node, depth = stack.pop()
-            nodes += 1
-            if nodes > _MAX_JSON_NODES:
-                raise ValueError(f"RPC event exceeds {_MAX_JSON_NODES} JSON nodes")
-            if depth > _MAX_JSON_DEPTH:
-                raise ValueError(f"RPC event exceeds JSON depth {_MAX_JSON_DEPTH}")
-            if isinstance(node, dict):
-                stack.extend((child, depth + 1) for child in node.values())
-            elif isinstance(node, list):
-                stack.extend((child, depth + 1) for child in node)
-        return value
+        return _bound_json_structure(value, label="RPC event")
 
 
 class TraceRpcClosed(_TraceModel):
@@ -179,10 +197,25 @@ TraceInputAdapter: TypeAdapter[TraceInput] = TypeAdapter(TraceInput)
 
 
 class TraceExpectedCommand(_TraceModel):
-    model_config = ConfigDict(extra="allow", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="allow",
+        frozen=True,
+        strict=True,
+        json_schema_extra={
+            "x-wisp-max-depth": _MAX_JSON_DEPTH,
+            "x-wisp-max-nodes": _MAX_JSON_NODES,
+        },
+    )
+
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
 
     type: str = Field(min_length=1, max_length=64)
     id: str | None = Field(default=None, min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_command_payload(cls, value: Any) -> Any:
+        return _bound_json_structure(value, label="expected command")
 
 
 class TraceExpected(_TraceModel):

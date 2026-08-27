@@ -121,6 +121,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self._streaming = False
         super().end_token_stream()
 
+    def end_token_stream(self) -> None:
+        self._streaming = False
+        super().end_token_stream()
+
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, MessageCompleted):
             self.retained_text = event.content

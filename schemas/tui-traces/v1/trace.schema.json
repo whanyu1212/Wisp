@@ -87,7 +87,9 @@
       "type": "object"
     },
     "TraceExpectedCommand": {
-      "additionalProperties": true,
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
       "properties": {
         "id": {
           "anyOf": [
@@ -115,7 +117,9 @@
         "type"
       ],
       "title": "TraceExpectedCommand",
-      "type": "object"
+      "type": "object",
+      "x-wisp-max-depth": 8,
+      "x-wisp-max-nodes": 1024
     },
     "TraceInitialState": {
       "additionalProperties": false,
