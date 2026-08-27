@@ -7,10 +7,11 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
+from wisp.agent.mode import AgentMode
 from wisp.events import KnownWispEventAdapter
 from wisp.rpc.commands import ApprovalScope
 from wisp.tui.input_types import SubmissionId, new_submission_id
@@ -36,11 +37,16 @@ __all__ = [
     "DeterministicIdFactory",
     "RecordingTraceRenderer",
     "TraceController",
+    "TraceReplayError",
     "TraceRunResult",
     "TraceRunner",
     "load_trace",
     "run_trace",
 ]
+
+
+class TraceReplayError(RuntimeError):
+    """A trace action cannot be applied to the live shell state."""
 
 
 class DeterministicClock:
@@ -377,7 +383,14 @@ class TraceRunner:
             self.shell.view.queued_follow_ups = v.queued_follow_ups
             self.shell.view.provider = v.provider
             self.shell.view.model = v.model
-            # mode handled via shell.current_mode? Keep view mode separate.
+            # mode and last_session flow through shell-owned state so later
+            # _sync_view() calls keep replaying the seeded values faithfully.
+            if v.mode not in ("build", "plan"):
+                raise TraceReplayError(f"invalid initial view mode: {v.mode!r}")
+            self.shell.current_mode = cast(AgentMode, v.mode)
+            self.shell.view.mode = cast(AgentMode, v.mode)
+            if v.last_session is not None:
+                self.shell.view.last_session = v.last_session
         if trace.initial.interaction is not None:
             inter = trace.initial.interaction
             # Map string status to TuiStatus if possible; fallback to keep.
@@ -423,7 +436,10 @@ class TraceRunner:
                 await self.shell._handle_input_line(_InputLine(text=sub, mode=_InputMode.idle))
             elif inp.type == "local.slash":
                 # For slash commands, synthesize an input line with slash text.
-                slash_text = inp.command
+                # parse_tui_slash_command only recognizes "/"-prefixed text, so
+                # normalize unprefixed names instead of submitting them as prompts.
+                command = inp.command if inp.command.startswith("/") else f"/{inp.command}"
+                slash_text = command
                 if inp.args:
                     slash_text += " " + " ".join(inp.args)
                 await self.shell._handle_input_line(
@@ -432,12 +448,17 @@ class TraceRunner:
             elif inp.type == "local.cancel":
                 await self.shell._handle_input_cancelled(_InputCancelled(mode=_InputMode.idle))
             elif inp.type == "local.approve":
-                # Directly answer pending approval with explicit decision.
+                # The trace encodes the exact request it answers; refuse to
+                # resolve a stale or mis-correlated approval target.
+                approval = self.shell.state.pending_approval
+                if approval is None or approval.call_id != inp.call_id:
+                    pending = approval.call_id if approval is not None else None
+                    raise TraceReplayError(
+                        f"local.approve targets call_id {inp.call_id!r} but {pending!r} is pending"
+                    )
                 scope_val: ApprovalScope | None = None
-                if inp.scope is not None:
-                    # Keep only allowed scopes.
-                    if inp.scope in {"once", "tool_session", "all_session"}:
-                        scope_val = inp.scope  # type: ignore[assignment]
+                if inp.scope is not None and inp.scope in {"once", "tool_session", "all_session"}:
+                    scope_val = cast(ApprovalScope, inp.scope)
                 await self.shell._answer_pending_approval(
                     "",
                     approved=inp.approved,
@@ -446,6 +467,13 @@ class TraceRunner:
                     exit_after_denial=False,
                 )
             elif inp.type == "local.trust":
+                trust = self.shell.state.pending_trust
+                if trust is None or trust.request_id != inp.request_id:
+                    pending_id = trust.request_id if trust is not None else None
+                    raise TraceReplayError(
+                        f"local.trust targets request_id {inp.request_id!r} but "
+                        f"{pending_id!r} is pending"
+                    )
                 await self.shell._answer_pending_trust(
                     "",
                     trusted=inp.trusted,

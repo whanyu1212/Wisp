@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
 from jsonschema import Draft202012Validator
 
-from wisp.tui.trace_runner import load_trace, run_trace
+from wisp.tui.trace_runner import TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
     DEFAULT_TRACE_SCHEMA_DIRECTORY,
     TraceFileAdapter,
@@ -78,14 +79,14 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
         trace = load_trace(path)
         result = await run_trace(trace)
 
-        # Structural diff for commands (ordered).
-        actual_cmds = [(c["type"], c["id"]) for c in result.commands]
-        expected_cmds = [(c.type, c.id) for c in trace.expected.commands]
-        assert actual_cmds == expected_cmds, (
-            f"command mismatch in {path.name}\n"
-            f"  actual:   {actual_cmds}\n"
-            f"  expected: {expected_cmds}"
-        )
+        # Compare every expected payload field, not just (type, id): actual
+        # commands may carry more detail, but each expected key/value pair must
+        # match exactly so wrong call_id/scope/reason/prompt regressions fail.
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        expected_commands: list[dict[str, object]] = list(raw["expected"]["commands"])
+        fail_details = _diff_commands(result.commands, expected_commands)
+        if fail_details:
+            pytest.fail(f"command mismatch in {path.name}\n{fail_details}")
 
         assert result.view == trace.expected.view, (
             f"view mismatch in {path.name}\n"
@@ -103,7 +104,27 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
             f"  expected: {trace.expected.retained_text!r}"
         )
 
-    anyio.run(run)
+
+def _diff_commands(actual: tuple[dict[str, Any], ...], expected: list[dict[str, object]]) -> str:
+    """Return a structural diff string when outbound commands diverge."""
+
+    if len(actual) != len(expected):
+        return (
+            f"  count differs:\n"
+            f"    actual ({len(actual)}):   {[(c.get('type'), c.get('id')) for c in actual]}\n"
+            f"    expected ({len(expected)}): "
+            f"{[(c.get('type'), c.get('id')) for c in expected]}"
+        )
+    lines: list[str] = []
+    for index, expected_command in enumerate(expected):
+        actual_command = actual[index]
+        for key, value in expected_command.items():
+            if actual_command.get(key) != value:
+                lines.append(
+                    f"  command[{index}] {actual_command.get('type')} field {key!r}: "
+                    f"actual {actual_command.get(key)!r} != expected {value!r}"
+                )
+    return "\n".join(lines)
 
 
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
@@ -154,3 +175,155 @@ def test_id_factory_is_deterministic_per_prefix() -> None:
     assert factory.next("prompt") == "prompt-2"
     assert factory.next("approval") == "approval-1"
     assert factory.next("prompt") == "prompt-3"
+
+
+def _inline_trace(
+    name: str, inputs: list[dict[str, Any]], initial: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "name": name,
+        "description": f"synthetic trace for {name}",
+        "initial": initial,
+        "inputs": inputs,
+        "expected": {
+            "commands": [],
+            "view": {
+                "status": "idle",
+                "input_mode": "idle",
+                "input_ready": True,
+                "queued_steering": 0,
+                "queued_follow_ups": 0,
+                "provider": "fake",
+                "model": None,
+                "mode": "build",
+                "last_session": None,
+            },
+            "interaction": {
+                "status": "idle",
+                "current_command_id": None,
+                "current_command_type": None,
+                "pending_approval_call_id": None,
+                "pending_trust_request_id": None,
+                "cancel_requested": False,
+                "exit_requested": False,
+            },
+            "retained_text": None,
+        },
+    }
+
+
+def _default_initial() -> dict[str, Any]:
+    return {"provider": "fake", "model": None, "effort": None, "view": None, "interaction": None}
+
+
+def test_unprefixed_slash_command_is_normalized_before_parsing() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "slash_normalization",
+            [{"type": "local.slash", "command": "mcp", "args": [], "clock_ms": 0}],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+
+        command_types = [command["type"] for command in result.commands]
+        assert command_types == ["get_mcp_status"], (
+            f"unprefixed slash must dispatch the slash command, got {command_types}"
+        )
+
+    anyio.run(run)
+
+
+def test_local_approve_with_wrong_call_id_is_rejected() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "wrong_approval_target",
+            [
+                {"type": "local.submit", "content": "read file", "clock_ms": 0},
+                {
+                    "type": "rpc.event",
+                    "event": {
+                        "type": "tool.approval.requested",
+                        "call_id": "call-1",
+                        "name": "read",
+                        "arguments": {},
+                        "safety": "read",
+                    },
+                    "clock_ms": 10,
+                },
+                {
+                    "type": "local.approve",
+                    "call_id": "call-wrong",
+                    "approved": False,
+                    "clock_ms": 20,
+                },
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        with pytest.raises(TraceReplayError, match="call-wrong"):
+            await run_trace(trace)
+
+    anyio.run(run)
+
+
+def test_local_trust_with_wrong_request_id_is_rejected() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "wrong_trust_target",
+            [
+                {
+                    "type": "rpc.event",
+                    "event": {
+                        "type": "trust.requested",
+                        "request_id": "trust-1",
+                        "project_path": "/tmp/proj",
+                    },
+                    "clock_ms": 0,
+                },
+                {
+                    "type": "local.trust",
+                    "request_id": "trust-wrong",
+                    "trusted": True,
+                    "clock_ms": 10,
+                },
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        with pytest.raises(TraceReplayError, match="trust-wrong"):
+            await run_trace(trace)
+
+    anyio.run(run)
+
+
+def test_initial_view_mode_and_last_session_are_applied() -> None:
+    async def run() -> None:
+        initial = _default_initial()
+        initial["view"] = {
+            "status": "idle",
+            "input_mode": "idle",
+            "input_ready": True,
+            "queued_steering": 0,
+            "queued_follow_ups": 0,
+            "provider": "fake",
+            "model": None,
+            "mode": "plan",
+            "last_session": "session-1",
+        }
+        data = _inline_trace(
+            "seeded_view",
+            [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+            initial,
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+
+        assert result.view.mode == "plan"
+        assert result.view.last_session == "session-1"
+        # The run itself still advances status through prompt submission.
+        first_prompt = result.commands[0]
+        assert first_prompt["type"] == "prompt"
+
+    anyio.run(run)

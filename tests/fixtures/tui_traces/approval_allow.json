@@ -79,11 +79,16 @@
     "commands": [
       {
         "type": "prompt",
-        "id": "prompt-1"
+        "id": "prompt-1",
+        "prompt": "read file"
       },
       {
         "type": "approval",
-        "id": "approval-1"
+        "id": "approval-1",
+        "call_id": "call-1",
+        "approved": true,
+        "reason": null,
+        "scope": null
       },
       {
         "type": "get_session_stats",
