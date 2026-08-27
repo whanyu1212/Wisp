@@ -13,7 +13,7 @@ from typing import Any, cast
 import anyio
 
 from wisp.agent.mode import AgentMode
-from wisp.events import KnownWispEventAdapter
+from wisp.events import KnownWispEventAdapter, ToolApprovalRequested, TrustRequested
 from wisp.rpc.commands import ApprovalScope
 from wisp.tui.input_types import SubmissionId, new_submission_id
 from wisp.tui.rendering import LineTuiRenderer
@@ -274,7 +274,7 @@ class TraceController:
         effort: str | None = None,
         clear_effort: bool = False,
         auto_compaction_enabled: bool | None = None,
-        mode: Any | None = None,
+        mode: AgentMode | None = None,
         command_id: str | None = None,
     ) -> str:
         cid = command_id or self._next_id("configure")
@@ -285,6 +285,9 @@ class TraceController:
                 "provider": provider,
                 "model": model,
                 "effort": effort,
+                "clear_effort": clear_effort,
+                "auto_compaction_enabled": auto_compaction_enabled,
+                "mode": mode,
             }
         )
         return cid
@@ -404,7 +407,20 @@ class TraceRunner:
                 # Literal narrow: prompt|init|compact; keep if matches else None.
                 if inter.current_command_type in {"prompt", "init", "compact"}:
                     self.shell.state.current_command_type = inter.current_command_type  # type: ignore[assignment]
-            # Pending approval/trust are set via rpc events, not initial mock.
+            # Seed matching pending requests so a following local.approve/
+            # local.trust resolves the exact encoded target instead of failing.
+            if inter.pending_approval_call_id is not None:
+                self.shell.state.pending_approval = ToolApprovalRequested(
+                    call_id=inter.pending_approval_call_id,
+                    name="trace",
+                    arguments={},
+                    safety="read",
+                )
+            if inter.pending_trust_request_id is not None:
+                self.shell.state.pending_trust = TrustRequested(
+                    request_id=inter.pending_trust_request_id,
+                    project_path=Path("/workspace"),
+                )
             self.shell.state.cancel_requested = inter.cancel_requested
             self.shell.state.exit_requested = inter.exit_requested
 
@@ -418,14 +434,14 @@ class TraceRunner:
             self.shell.state.status = TuiStatus.idle
             self.shell._sync_view()
 
-        for inp in self.trace.inputs:
+        inputs = list(self.trace.inputs)
+        for index, inp in enumerate(inputs):
             clock_ms: int = int(getattr(inp, "clock_ms", 0))
             self.clock.advance_to(clock_ms)
 
             if inp.type == "local.submit":
                 # Build a submission with deterministic id.
                 sid = new_submission_id()
-                # Use the input's content; queue_kind defaults to auto.
                 from wisp.tui.input_types import TuiSubmission
 
                 sub = TuiSubmission(
@@ -434,7 +450,9 @@ class TraceRunner:
                     display=inp.content,
                     input_mode="idle",
                 )
-                await self.shell._handle_input_line(_InputLine(text=sub, mode=_InputMode.idle))
+                should_exit = await self.shell._handle_input_line(
+                    _InputLine(text=sub, mode=_InputMode.idle)
+                )
             elif inp.type == "local.slash":
                 # For slash commands, synthesize an input line with slash text.
                 # parse_tui_slash_command only recognizes "/"-prefixed text, so
@@ -445,11 +463,13 @@ class TraceRunner:
                     # shlex-quote each token so argument boundaries survive the
                     # shell's shlex.split re-tokenization unchanged.
                     slash_text += " " + " ".join(shlex.quote(arg) for arg in inp.args)
-                await self.shell._handle_input_line(
+                should_exit = await self.shell._handle_input_line(
                     _InputLine(text=slash_text, mode=_InputMode.idle)
                 )
             elif inp.type == "local.cancel":
-                await self.shell._handle_input_cancelled(_InputCancelled(mode=_InputMode.idle))
+                should_exit = await self.shell._handle_input_cancelled(
+                    _InputCancelled(mode=_InputMode.idle)
+                )
             elif inp.type == "local.approve":
                 # The trace encodes the exact request it answers; refuse to
                 # resolve a stale or mis-correlated approval target.
@@ -460,7 +480,7 @@ class TraceRunner:
                         f"local.approve targets call_id {inp.call_id!r} but {pending!r} is pending"
                     )
                 scope_val: ApprovalScope | None = inp.scope
-                await self.shell._answer_pending_approval(
+                should_exit = await self.shell._answer_pending_approval(
                     "",
                     approved=inp.approved,
                     reason=inp.reason,
@@ -475,20 +495,30 @@ class TraceRunner:
                         f"local.trust targets request_id {inp.request_id!r} but "
                         f"{pending_id!r} is pending"
                     )
-                await self.shell._answer_pending_trust(
+                should_exit = await self.shell._answer_pending_trust(
                     "",
                     trusted=inp.trusted,
                     reason=None if inp.trusted else "Denied from trace",
                     transient=bool(inp.transient) if not inp.trusted else False,
                 )
             elif inp.type == "rpc.event":
-                # Validate and dispatch typed event.
                 event = KnownWispEventAdapter.validate_python(inp.event)
-                await self.shell._handle_rpc_event(event)
+                should_exit = await self.shell._handle_rpc_event(event)
             elif inp.type == "rpc.closed":
-                self.shell._handle_rpc_closed(_RpcEventsClosed(error=inp.error))
-            else:
+                should_exit = self.shell._handle_rpc_closed(_RpcEventsClosed(error=inp.error))
+            else:  # pragma: no cover - schema discriminator prevents this
                 raise RuntimeError(f"unknown trace input type: {inp.type}")
+
+            # The live loop terminates on the shell's exit signal; honor it by
+            # stopping replay and rejecting impossible trailing transitions.
+            if should_exit:
+                remaining = len(inputs) - index - 1
+                if remaining:
+                    raise TraceReplayError(
+                        f"{remaining} trailing input(s) after the shell reported an exit; "
+                        "the live loop would have terminated before consuming them"
+                    )
+                break
 
         view = _view_projection(self.shell)
         interaction = _interaction_projection(self.shell)

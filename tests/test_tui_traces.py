@@ -264,6 +264,88 @@ def test_slash_arguments_keep_token_boundaries() -> None:
     anyio.run(run)
 
 
+def test_replay_stops_at_exit_and_rejects_trailing_inputs() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "trailing_after_exit",
+            [
+                {"type": "local.submit", "content": "one", "clock_ms": 0},
+                {"type": "rpc.closed", "error": None, "clock_ms": 10},
+                {"type": "local.submit", "content": "two", "clock_ms": 20},
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        with pytest.raises(TraceReplayError, match="trailing input"):
+            await run_trace(trace)
+
+    anyio.run(run)
+
+
+def test_initial_pending_requests_are_seeded_and_resolvable() -> None:
+    async def run() -> None:
+        initial = _default_initial()
+        initial["interaction"] = {
+            "status": "waiting_for_approval",
+            "current_command_id": "prompt-1",
+            "current_command_type": "prompt",
+            "pending_approval_call_id": "call-seed",
+            "pending_trust_request_id": None,
+            "cancel_requested": False,
+            "exit_requested": False,
+        }
+        data = _inline_trace(
+            "seeded_pending",
+            [
+                {
+                    "type": "local.approve",
+                    "call_id": "call-seed",
+                    "approved": False,
+                    "clock_ms": 0,
+                }
+            ],
+            initial,
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+
+        approvals = [command for command in result.commands if command["type"] == "approval"]
+        assert len(approvals) == 1
+        assert approvals[0]["call_id"] == "call-seed"
+        assert approvals[0]["approved"] is False
+
+    anyio.run(run)
+
+
+def test_configure_recorder_captures_every_argument() -> None:
+    from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
+
+    async def run() -> None:
+        controller = TraceController(DeterministicIdFactory())
+        await controller.configure(
+            provider="fake-provider",
+            model="fake-model",
+            effort="high",
+            clear_effort=True,
+            auto_compaction_enabled=False,
+            mode="plan",
+        )
+        assert controller.commands == [
+            {
+                "type": "configure",
+                "id": "configure-1",
+                "provider": "fake-provider",
+                "model": "fake-model",
+                "effort": "high",
+                "clear_effort": True,
+                "auto_compaction_enabled": False,
+                "mode": "plan",
+            }
+        ]
+
+    anyio.run(run)
+
+
 def test_local_approve_with_wrong_call_id_is_rejected() -> None:
     async def run() -> None:
         data = _inline_trace(
