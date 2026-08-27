@@ -10,6 +10,7 @@ mod event_projection;
 pub use event_projection::EventProjectionError;
 
 const DEFAULT_DENIAL_REASON: &str = "Denied from TUI";
+const RPC_CANCELLED_PREFIX: &str = "RPC command cancelled:";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AgentMode {
@@ -404,7 +405,7 @@ fn handle_backend_event(
             command_id,
             command_type,
             ok,
-            ..
+            error,
         } => {
             let matches_current = state.current_command.as_ref().is_some_and(|current| {
                 current.id == command_id && current.command_type.as_str() == command_type
@@ -420,7 +421,11 @@ fn handle_backend_event(
             state.stream_turn = None;
             state.streaming_text = false;
             state.interaction_status = InteractionStatus::Idle;
-            state.view_status = if ok {
+            let was_cancelled = !ok
+                && error
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
+            state.view_status = if ok || was_cancelled {
                 ViewStatus::Idle
             } else {
                 ViewStatus::Error
@@ -541,6 +546,40 @@ mod tests {
         .unwrap();
         assert_eq!(state.view_status, ViewStatus::Error);
         assert_eq!(state.interaction_status, InteractionStatus::Idle);
+        assert!(state.current_command.is_none());
+        assert_eq!(
+            command_value(&effects[0]).unwrap()["type"],
+            "get_session_stats"
+        );
+    }
+
+    #[test]
+    fn cancelled_matching_completion_returns_to_idle() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.cancel_requested = true;
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "prompt-1".into(),
+                command_type: "prompt".into(),
+                ok: false,
+                error: Some("RPC command cancelled: requested by user".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.view_status, ViewStatus::Idle);
+        assert_eq!(state.interaction_status, InteractionStatus::Idle);
+        assert!(!state.cancel_requested);
         assert!(state.current_command.is_none());
         assert_eq!(
             command_value(&effects[0]).unwrap()["type"],
