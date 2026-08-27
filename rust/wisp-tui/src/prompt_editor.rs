@@ -257,7 +257,11 @@ fn next_grapheme_boundary(text: &str, cursor: usize) -> Option<usize> {
 }
 
 fn display_width(text: &str) -> usize {
-    let mut column = 0;
+    display_width_at_column(text, 0)
+}
+
+fn display_width_at_column(text: &str, start_column: usize) -> usize {
+    let mut column = start_column;
     for grapheme in text.graphemes(true) {
         if grapheme == "\t" {
             column += TAB_WIDTH - (column % TAB_WIDTH);
@@ -265,13 +269,13 @@ fn display_width(text: &str) -> usize {
             column += grapheme.width();
         }
     }
-    column
+    column - start_column
 }
 
 fn byte_at_display_column(text: &str, target: usize) -> usize {
     let mut width = 0;
     for (index, grapheme) in text.grapheme_indices(true) {
-        let next = width + display_width(grapheme);
+        let next = width + display_width_at_column(grapheme, width);
         if next > target {
             return index;
         }
@@ -339,6 +343,16 @@ mod tests {
         assert_eq!((editor.cursor_row(), editor.cursor_column()), (1, 1));
         editor.handle_key(key(KeyCode::Up));
         assert_eq!((editor.cursor_row(), editor.cursor_column()), (0, 5));
+    }
+
+    #[test]
+    fn vertical_movement_uses_current_column_for_tab_stops() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("xxxx\na\tb");
+        editor.cursor = "xxxx".len();
+        editor.handle_key(key(KeyCode::Down));
+        assert_eq!((editor.cursor_row(), editor.cursor_column()), (1, 4));
+        assert_eq!(editor.cursor, "xxxx\na\t".len());
     }
 
     #[test]

@@ -267,21 +267,29 @@ fn sanitize_for_terminal(content: &str) -> String {
                 column += spaces;
             }
             _ => {
-                for character in grapheme.chars() {
-                    if character.is_control() {
-                        safe.push('�');
-                        column += 1;
-                    } else {
-                        safe.push(character);
+                if grapheme.chars().any(terminal_control_character) {
+                    let mut safe_grapheme = String::with_capacity(grapheme.len());
+                    for character in grapheme.chars() {
+                        if terminal_control_character(character) {
+                            safe_grapheme.push('�');
+                        } else {
+                            safe_grapheme.push(character);
+                        }
                     }
-                }
-                if !grapheme.chars().any(char::is_control) {
+                    column += safe_grapheme.as_str().width();
+                    safe.push_str(&safe_grapheme);
+                } else {
+                    safe.push_str(grapheme);
                     column += grapheme.width();
                 }
             }
         }
     }
     safe
+}
+
+fn terminal_control_character(character: char) -> bool {
+    character.is_control() || crate::is_bidi_control(character)
 }
 
 #[cfg(test)]
@@ -358,10 +366,14 @@ mod tests {
     #[test]
     fn terminal_controls_are_rendered_inertly() {
         let mut state = UiState::unconfigured();
-        state.last_submitted_prompt = Some("safe\u{1b}[2Jtail".into());
+        state.last_submitted_prompt = Some("safe\u{1b}[2Jtail\u{202e}spoof".into());
+        state.retained_text = Some("answer\u{2066}tail".into());
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!rendered.contains('\u{1b}'));
-        assert!(rendered.contains("safe�[2Jtail"));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains('\u{2066}'));
+        assert!(rendered.contains("safe�[2Jtail�spoof"));
+        assert!(rendered.contains("answer�tail"));
     }
 
     #[test]
