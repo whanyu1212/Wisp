@@ -97,7 +97,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.notices: list[str] = []
         self.errors: list[str] = []
         self.tokens: list[str] = []
-        self.completed_responses: list[str] = []
+        self.retained_text: str | None = None
+        self._streaming = False
 
     def view_updated(self, snapshot: Any) -> None:
         self.view_snapshots.append(snapshot)
@@ -110,14 +111,20 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def token_delta(self, delta: str) -> None:
         self.tokens.append(delta)
+        if not self._streaming:
+            self.retained_text = ""
+            self._streaming = True
+        self.retained_text = (self.retained_text or "") + delta
 
     def end_token_stream_with_content(self, content: str) -> None:
-        self.completed_responses.append(content)
+        self.retained_text = content
+        self._streaming = False
         super().end_token_stream()
 
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, MessageCompleted):
-            self.completed_responses.append(event.content)
+            self.retained_text = event.content
+            self._streaming = False
         super().event(event)
 
 
@@ -542,15 +549,11 @@ class TraceRunner:
 
         view = _view_projection(self.shell)
         interaction = _interaction_projection(self.shell)
-        retained = next(
-            reversed(self.renderer.completed_responses),
-            "".join(self.renderer.tokens) if self.renderer.tokens else None,
-        )
         return TraceRunResult(
             commands=tuple(self.controller.commands),
             view=view,
             interaction=interaction,
-            retained_text=retained,
+            retained_text=self.renderer.retained_text,
             notices=tuple(self.renderer.notices),
             errors=tuple(self.renderer.errors),
             tokens=tuple(self.renderer.tokens),

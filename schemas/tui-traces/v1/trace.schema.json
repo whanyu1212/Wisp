@@ -1,5 +1,52 @@
 {
   "$defs": {
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128
+      },
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 64,
+          "propertyNames": {
+            "maxLength": 128
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "TraceExpected": {
       "additionalProperties": false,
       "properties": {
@@ -481,12 +528,12 @@
           "type": "integer"
         },
         "event": {
-          "additionalProperties": true,
+          "$ref": "#/$defs/JsonObject",
           "required": [
             "type"
           ],
-          "title": "Event",
-          "type": "object"
+          "x-wisp-max-depth": 8,
+          "x-wisp-max-nodes": 1024
         },
         "type": {
           "const": "rpc.event",

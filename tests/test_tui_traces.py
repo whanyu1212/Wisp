@@ -518,6 +518,70 @@ def test_completed_response_content_overrides_streamed_deltas() -> None:
     anyio.run(run)
 
 
+def test_later_partial_response_overrides_older_completion() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "partial_after_completion",
+            [
+                {
+                    "type": "rpc.event",
+                    "event": {
+                        "type": "message.completed",
+                        "turn": 1,
+                        "content": "older response",
+                        "finish_reason": "stop",
+                    },
+                    "clock_ms": 0,
+                },
+                {
+                    "type": "rpc.event",
+                    "event": {"type": "message.delta", "turn": 2, "delta": "new partial"},
+                    "clock_ms": 5,
+                },
+                {"type": "rpc.closed", "error": "stream lost", "clock_ms": 10},
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+        assert result.retained_text == "new partial"
+
+    anyio.run(run)
+
+
+def test_rpc_event_payloads_are_bounded() -> None:
+    oversized = _inline_trace(
+        "oversized_rpc_event",
+        [
+            {
+                "type": "rpc.event",
+                "event": {"type": "error", "message": "x" * 4001},
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+    with pytest.raises(ValueError, match="event"):
+        TraceFileAdapter.validate_python(oversized)
+
+    nested: object = "value"
+    for _ in range(8):
+        nested = [nested]
+    too_deep = _inline_trace(
+        "deep_rpc_event",
+        [
+            {
+                "type": "rpc.event",
+                "event": {"type": "error", "nested": nested},
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+    with pytest.raises(ValueError, match="depth 8"):
+        TraceFileAdapter.validate_python(too_deep)
+
+
 def test_local_approve_with_wrong_call_id_is_rejected() -> None:
     async def run() -> None:
         data = _inline_trace(
