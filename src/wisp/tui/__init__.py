@@ -1,6 +1,9 @@
 """Minimal terminal UI shell for Wisp."""
 
-from wisp.tui.app import run_tui
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalSkillInvocation,
@@ -26,6 +29,19 @@ from wisp.tui.rendering import (
 )
 from wisp.tui.shell import TuiShell
 from wisp.tui.state import TuiExitReason, TuiInteractionState, TuiStatus, TuiViewState
+
+if TYPE_CHECKING:
+    from wisp.tui.app import run_tui
+
+
+def __getattr__(name: str) -> object:
+    if name != "run_tui":
+        raise AttributeError(name)
+    from wisp.tui.app import run_tui
+
+    globals()[name] = run_tui
+    return run_tui
+
 
 __all__ = [
     "FullscreenTuiRenderer",

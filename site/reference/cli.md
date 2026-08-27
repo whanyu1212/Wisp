@@ -13,11 +13,12 @@ The `wisp` executable selects an interface from its arguments and terminal state
 |---|---|
 | `wisp` | Launch the Textual TUI when stdin and stdout are interactive |
 | `wisp tui` | Launch the dedicated Textual TUI command |
+| `wisp tui --renderer rust` | Launch the experimental Rust transport-diagnostic scaffold |
 | `wisp tui --line` | Launch the simple line renderer |
 | `wisp -p "PROMPT"` | Run one prompt and print assistant text |
 | `wisp -p "PROMPT" --mode json` | Emit one typed `WispEvent` JSON object per line |
 | `wisp --mode rpc` | Start the long-lived JSONL RPC command host |
-| `wisp --mode tui --tui-renderer RENDERER` | Compatibility TUI entry point (`line`, `fullscreen`, or `textual`) |
+| `wisp --mode tui --tui-renderer RENDERER` | Compatibility TUI entry point (`line`, `fullscreen`, `textual`, or `rust`) |
 
 A prompt is invalid with `--mode rpc` or `--mode tui`. A non-interactive invocation with neither a
 prompt nor an explicit RPC/TUI mode prints help and exits.
@@ -36,7 +37,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
 | `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
-| `--tui-renderer line\|fullscreen\|textual` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
+| `--tui-renderer line\|fullscreen\|textual\|rust` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
 | `--no-synchronized-output` | Disable capability-gated synchronized frames in the Textual TUI | — |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
@@ -65,6 +66,7 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 | Option | Meaning |
 |---|---|
 | `--line` | Use the simple line renderer instead of Textual |
+| `--renderer textual\|rust\|fullscreen\|line` | Select the terminal frontend; defaults to Textual |
 | `--no-synchronized-output` | Disable capability-gated synchronized frames in Textual |
 | `--session-dir PATH` | Override the JSONL session directory |
 | `--auth-file PATH` | Override the provider auth file |
@@ -79,6 +81,16 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 Provider and model defaults for the dedicated command come from configuration and
 `WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
+
+`rust` is an experimental, macOS/Linux-only transport scaffold, not a prompt-capable replacement for
+Textual. It requires the Python package version, Rust crate version, live RPC v2, and event schema v34
+to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls back to Textual when
+the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
+do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)
+for source use.
+
+`WISP_TUI_RENDERER` participates in top-level TUI selection, including bare interactive `wisp` and
+the compatibility `--mode tui` form. The dedicated `wisp tui` command uses its `--renderer` option.
 
 ## Maintenance and inspection commands
 

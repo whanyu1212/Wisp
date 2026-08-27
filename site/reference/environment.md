@@ -9,7 +9,8 @@ title: Environment variables
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
-| `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
+| `WISP_TUI_RENDERER` | TUI renderer for top-level TUI selection: `line`, `fullscreen`, `textual`, or experimental `rust` |
+| `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used only when the Rust renderer is selected |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
 | `WISP_OPENAI_COMPATIBLE_CONFIG` | JSON object configuring one OpenAI-compatible endpoint; overrides the user-settings `openai_compatible` object |
@@ -51,3 +52,12 @@ project files, and `WISP_TRUST` is never persisted — see
 `WISP_MODE` applies only when neither a mode nor a prompt is supplied on the command line. For
 example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
 `wisp -p "hello" --mode json` for a machine-readable prompt run.
+
+`WISP_TUI_RENDERER=rust` opts a top-level TUI invocation into the experimental macOS/Linux transport
+scaffold. An explicit `--tui-renderer` takes precedence. The dedicated `wisp tui` command instead
+uses `--renderer rust`. Rust selection never falls back to Textual on failure.
+
+`WISP_RUST_TUI_BINARY` is a source-development override, not a general executable search path. It
+must name an existing, executable absolute path and is removed from the environment passed to the
+Python RPC backend. Current Python distributions do not include a Rust TUI binary; see
+[Development setup](../contributing/development#rust-tui-scaffold).

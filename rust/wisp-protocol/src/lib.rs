@@ -12,6 +12,17 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
+/// The canonical manifest embedded alongside the generated live RPC v2 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v2/manifest.json");
+/// The only live RPC protocol version implemented by these models.
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 2;
+/// The current Wisp event schema version.
+pub const EVENT_SCHEMA_VERSION: u32 = 34;
+/// The fixed maximum payload size for either handshake frame.
+pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
+/// The schema-level ceiling for negotiated application frames.
+pub const MAX_APPLICATION_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct ProtocolDecodeError(String);
 
@@ -395,6 +406,26 @@ pub mod handshake_request {
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
 
+    impl RpcHandshakeRequest {
+        /// Construct the frontend's current, capability-free live RPC request.
+        pub fn current(
+            frontend_name: &str,
+            frontend_version: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "rpc.handshake.request",
+                "frontend_name": frontend_name,
+                "frontend_version": frontend_version,
+                "min_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
+                "max_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
+                "min_event_schema_version": super::EVENT_SCHEMA_VERSION,
+                "max_event_schema_version": super::EVENT_SCHEMA_VERSION,
+                "supported_capabilities": [],
+                "required_capabilities": []
+            }))
+        }
+    }
+
     pub fn deserialize(
         value: serde_json::Value,
     ) -> Result<RpcHandshakeRequest, super::ProtocolDecodeError> {
@@ -409,6 +440,51 @@ pub mod handshake_response {
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
+
+    impl RpcHandshakeResponse {
+        fn wire_value(&self) -> serde_json::Value {
+            serde_json::to_value(&self.0)
+                .expect("validated generated handshake values must serialize")
+        }
+
+        /// Return the backend package version reported by either outcome.
+        pub fn backend_package_version(&self) -> String {
+            self.wire_value()["backend_package_version"]
+                .as_str()
+                .expect("validated handshake has a backend package version")
+                .to_owned()
+        }
+
+        /// Return the backend's safe rejection code and message, if rejected.
+        pub fn rejection(&self) -> Option<(String, String)> {
+            let value = self.wire_value();
+            (value["type"] == "rpc.handshake.rejected").then(|| {
+                (
+                    value["code"]
+                        .as_str()
+                        .expect("validated rejection has a code")
+                        .to_owned(),
+                    value["message"]
+                        .as_str()
+                        .expect("validated rejection has a message")
+                        .to_owned(),
+                )
+            })
+        }
+
+        /// Return selected protocol, event schema, and directional limits on acceptance.
+        pub fn accepted_contract(&self) -> Option<(u32, u32, usize, usize)> {
+            let value = self.wire_value();
+            (value["type"] == "rpc.handshake.accepted").then(|| {
+                (
+                    value["protocol_version"].as_u64().unwrap() as u32,
+                    value["event_schema_version"].as_u64().unwrap() as u32,
+                    value["limits"]["max_client_frame_bytes"].as_u64().unwrap() as usize,
+                    value["limits"]["max_server_frame_bytes"].as_u64().unwrap() as usize,
+                )
+            })
+        }
+    }
 
     pub fn deserialize(
         value: serde_json::Value,
@@ -428,6 +504,13 @@ pub mod commands {
         generated::WispTypedClientRpcCommands
     );
 
+    impl WispTypedClientRpcCommands {
+        /// Construct the typed command used to request graceful backend shutdown.
+        pub fn shutdown(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "shutdown", "id": id}))
+        }
+    }
+
     pub fn deserialize(
         value: serde_json::Value,
     ) -> Result<WispTypedClientRpcCommands, super::ProtocolDecodeError> {
@@ -444,6 +527,62 @@ pub mod events {
         WispCurrentLiveEventOutput,
         generated::WispCurrentLiveEventOutput
     );
+
+    /// Terminal result projected from a validated `rpc.command.finished` event.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum CommandFinishedOutcome {
+        Succeeded,
+        Failed { error: Option<String> },
+    }
+
+    impl WispCurrentLiveEventOutput {
+        fn wire_value(&self) -> serde_json::Value {
+            serde_json::to_value(&self.0).expect("validated generated events must serialize")
+        }
+
+        /// Return the stable event discriminator for diagnostic display.
+        pub fn event_type(&self) -> String {
+            self.wire_value()["type"]
+                .as_str()
+                .expect("validated event has a discriminator")
+                .to_owned()
+        }
+
+        /// Return the validated event schema version carried by this event.
+        pub fn schema_version(&self) -> u32 {
+            self.wire_value()["schema_version"]
+                .as_u64()
+                .expect("validated event has a schema version") as u32
+        }
+
+        /// Project the terminal outcome for one exact command, if this is its event.
+        pub fn command_finished_outcome(
+            &self,
+            id: &str,
+            command_type: &str,
+        ) -> Option<CommandFinishedOutcome> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.command.finished"
+                || value["command_id"] != id
+                || value["command_type"] != command_type
+            {
+                return None;
+            }
+            Some(if value["ok"] == true {
+                CommandFinishedOutcome::Succeeded
+            } else {
+                CommandFinishedOutcome::Failed {
+                    error: value["error"].as_str().map(str::to_owned),
+                }
+            })
+        }
+
+        /// Check for the successful terminal event of one typed command.
+        pub fn successful_command_finished(&self, id: &str, command_type: &str) -> bool {
+            self.command_finished_outcome(id, command_type)
+                == Some(CommandFinishedOutcome::Succeeded)
+        }
+    }
 
     pub fn deserialize(
         value: serde_json::Value,

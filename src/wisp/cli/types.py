@@ -17,6 +17,15 @@ class OutputMode(StrEnum):
     tui = "tui"
 
 
+class TuiFrontendKind(StrEnum):
+    """Terminal frontends selectable from the command line."""
+
+    line = "line"
+    fullscreen = "fullscreen"
+    textual = "textual"
+    rust = "rust"
+
+
 # Compatibility name retained for CLI renderers.  RPC execution uses the
 # transport-neutral class directly.
 _JsonOutputModeError = RpcOutputAlreadyReportedError
