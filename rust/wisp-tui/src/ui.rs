@@ -322,6 +322,38 @@ fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str 
     }
     let width = width.max(1);
     let max_lines = max_lines.max(1);
+    let candidate_start = transcript_tail_candidate_start(content, width, max_lines);
+    let candidate = &content[candidate_start..];
+    let mut line_starts = vec![candidate_start];
+    let mut column = 0_usize;
+    let mut line_empty = true;
+
+    for (relative_offset, grapheme) in candidate.grapheme_indices(true) {
+        let offset = candidate_start + relative_offset;
+        if is_line_break_grapheme(grapheme) {
+            line_starts.push(offset + grapheme.len());
+            column = 0;
+            line_empty = true;
+            continue;
+        }
+
+        let width_at_column = transcript_tail_grapheme_width(grapheme, column);
+        if !line_empty && column.saturating_add(width_at_column) > width {
+            line_starts.push(offset);
+            column = 0;
+        }
+        column = column.saturating_add(transcript_tail_grapheme_width(grapheme, column));
+        line_empty = false;
+    }
+
+    if line_starts.len() > max_lines {
+        return &content[line_starts[line_starts.len() - max_lines]..];
+    }
+
+    candidate
+}
+
+fn transcript_tail_candidate_start(content: &str, width: usize, max_lines: usize) -> usize {
     let visible_cells = width.saturating_mul(max_lines);
     let mut display_cells = 0_usize;
     let mut hard_lines = 0_usize;
@@ -330,28 +362,35 @@ fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str 
         if is_line_break_grapheme(grapheme) {
             hard_lines += 1;
             if hard_lines >= max_lines {
-                return &content[offset + grapheme.len()..];
+                return offset + grapheme.len();
             }
             continue;
         }
 
         display_cells =
-            display_cells.saturating_add(transcript_tail_grapheme_width(grapheme).max(1));
+            display_cells.saturating_add(transcript_tail_grapheme_min_width(grapheme).max(1));
         if display_cells >= visible_cells {
-            return &content[offset..];
+            return offset;
         }
     }
 
-    content
+    0
 }
 
 fn is_line_break_grapheme(grapheme: &str) -> bool {
     matches!(grapheme, "\n" | "\r\n" | "\r")
 }
 
-fn transcript_tail_grapheme_width(grapheme: &str) -> usize {
+fn transcript_tail_grapheme_min_width(grapheme: &str) -> usize {
     if grapheme == "\t" {
-        return 4;
+        return 1;
+    }
+    transcript_tail_grapheme_width(grapheme, 0)
+}
+
+fn transcript_tail_grapheme_width(grapheme: &str, column: usize) -> usize {
+    if grapheme == "\t" {
+        return 4 - (column % 4);
     }
     if grapheme.chars().any(terminal_control_character) {
         return grapheme
@@ -502,5 +541,14 @@ mod tests {
         assert!(tail.starts_with(family));
         assert!(tail.ends_with("TAIL"));
         assert!(tail.len() > 80 * 5 * 8);
+    }
+
+    #[test]
+    fn transcript_tail_slice_uses_current_column_for_tabs() {
+        let content = format!("HEAD{}TAIL", "abc\t".repeat(200));
+        let tail = transcript_tail_slice(&content, 80, 5);
+        assert!(!tail.contains("HEAD"));
+        assert!(tail.ends_with("TAIL"));
+        assert!(tail.matches("abc\t").count() >= 75);
     }
 }
