@@ -11,6 +11,8 @@ use unicode_width::UnicodeWidthStr;
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 const MAX_COMPOSER_HEIGHT: u16 = 8;
+const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 8;
+const MIN_TRANSCRIPT_TAIL_SCAN_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -105,47 +107,57 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let mut lines = Vec::new();
     let content_width = usize::from(area.width.saturating_sub(2)).max(1);
+    let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
     if let Some(prompt) = state.last_submitted_prompt.as_deref() {
-        lines.push(Line::styled(
-            "you",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ));
-        push_content_lines(&mut lines, prompt, content_width);
-        lines.push(Line::default());
-        lines.push(Line::styled(
-            "wisp",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
+        push_transcript_line(
+            &mut lines,
+            Line::styled(
+                "you",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            visible_lines,
+        );
+        push_content_lines(&mut lines, prompt, content_width, visible_lines);
+        push_transcript_line(&mut lines, Line::default(), visible_lines);
+        push_transcript_line(
+            &mut lines,
+            Line::styled(
+                "wisp",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            visible_lines,
+        );
         match state.retained_text.as_deref() {
             Some(content) if !content.is_empty() => {
-                push_content_lines(&mut lines, content, content_width);
+                push_content_lines(&mut lines, content, content_width, visible_lines);
             }
             _ if state.view_status == ViewStatus::Running => {
-                lines.push(Line::styled(
-                    "working…",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                push_transcript_line(
+                    &mut lines,
+                    Line::styled("working…", Style::default().fg(Color::DarkGray)),
+                    visible_lines,
+                );
             }
-            _ => lines.push(Line::default()),
+            _ => push_transcript_line(&mut lines, Line::default(), visible_lines),
         }
     } else {
-        lines.push(Line::styled(
-            "Type a prompt below to start.",
-            Style::default().fg(Color::DarkGray),
-        ));
+        push_transcript_line(
+            &mut lines,
+            Line::styled(
+                "Type a prompt below to start.",
+                Style::default().fg(Color::DarkGray),
+            ),
+            visible_lines,
+        );
     }
-    let inner_height = area.height.saturating_sub(2);
-    let line_count = lines.len();
     let block = Block::default()
         .title(" conversation ")
         .borders(Borders::ALL);
     let paragraph = Paragraph::new(Text::from(lines)).block(block);
-    let scroll = line_count.saturating_sub(usize::from(inner_height));
-    let paragraph = paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -234,28 +246,34 @@ fn editable(state: &UiState) -> bool {
     state.input_ready && state.current_command.is_none() && state.view_status == ViewStatus::Idle
 }
 
-fn push_content_lines(lines: &mut Vec<Line<'static>>, content: &str, width: usize) {
-    let safe = sanitize_for_terminal(content);
+fn push_content_lines(
+    lines: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    max_lines: usize,
+) {
+    let safe = sanitize_for_terminal(transcript_tail_slice(content, width, max_lines));
     for hard_line in safe.split('\n') {
         let mut rendered = String::new();
         let mut rendered_width = 0_usize;
         for grapheme in hard_line.graphemes(true) {
             let grapheme_width = grapheme.width();
             if !rendered.is_empty() && rendered_width.saturating_add(grapheme_width) > width {
-                lines.push(Line::from(std::mem::take(&mut rendered)));
+                push_transcript_line(lines, Line::from(std::mem::take(&mut rendered)), max_lines);
                 rendered_width = 0;
             }
             rendered.push_str(grapheme);
             rendered_width = rendered_width.saturating_add(grapheme_width);
         }
-        lines.push(Line::from(rendered));
+        push_transcript_line(lines, Line::from(rendered), max_lines);
     }
 }
 
 fn sanitize_for_terminal(content: &str) -> String {
-    let mut safe = String::with_capacity(content.len());
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut safe = String::with_capacity(normalized.len());
     let mut column = 0_usize;
-    for grapheme in content.graphemes(true) {
+    for grapheme in normalized.graphemes(true) {
         match grapheme {
             "\n" => {
                 safe.push('\n');
@@ -290,6 +308,41 @@ fn sanitize_for_terminal(content: &str) -> String {
 
 fn terminal_control_character(character: char) -> bool {
     character.is_control() || crate::is_bidi_control(character)
+}
+
+fn push_transcript_line(lines: &mut Vec<Line<'static>>, line: Line<'static>, max_lines: usize) {
+    lines.push(line);
+    if lines.len() > max_lines {
+        let extra = lines.len() - max_lines;
+        lines.drain(0..extra);
+    }
+}
+
+fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str {
+    if content.is_empty() {
+        return content;
+    }
+    let visible_cells = width.max(1).saturating_mul(max_lines.max(1));
+    let scan_bytes = visible_cells
+        .saturating_mul(TRANSCRIPT_TAIL_BYTES_PER_CELL)
+        .max(MIN_TRANSCRIPT_TAIL_SCAN_BYTES);
+    if content.len() <= scan_bytes {
+        return content;
+    }
+    let mut start = content.len() - scan_bytes;
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut hard_lines = 0_usize;
+    for (offset, character) in content[start..].char_indices().rev() {
+        if character == '\n' {
+            hard_lines += 1;
+            if hard_lines >= max_lines.max(1) {
+                return &content[start + offset + 1..];
+            }
+        }
+    }
+    &content[start..]
 }
 
 #[cfg(test)]
@@ -377,6 +430,14 @@ mod tests {
     }
 
     #[test]
+    fn terminal_sanitizer_preserves_crlf_line_breaks() {
+        assert_eq!(
+            sanitize_for_terminal("alpha\r\nbeta\rgamma"),
+            "alpha\nbeta\ngamma"
+        );
+    }
+
+    #[test]
     fn tiny_terminal_uses_safe_fallback() {
         let state = UiState::unconfigured();
         let rendered = render_to_string(20, 5, &state, &PromptEditor::default());
@@ -398,5 +459,16 @@ mod tests {
         state.retained_text = Some(format!("{}TAIL", "wrapped output ".repeat(80)));
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
+    }
+
+    #[test]
+    fn transcript_tail_slice_bounds_large_unbroken_content() {
+        let content = format!("HEAD{}TAIL", "x".repeat(1024 * 1024));
+        let tail = transcript_tail_slice(&content, 80, 5);
+        assert!(!tail.contains("HEAD"));
+        assert!(tail.ends_with("TAIL"));
+        let scan_bytes =
+            (80 * 5 * TRANSCRIPT_TAIL_BYTES_PER_CELL).max(MIN_TRANSCRIPT_TAIL_SCAN_BYTES);
+        assert!(tail.len() <= scan_bytes + "TAIL".len());
     }
 }

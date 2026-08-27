@@ -265,7 +265,19 @@ impl LiveUi {
         let mut control = LoopControl::Continue;
         for effect in effects {
             match effect {
-                UiEffect::SendCommand(command) => send_value(writer, &command, limit).await?,
+                UiEffect::SendCommand(command) => {
+                    let value = serde_json::to_value(&command)?;
+                    let command_type = value.get("type").and_then(|value| value.as_str());
+                    let payload = Bytes::from(serde_json::to_vec(&value)?);
+                    if payload.len() > limit && command_type == Some("get_session_stats") {
+                        self.notice = Some(format!(
+                            "Skipped session stats refresh because the negotiated {limit}-byte RPC frame limit is too small."
+                        ));
+                        self.render_pending = true;
+                        continue;
+                    }
+                    send_payload(writer, payload, limit).await?;
+                }
                 UiEffect::RequestRender => self.render_pending = true,
                 UiEffect::Exit => control = LoopControl::Exit,
             }
@@ -710,15 +722,20 @@ async fn send_value<T: serde::Serialize>(
     value: &T,
     limit: usize,
 ) -> Result<(), Error> {
-    let payload = serde_json::to_vec(value)?;
+    let payload = Bytes::from(serde_json::to_vec(value)?);
+    send_payload(writer, payload, limit).await
+}
+
+async fn send_payload(
+    writer: &mpsc::Sender<WriterMessage>,
+    payload: Bytes,
+    limit: usize,
+) -> Result<(), Error> {
     if payload.len() > limit {
         return Err(Error::FrameTooLarge { limit });
     }
     writer
-        .send(WriterMessage::Frame {
-            payload: payload.into(),
-            limit,
-        })
+        .send(WriterMessage::Frame { payload, limit })
         .await
         .map_err(|_| Error::WriterStopped)
 }
@@ -1000,6 +1017,7 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reducer::{ActiveCommand, ActiveCommandType};
     use serde_json::json;
     use tokio::io::duplex;
     use wisp_protocol::events;
@@ -1452,6 +1470,50 @@ mod tests {
                 .as_deref()
                 .is_some_and(|notice| notice.contains("negotiated"))
         );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn oversized_automatic_stats_refresh_is_non_terminal() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let stats = WispTypedClientRpcCommands::get_session_stats("get_session_stats-1").unwrap();
+        let encoded_len = serde_json::to_vec(&stats).unwrap().len();
+
+        let control = live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "prompt-1".into(),
+                    command_type: "prompt".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert!(live_ui.state.current_command.is_none());
+        assert_eq!(live_ui.state.view_status, ViewStatus::Idle);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("stats refresh"))
+        );
+        assert!(live_ui.render_pending);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
