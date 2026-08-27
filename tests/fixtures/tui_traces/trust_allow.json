@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "name": "trust_allow",
+  "description": "Trust request is allowed and the run continues.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": null
+  },
+  "inputs": [
+    {
+      "type": "local.submit",
+      "content": "hello",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "trust.requested",
+        "request_id": "trust-req-1",
+        "project_path": "fixture.jsonl"
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "local.trust",
+      "request_id": "trust-req-1",
+      "trusted": true,
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "command_id": "prompt-1",
+        "command_type": "prompt",
+        "ok": true
+      },
+      "clock_ms": 30
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "prompt",
+        "id": "prompt-1",
+        "prompt": "hello"
+      },
+      {
+        "type": "trust",
+        "id": "trust-1",
+        "request_id": "trust-req-1",
+        "trusted": true,
+        "reason": null,
+        "transient": false
+      },
+      {
+        "type": "get_session_stats",
+        "id": "get_session_stats-1"
+      }
+    ],
+    "view": {
+      "status": "idle",
+      "input_mode": "idle",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "idle",
+      "current_command_id": null,
+      "current_command_type": null,
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null
+  }
+}

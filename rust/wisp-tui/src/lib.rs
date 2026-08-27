@@ -19,7 +19,8 @@ use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
 use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
 use reducer::{
-    BackendEvent, CommandIdSource, CommandKind, UiAction, UiEffect, UiState, ViewStatus,
+    BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
+    ViewStatus,
 };
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -35,7 +36,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use ui::ConnectionInfo;
-use wisp_protocol::commands::WispTypedClientRpcCommands;
+use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 use wisp_protocol::events::{CommandFinishedOutcome, WispCurrentLiveEventOutput};
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 use wisp_protocol::handshake_response::RpcHandshakeResponse;
@@ -311,31 +312,45 @@ impl LiveUi {
         self.apply_effects(effects, writer, limit).await
     }
 
-    async fn cancel_current_command(
+    fn cancel_frame_limit_notice(&self, limit: usize) -> Result<Option<String>, Error> {
+        let Some(current) = self.state.current_command.as_ref() else {
+            return Ok(None);
+        };
+        if self.state.pending_trust_request_id.is_some()
+            || self.state.pending_approval.is_some()
+            || self.state.cancel_requested
+        {
+            return Ok(None);
+        }
+        let id = self.ids.peek_id(CommandKind::Cancel);
+        let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len <= limit {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Skipped prompt cancellation because the negotiated {limit}-byte RPC frame limit is too small."
+        )))
+    }
+
+    async fn interrupt(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
-    ) -> Result<(), Error> {
-        let Some(current) = self.state.current_command.as_ref() else {
-            return Ok(());
-        };
-        if self.state.cancel_requested {
-            return Ok(());
+        quit_if_idle: bool,
+    ) -> Result<LoopControl, Error> {
+        if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
+            if quit_if_idle {
+                return Ok(LoopControl::Exit);
+            }
+            return Ok(LoopControl::Continue);
         }
-        let id = self.ids.next_prefixed_id("cancel");
-        let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
-        let payload = Bytes::from(serde_json::to_vec(&command)?);
-        if payload.len() > limit {
-            self.notice = Some(format!(
-                "Skipped prompt cancellation because the negotiated {limit}-byte RPC frame limit is too small."
-            ));
+        if let Some(notice) = self.cancel_frame_limit_notice(limit)? {
+            self.notice = Some(notice);
             self.render_pending = true;
-            return Ok(());
+            return Ok(LoopControl::Continue);
         }
-        send_payload(writer, payload, limit).await?;
-        self.state.cancel_requested = true;
-        self.render_pending = true;
-        Ok(())
+        self.dispatch(UiAction::Cancel, writer, limit).await
     }
 
     fn prompt_editable(&self) -> bool {
@@ -399,9 +414,36 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match input {
-            Input::Key(key) if is_ctrl_c(key) => {
-                self.cancel_current_command(writer, limit).await?;
-                Ok(LoopControl::Exit)
+            Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
+            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
+                match approval_decision(key, self.state.pending_approval.as_ref()) {
+                    Some(action) => {
+                        self.notice = None;
+                        self.dispatch(action, writer, limit).await
+                    }
+                    None if key_can_edit(key) => {
+                        self.notice =
+                            Some("Approve with y once, t tool, a all, or deny with n/Esc.".into());
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    None => Ok(LoopControl::Continue),
+                }
+            }
+            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForTrust => {
+                match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
+                    Some(action) => {
+                        self.notice = None;
+                        self.dispatch(action, writer, limit).await
+                    }
+                    None if key_can_edit(key) => {
+                        self.notice = Some("Trust with y, or deny with n/Esc.".into());
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    None => Ok(LoopControl::Continue),
+                }
             }
             Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
@@ -462,6 +504,59 @@ impl LiveUi {
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn is_escape(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+}
+
+fn printable_char(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(character)
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            Some(character)
+        }
+        _ => None,
+    }
+}
+
+fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option<UiAction> {
+    let pending = pending?;
+    let approved = match printable_char(key)?.to_ascii_lowercase() {
+        'y' => true,
+        't' => true,
+        'a' => true,
+        'n' => false,
+        _ => return None,
+    };
+    let scope = match printable_char(key)?.to_ascii_lowercase() {
+        't' => Some(ApprovalScope::ToolSession),
+        'a' => Some(ApprovalScope::AllSession),
+        'y' => Some(ApprovalScope::Once),
+        _ => None,
+    };
+    Some(UiAction::ApprovalDecision {
+        call_id: pending.call_id.clone(),
+        approved,
+        reason: None,
+        scope,
+    })
+}
+
+fn trust_decision(key: KeyEvent, request_id: Option<&str>) -> Option<UiAction> {
+    let request_id = request_id?;
+    let trusted = match printable_char(key)?.to_ascii_lowercase() {
+        'y' => true,
+        'n' => false,
+        _ => return None,
+    };
+    Some(UiAction::TrustDecision {
+        request_id: request_id.to_owned(),
+        trusted,
+        reason: None,
+        transient: Some(!trusted),
+    })
 }
 
 fn key_can_edit(key: KeyEvent) -> bool {
@@ -589,14 +684,27 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 }
                 outcome = receive_reader_outcome(&mut reader_outcome) => {
                     reader_outcome = None;
-                    break unexpected_reader_outcome(outcome, &mut backend).await;
+                    match outcome {
+                        Ok(ReaderTermination::Eof) => {
+                            live_ui
+                                .dispatch(
+                                    UiAction::TransportClosed { error: None },
+                                    &writer_tx,
+                                    max_client_frame,
+                                )
+                                .await?;
+                            break Ok(());
+                        }
+                        Err(error) => break Err(error),
+                    }
                 }
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    live_ui
-                        .cancel_current_command(&writer_tx, max_client_frame)
-                        .await?;
-                    break Ok(());
+                    if live_ui.interrupt(&writer_tx, max_client_frame, true).await?
+                        == LoopControl::Exit
+                    {
+                        break Ok(());
+                    }
                 }
                 _ = redraw.tick() => {
                     if live_ui.render_pending {
@@ -724,22 +832,6 @@ async fn receive_reader_outcome(
     }
 }
 
-async fn unexpected_reader_outcome(
-    outcome: Result<ReaderTermination, Error>,
-    backend: &mut BackendProcess,
-) -> Result<(), Error> {
-    match outcome {
-        Ok(ReaderTermination::Eof) => {
-            backend.wait_gracefully(Duration::from_millis(100)).await?;
-            match backend.try_wait()? {
-                Some(status) => Err(classify_backend_exit(status)),
-                None => Err(Error::BackendStreamEnded),
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
 fn shutdown_reader_outcome(outcome: Result<ReaderTermination, Error>) -> Result<(), Error> {
     match outcome {
         Ok(ReaderTermination::Eof) => Ok(()),
@@ -747,6 +839,7 @@ fn shutdown_reader_outcome(outcome: Result<ReaderTermination, Error>) -> Result<
     }
 }
 
+#[cfg(test)]
 fn classify_backend_exit(status: std::process::ExitStatus) -> Error {
     if status.success() {
         Error::BackendExited(status)
@@ -1497,9 +1590,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_c_cancels_active_prompt_before_exit() {
+    async fn ctrl_c_cancels_active_prompt_without_exiting() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -1519,7 +1613,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(control, LoopControl::Continue);
         assert!(live_ui.state.cancel_requested);
         assert!(live_ui.render_pending);
         let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
@@ -1533,9 +1627,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_ctrl_c_cancel_frame_does_not_abort_exit() {
+    async fn oversized_ctrl_c_cancel_frame_stays_in_the_loop() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -1557,7 +1652,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(control, LoopControl::Continue);
         assert!(!live_ui.state.cancel_requested);
         assert!(live_ui.render_pending);
         assert!(
@@ -1567,6 +1662,97 @@ mod tests {
                 .is_some_and(|notice| notice.contains("prompt cancellation"))
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn idle_ctrl_c_exits_without_a_cancel_command() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn approval_and_trust_keys_emit_typed_commands() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({}),
+            safety: "read".into(),
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval key must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "approval",
+                "id": "approval-1",
+                "call_id": "call-1",
+                "approved": true
+            })
+        );
+
+        live_ui.state.view_status = ViewStatus::WaitingForTrust;
+        live_ui.state.pending_trust_request_id = Some("trust-req-1".into());
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust key must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "trust",
+                "id": "trust-2",
+                "request_id": "trust-req-1",
+                "trusted": false,
+                "reason": "Denied from TUI",
+                "transient": true
+            })
+        );
     }
 
     #[tokio::test]

@@ -109,6 +109,49 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         cancel,
         serde_json::json!({"type": "cancel", "id": "cancel-1", "target_id": "prompt-1"})
     );
+
+    let trusted = commands::WispTypedClientRpcCommands::trust(
+        "trust-1",
+        "trust-req-1",
+        true,
+        None,
+        Some(false),
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        trusted,
+        serde_json::json!({
+            "type": "trust",
+            "id": "trust-1",
+            "request_id": "trust-req-1",
+            "trusted": true,
+            "transient": false
+        })
+    );
+
+    let denied = commands::WispTypedClientRpcCommands::trust(
+        "trust-2",
+        "trust-req-2",
+        false,
+        Some("Trust prompt cancelled"),
+        Some(true),
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        denied,
+        serde_json::json!({
+            "type": "trust",
+            "id": "trust-2",
+            "request_id": "trust-req-2",
+            "trusted": false,
+            "reason": "Trust prompt cancelled",
+            "transient": true
+        })
+    );
 }
 
 #[test]

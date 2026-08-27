@@ -213,15 +213,13 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
     }
 
     let message = match state.view_status {
-        ViewStatus::Running => "Prompt in progress; active-run input arrives in #466.",
-        ViewStatus::WaitingForApproval => {
-            "A tool approval is waiting; approval controls arrive in the next PR."
+        ViewStatus::Running => {
+            "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
-        ViewStatus::WaitingForTrust => {
-            "Project trust is waiting; trust controls arrive in the next PR."
-        }
-        ViewStatus::Error => "The prompt failed. Ctrl-C exits the current Rust TUI slice.",
-        ViewStatus::Idle => "",
+        ViewStatus::WaitingForApproval => approval_composer_message(state),
+        ViewStatus::WaitingForTrust => "trust this project? [y/N]".into(),
+        ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
+        ViewStatus::Idle => String::new(),
     };
     frame.render_widget(
         Paragraph::new(message)
@@ -368,6 +366,16 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
 
 fn editable(state: &UiState) -> bool {
     state.input_ready && state.current_command.is_none() && state.view_status == ViewStatus::Idle
+}
+
+fn approval_composer_message(state: &UiState) -> String {
+    match state.pending_approval.as_ref() {
+        Some(pending) => format!(
+            "approve {} ({})? [y once/t tool/a all/N]",
+            pending.name, pending.safety
+        ),
+        None => "approve? [y once/t tool/a all/N]".into(),
+    }
 }
 
 fn push_content_lines(
@@ -604,7 +612,7 @@ mod tests {
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("partial answer"));
-        assert!(rendered.contains("active-run input arrives in #466"));
+        assert!(rendered.contains("Esc/Ctrl-C cancels"));
     }
 
     #[test]
@@ -618,12 +626,13 @@ mod tests {
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(approval.contains("approval is waiting"));
+        assert!(approval.contains("approve shell (ask)?"));
+        assert!(approval.contains("[y once/t tool/a all/N]"));
 
         state.view_status = ViewStatus::WaitingForTrust;
         state.pending_trust_request_id = Some("trust-1".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(trust.contains("Project trust is waiting"));
+        assert!(trust.contains("trust this project? [y/N]"));
     }
 
     #[test]

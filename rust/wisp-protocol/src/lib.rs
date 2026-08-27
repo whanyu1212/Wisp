@@ -567,6 +567,32 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))
         }
 
+        /// Construct a response to one pending project-trust request.
+        pub fn trust(
+            id: &str,
+            request_id: &str,
+            trusted: bool,
+            reason: Option<&str>,
+            transient: Option<bool>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "trust",
+                "id": id,
+                "request_id": request_id,
+                "trusted": trusted,
+            });
+            let object = value
+                .as_object_mut()
+                .expect("command constructors create JSON objects");
+            if let Some(reason) = reason {
+                object.insert("reason".into(), serde_json::Value::String(reason.into()));
+            }
+            if let Some(transient) = transient {
+                object.insert("transient".into(), serde_json::Value::Bool(transient));
+            }
+            deserialize(value)
+        }
+
         /// Construct the typed command used to request graceful backend shutdown.
         pub fn shutdown(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "shutdown", "id": id}))
