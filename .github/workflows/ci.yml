@@ -200,6 +200,19 @@ jobs:
           ${{ matrix.extra_args }}
           --durations=20
 
+  tui-status:
+    name: Test (tui)
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require the split test matrix to pass
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
   macos-smoke:
     name: Platform smoke (macOS)
     runs-on: macos-latest
