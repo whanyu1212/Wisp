@@ -590,7 +590,7 @@ fn trust_decision(key: KeyEvent, request_id: Option<&str>) -> Option<UiAction> {
         request_id: request_id.to_owned(),
         trusted,
         reason: None,
-        transient: Some(!trusted),
+        transient: Some(false),
     })
 }
 
@@ -1820,7 +1820,7 @@ mod tests {
                 "request_id": "trust-req-1",
                 "trusted": false,
                 "reason": "Denied from TUI",
-                "transient": true
+                "transient": false
             })
         );
     }

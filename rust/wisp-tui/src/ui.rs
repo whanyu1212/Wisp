@@ -15,6 +15,8 @@ const COMPOSER_TAB_WIDTH: usize = 4;
 const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 16;
 const TRANSCRIPT_TAIL_MIN_BYTES: usize = 4 * 1024;
 const TRANSCRIPT_TAIL_MAX_BYTES: usize = 64 * 1024;
+const DECISION_PREVIEW_GRAPHEMES: usize = 160;
+const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -45,6 +47,11 @@ pub fn render(
         u16::try_from(editor.line_count().saturating_add(2))
             .unwrap_or(MAX_COMPOSER_HEIGHT)
             .clamp(3, MAX_COMPOSER_HEIGHT)
+    } else if matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    ) {
+        5
     } else {
         3
     };
@@ -217,7 +224,7 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
             "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
         ViewStatus::WaitingForApproval => approval_composer_message(state),
-        ViewStatus::WaitingForTrust => "trust this project? [y/N]".into(),
+        ViewStatus::WaitingForTrust => trust_composer_message(state),
         ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
         ViewStatus::Idle => String::new(),
     };
@@ -371,11 +378,76 @@ fn editable(state: &UiState) -> bool {
 fn approval_composer_message(state: &UiState) -> String {
     match state.pending_approval.as_ref() {
         Some(pending) => format!(
-            "approve {} ({})? [y once/t tool/a all/N]",
-            sanitize_inline_for_terminal(&pending.name),
-            sanitize_inline_for_terminal(&pending.safety)
+            "approve {} ({})? [y once/t tool/a all/N]\nargs: {}",
+            bounded_decision_preview(&pending.name),
+            bounded_decision_preview(&pending.safety),
+            bounded_json_preview(&pending.arguments)
         ),
         None => "approve? [y once/t tool/a all/N]".into(),
+    }
+}
+
+fn trust_composer_message(state: &UiState) -> String {
+    match state.pending_trust_project_path.as_deref() {
+        Some(project_path) => format!(
+            "trust project {}? [y/N]",
+            bounded_decision_preview(project_path)
+        ),
+        None => "trust this project? [y/N]".into(),
+    }
+}
+
+fn bounded_decision_preview(content: &str) -> String {
+    let mut preview = String::new();
+    let mut graphemes = content.graphemes(true);
+    for grapheme in graphemes.by_ref().take(DECISION_PREVIEW_GRAPHEMES) {
+        if matches!(grapheme, "\n" | "\r" | "\r\n" | "\t") {
+            preview.push(' ');
+        } else {
+            for character in grapheme.chars() {
+                if terminal_control_character(character) {
+                    preview.push('�');
+                } else {
+                    preview.push(character);
+                }
+            }
+        }
+    }
+    if graphemes.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+fn bounded_json_preview(value: &serde_json::Value) -> String {
+    let mut writer = DecisionPreviewWriter::default();
+    if serde_json::to_writer(&mut writer, value).is_err() {
+        return "<invalid arguments>".into();
+    }
+    let mut preview = bounded_decision_preview(&String::from_utf8_lossy(&writer.bytes));
+    if writer.truncated && !preview.ends_with('…') {
+        preview.push('…');
+    }
+    preview
+}
+
+#[derive(Default)]
+struct DecisionPreviewWriter {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl std::io::Write for DecisionPreviewWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let remaining = DECISION_PREVIEW_JSON_BYTES.saturating_sub(self.bytes.len());
+        let retained = remaining.min(buffer.len());
+        self.bytes.extend_from_slice(&buffer[..retained]);
+        self.truncated |= retained < buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -400,10 +472,6 @@ fn push_content_lines(
         }
         push_transcript_line(lines, Line::from(rendered), max_lines);
     }
-}
-
-fn sanitize_inline_for_terminal(content: &str) -> String {
-    sanitize_for_terminal(content).replace('\n', " ")
 }
 
 fn sanitize_for_terminal(content: &str) -> String {
@@ -627,11 +695,13 @@ mod tests {
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
             name: "shell".into(),
-            arguments: json!({}),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approve shell (ask)?"));
+        assert!(approval.contains("args:"));
+        assert!(approval.contains("rm -rf /tmp/example"));
         assert!(approval.contains("[y once/t tool/a all/N]"));
 
         state.pending_approval = Some(PendingApproval {
@@ -647,10 +717,24 @@ mod tests {
         assert!(adversarial.contains("shell�[2J�spoof next"));
         assert!(adversarial.contains("ask�safe"));
 
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-3".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "x".repeat(DECISION_PREVIEW_GRAPHEMES + 20)}),
+            safety: "ask".into(),
+        });
+        let bounded = approval_composer_message(&state);
+        assert!(bounded.contains('…'));
+        assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 100);
+
         state.view_status = ViewStatus::WaitingForTrust;
         state.pending_trust_request_id = Some("trust-1".into());
+        state.pending_trust_project_path =
+            Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(trust.contains("trust this project? [y/N]"));
+        assert!(trust.contains("trust project /workspace/project�[2J�spoof next? [y/N]"));
+        assert!(!trust.contains('\u{1b}'));
+        assert!(!trust.contains('\u{202e}'));
     }
 
     #[test]

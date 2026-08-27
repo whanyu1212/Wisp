@@ -357,6 +357,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
         state.cancel_requested = interaction.cancel_requested;
         state.exit_requested = interaction.exit_requested;
         state.pending_trust_request_id = interaction.pending_trust_request_id.clone();
+        state.pending_trust_project_path = None;
         if let Some(call_id) = &interaction.pending_approval_call_id {
             state.pending_approval = Some(PendingApproval {
                 call_id: call_id.clone(),

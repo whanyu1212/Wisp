@@ -132,6 +132,7 @@ pub struct UiState {
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_trust_request_id: Option<String>,
+    pub pending_trust_project_path: Option<String>,
     pub cancel_requested: bool,
     pub exit_requested: bool,
     pub last_submitted_prompt: Option<String>,
@@ -168,6 +169,7 @@ impl UiState {
             current_command: None,
             pending_approval: None,
             pending_trust_request_id: None,
+            pending_trust_project_path: None,
             cancel_requested: false,
             exit_requested: false,
             last_submitted_prompt: None,
@@ -235,6 +237,7 @@ pub enum BackendEvent {
     ToolApprovalRequested(PendingApproval),
     TrustRequested {
         request_id: String,
+        project_path: String,
     },
     CommandFinished {
         command_id: String,
@@ -424,6 +427,7 @@ fn answer_trust(
         selected_transient,
     )?;
     state.pending_trust_request_id = None;
+    state.pending_trust_project_path = None;
     restore_active_or_idle(state);
     Ok(vec![
         UiEffect::SendCommand(command),
@@ -526,8 +530,12 @@ fn handle_backend_event(
             state.interaction_status = InteractionStatus::WaitingForApproval;
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::TrustRequested { request_id } => {
+        BackendEvent::TrustRequested {
+            request_id,
+            project_path,
+        } => {
             state.pending_trust_request_id = Some(request_id);
+            state.pending_trust_project_path = Some(project_path);
             state.view_status = ViewStatus::WaitingForTrust;
             state.interaction_status = InteractionStatus::WaitingForTrust;
             Ok(vec![UiEffect::RequestRender])
@@ -548,6 +556,8 @@ fn handle_backend_event(
             let stats = WispTypedClientRpcCommands::get_session_stats(&stats_id)?;
             state.current_command = None;
             state.pending_approval = None;
+            state.pending_trust_request_id = None;
+            state.pending_trust_project_path = None;
             state.cancel_requested = false;
             state.stream_turn = None;
             state.streaming_text = false;
@@ -893,6 +903,7 @@ mod tests {
             &mut state,
             UiAction::BackendEvent(BackendEvent::TrustRequested {
                 request_id: "trust-1".into(),
+                project_path: "/workspace".into(),
             }),
             &mut ids,
         )
@@ -900,6 +911,10 @@ mod tests {
         assert_eq!(state.view_status, ViewStatus::WaitingForTrust);
         assert_eq!(state.interaction_status, InteractionStatus::WaitingForTrust);
         assert_eq!(state.pending_trust_request_id.as_deref(), Some("trust-1"));
+        assert_eq!(
+            state.pending_trust_project_path.as_deref(),
+            Some("/workspace")
+        );
         assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
     }
 
@@ -917,6 +932,7 @@ mod tests {
             BackendEvent::from_live(&live).unwrap(),
             BackendEvent::TrustRequested {
                 request_id: "trust-7".into(),
+                project_path: "/workspace".into(),
             }
         );
     }
@@ -972,6 +988,7 @@ mod tests {
         assert!(command.get("reason").is_none());
         assert_eq!(state.view_status, ViewStatus::Running);
         assert!(state.pending_trust_request_id.is_none());
+        assert!(state.pending_trust_project_path.is_none());
     }
 
     #[test]
