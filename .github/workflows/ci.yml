@@ -61,9 +61,13 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
-  rust-protocol:
-    name: Rust protocol conformance
-    runs-on: ubuntu-latest
+  rust-workspace:
+    name: Rust workspace (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
     steps:
@@ -84,7 +88,7 @@ jobs:
         run: uv sync --locked
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: clippy,rustfmt
 
@@ -94,11 +98,22 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all --check
 
-      - name: Lint Rust protocol crate
+      - name: Check Rust workspace
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Test Rust protocol conformance
+      - name: Test Rust workspace
         run: cargo test --workspace --all-features
+
+      - name: Build Rust TUI
+        run: cargo build -p wisp-tui
+
+      - name: Test Python/Rust TUI handoff
+        env:
+          RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
+        run: uv run pytest tests/test_rust_tui_smoke.py
 
   package:
     name: Build and verify package

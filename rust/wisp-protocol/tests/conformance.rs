@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use wisp_protocol::events::CommandFinishedOutcome;
 use wisp_protocol::{commands, events, handshake_request, handshake_response};
 
 fn fixtures(schema: &str) -> BTreeMap<String, Value> {
@@ -276,4 +277,94 @@ fn handshake_cross_field_invariants_fail_closed() {
     for response in invalid_responses {
         assert!(handshake_response::deserialize(response).is_err());
     }
+}
+
+#[test]
+fn current_helpers_match_the_embedded_manifest_and_wire_contract() {
+    let manifest: Value =
+        serde_json::from_str(wisp_protocol::LIVE_RPC_MANIFEST_JSON).expect("manifest is JSON");
+    assert_eq!(
+        manifest["live_protocol_version"],
+        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        manifest["event_schema_version"],
+        wisp_protocol::EVENT_SCHEMA_VERSION
+    );
+    assert_eq!(
+        manifest["fixed_handshake_frame_bytes"],
+        wisp_protocol::HANDSHAKE_FRAME_BYTES
+    );
+    assert_eq!(
+        manifest["maximum_application_frame_bytes"],
+        wisp_protocol::MAX_APPLICATION_FRAME_BYTES
+    );
+
+    let request = handshake_request::RpcHandshakeRequest::current("wisp-rust-tui", "0.1.0")
+        .expect("current request is valid")
+        .into_value()
+        .unwrap();
+    assert_eq!(request["min_protocol_version"], 2);
+    assert_eq!(request["max_event_schema_version"], 34);
+
+    let shutdown = commands::WispTypedClientRpcCommands::shutdown("shutdown-1")
+        .expect("shutdown command is valid")
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        shutdown,
+        serde_json::json!({"type": "shutdown", "id": "shutdown-1"})
+    );
+}
+
+#[test]
+fn response_and_event_accessors_use_validated_wire_values() {
+    let accepted = handshake_response::deserialize(serde_json::json!({
+        "type": "rpc.handshake.accepted",
+        "backend_package_version": "0.1.0",
+        "protocol_version": 2,
+        "event_schema_version": 34,
+        "min_protocol_version": 2,
+        "max_protocol_version": 2,
+        "capabilities": [],
+        "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
+    }))
+    .unwrap();
+    assert_eq!(accepted.backend_package_version(), "0.1.0");
+    assert_eq!(accepted.accepted_contract(), Some((2, 34, 1024, 2048)));
+    assert!(accepted.rejection().is_none());
+
+    let event = events::deserialize(serde_json::json!({
+        "type": "rpc.command.finished",
+        "schema_version": 34,
+        "timestamp": "2026-01-02T03:04:05Z",
+        "command_id": "shutdown-1",
+        "command_type": "shutdown",
+        "ok": true,
+        "error": null
+    }))
+    .unwrap();
+    assert_eq!(event.event_type(), "rpc.command.finished");
+    assert!(event.successful_command_finished("shutdown-1", "shutdown"));
+
+    let failed = events::deserialize(serde_json::json!({
+        "type": "rpc.command.finished",
+        "schema_version": 34,
+        "timestamp": "2026-01-02T03:04:05Z",
+        "command_id": "shutdown-1",
+        "command_type": "shutdown",
+        "ok": false,
+        "error": "shutdown refused"
+    }))
+    .unwrap();
+    assert_eq!(
+        failed.command_finished_outcome("shutdown-1", "shutdown"),
+        Some(CommandFinishedOutcome::Failed {
+            error: Some("shutdown refused".into())
+        })
+    );
+    assert_eq!(
+        failed.command_finished_outcome("another-command", "shutdown"),
+        None
+    );
 }

@@ -25,10 +25,33 @@ compact billing and context fields.
   `session unpriced` when no request can be priced. This keeps earlier usage honest after switching
   providers. Estimates are not invoices.
 
-Unlike print mode, **the TUI exposes the full tool registry by default** — otherwise it would be a
-chatbot that can't read files or run commands. Mutating and command tools still pause for approval:
-approve once, allow that tool for the session, YOLO all mutating/command tools for the process (never
-persisted), or deny.
+## Experimental Rust transport scaffold
+
+Textual remains Wisp's default and full-featured TUI. An experimental Rust frontend is available as
+an explicit opt-in on macOS and Linux:
+
+```bash
+wisp tui --renderer rust
+wisp --mode tui --tui-renderer rust
+WISP_TUI_RENDERER=rust wisp
+```
+
+The Rust frontend currently provides a diagnostic transport screen only. It negotiates live RPC v2
+and event schema v34, validates incoming current-version events, and shows the backend version, event
+count, and latest event type. Press `q` or `Ctrl+C` to request shutdown. It does not yet accept
+prompts or provide the commands, transcript, approvals, pickers, or other product behavior documented
+for Textual below.
+
+Selecting Rust never falls back to Textual. A missing or non-executable binary, unsupported platform,
+package-version mismatch, negotiation failure, or non-zero Rust exit is reported as an error. Current
+Python distributions do not include a Rust binary; source builds require the setup documented in
+[Development setup](../contributing/development#rust-tui-scaffold). Select Textual explicitly with
+`wisp tui --renderer textual` if needed.
+
+Unlike print mode, **the Textual TUI exposes the full tool registry by default** — otherwise it would
+be a chatbot that can't read files or run commands. Mutating and command tools still pause for
+approval: approve once, allow that tool for the session, YOLO all mutating/command tools for the
+process (never persisted), or deny.
 
 ## Steering and follow-ups
 
@@ -183,6 +206,7 @@ wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
+wisp tui --renderer rust                 # experimental transport diagnostics only
 wisp tui --no-synchronized-output        # disable atomic Textual frame presentation
 ```
 
@@ -203,4 +227,4 @@ the Textual TUI and has no environment-variable equivalent; line, print, JSONL-R
 not use synchronized frames.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
-`--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
+`--tui-renderer line|fullscreen|textual|rust` plus `WISP_TUI_RENDERER`.

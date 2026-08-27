@@ -33,7 +33,6 @@ from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
 from wisp.tools.result import ToolError
-from wisp.tui.rendering import TuiRendererKind
 
 from . import options as _cli_options
 from . import output as _cli_output
@@ -42,7 +41,10 @@ from . import skills as _cli_skills
 from . import tools as _cli_tools
 from . import trust as _cli_trust
 from . import update as _cli_update
-from .types import OutputMode, _JsonOutputModeError, _RenderedPrintError
+from .types import OutputMode, TuiFrontendKind, _JsonOutputModeError, _RenderedPrintError
+
+# Compatibility alias for callers that imported the former CLI option enum here.
+TuiRendererKind = TuiFrontendKind
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
 _resolve_cli_trust = _cli_trust.resolve_cli_trust
@@ -139,12 +141,12 @@ def cli_callback(
         ),
     ] = OutputMode.text,
     tui_renderer: Annotated[
-        TuiRendererKind,
+        TuiFrontendKind,
         typer.Option(
             "--tui-renderer",
-            help="TUI renderer to use with --mode tui.",
+            help="Terminal frontend to use with --mode tui.",
         ),
-    ] = TuiRendererKind.line,
+    ] = TuiFrontendKind.line,
     no_synchronized_output: Annotated[
         bool,
         typer.Option(
@@ -217,7 +219,7 @@ def cli_callback(
         mode_was_provided=mode_was_provided,
         console=console,
     )
-    resolved_tui_renderer = TuiRendererKind.textual if bare_interactive_invocation else tui_renderer
+    resolved_tui_renderer = TuiFrontendKind.textual if bare_interactive_invocation else tui_renderer
     resolved_all_tools = all_tools
     if resolved_mode is OutputMode.tui:
         resolved_tui_renderer = _resolve_tui_renderer(
@@ -370,10 +372,18 @@ def cli_callback(
 
 @app.command("tui")
 def tui_command(
+    ctx: typer.Context,
     line: Annotated[
         bool,
         typer.Option("--line", help="Use the simple line renderer instead of the Textual TUI."),
     ] = False,
+    renderer: Annotated[
+        TuiFrontendKind,
+        typer.Option(
+            "--renderer",
+            help="Terminal frontend to use: textual, rust, fullscreen, or line.",
+        ),
+    ] = TuiFrontendKind.textual,
     no_synchronized_output: Annotated[
         bool,
         typer.Option(
@@ -433,9 +443,13 @@ def tui_command(
         ),
     ] = None,
 ) -> None:
-    """Start Wisp's fullscreen TUI."""
+    """Start Wisp's terminal interface."""
 
     console = Console(stderr=True)
+    if line and _option_was_provided(ctx, "renderer"):
+        console.print("[red]error:[/red] use either --line or --renderer, not both")
+        raise typer.Exit(1)
+
     # Resolve trust before config, preflight, or terminal UI startup. The persisted
     # decision is then observed by the RPC subprocess, so normal TUI launches never
     # enter the fullscreen interface with project trust still undecided.
@@ -448,7 +462,7 @@ def tui_command(
         mode=OutputMode.text,
         console=console,
     )
-    renderer = TuiRendererKind.line if line else TuiRendererKind.textual
+    selected_renderer = TuiFrontendKind.line if line else renderer
     try:
         config = WispConfig.from_env(
             session_dir=session_dir,
@@ -465,7 +479,7 @@ def tui_command(
             continue_latest=continue_latest,
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
-            renderer=renderer,
+            renderer=selected_renderer,
             synchronized_output=not no_synchronized_output,
             project_trusted=trusted,
             # These default to None on the `tui` command, so they are non-None only when
@@ -526,7 +540,7 @@ def _run_tui_from_cli_options(
     continue_latest: bool,
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
-    renderer: TuiRendererKind,
+    renderer: TuiFrontendKind,
     synchronized_output: bool,
     project_trusted: bool,
     user_provider: str | None = None,
@@ -534,7 +548,40 @@ def _run_tui_from_cli_options(
     user_session_dir: Path | None = None,
     user_auth_file: Path | None = None,
 ) -> None:
-    from wisp.tui import TuiExitReason, TuiOptions, run_tui
+    from wisp.tui.launch import TuiOptions
+
+    if renderer is TuiFrontendKind.rust:
+        from wisp.tui.rust_launcher import RustTuiLaunchError, run_rust_tui
+
+        try:
+            status = run_rust_tui(
+                TuiOptions(
+                    config=config,
+                    all_tools=all_tools,
+                    allow_read_tools=allow_read_tools,
+                    allowed_tools=allowed_tools,
+                    resume=resume,
+                    continue_latest=continue_latest,
+                    approve_unsafe_tools=approve_unsafe_tools,
+                    max_tool_iterations=max_tool_iterations,
+                    synchronized_output=synchronized_output,
+                    project_trusted=project_trusted,
+                    user_provider=user_provider,
+                    user_model=user_model,
+                    user_session_dir=user_session_dir,
+                    user_auth_file=user_auth_file,
+                )
+            )
+        except RustTuiLaunchError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        if status != 0:
+            typer.echo(f"error: Rust TUI exited with status {status}", err=True)
+            raise typer.Exit(status if 1 <= status <= 255 else 1)
+        return
+
+    from wisp.tui import TuiExitReason, run_tui
+    from wisp.tui.rendering import TuiRendererKind as PythonTuiRendererKind
 
     restart_argv = tuple(sys.orig_argv)
     restart_cwd = Path.cwd()
@@ -550,7 +597,7 @@ def _run_tui_from_cli_options(
             continue_latest=continue_latest,
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
-            renderer=renderer,
+            renderer=PythonTuiRendererKind(renderer.value),
             synchronized_output=synchronized_output,
             project_trusted=project_trusted,
             user_provider=user_provider,

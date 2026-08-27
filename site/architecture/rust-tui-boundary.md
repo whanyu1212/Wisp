@@ -6,14 +6,19 @@ title: Rust terminal frontend boundary
 
 | Field | Decision |
 |---|---|
-| Status | Accepted for implementation experiment |
+| Status | Accepted; diagnostic transport scaffold implemented behind an experimental opt-in |
 | Date | 2026-08-24 |
-| Tracking | [#456](https://github.com/whanyu1212/Wisp/issues/456), [#457](https://github.com/whanyu1212/Wisp/issues/457) |
+| Tracking | [#456](https://github.com/whanyu1212/Wisp/issues/456), [#457](https://github.com/whanyu1212/Wisp/issues/457), [#463](https://github.com/whanyu1212/Wisp/issues/463) |
 | Deferred decision | Default renderer and long-term Textual support, owned by [#470](https://github.com/whanyu1212/Wisp/issues/470) |
 
 Wisp will experiment with an optional Rust terminal frontend over the existing Python JSONL-RPC
 runtime. This decision authorizes the experiment and fixes the language boundary. It does not make
 Rust the default, remove Textual, or move the agent runtime out of Python.
+
+The #463 implementation is intentionally narrower than the target frontend described below. It is a
+diagnostic transport scaffold: it negotiates and validates the current live RPC contract, displays
+connection and event metadata, and exercises bounded shutdown and cleanup. It does not accept
+prompts or claim Textual workflow or product parity. Textual remains the default frontend.
 
 The governing rule is:
 
@@ -58,7 +63,7 @@ into Rust: model-catalog derivation, credential operations, protected-path-aware
 update operations. Those become backend capabilities or launcher responsibilities before the Rust
 frontend reaches parity.
 
-### Target optional Rust path
+### Implemented optional Rust scaffold path
 
 ```mermaid
 flowchart LR
@@ -72,13 +77,18 @@ flowchart LR
   Harness --> Loop[run_agent_loop]
 ```
 
-The Python launcher remains the trusted entrypoint. It resolves the selected renderer, chooses a
-compatible bundled Rust binary, supplies the exact Python interpreter and backend command, and
-passes only the required startup environment. Rust owns graceful backend protocol shutdown and the
-terminal lifecycle after handoff. The launcher remains alive as an external supervisor and places
-the frontend and backend in one OS-level cleanup boundary, such as a process group or job. If Rust
-cannot unwind, the launcher must detect its exit, restore a known terminal baseline, and terminate
-the entire boundary within a fixed deadline. Backend stdin reaching EOF is not a cleanup guarantee.
+The Python launcher remains the trusted entrypoint. It resolves the selected renderer and Rust
+executable, supplies the exact Python interpreter and opaque `wisp --mode rpc` backend command, and
+runs preflight before terminal handoff. The current scaffold does not ship a Rust binary in Wisp's
+Python distributions; source development therefore supplies an absolute `WISP_RUST_TUI_BINARY`.
+
+On macOS and Linux, the launcher starts Rust in a new process group and transfers the foreground
+terminal to it. Rust spawns the Python backend in that inherited group, owns negotiated protocol
+shutdown, and restores its raw-mode and alternate-screen changes. The Python launcher remains alive
+as the external supervisor. On every exit path it checks and, if necessary, signals the entire
+process group, then restores the original foreground process group, termios attributes, and a known
+ANSI terminal baseline. Backend stdin reaching EOF is not treated as a cleanup guarantee. Windows
+is rejected before binary resolution; no Windows supervision path is implemented.
 
 Textual remains a separate, supported path through the same Python runtime. Explicit Rust selection
 that cannot start because the binary is missing, incompatible, or fails during negotiation returns
@@ -111,7 +121,7 @@ Textual, and any future automatic fallback policy requires the rollout decision 
 | Themes, keymaps, layout, and other presentation preferences | Rust | Preferences cannot alter backend behavior or become session authority. |
 | Rust binary selection and backend command construction | Python launcher | Rust does not discover an arbitrary interpreter or rebuild trusted arguments. |
 | Invocation supervision and fail-safe cleanup | Python launcher and OS supervision primitive | Rust attempts graceful shutdown; the launcher terminates the shared process group or job when Rust cannot unwind. |
-| Textual TUI | Python fallback | It remains supported until a later explicit decision. |
+| Textual TUI | Python default frontend | It remains supported until a later explicit decision; Rust failures do not select it automatically. |
 
 ## Migration map for the current TUI
 
@@ -161,26 +171,33 @@ in fixtures, or written to logs and diagnostics.
 
 ## Live protocol and durable compatibility
 
-The live frontend protocol and durable session formats are separate compatibility domains:
+The live frontend protocol and durable session formats are separate compatibility domains. The
+current scaffold is exact-lockstep rather than range-compatible:
 
 - Python models are the source of truth for the live command and event schema.
-- #458 exports that schema, generates Rust data-transfer types, and adds negotiation and drift
-  checks. Rust types are not maintained as a handwritten second schema.
-- The initial bundled frontend supports only negotiated current live versions. Lockstep packaging
-  does not excuse a late or ambiguous mismatch failure.
+- The committed schemas generate Rust data-transfer types at compile time; Rust types are not a
+  handwritten second schema.
+- The Python package/runtime and `wisp-tui` crate are currently both version `0.1.0`. The launcher
+  passes the Python version to Rust, Rust checks it against `CARGO_PKG_VERSION` before spawning the
+  backend, and the backend repeats its package version in the handshake.
+- The only accepted live contract is RPC protocol v2 with event schema v34 and no negotiated
+  capabilities. The scaffold sends only handshake and shutdown commands, validates current live
+  event output, and displays event counts and the latest event discriminator.
+- A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
+  current scaffold does not negotiate older live contracts.
 - Python retains backward parsing, migration, and replay of persisted session and event versions.
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-Exact frame limits, unknown-type behavior, UTF-8 handling, and handshake fields belong to #458.
-This decision fixes their ownership, not their final wire representation. See
-[Compatibility and versioning](../reference/compatibility) for Wisp's currently shipped contracts.
+The committed v2 schema manifest and generated projections define the current handshake fields,
+frame limits, strict event variants, and UTF-8 JSON representation. See
+[Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 
 ## Lifecycle and failure ownership
 
 | Failure or transition | Required owner and outcome |
 |---|---|
-| Rust binary missing or incompatible | The Python launcher reports an actionable non-zero failure for explicit Rust selection. Textual remains explicitly selectable. |
+| Rust binary missing or incompatible | The Python launcher reports an actionable non-zero failure for Rust selection. Textual remains explicitly selectable, but is not selected automatically. |
 | Backend spawn failure | Rust restores the terminal and reports the sanitized failure; the launcher verifies the supervised boundary is empty and exits non-zero. |
 | Protocol version mismatch | Negotiation fails before ordinary commands or terminal interaction; neither side continues optimistically. |
 | Backend exits or stdout closes | Rust stops accepting commands, preserves any bounded partial presentation, restores the terminal, and reports truthful status. |
@@ -190,9 +207,9 @@ This decision fixes their ownership, not their final wire representation. See
 | Failed update or restart | Python reports failure without leaving a mixed-version process pair. The user retains an explicit Textual path. |
 | Textual failure | Existing Python cleanup and RPC ownership remain unchanged by the Rust experiment. |
 
-Later implementation issues define exact timeouts, exit codes, and platform primitives, but they may
-not rely on frontend destructors or backend EOF for fail-safe cleanup, transfer semantic authority,
-or permit unbounded cleanup.
+The scaffold implements bounded handshake, graceful shutdown, task join, and signal-escalation
+deadlines. It does not rely on frontend destructors or backend EOF for fail-safe cleanup, transfer
+semantic authority, or permit unbounded cleanup.
 
 ## Relationship to existing work
 
@@ -215,9 +232,10 @@ or permit unbounded cleanup.
 
 ## Consequences and reconsideration
 
-The experiment adds a second frontend language, cross-language fixtures, platform binaries, and a
-lockstep compatibility obligation. Those costs are accepted only while they test a concrete
-performance and maintainability hypothesis. They do not justify moving unrelated Python systems.
+The experiment adds a second frontend language, cross-language fixtures, and a lockstep compatibility
+obligation. Shipping platform binaries would add a separate distribution cost; #463 does not do so.
+Those costs are accepted only while they test a concrete performance and maintainability hypothesis.
+They do not justify moving unrelated Python systems.
 
 The split must be reconsidered before a default-renderer proposal if any of these remain true:
 

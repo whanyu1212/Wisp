@@ -8,10 +8,8 @@ import sys
 import typer
 from rich.console import Console
 
-from wisp.tui.rendering import TuiRendererKind
-
 from .output import _exit_with_error
-from .types import OutputMode
+from .types import OutputMode, TuiFrontendKind
 
 
 def _option_was_provided(ctx: typer.Context, name: str) -> bool:
@@ -45,11 +43,11 @@ def _resolve_cli_mode(
 
 
 def _resolve_tui_renderer(
-    renderer: TuiRendererKind,
+    renderer: TuiFrontendKind,
     *,
     renderer_was_provided: bool,
     console: Console,
-) -> TuiRendererKind:
+) -> TuiFrontendKind:
     if renderer_was_provided:
         return renderer
     env_renderer = _tui_renderer_from_env(console)
@@ -69,14 +67,14 @@ def _output_mode_from_env(console: Console) -> OutputMode | None:
         )
 
 
-def _tui_renderer_from_env(console: Console) -> TuiRendererKind | None:
+def _tui_renderer_from_env(console: Console) -> TuiFrontendKind | None:
     value = _env_value("WISP_TUI_RENDERER")
     if value is None:
         return None
     try:
-        return TuiRendererKind(value)
+        return TuiFrontendKind(value)
     except ValueError:
-        allowed = ", ".join(renderer.value for renderer in TuiRendererKind)
+        allowed = ", ".join(renderer.value for renderer in TuiFrontendKind)
         _exit_with_error(
             f"WISP_TUI_RENDERER must be one of: {allowed}",
             mode=OutputMode.text,
