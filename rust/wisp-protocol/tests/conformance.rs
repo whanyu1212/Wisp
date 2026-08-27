@@ -100,6 +100,15 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         stats,
         serde_json::json!({"type": "get_session_stats", "id": "stats-1"})
     );
+
+    let cancel = commands::WispTypedClientRpcCommands::cancel("cancel-1", "prompt-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        cancel,
+        serde_json::json!({"type": "cancel", "id": "cancel-1", "target_id": "prompt-1"})
+    );
 }
 
 #[test]

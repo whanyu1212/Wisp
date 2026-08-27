@@ -213,19 +213,27 @@ struct SequentialCommandIds {
 
 impl SequentialCommandIds {
     fn peek_id(&self, kind: CommandKind) -> String {
+        self.peek_prefixed_id(kind.prefix())
+    }
+
+    fn peek_prefixed_id(&self, prefix: &str) -> String {
         let next = self
             .next
             .checked_add(1)
             .expect("a frontend process cannot exhaust u64 command IDs");
-        format!("{}-{next}", kind.prefix())
+        format!("{prefix}-{next}")
+    }
+
+    fn next_prefixed_id(&mut self, prefix: &str) -> String {
+        let id = self.peek_prefixed_id(prefix);
+        self.next += 1;
+        id
     }
 }
 
 impl CommandIdSource for SequentialCommandIds {
     fn next_id(&mut self, kind: CommandKind) -> String {
-        let id = self.peek_id(kind);
-        self.next += 1;
-        id
+        self.next_prefixed_id(kind.prefix())
     }
 }
 
@@ -295,6 +303,25 @@ impl LiveUi {
         self.apply_effects(effects, writer, limit).await
     }
 
+    async fn cancel_current_command(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<(), Error> {
+        let Some(current) = self.state.current_command.as_ref() else {
+            return Ok(());
+        };
+        if self.state.cancel_requested {
+            return Ok(());
+        }
+        let id = self.ids.next_prefixed_id("cancel");
+        let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
+        send_value(writer, &command, limit).await?;
+        self.state.cancel_requested = true;
+        self.render_pending = true;
+        Ok(())
+    }
+
     fn prompt_editable(&self) -> bool {
         self.state.input_ready
             && self.state.current_command.is_none()
@@ -348,7 +375,10 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match input {
-            Input::Key(key) if is_ctrl_c(key) => Ok(LoopControl::Exit),
+            Input::Key(key) if is_ctrl_c(key) => {
+                self.cancel_current_command(writer, limit).await?;
+                Ok(LoopControl::Exit)
+            }
             Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
                     let prompt = self.editor.text().to_owned();
@@ -539,6 +569,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 }
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
+                    live_ui
+                        .cancel_current_command(&writer_tx, max_client_frame)
+                        .await?;
                     break Ok(());
                 }
                 _ = redraw.tick() => {
@@ -1437,6 +1470,42 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
             json!({"type": "prompt", "id": "prompt-1", "prompt": "hello\nworld"})
         );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_cancels_active_prompt_before_exit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(live_ui.state.cancel_requested);
+        assert!(live_ui.render_pending);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("Ctrl-C with an active prompt must queue one cancel frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({"type": "cancel", "id": "cancel-1", "target_id": "prompt-1"})
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
