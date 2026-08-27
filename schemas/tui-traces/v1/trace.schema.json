@@ -258,8 +258,11 @@
         "scope": {
           "anyOf": [
             {
-              "maxLength": 32,
-              "minLength": 1,
+              "enum": [
+                "once",
+                "tool_session",
+                "all_session"
+              ],
               "type": "string"
             },
             {

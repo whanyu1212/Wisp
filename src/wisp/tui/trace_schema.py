@@ -96,7 +96,7 @@ class TraceLocalApprove(_TraceModel):
     call_id: str = Field(min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN)
     approved: bool
     reason: str | None = Field(default=None, min_length=1, max_length=512)
-    scope: str | None = Field(default=None, min_length=1, max_length=32)
+    scope: Literal["once", "tool_session", "all_session"] | None = None
     clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
 
 

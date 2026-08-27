@@ -104,6 +104,8 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
             f"  expected: {trace.expected.retained_text!r}"
         )
 
+    anyio.run(run)
+
 
 def _diff_commands(actual: tuple[dict[str, Any], ...], expected: list[dict[str, object]]) -> str:
     """Return a structural diff string when outbound commands diverge."""
@@ -231,6 +233,33 @@ def test_unprefixed_slash_command_is_normalized_before_parsing() -> None:
         assert command_types == ["get_mcp_status"], (
             f"unprefixed slash must dispatch the slash command, got {command_types}"
         )
+
+    anyio.run(run)
+
+
+def test_slash_arguments_keep_token_boundaries() -> None:
+    async def run() -> None:
+        spaced_argument = "sess id with spaces"
+        data = _inline_trace(
+            "slash_arg_boundaries",
+            [
+                {
+                    "type": "local.slash",
+                    "command": "resume",
+                    "args": [spaced_argument],
+                    "clock_ms": 0,
+                }
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+
+        selections = [command for command in result.commands if command["type"] == "select_session"]
+        assert len(selections) == 1, (
+            f"one quoted argument must stay one token, got {result.commands}"
+        )
+        assert selections[0]["session_id"] == spaced_argument
 
     anyio.run(run)
 

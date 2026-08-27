@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections import deque
 from dataclasses import dataclass
 from itertools import count
@@ -441,7 +442,9 @@ class TraceRunner:
                 command = inp.command if inp.command.startswith("/") else f"/{inp.command}"
                 slash_text = command
                 if inp.args:
-                    slash_text += " " + " ".join(inp.args)
+                    # shlex-quote each token so argument boundaries survive the
+                    # shell's shlex.split re-tokenization unchanged.
+                    slash_text += " " + " ".join(shlex.quote(arg) for arg in inp.args)
                 await self.shell._handle_input_line(
                     _InputLine(text=slash_text, mode=_InputMode.idle)
                 )
@@ -456,9 +459,7 @@ class TraceRunner:
                     raise TraceReplayError(
                         f"local.approve targets call_id {inp.call_id!r} but {pending!r} is pending"
                     )
-                scope_val: ApprovalScope | None = None
-                if inp.scope is not None and inp.scope in {"once", "tool_session", "all_session"}:
-                    scope_val = cast(ApprovalScope, inp.scope)
+                scope_val: ApprovalScope | None = inp.scope
                 await self.shell._answer_pending_approval(
                     "",
                     approved=inp.approved,
