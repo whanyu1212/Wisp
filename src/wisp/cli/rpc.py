@@ -15,7 +15,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp import __version__
 from wisp.config import WispConfig
-from wisp.events import WispEvent
+from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.framing import encode_rpc_frame
@@ -40,11 +40,20 @@ _RPC_TRANSPORT_LIMITS = RpcTransportLimits(
 # event ahead of the coordinator so the per-frame limit also bounds aggregate
 # transport memory under downstream backpressure.
 _RPC_CONTROL_STREAM_BUFFER_SIZE = 1
+_MAX_RPC_STARTUP_ERROR_CHARS = 1_000
 
 
 def _write_json_event(event: WispEvent) -> None:
     encode_rpc_frame(event, max_frame_bytes=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes)
     _cli_output._write_json_event(event)
+
+
+def _write_startup_error(message: str) -> None:
+    """Write a bounded error after negotiation but before the RPC host owns output."""
+
+    if len(message) > _MAX_RPC_STARTUP_ERROR_CHARS:
+        message = f"{message[: _MAX_RPC_STARTUP_ERROR_CHARS - 3]}..."
+    _write_json_event(ErrorEvent(message=message))
 
 
 async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:

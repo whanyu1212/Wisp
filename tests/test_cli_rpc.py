@@ -2302,6 +2302,26 @@ def test_rpc_mode_negotiates_before_startup_errors(
     assert message in records[1]["message"]
 
 
+def test_rpc_mode_bounds_post_handshake_startup_errors(tmp_path: Path) -> None:
+    provider = "x" * 5_000
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--provider", provider, "--session-dir", str(tmp_path)],
+        input="",
+        env={"WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    message = records[1]["message"]
+    assert isinstance(message, str)
+    assert len(message) == cli_module.rpc._MAX_RPC_STARTUP_ERROR_CHARS
+    assert message.startswith("Unknown provider: ")
+    assert message.endswith("...")
+
+
 def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
     runner = CliRunner()
 
