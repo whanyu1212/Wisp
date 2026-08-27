@@ -419,17 +419,9 @@ class TraceRunner:
         # Seed view/interaction if provided.
         if trace.initial.view is not None:
             v = trace.initial.view
-            self.shell.view.status = v.status
-            self.shell.view.input_mode = v.input_mode
             self.shell.view.input_ready = v.input_ready
-            self.shell.view.queued_steering = v.queued_steering
-            self.shell.view.queued_follow_ups = v.queued_follow_ups
-            self.shell.view.provider = v.provider
-            self.shell.view.model = v.model
             # mode and last_session flow through shell-owned state so later
             # _sync_view() calls keep replaying the seeded values faithfully.
-            if v.mode not in ("build", "plan"):
-                raise TraceReplayError(f"invalid initial view mode: {v.mode!r}")
             self.shell.current_mode = v.mode
             self.shell.view.mode = v.mode
             if v.last_session is not None:
@@ -460,6 +452,8 @@ class TraceRunner:
                 )
             self.shell.state.cancel_requested = inter.cancel_requested
             self.shell.state.exit_requested = inter.exit_requested
+        if trace.initial.view is not None:
+            self.shell._sync_view()
 
     async def run(self) -> TraceRunResult:
         _reset_submission_ids()

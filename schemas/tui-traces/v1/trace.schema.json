@@ -172,7 +172,7 @@
         "view": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TraceViewProjection"
+              "$ref": "#/$defs/TraceInitialViewState"
             },
             {
               "type": "null"
@@ -185,40 +185,43 @@
         "provider"
       ],
       "title": "TraceInitialState",
-      "type": "object",
-      "x-wisp-invariants": {
-        "view.input_mode": {
-          "derivedFrom": "interaction.status ?? 'idle'",
-          "valueMap": {
-            "compacting": "running",
-            "exiting": "exiting",
-            "idle": "idle",
-            "running": "running",
-            "waiting_for_approval": "approval",
-            "waiting_for_trust": "trust"
-          }
+      "type": "object"
+    },
+    "TraceInitialViewState": {
+      "additionalProperties": false,
+      "description": "View fields with independent shell backing state.",
+      "properties": {
+        "input_ready": {
+          "default": true,
+          "title": "Input Ready",
+          "type": "boolean"
         },
-        "view.model": {
-          "equalsField": "model"
+        "last_session": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Session"
         },
-        "view.provider": {
-          "equalsField": "provider"
-        },
-        "view.queued_follow_ups": {
-          "const": 0
-        },
-        "view.queued_steering": {
-          "const": 0
-        },
-        "view.status": {
-          "defaultIdentity": true,
-          "derivedFrom": "interaction.status ?? 'idle'",
-          "valueMap": {
-            "waiting_for_approval": "waiting for approval",
-            "waiting_for_trust": "waiting for trust"
-          }
+        "mode": {
+          "default": "build",
+          "enum": [
+            "build",
+            "plan"
+          ],
+          "title": "Mode",
+          "type": "string"
         }
-      }
+      },
+      "title": "TraceInitialViewState",
+      "type": "object"
     },
     "TraceInteractionProjection": {
       "additionalProperties": false,

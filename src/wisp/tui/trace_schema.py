@@ -117,71 +117,20 @@ class TraceInteractionProjection(_TraceModel):
     exit_requested: bool = False
 
 
-class TraceInitialState(_TraceModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        strict=True,
-        json_schema_extra={
-            "x-wisp-invariants": {
-                "view.provider": {"equalsField": "provider"},
-                "view.model": {"equalsField": "model"},
-                "view.queued_steering": {"const": 0},
-                "view.queued_follow_ups": {"const": 0},
-                "view.status": {
-                    "derivedFrom": "interaction.status ?? 'idle'",
-                    "valueMap": {
-                        "waiting_for_approval": "waiting for approval",
-                        "waiting_for_trust": "waiting for trust",
-                    },
-                    "defaultIdentity": True,
-                },
-                "view.input_mode": {
-                    "derivedFrom": "interaction.status ?? 'idle'",
-                    "valueMap": {
-                        "idle": "idle",
-                        "running": "running",
-                        "compacting": "running",
-                        "waiting_for_approval": "approval",
-                        "waiting_for_trust": "trust",
-                        "exiting": "exiting",
-                    },
-                },
-            }
-        },
-    )
+class TraceInitialViewState(_TraceModel):
+    """View fields with independent shell backing state."""
 
+    input_ready: bool = True
+    mode: Literal["build", "plan"] = "build"
+    last_session: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class TraceInitialState(_TraceModel):
     provider: str = Field(min_length=1, max_length=64)
     model: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str | None = Field(default=None, min_length=1, max_length=64)
-    view: TraceViewProjection | None = None
+    view: TraceInitialViewState | None = None
     interaction: TraceInteractionProjection | None = None
-
-    @model_validator(mode="after")
-    def _require_representable_view(self) -> TraceInitialState:
-        view = self.view
-        if view is None:
-            return self
-        if view.provider != self.provider or view.model != self.model:
-            raise ValueError("initial view provider/model must match initial shell configuration")
-        if view.queued_steering or view.queued_follow_ups:
-            raise ValueError("initial view queues require submissions and must be empty")
-
-        status = self.interaction.status if self.interaction is not None else "idle"
-        expected_view_status = {
-            "waiting_for_approval": "waiting for approval",
-            "waiting_for_trust": "waiting for trust",
-        }.get(status, status)
-        expected_input_mode = {
-            "running": "running",
-            "compacting": "running",
-            "waiting_for_approval": "approval",
-            "waiting_for_trust": "trust",
-            "exiting": "exiting",
-        }.get(status, "idle")
-        if view.status != expected_view_status or view.input_mode != expected_input_mode:
-            raise ValueError("initial view status/input mode must match initial interaction")
-        return self
 
 
 class TraceLocalSubmit(_TraceModel):

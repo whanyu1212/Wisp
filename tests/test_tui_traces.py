@@ -9,6 +9,7 @@ from typing import Any
 import anyio
 import pytest
 from jsonschema import Draft202012Validator
+from jsonschema import ValidationError as JsonSchemaValidationError
 
 from wisp.tui.trace_runner import RecordingTraceRenderer, TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
@@ -43,12 +44,17 @@ def test_trace_schema_is_valid_json_schema() -> None:
     Draft202012Validator.check_schema(schema)
 
 
-def test_trace_schema_publishes_initial_state_invariants() -> None:
+def test_initial_view_schema_excludes_derived_state() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    invariants = schema["$defs"]["TraceInitialState"]["x-wisp-invariants"]
-    assert invariants["view.provider"] == {"equalsField": "provider"}
-    assert invariants["view.queued_steering"] == {"const": 0}
-    assert invariants["view.status"]["derivedFrom"] == "interaction.status ?? 'idle'"
+    initial = _default_initial()
+    initial["view"] = {"input_ready": True, "mode": "build", "provider": "other"}
+    data = _inline_trace(
+        "derived_initial_view_field",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(JsonSchemaValidationError, match="provider"):
+        Draft202012Validator(schema).validate(data)
 
 
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
@@ -416,28 +422,6 @@ def test_interaction_status_is_preserved_when_initial_view_is_omitted() -> None:
     anyio.run(run)
 
 
-def test_unrepresentable_initial_view_state_is_rejected() -> None:
-    initial = _default_initial()
-    initial["view"] = {
-        "status": "idle",
-        "input_mode": "idle",
-        "input_ready": True,
-        "queued_steering": 1,
-        "queued_follow_ups": 0,
-        "provider": "other-provider",
-        "model": None,
-        "mode": "build",
-        "last_session": None,
-    }
-    data = _inline_trace(
-        "unrepresentable_initial_view",
-        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
-        initial,
-    )
-    with pytest.raises(ValueError, match="initial"):
-        TraceFileAdapter.validate_python(data)
-
-
 def test_configure_recorder_captures_every_argument() -> None:
     from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
 
@@ -715,13 +699,7 @@ def test_initial_view_mode_and_last_session_are_applied() -> None:
     async def run() -> None:
         initial = _default_initial()
         initial["view"] = {
-            "status": "idle",
-            "input_mode": "idle",
             "input_ready": True,
-            "queued_steering": 0,
-            "queued_follow_ups": 0,
-            "provider": "fake",
-            "model": None,
             "mode": "plan",
             "last_session": "session-1",
         }
