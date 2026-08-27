@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "name": "approval_deny",
+  "description": "Prompt triggers approval, user denies, and run completes.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": null
+  },
+  "inputs": [
+    {
+      "type": "local.submit",
+      "content": "read file",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.approval.requested",
+        "call_id": "call-1",
+        "name": "read",
+        "arguments": {},
+        "safety": "read"
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "local.approve",
+      "call_id": "call-1",
+      "approved": false,
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.approval.resolved",
+        "call_id": "call-1",
+        "name": "read",
+        "approved": false
+      },
+      "clock_ms": 30
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "command_id": "prompt-1",
+        "command_type": "prompt",
+        "ok": true
+      },
+      "clock_ms": 40
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "prompt",
+        "id": "prompt-1",
+        "prompt": "read file"
+      },
+      {
+        "type": "approval",
+        "id": "approval-1",
+        "call_id": "call-1",
+        "approved": false,
+        "reason": "Denied from TUI",
+        "scope": null
+      },
+      {
+        "type": "get_session_stats",
+        "id": "get_session_stats-1"
+      }
+    ],
+    "view": {
+      "status": "idle",
+      "input_mode": "idle",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "idle",
+      "current_command_id": null,
+      "current_command_type": null,
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null
+  }
+}

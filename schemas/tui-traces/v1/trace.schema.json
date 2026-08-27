@@ -1,0 +1,769 @@
+{
+  "$defs": {
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128
+      },
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 64,
+          "propertyNames": {
+            "maxLength": 128
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "TraceExpected": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/TraceExpectedCommand"
+          },
+          "maxItems": 32,
+          "title": "Commands",
+          "type": "array"
+        },
+        "interaction": {
+          "$ref": "#/$defs/TraceInteractionProjection"
+        },
+        "retained_text": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retained Text"
+        },
+        "view": {
+          "$ref": "#/$defs/TraceViewProjection"
+        }
+      },
+      "required": [
+        "commands",
+        "view",
+        "interaction"
+      ],
+      "title": "TraceExpected",
+      "type": "object"
+    },
+    "TraceExpectedCommand": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "TraceExpectedCommand",
+      "type": "object",
+      "x-wisp-max-depth": 8,
+      "x-wisp-max-nodes": 1024
+    },
+    "TraceInitialState": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "interaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TraceInteractionProjection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TraceInitialViewState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "TraceInitialState",
+      "type": "object"
+    },
+    "TraceInitialViewState": {
+      "additionalProperties": false,
+      "description": "View fields with independent shell backing state.",
+      "properties": {
+        "input_ready": {
+          "default": true,
+          "title": "Input Ready",
+          "type": "boolean"
+        },
+        "last_session": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Session"
+        },
+        "mode": {
+          "default": "build",
+          "enum": [
+            "build",
+            "plan"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "TraceInitialViewState",
+      "type": "object"
+    },
+    "TraceInteractionProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "cancel_requested": {
+          "default": false,
+          "title": "Cancel Requested",
+          "type": "boolean"
+        },
+        "current_command_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Command Id"
+        },
+        "current_command_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "prompt",
+                "init",
+                "compact"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Command Type"
+        },
+        "exit_requested": {
+          "default": false,
+          "title": "Exit Requested",
+          "type": "boolean"
+        },
+        "pending_approval_call_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending Approval Call Id"
+        },
+        "pending_trust_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending Trust Request Id"
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "running",
+            "compacting",
+            "waiting_for_approval",
+            "waiting_for_trust",
+            "exiting"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "TraceInteractionProjection",
+      "type": "object"
+    },
+    "TraceLocalApprove": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "call_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "title": "Call Id",
+          "type": "string"
+        },
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "once",
+                "tool_session",
+                "all_session"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        },
+        "type": {
+          "const": "local.approve",
+          "default": "local.approve",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "approved",
+        "clock_ms"
+      ],
+      "title": "TraceLocalApprove",
+      "type": "object"
+    },
+    "TraceLocalCancel": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "type": {
+          "const": "local.cancel",
+          "default": "local.cancel",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clock_ms"
+      ],
+      "title": "TraceLocalCancel",
+      "type": "object"
+    },
+    "TraceLocalSlash": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Args",
+          "type": "array"
+        },
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "command": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z/][a-z0-9/_-]*$",
+          "title": "Command",
+          "type": "string"
+        },
+        "type": {
+          "const": "local.slash",
+          "default": "local.slash",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "clock_ms"
+      ],
+      "title": "TraceLocalSlash",
+      "type": "object"
+    },
+    "TraceLocalSubmit": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "type": {
+          "const": "local.submit",
+          "default": "local.submit",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "clock_ms"
+      ],
+      "title": "TraceLocalSubmit",
+      "type": "object"
+    },
+    "TraceLocalTrust": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "transient": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transient"
+        },
+        "trusted": {
+          "title": "Trusted",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "local.trust",
+          "default": "local.trust",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "trusted",
+        "clock_ms"
+      ],
+      "title": "TraceLocalTrust",
+      "type": "object"
+    },
+    "TraceRpcClosed": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "type": {
+          "const": "rpc.closed",
+          "default": "rpc.closed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clock_ms"
+      ],
+      "title": "TraceRpcClosed",
+      "type": "object"
+    },
+    "TraceRpcEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "event": {
+          "$ref": "#/$defs/JsonObject",
+          "required": [
+            "type"
+          ],
+          "x-wisp-max-depth": 8,
+          "x-wisp-max-nodes": 1024
+        },
+        "type": {
+          "const": "rpc.event",
+          "default": "rpc.event",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "clock_ms"
+      ],
+      "title": "TraceRpcEvent",
+      "type": "object"
+    },
+    "TraceViewProjection": {
+      "additionalProperties": false,
+      "description": "Semantic view projection verified by traces; not terminal cells.",
+      "properties": {
+        "input_mode": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Input Mode",
+          "type": "string"
+        },
+        "input_ready": {
+          "title": "Input Ready",
+          "type": "boolean"
+        },
+        "last_session": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Session"
+        },
+        "mode": {
+          "default": "build",
+          "enum": [
+            "build",
+            "plan"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "queued_follow_ups": {
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Queued Follow Ups",
+          "type": "integer"
+        },
+        "queued_steering": {
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Queued Steering",
+          "type": "integer"
+        },
+        "status": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "input_mode",
+        "input_ready",
+        "queued_steering",
+        "queued_follow_ups"
+      ],
+      "title": "TraceViewProjection",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "expected": {
+      "$ref": "#/$defs/TraceExpected"
+    },
+    "initial": {
+      "$ref": "#/$defs/TraceInitialState"
+    },
+    "inputs": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "local.approve": "#/$defs/TraceLocalApprove",
+            "local.cancel": "#/$defs/TraceLocalCancel",
+            "local.slash": "#/$defs/TraceLocalSlash",
+            "local.submit": "#/$defs/TraceLocalSubmit",
+            "local.trust": "#/$defs/TraceLocalTrust",
+            "rpc.closed": "#/$defs/TraceRpcClosed",
+            "rpc.event": "#/$defs/TraceRpcEvent"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/TraceLocalSubmit"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalSlash"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalCancel"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalApprove"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalTrust"
+          },
+          {
+            "$ref": "#/$defs/TraceRpcEvent"
+          },
+          {
+            "$ref": "#/$defs/TraceRpcClosed"
+          }
+        ]
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Inputs",
+      "type": "array"
+    },
+    "name": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "initial",
+    "inputs",
+    "expected"
+  ],
+  "title": "Wisp TUI transition trace",
+  "type": "object",
+  "x-wisp-trace-schema-version": 1
+}
