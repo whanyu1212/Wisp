@@ -111,8 +111,12 @@ class RecordingTraceRenderer(LineTuiRenderer):
     def token_delta(self, delta: str) -> None:
         self.tokens.append(delta)
 
+    def end_token_stream_with_content(self, content: str) -> None:
+        self.completed_responses.append(content)
+        super().end_token_stream()
+
     def event(self, event: KnownWispEvent) -> None:
-        if isinstance(event, MessageCompleted) and event.content:
+        if isinstance(event, MessageCompleted):
             self.completed_responses.append(event.content)
         super().event(event)
 
@@ -422,10 +426,7 @@ class TraceRunner:
                     f"invalid initial interaction status: {inter.status!r}"
                 ) from exc
             self.shell.state.current_command_id = inter.current_command_id
-            if inter.current_command_type is not None:
-                # Literal narrow: prompt|init|compact; keep if matches else None.
-                if inter.current_command_type in {"prompt", "init", "compact"}:
-                    self.shell.state.current_command_type = inter.current_command_type  # type: ignore[assignment]
+            self.shell.state.current_command_type = inter.current_command_type
             # Seed matching pending requests so a following local.approve/
             # local.trust resolves the exact encoded target instead of failing.
             if inter.pending_approval_call_id is not None:
@@ -449,8 +450,8 @@ class TraceRunner:
         # Mark input ready (post-hydration) unless trace says otherwise.
         if self.trace.initial.view is None:
             self.shell.view.input_ready = True
-            self.shell.view.status = "idle"
-            self.shell.state.status = TuiStatus.idle
+            if self.trace.initial.interaction is None:
+                self.shell.state.status = TuiStatus.idle
             self.shell._sync_view()
 
         inputs = list(self.trace.inputs)
@@ -541,10 +542,9 @@ class TraceRunner:
 
         view = _view_projection(self.shell)
         interaction = _interaction_projection(self.shell)
-        retained = (
-            "".join(self.renderer.tokens)
-            if self.renderer.tokens
-            else next(reversed(self.renderer.completed_responses), None)
+        retained = next(
+            reversed(self.renderer.completed_responses),
+            "".join(self.renderer.tokens) if self.renderer.tokens else None,
         )
         return TraceRunResult(
             commands=tuple(self.controller.commands),

@@ -62,7 +62,7 @@ class TraceInteractionProjection(_TraceModel):
     current_command_id: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN
     )
-    current_command_type: str | None = Field(default=None, min_length=1, max_length=32)
+    current_command_type: Literal["prompt", "init", "compact"] | None = None
     pending_approval_call_id: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN
     )

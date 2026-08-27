@@ -162,8 +162,11 @@
         "current_command_type": {
           "anyOf": [
             {
-              "maxLength": 32,
-              "minLength": 1,
+              "enum": [
+                "prompt",
+                "init",
+                "compact"
+              ],
               "type": "string"
             },
             {

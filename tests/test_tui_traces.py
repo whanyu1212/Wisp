@@ -354,6 +354,50 @@ def test_invalid_initial_interaction_status_is_rejected() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+def test_invalid_initial_command_type_is_rejected() -> None:
+    initial = _default_initial()
+    initial["interaction"] = {
+        "status": "running",
+        "current_command_id": "prompt-1",
+        "current_command_type": "submit",
+        "pending_approval_call_id": None,
+        "pending_trust_request_id": None,
+        "cancel_requested": False,
+        "exit_requested": False,
+    }
+    data = _inline_trace(
+        "invalid_command_type",
+        [{"type": "local.submit", "content": "hello", "clock_ms": 0}],
+        initial,
+    )
+    with pytest.raises(ValueError, match="current_command_type"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_interaction_status_is_preserved_when_initial_view_is_omitted() -> None:
+    async def run() -> None:
+        initial = _default_initial()
+        initial["interaction"] = {
+            "status": "running",
+            "current_command_id": "prompt-1",
+            "current_command_type": "prompt",
+            "pending_approval_call_id": None,
+            "pending_trust_request_id": None,
+            "cancel_requested": False,
+            "exit_requested": False,
+        }
+        data = _inline_trace(
+            "interaction_without_view",
+            [{"type": "local.slash", "command": "help", "args": [], "clock_ms": 0}],
+            initial,
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+        assert result.interaction.status == "running"
+
+    anyio.run(run)
+
+
 def test_configure_recorder_captures_every_argument() -> None:
     from wisp.tui.trace_runner import DeterministicIdFactory, TraceController
 
@@ -438,6 +482,38 @@ def test_completed_response_without_deltas_is_retained() -> None:
         result = await run_trace(trace)
         assert result.tokens == ()
         assert result.retained_text == "complete response"
+
+    anyio.run(run)
+
+
+def test_completed_response_content_overrides_streamed_deltas() -> None:
+    async def run() -> None:
+        data = _inline_trace(
+            "completed_reconciles_deltas",
+            [
+                {"type": "local.submit", "content": "hello", "clock_ms": 0},
+                {
+                    "type": "rpc.event",
+                    "event": {"type": "message.delta", "turn": 1, "delta": "partial"},
+                    "clock_ms": 5,
+                },
+                {
+                    "type": "rpc.event",
+                    "event": {
+                        "type": "message.completed",
+                        "turn": 1,
+                        "content": "authoritative response",
+                        "finish_reason": "stop",
+                    },
+                    "clock_ms": 10,
+                },
+            ],
+            _default_initial(),
+        )
+        trace = TraceFileAdapter.validate_python(data)
+        result = await run_trace(trace)
+        assert result.tokens == ("partial",)
+        assert result.retained_text == "authoritative response"
 
     anyio.run(run)
 
