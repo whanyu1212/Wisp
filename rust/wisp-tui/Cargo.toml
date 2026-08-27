@@ -17,3 +17,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 wisp-protocol = { path = "../wisp-protocol" }
+
+[dev-dependencies]
+jsonschema.workspace = true
