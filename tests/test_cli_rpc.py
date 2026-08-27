@@ -105,6 +105,31 @@ def test_rpc_mode_accepts_handshake_before_any_runtime_event(tmp_path: Path) -> 
     ]
 
 
+def test_rpc_mode_selected_from_environment_skips_plaintext_help(tmp_path: Path) -> None:
+    result = _BaseCliRunner().invoke(
+        app,
+        [],
+        input=_RPC_TEST_HANDSHAKE + '{"id":"bye","type":"shutdown"}\n',
+        env={
+            "WISP_MODE": "rpc",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+            "WISP_SESSION_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.handshake.accepted",
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+    assert records[-1]["command_id"] == "bye"
+    assert records[-1]["ok"] is True
+
+
 @pytest.mark.process
 def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) -> None:
     async def scenario() -> list[dict[str, object]]:

@@ -236,7 +236,11 @@ def cli_callback(
         if not rpc_handshake_complete:
             return
 
-    if prompt is None and resolved_mode is not OutputMode.tui and not _has_callback_cli_args(ctx):
+    if (
+        prompt is None
+        and resolved_mode not in {OutputMode.rpc, OutputMode.tui}
+        and not _has_callback_cli_args(ctx)
+    ):
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
