@@ -18,6 +18,8 @@ use framing::FrameReader;
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
 use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 use reducer::{
     BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
     ViewStatus,
@@ -310,6 +312,39 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
         self.apply_effects(effects, writer, limit).await
+    }
+
+    fn draw<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        connection: &ConnectionInfo,
+    ) -> Result<(), Error> {
+        terminal.draw(|frame| {
+            ui::render(
+                frame,
+                &self.state,
+                &self.editor,
+                connection,
+                self.notice.as_deref(),
+            );
+        })?;
+        self.render_pending = false;
+        Ok(())
+    }
+
+    async fn close_transport<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        connection: &ConnectionInfo,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+        error: Option<String>,
+    ) -> Result<LoopControl, Error> {
+        let control = self
+            .dispatch(UiAction::TransportClosed { error }, writer, limit)
+            .await?;
+        self.draw(terminal, connection)?;
+        Ok(control)
     }
 
     fn cancel_frame_limit_notice(&self, limit: usize) -> Result<Option<String>, Error> {
@@ -687,10 +722,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     match outcome {
                         Ok(ReaderTermination::Eof) => {
                             live_ui
-                                .dispatch(
-                                    UiAction::TransportClosed { error: None },
+                                .close_transport(
+                                    terminal.terminal(),
+                                    &connection,
                                     &writer_tx,
                                     max_client_frame,
+                                    None,
                                 )
                                 .await?;
                             break Ok(());
@@ -708,16 +745,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 }
                 _ = redraw.tick() => {
                     if live_ui.render_pending {
-                        terminal.terminal().draw(|frame| {
-                            ui::render(
-                                frame,
-                                &live_ui.state,
-                                &live_ui.editor,
-                                &connection,
-                                live_ui.notice.as_deref(),
-                            );
-                        })?;
-                        live_ui.render_pending = false;
+                        live_ui.draw(terminal.terminal(), &connection)?;
                     }
                 }
             }
@@ -1168,6 +1196,7 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
 mod tests {
     use super::*;
     use crate::reducer::{ActiveCommand, ActiveCommandType};
+    use ratatui::backend::TestBackend;
     use serde_json::json;
     use tokio::io::duplex;
     use wisp_protocol::events;
@@ -1553,6 +1582,47 @@ mod tests {
             classify_backend_exit(exit_status(9)),
             Error::BackendExitFailure(status) if status.code() == Some(9)
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_close_draws_retained_error_state_before_exit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.last_submitted_prompt = Some("hello".into());
+        state.retained_text = Some("partial response".into());
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+
+        let control = live_ui
+            .close_transport(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(!live_ui.render_pending);
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("partial response"));
+        assert!(rendered.contains("prompt failed"));
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]

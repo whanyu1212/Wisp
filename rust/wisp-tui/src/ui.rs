@@ -372,7 +372,8 @@ fn approval_composer_message(state: &UiState) -> String {
     match state.pending_approval.as_ref() {
         Some(pending) => format!(
             "approve {} ({})? [y once/t tool/a all/N]",
-            pending.name, pending.safety
+            sanitize_inline_for_terminal(&pending.name),
+            sanitize_inline_for_terminal(&pending.safety)
         ),
         None => "approve? [y once/t tool/a all/N]".into(),
     }
@@ -399,6 +400,10 @@ fn push_content_lines(
         }
         push_transcript_line(lines, Line::from(rendered), max_lines);
     }
+}
+
+fn sanitize_inline_for_terminal(content: &str) -> String {
+    sanitize_for_terminal(content).replace('\n', " ")
 }
 
 fn sanitize_for_terminal(content: &str) -> String {
@@ -628,6 +633,19 @@ mod tests {
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approve shell (ask)?"));
         assert!(approval.contains("[y once/t tool/a all/N]"));
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-2".into(),
+            name: "shell\u{1b}[2J\u{202e}spoof\nnext".into(),
+            arguments: json!({}),
+            safety: "ask\u{2066}safe".into(),
+        });
+        let adversarial = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(!adversarial.contains('\u{1b}'));
+        assert!(!adversarial.contains('\u{202e}'));
+        assert!(!adversarial.contains('\u{2066}'));
+        assert!(adversarial.contains("shell�[2J�spoof next"));
+        assert!(adversarial.contains("ask�safe"));
 
         state.view_status = ViewStatus::WaitingForTrust;
         state.pending_trust_request_id = Some("trust-1".into());
