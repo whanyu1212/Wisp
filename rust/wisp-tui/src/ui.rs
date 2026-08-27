@@ -404,9 +404,11 @@ fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str 
     }
     let width = width.max(1);
     let max_lines = max_lines.max(1);
-    let candidate_start = transcript_tail_candidate_start(content, width, max_lines).max(
-        transcript_tail_byte_start(content, transcript_tail_byte_budget(width, max_lines)),
-    );
+    let byte_start =
+        transcript_tail_byte_start(content, transcript_tail_byte_budget(width, max_lines));
+    let bounded_content = &content[byte_start..];
+    let candidate_start =
+        byte_start + transcript_tail_candidate_start(bounded_content, width, max_lines);
     let candidate = &content[candidate_start..];
     let mut line_starts = vec![candidate_start];
     let mut column = 0_usize;
