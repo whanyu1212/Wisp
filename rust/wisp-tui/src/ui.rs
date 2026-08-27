@@ -187,17 +187,20 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         let column = editor.cursor_column();
         let vertical_scroll = row.saturating_sub(usize::from(inner.height.saturating_sub(1)));
         let horizontal_scroll = column.saturating_sub(usize::from(inner.width.saturating_sub(1)));
+        let cursor_visible_row = row.saturating_sub(vertical_scroll);
         let display_text = composer_visible_text(
             editor,
             vertical_scroll,
             horizontal_scroll,
             usize::from(inner.width),
             usize::from(inner.height),
+            cursor_visible_row,
         );
-        let paragraph = Paragraph::new(display_text).block(block);
+        let cursor_horizontal_scroll = display_text.cursor_horizontal_scroll;
+        let paragraph = Paragraph::new(display_text.text).block(block);
         frame.render_widget(paragraph, area);
         let cursor_x = inner.x.saturating_add(
-            u16::try_from(column.saturating_sub(horizontal_scroll)).unwrap_or(u16::MAX),
+            u16::try_from(column.saturating_sub(cursor_horizontal_scroll)).unwrap_or(u16::MAX),
         );
         let cursor_y = inner
             .y
@@ -228,17 +231,24 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
     );
 }
 
+struct ComposerVisibleText {
+    text: String,
+    cursor_horizontal_scroll: usize,
+}
+
 fn composer_visible_text(
     editor: &PromptEditor,
     vertical_scroll: usize,
     horizontal_scroll: usize,
     width: usize,
     height: usize,
-) -> String {
+    cursor_visible_row: usize,
+) -> ComposerVisibleText {
     let display_text = editor.display_text();
     let mut visible = String::new();
     let visible_width = width.max(1);
     let visible_height = height.max(1);
+    let mut cursor_horizontal_scroll = horizontal_scroll;
     for (index, line) in display_text
         .split('\n')
         .skip(vertical_scroll)
@@ -248,33 +258,49 @@ fn composer_visible_text(
         if index > 0 {
             visible.push('\n');
         }
-        visible.push_str(display_column_slice(line, horizontal_scroll, visible_width));
+        let (slice, effective_start) =
+            display_column_window(line, horizontal_scroll, visible_width);
+        if index == cursor_visible_row {
+            cursor_horizontal_scroll = effective_start;
+        }
+        visible.push_str(slice);
     }
-    visible
+    ComposerVisibleText {
+        text: visible,
+        cursor_horizontal_scroll,
+    }
 }
 
-fn display_column_slice(line: &str, start: usize, width: usize) -> &str {
+fn display_column_window(line: &str, start: usize, width: usize) -> (&str, usize) {
     if width == 0 {
-        return "";
+        return ("", start);
     }
-    let end = start.saturating_add(width);
     let mut column = 0_usize;
     let mut start_byte = None;
+    let mut effective_start = start;
+    let mut end = start.saturating_add(width);
     for (offset, grapheme) in line.grapheme_indices(true) {
+        if start_byte.is_none() && column >= start {
+            start_byte = Some(offset);
+            effective_start = column;
+            end = effective_start.saturating_add(width);
+        }
         let grapheme_width = grapheme.width();
         let next_column = column.saturating_add(grapheme_width);
-        if start_byte.is_none() && (next_column > start || grapheme_width == 0 && column >= start) {
-            start_byte = Some(offset);
-        }
         if let Some(start) = start_byte {
             if column >= end {
-                return &line[start..offset];
+                return (&line[start..offset], effective_start);
             }
         }
         column = next_column;
     }
     let start_byte = start_byte.unwrap_or(line.len());
-    &line[start_byte..]
+    let effective_start = if start_byte == line.len() {
+        column
+    } else {
+        effective_start
+    };
+    (&line[start_byte..], effective_start)
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
@@ -596,9 +622,20 @@ mod tests {
         let mut editor = PromptEditor::default();
         let prompt = format!("{}TAIL", "x".repeat(70_000));
         editor.insert_paste(&prompt);
-        assert_eq!(display_column_slice(&prompt, 70_000, 4), "TAIL");
+        assert_eq!(display_column_window(&prompt, 70_000, 4).0, "TAIL");
         let rendered = render_to_string(40, 14, &state, &editor);
         assert!(rendered.contains("TAIL"));
+    }
+
+    #[test]
+    fn composer_window_aligns_start_to_wide_grapheme_boundary() {
+        let line = format!("{}TAIL", "🙂".repeat(35_000));
+        let width = 38;
+        let requested_start = line.width().saturating_sub(width - 1);
+        let (slice, effective_start) = display_column_window(&line, requested_start, width);
+        assert!(effective_start >= requested_start);
+        assert!(line.width().saturating_sub(effective_start) < width);
+        assert!(slice.ends_with("TAIL"));
     }
 
     #[test]
