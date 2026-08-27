@@ -562,6 +562,11 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_session_stats", "id": id}))
         }
 
+        /// Construct a request to cancel a running or queued command.
+        pub fn cancel(id: &str, target_id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))
+        }
+
         /// Construct the typed command used to request graceful backend shutdown.
         pub fn shutdown(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "shutdown", "id": id}))

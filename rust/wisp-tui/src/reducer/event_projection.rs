@@ -58,6 +58,9 @@ impl BackendEvent {
                 })?,
                 safety: string_field(value, &event_type, "safety")?,
             }),
+            "trust.requested" => Self::TrustRequested {
+                request_id: string_field(value, &event_type, "request_id")?,
+            },
             "rpc.command.finished" => Self::CommandFinished {
                 command_id: string_field(value, &event_type, "command_id")?,
                 command_type: string_field(value, &event_type, "command_type")?,

@@ -17,13 +17,13 @@ import pytest
 
 @pytest.mark.process
 @pytest.mark.parametrize(
-    ("quit_input", "expected_exit"),
-    [(b"q", 0), (b"\x03", 0), (None, 1)],
-    ids=["quit-key", "ctrl-c", "frontend-killed"],
+    ("exercise_prompt", "expected_exit"),
+    [(True, 0), (False, 1)],
+    ids=["prompt-stream-and-quit", "frontend-killed"],
 )
 def test_rust_tui_cross_language_smoke(
     tmp_path: Path,
-    quit_input: bytes | None,
+    exercise_prompt: bool,
     expected_exit: int,
 ) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
@@ -60,6 +60,8 @@ def test_rust_tui_cross_language_smoke(
     output = bytearray()
     status: int | None = None
     deadline = time.monotonic() + 20
+    prompt_sent = False
+    response_seen = False
     quit_sent = False
     rust_process_group: int | None = None
     try:
@@ -71,12 +73,17 @@ def test_rust_tui_cross_language_smoke(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not quit_sent and b"WISP / NATIVE TRANSPORT" in output:
-                if quit_input is None:
+            if not prompt_sent and b"Type a prompt below to start." in output:
+                if not exercise_prompt:
                     rust_process_group = os.tcgetpgrp(terminal_fd)
                     os.kill(rust_process_group, signal.SIGKILL)
+                    quit_sent = True
                 else:
-                    os.write(terminal_fd, quit_input)
+                    os.write(terminal_fd, b"hello rust\r")
+                prompt_sent = True
+            if exercise_prompt and not quit_sent and b"response" in output:
+                response_seen = True
+                os.write(terminal_fd, b"\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
@@ -97,7 +104,14 @@ def test_rust_tui_cross_language_smoke(
                 pass
             os.waitpid(child_pid, 0)
 
+    assert prompt_sent, bytes(output)
     assert quit_sent, bytes(output)
+    if exercise_prompt:
+        assert response_seen, bytes(output)
+        # Ratatui may place cursor-control sequences between adjacent cells, so
+        # assert the submitted prompt's words independently in the PTY stream.
+        assert b"hello" in output
+        assert b"rust" in output
     assert os.waitstatus_to_exitcode(status) == expected_exit, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal
     if rust_process_group is not None:

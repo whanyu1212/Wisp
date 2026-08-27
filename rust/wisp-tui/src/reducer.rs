@@ -132,6 +132,7 @@ pub struct UiState {
     pub pending_trust_request_id: Option<String>,
     pub cancel_requested: bool,
     pub exit_requested: bool,
+    pub last_submitted_prompt: Option<String>,
     pub retained_text: Option<String>,
     stream_turn: Option<u64>,
     streaming_text: bool,
@@ -139,11 +140,23 @@ pub struct UiState {
 
 impl UiState {
     pub fn new(provider: String, model: Option<String>, effort: Option<String>) -> Self {
+        Self::with_provider(Some(provider), model, effort)
+    }
+
+    pub fn unconfigured() -> Self {
+        Self::with_provider(None, None, None)
+    }
+
+    fn with_provider(
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    ) -> Self {
         Self {
             view_status: ViewStatus::Idle,
             interaction_status: InteractionStatus::Idle,
             input_ready: true,
-            provider: Some(provider),
+            provider,
             model,
             effort,
             mode: AgentMode::Build,
@@ -155,6 +168,7 @@ impl UiState {
             pending_trust_request_id: None,
             cancel_requested: false,
             exit_requested: false,
+            last_submitted_prompt: None,
             retained_text: None,
             stream_turn: None,
             streaming_text: false,
@@ -213,6 +227,9 @@ pub enum BackendEvent {
         content: String,
     },
     ToolApprovalRequested(PendingApproval),
+    TrustRequested {
+        request_id: String,
+    },
     CommandFinished {
         command_id: String,
         command_type: String,
@@ -300,6 +317,8 @@ fn submit(
     });
     state.pending_approval = None;
     state.cancel_requested = false;
+    state.last_submitted_prompt = Some(content);
+    state.retained_text = None;
     state.stream_turn = None;
     state.streaming_text = false;
     Ok(vec![
@@ -401,6 +420,12 @@ fn handle_backend_event(
             state.interaction_status = InteractionStatus::WaitingForApproval;
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::TrustRequested { request_id } => {
+            state.pending_trust_request_id = Some(request_id);
+            state.view_status = ViewStatus::WaitingForTrust;
+            state.interaction_status = InteractionStatus::WaitingForTrust;
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::CommandFinished {
             command_id,
             command_type,
@@ -461,10 +486,13 @@ mod tests {
     #[test]
     fn submission_stream_and_completion_are_deterministic() {
         let mut state = UiState::new("fake".into(), None, None);
+        state.retained_text = Some("stale answer".into());
         let mut ids = DeterministicIds::default();
         let effects = reduce(&mut state, UiAction::Submit("hello".into()), &mut ids).unwrap();
         assert_eq!(command_value(&effects[0]).unwrap()["id"], "prompt-1");
         assert_eq!(state.interaction_status, InteractionStatus::Running);
+        assert_eq!(state.last_submitted_prompt.as_deref(), Some("hello"));
+        assert_eq!(state.retained_text, None);
 
         for delta in ["hel", "lo"] {
             reduce(
@@ -747,6 +775,42 @@ mod tests {
                 turn: 1,
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
+            }
+        );
+    }
+
+    #[test]
+    fn trust_request_is_a_visible_blocking_state() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::TrustRequested {
+                request_id: "trust-1".into(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.view_status, ViewStatus::WaitingForTrust);
+        assert_eq!(state.interaction_status, InteractionStatus::WaitingForTrust);
+        assert_eq!(state.pending_trust_request_id.as_deref(), Some("trust-1"));
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+    }
+
+    #[test]
+    fn live_trust_request_projection_preserves_request_identity() {
+        let value = serde_json::json!({
+            "type": "trust.requested",
+            "schema_version": 34,
+            "timestamp": "2026-01-02T03:04:05Z",
+            "request_id": "trust-7",
+            "project_path": "/workspace"
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&live).unwrap(),
+            BackendEvent::TrustRequested {
+                request_id: "trust-7".into(),
             }
         );
     }

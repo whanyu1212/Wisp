@@ -16,6 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 wisp-protocol = { path = "../wisp-protocol" }
 
 [dev-dependencies]
