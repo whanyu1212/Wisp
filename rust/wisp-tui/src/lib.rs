@@ -147,6 +147,27 @@ pub fn render_top_level_error(error: &Error) -> String {
     output.finish()
 }
 
+fn render_transport_closed_diagnostic(state: &UiState) -> String {
+    let mut output = BoundedTerminalText::new(TOP_LEVEL_ERROR_MAX_BYTES, TOP_LEVEL_ERROR_MAX_CHARS);
+    std::fmt::write(
+        &mut output,
+        format_args!("wisp-tui: backend stream ended unexpectedly"),
+    )
+    .expect("bounded terminal renderer cannot fail");
+    if let Some(content) = state
+        .retained_text
+        .as_deref()
+        .filter(|content| !content.is_empty())
+    {
+        std::fmt::write(
+            &mut output,
+            format_args!("; partial assistant response: {content}"),
+        )
+        .expect("bounded terminal renderer cannot fail");
+    }
+    output.finish()
+}
+
 enum WriterMessage {
     Frame { payload: Bytes, limit: usize },
     Close,
@@ -672,6 +693,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             event_schema_version: events,
         };
         let mut live_ui = LiveUi::default();
+        let mut transport_closed_diagnostic = None;
         let mut redraw = interval(FRAME_INTERVAL);
         redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let loop_result = loop {
@@ -730,6 +752,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
                                     None,
                                 )
                                 .await?;
+                            transport_closed_diagnostic =
+                                Some(render_transport_closed_diagnostic(&live_ui.state));
                             break Ok(());
                         }
                         Err(error) => break Err(error),
@@ -754,6 +778,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
         drop(input_rx);
         input.await??;
         drop(terminal);
+        if let Some(diagnostic) = transport_closed_diagnostic {
+            eprintln!("{diagnostic}");
+        }
         loop_result?;
 
         queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
@@ -1421,6 +1448,24 @@ mod tests {
         assert!(!sanitized.contains('\u{7}'));
         assert!(!sanitized.contains('\r'));
         assert!(!sanitized.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn transport_closed_diagnostic_is_bounded_and_terminal_safe() {
+        let mut state = UiState::unconfigured();
+        state.retained_text =
+            Some("partial\u{1b}]0;owned\u{7}\u{202e}\n".repeat(TOP_LEVEL_ERROR_MAX_CHARS));
+        let rendered = render_transport_closed_diagnostic(&state);
+        assert!(rendered.starts_with("wisp-tui: backend stream ended unexpectedly"));
+        assert!(rendered.contains("partial assistant response"));
+        assert!(rendered.ends_with(TRUNCATION_NOTICE));
+        assert!(rendered.len() <= TOP_LEVEL_ERROR_MAX_BYTES);
+        assert!(rendered.chars().count() <= TOP_LEVEL_ERROR_MAX_CHARS);
+        assert!(
+            rendered
+                .chars()
+                .all(|character| !character.is_control() && !is_bidi_control(character))
+        );
     }
 
     #[test]

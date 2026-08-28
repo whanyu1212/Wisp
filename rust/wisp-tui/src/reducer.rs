@@ -550,6 +550,22 @@ fn handle_backend_event(
             request_id,
             project_path,
         } => {
+            if state.cancel_requested {
+                let id = ids.next_id(CommandKind::Trust);
+                let command = WispTypedClientRpcCommands::trust(
+                    &id,
+                    &request_id,
+                    false,
+                    Some(CANCELLED_TRUST_REASON),
+                    Some(true),
+                )?;
+                state.pending_trust_request_id = None;
+                state.pending_trust_project_path = None;
+                return Ok(vec![
+                    UiEffect::SendCommand(command),
+                    UiEffect::RequestRender,
+                ]);
+            }
             state.pending_trust_request_id = Some(request_id);
             state.pending_trust_project_path = Some(project_path);
             state.view_status = ViewStatus::WaitingForTrust;
@@ -1087,6 +1103,41 @@ mod tests {
         assert!(state.pending_approval.is_none());
         assert!(!state.cancel_requested);
         assert_eq!(state.view_status, ViewStatus::Running);
+    }
+
+    #[test]
+    fn late_trust_after_cancel_is_transiently_denied_without_reopening_the_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.cancel_requested = true;
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::TrustRequested {
+                request_id: "trust-1".into(),
+                project_path: "/workspace".into(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "trust");
+        assert_eq!(command["request_id"], "trust-1");
+        assert_eq!(command["trusted"], false);
+        assert_eq!(command["reason"], CANCELLED_TRUST_REASON);
+        assert_eq!(command["transient"], true);
+        assert!(state.cancel_requested);
+        assert!(state.pending_trust_request_id.is_none());
+        assert!(state.pending_trust_project_path.is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
     }
 
     #[test]

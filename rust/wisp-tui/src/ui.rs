@@ -421,7 +421,7 @@ fn bounded_decision_preview(content: &str) -> String {
 
 fn bounded_json_preview(value: &serde_json::Value) -> String {
     let mut writer = DecisionPreviewWriter::default();
-    if serde_json::to_writer(&mut writer, value).is_err() {
+    if serde_json::to_writer(&mut writer, value).is_err() && !writer.truncated {
         return "<invalid arguments>".into();
     }
     let mut preview = bounded_decision_preview(&String::from_utf8_lossy(&writer.bytes));
@@ -440,9 +440,22 @@ struct DecisionPreviewWriter {
 impl std::io::Write for DecisionPreviewWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let remaining = DECISION_PREVIEW_JSON_BYTES.saturating_sub(self.bytes.len());
-        let retained = remaining.min(buffer.len());
-        self.bytes.extend_from_slice(&buffer[..retained]);
-        self.truncated |= retained < buffer.len();
+        if remaining == 0 {
+            self.truncated = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "decision preview limit reached",
+            ));
+        }
+        if buffer.len() > remaining {
+            self.bytes.extend_from_slice(&buffer[..remaining]);
+            self.truncated = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "decision preview limit reached",
+            ));
+        }
+        self.bytes.extend_from_slice(buffer);
         Ok(buffer.len())
     }
 
@@ -726,6 +739,14 @@ mod tests {
         let bounded = approval_composer_message(&state);
         assert!(bounded.contains('…'));
         assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 100);
+
+        let mut writer = DecisionPreviewWriter::default();
+        let error =
+            std::io::Write::write(&mut writer, &vec![b'x'; DECISION_PREVIEW_JSON_BYTES + 1])
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        assert_eq!(writer.bytes.len(), DECISION_PREVIEW_JSON_BYTES);
+        assert!(writer.truncated);
 
         state.view_status = ViewStatus::WaitingForTrust;
         state.pending_trust_request_id = Some("trust-1".into());
