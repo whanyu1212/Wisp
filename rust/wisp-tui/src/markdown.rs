@@ -59,6 +59,7 @@ pub struct TranscriptSpan {
 pub struct MarkdownBlock {
     pub source: Range<usize>,
     pub spans: Vec<TranscriptSpan>,
+    truncated: bool,
 }
 
 impl MarkdownBlock {
@@ -225,6 +226,12 @@ impl IncrementalMarkdownState {
         }
         let mut document = self.stable_blocks.clone();
         document.extend(parsed[promote..].iter().cloned());
+        let presentation_source_end = presentation_start.saturating_add(source.len());
+        let document_truncated = enforce_document_budget(&mut document, presentation_source_end);
+        if document_truncated {
+            self.stable_source_end = source.len();
+            self.stable_blocks = document.clone();
+        }
         let work = MarkdownWork {
             source_bytes_parsed: checkpointed.saturating_add(mutable_source.len()),
             source_bytes_reused: reused,
@@ -270,6 +277,7 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
                 },
             }]
         },
+        truncated: false,
     }
 }
 
@@ -288,7 +296,20 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
                 output_offset: 0,
             },
         }],
+        truncated: true,
     })
+}
+
+fn finish_truncation_block(block: &mut Arc<MarkdownBlock>, source_end: usize) {
+    let block = Arc::make_mut(block);
+    block.source.end = source_end;
+    if let Some(span) = block.spans.first_mut() {
+        span.affinity.source_end = source_end;
+    }
+}
+
+fn is_truncation_block(block: &MarkdownBlock) -> bool {
+    block.truncated
 }
 
 #[derive(Default)]
@@ -298,27 +319,90 @@ struct ParseBudget {
     truncated: bool,
 }
 
+fn block_retained_bytes(block: &MarkdownBlock) -> usize {
+    block
+        .retained_bytes()
+        .saturating_add(std::mem::size_of::<Arc<MarkdownBlock>>())
+}
+
+fn block_fits_budget(block_count: usize, budget: &ParseBudget, block: &MarkdownBlock) -> bool {
+    block_count < MAX_PRESENTATION_BLOCKS
+        && budget
+            .retained_bytes
+            .saturating_add(block_retained_bytes(block))
+            <= MAX_PRESENTATION_RETAINED_BYTES
+        && budget.fragments.saturating_add(block.spans.len()) <= MAX_PRESENTATION_FRAGMENTS
+}
+
+fn record_block(budget: &mut ParseBudget, block: &MarkdownBlock) {
+    budget.retained_bytes = budget
+        .retained_bytes
+        .saturating_add(block_retained_bytes(block));
+    budget.fragments = budget.fragments.saturating_add(block.spans.len());
+}
+
+fn append_truncation_block(
+    blocks: &mut Vec<Arc<MarkdownBlock>>,
+    budget: &mut ParseBudget,
+    mut source_start: usize,
+) {
+    loop {
+        let marker = truncation_block(source_start);
+        if block_fits_budget(blocks.len(), budget, &marker) {
+            record_block(budget, &marker);
+            blocks.push(marker);
+            budget.truncated = true;
+            return;
+        }
+        let Some(removed) = blocks.pop() else {
+            return;
+        };
+        source_start = source_start.min(removed.source.start);
+        budget.retained_bytes = budget
+            .retained_bytes
+            .saturating_sub(block_retained_bytes(&removed));
+        budget.fragments = budget.fragments.saturating_sub(removed.spans.len());
+    }
+}
+
 fn push_bounded_block(
     blocks: &mut Vec<Arc<MarkdownBlock>>,
     budget: &mut ParseBudget,
     block: MarkdownBlock,
 ) {
-    let retained_bytes = block.retained_bytes();
-    let fragments = block.spans.len();
-    if blocks.len() >= MAX_PRESENTATION_BLOCKS
-        || budget.retained_bytes.saturating_add(retained_bytes)
-            > MAX_PRESENTATION_RETAINED_BYTES.saturating_sub(4 * 1024)
-        || budget.fragments.saturating_add(fragments) > MAX_PRESENTATION_FRAGMENTS.saturating_sub(1)
-    {
-        if !budget.truncated {
-            blocks.push(truncation_block(block.source.start));
-            budget.truncated = true;
-        }
-        return;
+    let block = Arc::new(block);
+    if block_fits_budget(blocks.len(), budget, &block) {
+        record_block(budget, &block);
+        blocks.push(block);
+    } else {
+        append_truncation_block(blocks, budget, block.source.start);
     }
-    budget.retained_bytes = budget.retained_bytes.saturating_add(retained_bytes);
-    budget.fragments = budget.fragments.saturating_add(fragments);
-    blocks.push(Arc::new(block));
+}
+
+fn enforce_document_budget(blocks: &mut Vec<Arc<MarkdownBlock>>, source_end: usize) -> bool {
+    let original = std::mem::take(blocks);
+    let mut bounded = Vec::with_capacity(original.len().min(MAX_PRESENTATION_BLOCKS));
+    let mut budget = ParseBudget::default();
+    for block in original {
+        if is_truncation_block(&block) {
+            append_truncation_block(&mut bounded, &mut budget, block.source.start);
+            break;
+        }
+        if block_fits_budget(bounded.len(), &budget, &block) {
+            record_block(&mut budget, &block);
+            bounded.push(block);
+        } else {
+            append_truncation_block(&mut bounded, &mut budget, block.source.start);
+            break;
+        }
+    }
+    if budget.truncated {
+        if let Some(last) = bounded.last_mut() {
+            finish_truncation_block(last, source_end);
+        }
+    }
+    *blocks = bounded;
+    budget.truncated
 }
 
 fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
@@ -374,7 +458,7 @@ fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
     }
     if budget.truncated {
         if let Some(last) = blocks.last_mut() {
-            Arc::make_mut(last).source.end = base_offset + source.len();
+            finish_truncation_block(last, base_offset + source.len());
         }
     }
     blocks
@@ -605,6 +689,7 @@ fn render_block(
     MarkdownBlock {
         source,
         spans: BlockRenderer::default().render(events, base_offset),
+        truncated: false,
     }
 }
 
@@ -730,6 +815,120 @@ mod tests {
 
         let settled = paragraph_state.build(&paragraph, 0, 0, true);
         assert!(settled.document.plain_text().ends_with("tail"));
+    }
+
+    #[test]
+    fn streaming_many_blocks_enforces_cumulative_presentation_budgets() {
+        let mut state = IncrementalMarkdownState::default();
+        let mut source = String::new();
+        let mut latest = MarkdownBuild::default();
+        for batch in 0..40 {
+            for item in 0..64 {
+                writeln!(source, "paragraph {batch}-{item}\n").unwrap();
+            }
+            latest = state.build(&source, 0, 0, false);
+            assert!(latest.document.blocks.len() <= MAX_PRESENTATION_BLOCKS);
+            assert!(latest.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+            assert!(
+                latest
+                    .document
+                    .blocks
+                    .iter()
+                    .map(|block| block.spans.len())
+                    .sum::<usize>()
+                    <= MAX_PRESENTATION_FRAGMENTS
+            );
+        }
+        assert!(
+            latest
+                .document
+                .plain_text()
+                .contains(PRESENTATION_TRUNCATED)
+        );
+
+        let settled = state.build(&source, 0, 0, true);
+        let from_scratch = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+        assert_eq!(settled.document, from_scratch.document);
+        assert!(settled.document.blocks.len() <= MAX_PRESENTATION_BLOCKS);
+        assert!(settled.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn document_budget_boundaries_and_truncation_identity_are_exact() {
+        fn synthetic_block(
+            start: usize,
+            fragments: usize,
+            fragment_bytes: usize,
+        ) -> Arc<MarkdownBlock> {
+            Arc::new(MarkdownBlock {
+                source: start..start + 1,
+                spans: (0..fragments)
+                    .map(|_| TranscriptSpan {
+                        text: "x".repeat(fragment_bytes),
+                        style: TranscriptSpanStyle::default(),
+                        affinity: SourceAffinity {
+                            source_offset: start,
+                            source_end: start + 1,
+                            output_offset: 0,
+                        },
+                    })
+                    .collect(),
+                truncated: false,
+            })
+        }
+
+        let mut exact_blocks = (0..MAX_PRESENTATION_BLOCKS)
+            .map(|index| synthetic_block(index, 0, 0))
+            .collect::<Vec<_>>();
+        assert!(!enforce_document_budget(
+            &mut exact_blocks,
+            MAX_PRESENTATION_BLOCKS
+        ));
+        assert_eq!(exact_blocks.len(), MAX_PRESENTATION_BLOCKS);
+        exact_blocks.push(synthetic_block(MAX_PRESENTATION_BLOCKS, 0, 0));
+        assert!(enforce_document_budget(
+            &mut exact_blocks,
+            MAX_PRESENTATION_BLOCKS + 1
+        ));
+        assert!(exact_blocks.len() <= MAX_PRESENTATION_BLOCKS);
+
+        let mut exact_fragments = vec![synthetic_block(0, MAX_PRESENTATION_FRAGMENTS, 0)];
+        assert!(!enforce_document_budget(&mut exact_fragments, 1));
+        exact_fragments.push(synthetic_block(1, 1, 0));
+        assert!(enforce_document_budget(&mut exact_fragments, 2));
+        assert!(
+            exact_fragments
+                .iter()
+                .map(|block| block.spans.len())
+                .sum::<usize>()
+                <= MAX_PRESENTATION_FRAGMENTS
+        );
+
+        let mut retained = (0..16)
+            .map(|index| synthetic_block(index, 1, 128 * 1024))
+            .collect::<Vec<_>>();
+        assert!(enforce_document_budget(&mut retained, 16));
+        assert!(
+            MarkdownDocument { blocks: retained }.retained_bytes()
+                <= MAX_PRESENTATION_RETAINED_BYTES
+        );
+
+        let mut state = IncrementalMarkdownState::default();
+        let source = format!("{PRESENTATION_TRUNCATED}\n\nstill visible");
+        let legitimate_text = state.build(&source, 0, 0, true);
+        assert!(
+            legitimate_text
+                .document
+                .plain_text()
+                .contains("still visible")
+        );
+        assert!(
+            legitimate_text
+                .document
+                .blocks
+                .iter()
+                .all(|block| !block.truncated)
+        );
     }
 
     #[test]
