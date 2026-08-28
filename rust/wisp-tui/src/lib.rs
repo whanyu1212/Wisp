@@ -281,6 +281,12 @@ enum RenderedDecisionContext {
     Trust(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UnsendableResponseContext {
+    Interactive(RenderedDecisionContext),
+    Cancelling(String),
+}
+
 struct LiveUi {
     state: UiState,
     editor: PromptEditor,
@@ -288,7 +294,7 @@ struct LiveUi {
     notice: Option<String>,
     render_pending: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
-    unsendable_decision_context: Option<RenderedDecisionContext>,
+    unsendable_response_context: Option<UnsendableResponseContext>,
 }
 
 impl Default for LiveUi {
@@ -300,7 +306,7 @@ impl Default for LiveUi {
             notice: None,
             render_pending: true,
             rendered_decision_context: None,
-            unsendable_decision_context: None,
+            unsendable_response_context: None,
         }
     }
 }
@@ -341,13 +347,50 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let blocked_context = self.unsendable_decision_context.clone();
+        let automatic_decision_response = self.automatic_decision_label(&action).is_some();
+        if let Some(notice) = self.automatic_decision_frame_limit_notice(&action, limit)? {
+            self.unsendable_response_context = self.current_unsendable_response_context();
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let blocked_context = self.unsendable_response_context.clone();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
-        if blocked_context.is_some() && blocked_context != self.current_decision_context() {
-            self.unsendable_decision_context = None;
+        if automatic_decision_response
+            || (blocked_context.is_some()
+                && blocked_context != self.current_unsendable_response_context())
+        {
+            self.unsendable_response_context = None;
             self.notice = None;
         }
         self.apply_effects(effects, writer, limit).await
+    }
+
+    fn automatic_decision_label(&self, action: &UiAction) -> Option<&'static str> {
+        match action {
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(_))
+                if self.state.cancel_requested =>
+            {
+                Some("automatic approval denial")
+            }
+            UiAction::BackendEvent(BackendEvent::TrustRequested { .. })
+                if self.state.cancel_requested =>
+            {
+                Some("automatic trust denial")
+            }
+            _ => None,
+        }
+    }
+
+    fn automatic_decision_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let Some(label) = self.automatic_decision_label(action) else {
+            return Ok(None);
+        };
+        self.reduced_action_frame_limit_notice(action, label, limit)
     }
 
     fn decision_frame_limit_notice(
@@ -362,6 +405,15 @@ impl LiveUi {
             UiAction::Cancel if self.state.pending_trust_request_id.is_some() => "trust denial",
             _ => return Ok(None),
         };
+        self.reduced_action_frame_limit_notice(action, label, limit)
+    }
+
+    fn reduced_action_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        label: &str,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
         let mut state = self.state.clone();
         let mut ids = self.ids.clone();
         let effects = reducer::reduce(&mut state, action.clone(), &mut ids)?;
@@ -370,7 +422,7 @@ impl LiveUi {
                 let encoded_len = serde_json::to_vec(&command)?.len();
                 if encoded_len > limit {
                     return Ok(Some(format!(
-                        "Skipped {label} because its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the decision remains pending. Press Esc or Ctrl-C again to exit."
+                        "Esc/Ctrl-C again exits. Skipped {label}: its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the response remains pending."
                     )));
                 }
             }
@@ -385,12 +437,12 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         if let Some(notice) = self.decision_frame_limit_notice(&action, limit)? {
-            self.unsendable_decision_context = self.current_decision_context();
+            self.unsendable_response_context = self.current_unsendable_response_context();
             self.notice = Some(notice);
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
-        self.unsendable_decision_context = None;
+        self.unsendable_response_context = None;
         self.notice = None;
         self.dispatch(action, writer, limit).await
     }
@@ -446,9 +498,23 @@ impl LiveUi {
         }
     }
 
-    fn unsendable_current_decision(&self) -> bool {
-        self.unsendable_decision_context.is_some()
-            && self.unsendable_decision_context == self.current_decision_context()
+    fn current_unsendable_response_context(&self) -> Option<UnsendableResponseContext> {
+        if let Some(decision) = self.current_decision_context() {
+            return Some(UnsendableResponseContext::Interactive(decision));
+        }
+        if self.state.cancel_requested {
+            return self
+                .state
+                .current_command
+                .as_ref()
+                .map(|current| UnsendableResponseContext::Cancelling(current.id.clone()));
+        }
+        None
+    }
+
+    fn unsendable_current_response(&self) -> bool {
+        self.unsendable_response_context.is_some()
+            && self.unsendable_response_context == self.current_unsendable_response_context()
     }
 
     fn rendered_approval_matches(&self, pending: Option<&PendingApproval>) -> bool {
@@ -530,7 +596,7 @@ impl LiveUi {
         limit: usize,
         quit_if_idle: bool,
     ) -> Result<LoopControl, Error> {
-        if self.unsendable_current_decision() {
+        if self.unsendable_current_response() {
             return Ok(LoopControl::Exit);
         }
         if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
@@ -540,7 +606,7 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         if let Some(notice) = self.cancel_frame_limit_notice(limit)? {
-            self.unsendable_decision_context = self.current_decision_context();
+            self.unsendable_response_context = self.current_unsendable_response_context();
             self.notice = Some(notice);
             self.render_pending = true;
             return Ok(LoopControl::Continue);
@@ -620,7 +686,7 @@ impl LiveUi {
                     }
                     Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
-                        if !self.unsendable_current_decision() {
+                        if !self.unsendable_current_response() {
                             self.notice = Some(
                                 "Approve with y once, t tool, a all, or deny with n/Esc.".into(),
                             );
@@ -640,7 +706,7 @@ impl LiveUi {
                     }
                     Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
-                        if !self.unsendable_current_decision() {
+                        if !self.unsendable_current_response() {
                             self.notice = Some("Trust with y, or deny with n/Esc.".into());
                         }
                         self.render_pending = true;
@@ -687,14 +753,14 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if key_can_edit(key) => {
-                if !self.unsendable_current_decision() {
+                if !self.unsendable_current_response() {
                     self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
                 }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Input::Paste(_) => {
-                if !self.unsendable_current_decision() {
+                if !self.unsendable_current_response() {
                     self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
                 }
                 self.render_pending = true;
@@ -2261,7 +2327,7 @@ mod tests {
             approval_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("decision remains pending"))
+                .is_some_and(|notice| notice.contains("response remains pending"))
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
 
@@ -2314,7 +2380,7 @@ mod tests {
             trust_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("decision remains pending"))
+                .is_some_and(|notice| notice.contains("response remains pending"))
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
 
@@ -2331,7 +2397,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(trust_ui.notice, None);
-        assert_eq!(trust_ui.unsendable_decision_context, None);
+        assert_eq!(trust_ui.unsendable_response_context, None);
 
         let control = trust_ui
             .handle_input(
@@ -2346,7 +2412,7 @@ mod tests {
             trust_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("Press Esc or Ctrl-C again to exit"))
+                .is_some_and(|notice| notice.starts_with("Esc/Ctrl-C again exits"))
         );
         let control = trust_ui
             .handle_input(
@@ -2362,6 +2428,122 @@ mod tests {
             trust_ui.state.pending_trust_request_id.as_deref(),
             Some(replacement_request_id.as_str())
         );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn automatic_cancellation_denials_are_preflighted() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let call_id = "c".repeat(32);
+        let mut approval_state = UiState::unconfigured();
+        approval_state.view_status = ViewStatus::Running;
+        approval_state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        approval_state.cancel_requested = true;
+        let mut approval_ui = LiveUi {
+            state: approval_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let approval = WispTypedClientRpcCommands::approval(
+            "approval-1",
+            &call_id,
+            false,
+            Some("Denied from TUI: cancelling"),
+            None,
+        )
+        .unwrap();
+        let approval_len = serde_json::to_vec(&approval).unwrap().len();
+        let approval_event =
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id,
+                name: "shell".into(),
+                arguments: json!({}),
+                safety: "command".into(),
+            }));
+
+        let control = approval_ui
+            .dispatch(approval_event.clone(), &writer_tx, approval_len - 1)
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert!(approval_ui.state.cancel_requested);
+        assert_eq!(approval_ui.state.view_status, ViewStatus::Running);
+        assert_eq!(
+            approval_ui.unsendable_response_context,
+            Some(UnsendableResponseContext::Cancelling("prompt-1".into()))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        approval_ui
+            .dispatch(approval_event, &writer_tx, approval_len)
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("automatic approval denial must be sent once it fits");
+        };
+        assert_eq!(payload.as_ref(), serde_json::to_vec(&approval).unwrap());
+        assert_eq!(approval_ui.unsendable_response_context, None);
+        assert_eq!(approval_ui.notice, None);
+
+        let request_id = "t".repeat(32);
+        let mut trust_state = UiState::unconfigured();
+        trust_state.view_status = ViewStatus::Running;
+        trust_state.current_command = Some(ActiveCommand {
+            id: "prompt-2".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        trust_state.cancel_requested = true;
+        let mut trust_ui = LiveUi {
+            state: trust_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let trust = WispTypedClientRpcCommands::trust(
+            "trust-1",
+            &request_id,
+            false,
+            Some("Trust prompt cancelled"),
+            Some(true),
+        )
+        .unwrap();
+        let trust_len = serde_json::to_vec(&trust).unwrap().len();
+
+        trust_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::TrustRequested {
+                    request_id,
+                    project_path: "/workspace".into(),
+                }),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert!(trust_ui.state.cancel_requested);
+        assert_eq!(trust_ui.state.view_status, ViewStatus::Running);
+        assert_eq!(
+            trust_ui.unsendable_response_context,
+            Some(UnsendableResponseContext::Cancelling("prompt-2".into()))
+        );
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Esc/Ctrl-C again exits"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Exit);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

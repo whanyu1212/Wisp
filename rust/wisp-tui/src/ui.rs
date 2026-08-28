@@ -56,7 +56,11 @@ pub fn render(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(5)])
             .split(area);
-        render_header(frame, chunks[0], state, connection);
+        if let Some(notice) = notice {
+            render_compact_notice(frame, chunks[0], notice);
+        } else {
+            render_header(frame, chunks[0], state, connection);
+        }
         render_composer(frame, chunks[1], state, editor);
         return;
     }
@@ -381,6 +385,16 @@ fn push_source_grapheme_window(
     }
     output.push_str(grapheme);
     Some(column)
+}
+
+fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str) {
+    frame.render_widget(
+        Paragraph::new(sanitize_for_terminal(notice))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
@@ -753,10 +767,20 @@ mod tests {
     }
 
     fn render_to_string(width: u16, height: u16, state: &UiState, editor: &PromptEditor) -> String {
+        render_to_string_with_notice(width, height, state, editor, None)
+    }
+
+    fn render_to_string_with_notice(
+        width: u16,
+        height: u16,
+        state: &UiState,
+        editor: &PromptEditor,
+        notice: Option<&str>,
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, state, editor, &connection(), None))
+            .draw(|frame| render(frame, state, editor, &connection(), notice))
             .unwrap();
         terminal.backend().to_string()
     }
@@ -850,6 +874,22 @@ mod tests {
         assert!(minimum_approval.contains("[y once/t tool/a all/N]"));
         assert!(minimum_approval.contains("args:"));
         assert!(minimum_approval.contains("rm -rf"));
+        for height in 8..=10 {
+            let compact_notice = render_to_string_with_notice(
+                30,
+                height,
+                &state,
+                &PromptEditor::default(),
+                Some(
+                    "Esc/Ctrl-C again exits. Skipped approval response: frame exceeds the negotiated limit.",
+                ),
+            );
+            assert!(compact_notice.contains("Esc/Ctrl-C"));
+            assert!(compact_notice.contains("again exits"));
+            assert!(compact_notice.contains("[y once/t tool/a all/N]"));
+            assert!(compact_notice.contains("tool:"));
+            assert!(compact_notice.contains("args:"));
+        }
 
         let mut writer = DecisionPreviewWriter::default();
         let error =
@@ -882,6 +922,22 @@ mod tests {
         assert!(minimum_trust.contains("[y trust/N deny]"));
         assert!(minimum_trust.contains("distinct-project"));
         assert!(!minimum_trust.contains("/very/long/shared/prefix"));
+        for height in 8..=10 {
+            let compact_notice = render_to_string_with_notice(
+                30,
+                height,
+                &state,
+                &PromptEditor::default(),
+                Some(
+                    "Esc/Ctrl-C again exits. Skipped trust response: frame exceeds the negotiated limit.",
+                ),
+            );
+            assert!(compact_notice.contains("Esc/Ctrl-C"));
+            assert!(compact_notice.contains("again exits"));
+            assert!(compact_notice.contains("[y trust/N deny]"));
+            assert!(compact_notice.contains("trust project:"));
+            assert!(compact_notice.contains("distinct-project"));
+        }
     }
 
     #[test]
