@@ -8,6 +8,8 @@ mod process;
 mod prompt_editor;
 pub mod reducer;
 mod terminal;
+mod transcript;
+mod transcript_view;
 mod ui;
 
 use bytes::Bytes;
@@ -37,6 +39,7 @@ use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
+use transcript_view::{TranscriptRowCache, TranscriptViewAction, TranscriptViewport};
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 use wisp_protocol::events::{CommandFinishedOutcome, WispCurrentLiveEventOutput};
@@ -155,8 +158,7 @@ fn render_transport_closed_diagnostic(state: &UiState) -> String {
     )
     .expect("bounded terminal renderer cannot fail");
     if let Some(content) = state
-        .retained_text
-        .as_deref()
+        .latest_assistant_text()
         .filter(|content| !content.is_empty())
     {
         std::fmt::write(
@@ -289,6 +291,8 @@ enum UnsendableResponseContext {
 
 struct LiveUi {
     state: UiState,
+    transcript_viewport: TranscriptViewport,
+    transcript_row_cache: TranscriptRowCache,
     editor: PromptEditor,
     ids: SequentialCommandIds,
     notice: Option<String>,
@@ -301,6 +305,8 @@ impl Default for LiveUi {
     fn default() -> Self {
         Self {
             state: UiState::unconfigured(),
+            transcript_viewport: TranscriptViewport::default(),
+            transcript_row_cache: TranscriptRowCache::default(),
             editor: PromptEditor::default(),
             ids: SequentialCommandIds::default(),
             notice: None,
@@ -355,7 +361,21 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         let blocked_context = self.unsendable_response_context.clone();
+        let follow_after_update = matches!(&action, UiAction::Submit(_));
+        let transcript_generation = self.state.transcript.generation();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if self.state.transcript.generation() != transcript_generation {
+            let action = if follow_after_update {
+                TranscriptViewAction::FollowTail
+            } else {
+                TranscriptViewAction::OutputChanged
+            };
+            self.transcript_viewport.reduce(
+                action,
+                &self.state.transcript,
+                &mut self.transcript_row_cache,
+            );
+        }
         if automatic_decision_response
             || (blocked_context.is_some()
                 && blocked_context != self.current_unsendable_response_context())
@@ -472,6 +492,8 @@ impl LiveUi {
             ui::render(
                 frame,
                 &self.state,
+                &mut self.transcript_viewport,
+                &mut self.transcript_row_cache,
                 &self.editor,
                 connection,
                 self.notice.as_deref(),
@@ -677,6 +699,15 @@ impl LiveUi {
         match input {
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
+            Input::Key(key) if transcript_view_action(key).is_some() => {
+                self.transcript_viewport.reduce(
+                    transcript_view_action(key).expect("guard requires a transcript action"),
+                    &self.state.transcript,
+                    &mut self.transcript_row_cache,
+                );
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
                 let context_visible =
                     self.rendered_approval_matches(self.state.pending_approval.as_ref());
@@ -728,9 +759,9 @@ impl LiveUi {
                         self.render_pending = true;
                         return Ok(LoopControl::Continue);
                     }
-                    let effects =
-                        reducer::reduce(&mut self.state, UiAction::Submit(prompt), &mut self.ids)?;
-                    let control = self.apply_effects(effects, writer, limit).await?;
+                    let control = self
+                        .dispatch(UiAction::Submit(prompt), writer, limit)
+                        .await?;
                     self.editor.clear();
                     self.notice = None;
                     Ok(control)
@@ -783,6 +814,23 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 
 fn is_escape(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
+}
+
+fn transcript_view_action(key: KeyEvent) -> Option<TranscriptViewAction> {
+    match (key.code, key.modifiers) {
+        (KeyCode::PageUp, KeyModifiers::NONE) => Some(TranscriptViewAction::PageUp),
+        (KeyCode::PageDown, KeyModifiers::NONE) => Some(TranscriptViewAction::PageDown),
+        (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewAction::ScrollLines(-1))
+        }
+        (KeyCode::Down, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewAction::ScrollLines(1))
+        }
+        (KeyCode::End, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewAction::FollowTail)
+        }
+        _ => None,
+    }
 }
 
 fn printable_char(key: KeyEvent) -> Option<char> {
@@ -1457,6 +1505,7 @@ mod tests {
     use crate::reducer::{ActiveCommand, ActiveCommandType};
     use ratatui::backend::TestBackend;
     use serde_json::json;
+    use std::fmt::Write as _;
     use tokio::io::duplex;
     use wisp_protocol::events;
 
@@ -1685,8 +1734,10 @@ mod tests {
     #[test]
     fn transport_closed_diagnostic_is_bounded_and_terminal_safe() {
         let mut state = UiState::unconfigured();
-        state.retained_text =
-            Some("partial\u{1b}]0;owned\u{7}\u{202e}\n".repeat(TOP_LEVEL_ERROR_MAX_CHARS));
+        state.transcript.complete_message(
+            1,
+            "partial\u{1b}]0;owned\u{7}\u{202e}\n".repeat(TOP_LEVEL_ERROR_MAX_CHARS),
+        );
         let rendered = render_transport_closed_diagnostic(&state);
         assert!(rendered.starts_with("wisp-tui: backend stream ended unexpectedly"));
         assert!(rendered.contains("partial assistant response"));
@@ -1870,8 +1921,10 @@ mod tests {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
         });
-        state.last_submitted_prompt = Some("hello".into());
-        state.retained_text = Some("partial response".into());
+        state.transcript.append_exchange("hello".into());
+        state
+            .transcript
+            .complete_message(0, "partial response".into());
         let mut live_ui = LiveUi {
             state,
             render_pending: false,
@@ -1904,7 +1957,7 @@ mod tests {
             .unwrap();
         assert_eq!(drain_control, LoopControl::Continue);
         assert_eq!(
-            live_ui.state.retained_text.as_deref(),
+            live_ui.state.latest_assistant_text(),
             Some("final queued fragment")
         );
 
@@ -1952,7 +2005,7 @@ mod tests {
         assert_eq!(control, LoopControl::Continue);
         assert!(live_ui.editor.text().is_empty());
         assert_eq!(
-            live_ui.state.last_submitted_prompt.as_deref(),
+            live_ui.state.transcript.latest_user_text(),
             Some("hello\nworld")
         );
         assert!(live_ui.render_pending);
@@ -2570,7 +2623,7 @@ mod tests {
         assert_eq!(control, LoopControl::Continue);
         assert_eq!(live_ui.editor.text(), "hello");
         assert!(live_ui.state.current_command.is_none());
-        assert_eq!(live_ui.state.last_submitted_prompt, None);
+        assert_eq!(live_ui.state.transcript.latest_user_text(), None);
         assert!(live_ui.render_pending);
         assert!(
             live_ui
@@ -2607,7 +2660,7 @@ mod tests {
         assert_eq!(control, LoopControl::Continue);
         assert_eq!(live_ui.editor.text(), "x");
         assert!(live_ui.state.current_command.is_none());
-        assert_eq!(live_ui.state.last_submitted_prompt, None);
+        assert_eq!(live_ui.state.transcript.latest_user_text(), None);
         assert!(live_ui.render_pending);
         assert!(
             live_ui
@@ -2659,6 +2712,102 @@ mod tests {
                 .is_some_and(|notice| notice.contains("stats refresh"))
         );
         assert!(live_ui.render_pending);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn transcript_navigation_keybindings_do_not_capture_editor_arrows() {
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(TranscriptViewAction::PageUp)
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(TranscriptViewAction::PageDown)
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(TranscriptViewAction::ScrollLines(-1))
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL)),
+            Some(TranscriptViewAction::ScrollLines(1))
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+            Some(TranscriptViewAction::FollowTail)
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_navigation_preserves_editor_and_tracks_unseen_output() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.transcript.append_exchange("prompt".into());
+        state.transcript.start_message(1);
+        let mut transcript_content = String::new();
+        for line in 0..50 {
+            writeln!(transcript_content, "line-{line}").unwrap();
+        }
+        state
+            .transcript
+            .append_message_delta(1, &transcript_content);
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("draft");
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            40,
+            6,
+        );
+        let _ = live_ui
+            .transcript_viewport
+            .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache);
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert_eq!(live_ui.editor.text(), "draft");
+        assert!(!live_ui.transcript_viewport.follows_tail());
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::MessageDelta {
+                    turn: 1,
+                    delta: "new output".into(),
+                    content_kind: reducer::MessageContentKind::Text,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.transcript_viewport.has_unseen_output());
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.transcript_viewport.follows_tail());
+        assert!(!live_ui.transcript_viewport.has_unseen_output());
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

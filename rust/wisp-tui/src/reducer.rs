@@ -3,6 +3,8 @@
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
+
+use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 
 mod event_projection;
@@ -136,10 +138,7 @@ pub struct UiState {
     pub pending_trust_project_path: Option<String>,
     pub cancel_requested: bool,
     pub exit_requested: bool,
-    pub last_submitted_prompt: Option<String>,
-    pub retained_text: Option<String>,
-    stream_turn: Option<u64>,
-    streaming_text: bool,
+    pub transcript: SharedTranscript,
 }
 
 impl UiState {
@@ -173,10 +172,7 @@ impl UiState {
             pending_trust_project_path: None,
             cancel_requested: false,
             exit_requested: false,
-            last_submitted_prompt: None,
-            retained_text: None,
-            stream_turn: None,
-            streaming_text: false,
+            transcript: SharedTranscript::default(),
         }
     }
 
@@ -185,7 +181,11 @@ impl UiState {
     }
 
     pub fn is_streaming_text(&self) -> bool {
-        self.streaming_text
+        self.transcript.is_streaming_text()
+    }
+
+    pub fn latest_assistant_text(&self) -> Option<&str> {
+        self.transcript.latest_assistant_text()
     }
 }
 
@@ -320,8 +320,7 @@ pub fn reduce(
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
             state.view_status = ViewStatus::Error;
-            state.streaming_text = false;
-            state.stream_turn = None;
+            state.transcript.finish_active_response();
             Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
         }
     }
@@ -348,10 +347,7 @@ fn submit(
     });
     state.pending_approval = None;
     state.cancel_requested = false;
-    state.last_submitted_prompt = Some(content);
-    state.retained_text = None;
-    state.stream_turn = None;
-    state.streaming_text = false;
+    state.transcript.append_exchange(content);
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -501,8 +497,7 @@ fn handle_backend_event(
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     match event {
         BackendEvent::MessageStarted { turn } => {
-            state.stream_turn = Some(turn);
-            state.streaming_text = false;
+            state.transcript.start_message(turn);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta {
@@ -510,24 +505,12 @@ fn handle_backend_event(
             delta,
             content_kind: MessageContentKind::Text,
         } => {
-            if state.stream_turn != Some(turn) || !state.streaming_text {
-                state.retained_text = Some(delta);
-            } else if let Some(content) = &mut state.retained_text {
-                content.push_str(&delta);
-            } else {
-                state.retained_text = Some(delta);
-            }
-            state.stream_turn = Some(turn);
-            state.streaming_text = true;
+            state.transcript.append_message_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta { .. } | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted { turn, content } => {
-            state.retained_text = Some(content);
-            if state.stream_turn == Some(turn) {
-                state.stream_turn = None;
-            }
-            state.streaming_text = false;
+            state.transcript.complete_message(turn, content);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolApprovalRequested(pending) => {
@@ -606,8 +589,7 @@ fn handle_backend_event(
             state.pending_trust_request_id = None;
             state.pending_trust_project_path = None;
             state.cancel_requested = false;
-            state.stream_turn = None;
-            state.streaming_text = false;
+            state.transcript.finish_active_response();
             state.interaction_status = InteractionStatus::Idle;
             let was_cancelled = !ok
                 && error
@@ -649,13 +631,13 @@ mod tests {
     #[test]
     fn submission_stream_and_completion_are_deterministic() {
         let mut state = UiState::new("fake".into(), None, None);
-        state.retained_text = Some("stale answer".into());
+        state.transcript.complete_message(0, "stale answer".into());
         let mut ids = DeterministicIds::default();
         let effects = reduce(&mut state, UiAction::Submit("hello".into()), &mut ids).unwrap();
         assert_eq!(command_value(&effects[0]).unwrap()["id"], "prompt-1");
         assert_eq!(state.interaction_status, InteractionStatus::Running);
-        assert_eq!(state.last_submitted_prompt.as_deref(), Some("hello"));
-        assert_eq!(state.retained_text, None);
+        assert_eq!(state.transcript.latest_user_text(), Some("hello"));
+        assert_eq!(state.latest_assistant_text(), Some(""));
 
         for delta in ["hel", "lo"] {
             reduce(
@@ -669,7 +651,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(state.retained_text.as_deref(), Some("hello"));
+        assert_eq!(state.latest_assistant_text(), Some("hello"));
 
         reduce(
             &mut state,
@@ -680,13 +662,13 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert_eq!(state.retained_text.as_deref(), Some("authoritative"));
+        assert_eq!(state.latest_assistant_text(), Some("authoritative"));
     }
 
     #[test]
-    fn thinking_is_ignored_and_a_new_text_turn_replaces_retained_content() {
+    fn thinking_is_ignored_and_a_new_text_turn_appends_a_response() {
         let mut state = UiState::new("fake".into(), None, None);
-        state.retained_text = Some("older answer".into());
+        state.transcript.complete_message(1, "older answer".into());
         let mut ids = DeterministicIds::default();
         let effects = reduce(
             &mut state,
@@ -699,7 +681,7 @@ mod tests {
         )
         .unwrap();
         assert!(effects.is_empty());
-        assert_eq!(state.retained_text.as_deref(), Some("older answer"));
+        assert_eq!(state.latest_assistant_text(), Some("older answer"));
 
         reduce(
             &mut state,
@@ -711,7 +693,8 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert_eq!(state.retained_text.as_deref(), Some("new answer"));
+        assert_eq!(state.latest_assistant_text(), Some("new answer"));
+        assert_eq!(state.transcript.entries().len(), 2);
     }
 
     #[test]
@@ -900,8 +883,7 @@ mod tests {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
         });
-        state.retained_text = Some("partial".into());
-        state.streaming_text = true;
+        state.transcript.append_message_delta(1, "partial");
         let mut ids = DeterministicIds::default();
         let effects = reduce(
             &mut state,
@@ -911,7 +893,7 @@ mod tests {
         .unwrap();
         assert_eq!(state.view_status, ViewStatus::Error);
         assert_eq!(state.interaction_status, InteractionStatus::Running);
-        assert_eq!(state.retained_text.as_deref(), Some("partial"));
+        assert_eq!(state.latest_assistant_text(), Some("partial"));
         assert!(!state.is_streaming_text());
         assert!(matches!(
             effects.as_slice(),
