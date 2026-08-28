@@ -219,15 +219,18 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         return;
     }
 
-    if state.view_status == ViewStatus::WaitingForApproval {
-        frame.render_widget(
-            Paragraph::new(Text::from(approval_composer_lines(
-                state,
-                usize::from(inner.width),
-            )))
-            .block(block),
-            area,
-        );
+    if matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    ) {
+        let lines = match state.view_status {
+            ViewStatus::WaitingForApproval => {
+                approval_composer_lines(state, usize::from(inner.width))
+            }
+            ViewStatus::WaitingForTrust => trust_composer_lines(state, usize::from(inner.width)),
+            _ => unreachable!("decision rows require a decision view"),
+        };
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
         return;
     }
 
@@ -235,9 +238,10 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         ViewStatus::Running => {
             "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
-        ViewStatus::WaitingForTrust => trust_composer_message(state),
         ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
-        ViewStatus::Idle | ViewStatus::WaitingForApproval => String::new(),
+        ViewStatus::Idle | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
+            String::new()
+        }
     };
     frame.render_widget(
         Paragraph::new(message)
@@ -424,14 +428,44 @@ fn decision_row(content: &str, width: usize) -> String {
     row
 }
 
-fn trust_composer_message(state: &UiState) -> String {
-    match state.pending_trust_project_path.as_deref() {
-        Some(project_path) => format!(
-            "trust project {}? [y/N]",
-            bounded_decision_preview(project_path)
-        ),
-        None => "trust this project? [y/N]".into(),
+fn trust_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+    let path = state
+        .pending_trust_project_path
+        .as_deref()
+        .map(bounded_decision_tail_preview)
+        .unwrap_or_else(|| "unknown project".into());
+    vec![
+        Line::from(decision_row("[y trust/N deny]", width)),
+        Line::from(decision_row("trust project:", width)),
+        Line::from(decision_tail_row(&path, width)),
+    ]
+}
+
+fn decision_tail_row(content: &str, width: usize) -> String {
+    if content.width() <= width {
+        return content.to_owned();
     }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let start = content.width().saturating_sub(width - 1);
+    let tail = source_display_column_window(content, start, width - 1).text;
+    format!("…{tail}")
+}
+
+fn bounded_decision_tail_preview(content: &str) -> String {
+    let mut graphemes = content.graphemes(true).rev();
+    let mut retained: Vec<_> = graphemes
+        .by_ref()
+        .take(DECISION_PREVIEW_GRAPHEMES)
+        .collect();
+    let truncated = graphemes.next().is_some();
+    retained.reverse();
+    let mut preview = bounded_decision_preview(&retained.concat());
+    if truncated {
+        preview.insert(0, '…');
+    }
+    preview
 }
 
 fn bounded_decision_preview(content: &str) -> String {
@@ -805,9 +839,20 @@ mod tests {
         state.pending_trust_project_path =
             Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(trust.contains("trust project /workspace/project�[2J�spoof next? [y/N]"));
+        assert!(trust.contains("[y trust/N deny]"));
+        assert!(trust.contains("trust project:"));
+        assert!(trust.contains("/workspace/project�[2J�spoof next"));
         assert!(!trust.contains('\u{1b}'));
         assert!(!trust.contains('\u{202e}'));
+
+        state.pending_trust_project_path = Some(format!(
+            "/very/long/shared/prefix/{}/distinct-project",
+            "nested/".repeat(30)
+        ));
+        let narrow_trust = render_to_string(30, 14, &state, &PromptEditor::default());
+        assert!(narrow_trust.contains("[y trust/N deny]"));
+        assert!(narrow_trust.contains("distinct-project"));
+        assert!(!narrow_trust.contains("/very/long/shared/prefix"));
     }
 
     #[test]
