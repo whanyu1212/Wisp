@@ -219,14 +219,25 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         return;
     }
 
+    if state.view_status == ViewStatus::WaitingForApproval {
+        frame.render_widget(
+            Paragraph::new(Text::from(approval_composer_lines(
+                state,
+                usize::from(inner.width),
+            )))
+            .block(block),
+            area,
+        );
+        return;
+    }
+
     let message = match state.view_status {
         ViewStatus::Running => {
             "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
-        ViewStatus::WaitingForApproval => approval_composer_message(state),
         ViewStatus::WaitingForTrust => trust_composer_message(state),
         ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
-        ViewStatus::Idle => String::new(),
+        ViewStatus::Idle | ViewStatus::WaitingForApproval => String::new(),
     };
     frame.render_widget(
         Paragraph::new(message)
@@ -375,16 +386,42 @@ fn editable(state: &UiState) -> bool {
     state.input_ready && state.current_command.is_none() && state.view_status == ViewStatus::Idle
 }
 
-fn approval_composer_message(state: &UiState) -> String {
-    match state.pending_approval.as_ref() {
-        Some(pending) => format!(
-            "approve {} ({})? [y once/t tool/a all/N]\nargs: {}",
-            bounded_decision_preview(&pending.name),
-            bounded_decision_preview(&pending.safety),
-            bounded_json_preview(&pending.arguments)
-        ),
-        None => "approve? [y once/t tool/a all/N]".into(),
+fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+    let Some(pending) = state.pending_approval.as_ref() else {
+        return vec![
+            Line::from(decision_row("[y once/t tool/a all/N]", width)),
+            Line::default(),
+            Line::from(decision_row("args: unavailable", width)),
+        ];
+    };
+    vec![
+        Line::from(decision_row("[y once/t tool/a all/N]", width)),
+        Line::from(decision_row(
+            &format!(
+                "tool: {} ({})",
+                bounded_decision_preview(&pending.name),
+                bounded_decision_preview(&pending.safety)
+            ),
+            width,
+        )),
+        Line::from(decision_row(
+            &format!("args: {}", bounded_json_preview(&pending.arguments)),
+            width,
+        )),
+    ]
+}
+
+fn decision_row(content: &str, width: usize) -> String {
+    let safe = bounded_decision_preview(content);
+    if safe.width() <= width {
+        return safe;
     }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let mut row = source_display_column_window(&safe, 0, width - 1).text;
+    row.push('…');
+    row
 }
 
 fn trust_composer_message(state: &UiState) -> String {
@@ -712,7 +749,7 @@ mod tests {
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(approval.contains("approve shell (ask)?"));
+        assert!(approval.contains("tool: shell (ask)"));
         assert!(approval.contains("args:"));
         assert!(approval.contains("rm -rf /tmp/example"));
         assert!(approval.contains("[y once/t tool/a all/N]"));
@@ -736,9 +773,24 @@ mod tests {
             arguments: json!({"command": "x".repeat(DECISION_PREVIEW_GRAPHEMES + 20)}),
             safety: "ask".into(),
         });
-        let bounded = approval_composer_message(&state);
+        let bounded = approval_composer_lines(&state, usize::MAX)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(bounded.contains('…'));
         assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 100);
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-4".into(),
+            name: "very-long-tool-name-".repeat(20),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            safety: "command".into(),
+        });
+        let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
+        assert!(narrow.contains("[y once/t tool/a all/N]"));
+        assert!(narrow.contains("args:"));
+        assert!(narrow.contains("rm -rf"));
 
         let mut writer = DecisionPreviewWriter::default();
         let error =

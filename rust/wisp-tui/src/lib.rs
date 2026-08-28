@@ -353,6 +353,25 @@ impl LiveUi {
         Ok(())
     }
 
+    async fn drain_backend_events(
+        &mut self,
+        events: &mut mpsc::Receiver<QueuedEvent>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        while let Ok(event) = events.try_recv() {
+            let event = BackendEvent::from_live(&event.event)?;
+            if self
+                .dispatch(UiAction::BackendEvent(event), writer, limit)
+                .await?
+                == LoopControl::Exit
+            {
+                return Ok(LoopControl::Exit);
+            }
+        }
+        Ok(LoopControl::Continue)
+    }
+
     async fn close_transport<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
@@ -743,6 +762,13 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     reader_outcome = None;
                     match outcome {
                         Ok(ReaderTermination::Eof) => {
+                            live_ui
+                                .drain_backend_events(
+                                    &mut event_rx,
+                                    &writer_tx,
+                                    max_client_frame,
+                                )
+                                .await?;
                             live_ui
                                 .close_transport(
                                     terminal.terminal(),
@@ -1646,6 +1672,35 @@ mod tests {
             ..LiveUi::default()
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        event_tx
+            .send(QueuedEvent {
+                event: parsed_event(json!({
+                    "type": "message.delta",
+                    "schema_version": 34,
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "role": "assistant",
+                    "content_index": 0,
+                    "content_kind": "text",
+                    "delta": "final queued fragment"
+                })),
+                _wire_bytes: permit,
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let drain_control = live_ui
+            .drain_backend_events(&mut event_rx, &writer_tx, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(drain_control, LoopControl::Continue);
+        assert_eq!(
+            live_ui.state.retained_text.as_deref(),
+            Some("final queued fragment")
+        );
 
         let control = live_ui
             .close_transport(
@@ -1665,7 +1720,7 @@ mod tests {
         assert_eq!(control, LoopControl::Exit);
         assert!(!live_ui.render_pending);
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("partial response"));
+        assert!(rendered.contains("final queued fragment"));
         assert!(rendered.contains("prompt failed"));
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
