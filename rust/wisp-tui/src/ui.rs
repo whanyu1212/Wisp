@@ -25,6 +25,10 @@ pub struct ConnectionInfo {
     pub event_schema_version: u32,
 }
 
+pub fn decision_context_visible(area: Rect) -> bool {
+    area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
+}
+
 pub fn render(
     frame: &mut Frame<'_>,
     state: &UiState,
@@ -33,7 +37,7 @@ pub fn render(
     notice: Option<&str>,
 ) {
     let area = frame.area();
-    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+    if !decision_context_visible(area) {
         frame.render_widget(
             Paragraph::new("Wisp: terminal too small (minimum 30x8)")
                 .alignment(Alignment::Center)

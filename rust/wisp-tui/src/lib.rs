@@ -275,12 +275,19 @@ enum LoopControl {
     Exit,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RenderedDecisionContext {
+    Approval(String),
+    Trust(String),
+}
+
 struct LiveUi {
     state: UiState,
     editor: PromptEditor,
     ids: SequentialCommandIds,
     notice: Option<String>,
     render_pending: bool,
+    rendered_decision_context: Option<RenderedDecisionContext>,
 }
 
 impl Default for LiveUi {
@@ -291,6 +298,7 @@ impl Default for LiveUi {
             ids: SequentialCommandIds::default(),
             notice: None,
             render_pending: true,
+            rendered_decision_context: None,
         }
     }
 }
@@ -340,7 +348,23 @@ impl LiveUi {
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
+        let mut rendered_decision_context = None;
         terminal.draw(|frame| {
+            if ui::decision_context_visible(frame.area()) {
+                rendered_decision_context = match self.state.view_status {
+                    ViewStatus::WaitingForApproval => {
+                        self.state.pending_approval.as_ref().map(|pending| {
+                            RenderedDecisionContext::Approval(pending.call_id.clone())
+                        })
+                    }
+                    ViewStatus::WaitingForTrust => self
+                        .state
+                        .pending_trust_request_id
+                        .clone()
+                        .map(RenderedDecisionContext::Trust),
+                    _ => None,
+                };
+            }
             ui::render(
                 frame,
                 &self.state,
@@ -349,8 +373,27 @@ impl LiveUi {
                 self.notice.as_deref(),
             );
         })?;
+        self.rendered_decision_context = rendered_decision_context;
         self.render_pending = false;
         Ok(())
+    }
+
+    fn rendered_approval_matches(&self, pending: Option<&PendingApproval>) -> bool {
+        matches!(
+            (&self.rendered_decision_context, pending),
+            (
+                Some(RenderedDecisionContext::Approval(rendered_call_id)),
+                Some(pending),
+            ) if rendered_call_id == &pending.call_id
+        )
+    }
+
+    fn rendered_trust_matches(&self, request_id: Option<&str>) -> bool {
+        matches!(
+            (&self.rendered_decision_context, request_id),
+            (Some(RenderedDecisionContext::Trust(rendered_request_id)), Some(request_id))
+                if rendered_request_id == request_id
+        )
     }
 
     async fn drain_backend_events(
@@ -492,7 +535,12 @@ impl LiveUi {
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
+                let context_visible =
+                    self.rendered_approval_matches(self.state.pending_approval.as_ref());
                 match approval_decision(key, self.state.pending_approval.as_ref()) {
+                    Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
+                        Ok(LoopControl::Continue)
+                    }
                     Some(action) => {
                         self.notice = None;
                         self.dispatch(action, writer, limit).await
@@ -507,7 +555,12 @@ impl LiveUi {
                 }
             }
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForTrust => {
+                let context_visible =
+                    self.rendered_trust_matches(self.state.pending_trust_request_id.as_deref());
                 match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
+                    Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
+                        Ok(LoopControl::Continue)
+                    }
                     Some(action) => {
                         self.notice = None;
                         self.dispatch(action, writer, limit).await
@@ -568,6 +621,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Redraw => {
+                self.rendered_decision_context = None;
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
@@ -1881,6 +1935,17 @@ mod tests {
             render_pending: false,
             ..LiveUi::default()
         };
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+            )
+            .unwrap();
 
         let control = live_ui
             .handle_input(
@@ -1906,9 +1971,19 @@ mod tests {
 
         live_ui.state.view_status = ViewStatus::WaitingForTrust;
         live_ui.state.pending_trust_request_id = Some("trust-req-1".into());
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+            )
+            .unwrap();
         let control = live_ui
             .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
             )
@@ -1917,6 +1992,130 @@ mod tests {
         assert_eq!(control, LoopControl::Continue);
         let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
             panic!("trust key must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "trust",
+                "id": "trust-2",
+                "request_id": "trust-req-1",
+                "trusted": true,
+                "transient": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_decision_keys_require_visible_current_context() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({"path": "/sensitive"}),
+            safety: "read".into(),
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+            protocol_version: 2,
+            event_schema_version: 34,
+        };
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-2".into();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-1".into();
+
+        live_ui
+            .handle_input(Input::Redraw, &writer_tx, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        for key in ['y', 't', 'a'] {
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(29, 7)).unwrap();
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval denial must remain available in a small terminal");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "approval",
+                "id": "approval-1",
+                "call_id": "call-1",
+                "approved": false,
+                "reason": "Denied from TUI"
+            })
+        );
+
+        live_ui.state.view_status = ViewStatus::WaitingForTrust;
+        live_ui.state.pending_approval = None;
+        live_ui.state.pending_trust_request_id = Some("trust-req-1".into());
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust denial must remain available in a small terminal");
         };
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
