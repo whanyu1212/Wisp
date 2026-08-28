@@ -18,8 +18,11 @@ use framing::FrameReader;
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
 use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 use reducer::{
-    BackendEvent, CommandIdSource, CommandKind, UiAction, UiEffect, UiState, ViewStatus,
+    BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
+    ViewStatus,
 };
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -35,7 +38,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use ui::ConnectionInfo;
-use wisp_protocol::commands::WispTypedClientRpcCommands;
+use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 use wisp_protocol::events::{CommandFinishedOutcome, WispCurrentLiveEventOutput};
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 use wisp_protocol::handshake_response::RpcHandshakeResponse;
@@ -144,6 +147,27 @@ pub fn render_top_level_error(error: &Error) -> String {
     output.finish()
 }
 
+fn render_transport_closed_diagnostic(state: &UiState) -> String {
+    let mut output = BoundedTerminalText::new(TOP_LEVEL_ERROR_MAX_BYTES, TOP_LEVEL_ERROR_MAX_CHARS);
+    std::fmt::write(
+        &mut output,
+        format_args!("wisp-tui: backend stream ended unexpectedly"),
+    )
+    .expect("bounded terminal renderer cannot fail");
+    if let Some(content) = state
+        .retained_text
+        .as_deref()
+        .filter(|content| !content.is_empty())
+    {
+        std::fmt::write(
+            &mut output,
+            format_args!("; partial assistant response: {content}"),
+        )
+        .expect("bounded terminal renderer cannot fail");
+    }
+    output.finish()
+}
+
 enum WriterMessage {
     Frame { payload: Bytes, limit: usize },
     Close,
@@ -206,7 +230,7 @@ impl ShutdownObservation {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SequentialCommandIds {
     next: u64,
 }
@@ -251,12 +275,26 @@ enum LoopControl {
     Exit,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RenderedDecisionContext {
+    Approval(String),
+    Trust(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UnsendableResponseContext {
+    Interactive(RenderedDecisionContext),
+    Cancelling(String),
+}
+
 struct LiveUi {
     state: UiState,
     editor: PromptEditor,
     ids: SequentialCommandIds,
     notice: Option<String>,
     render_pending: bool,
+    rendered_decision_context: Option<RenderedDecisionContext>,
+    unsendable_response_context: Option<UnsendableResponseContext>,
 }
 
 impl Default for LiveUi {
@@ -267,6 +305,8 @@ impl Default for LiveUi {
             ids: SequentialCommandIds::default(),
             notice: None,
             render_pending: true,
+            rendered_decision_context: None,
+            unsendable_response_context: None,
         }
     }
 }
@@ -307,35 +347,271 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        let automatic_decision_response = self.automatic_decision_label(&action).is_some();
+        if let Some(notice) = self.automatic_decision_frame_limit_notice(&action, limit)? {
+            self.unsendable_response_context = self.current_unsendable_response_context();
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let blocked_context = self.unsendable_response_context.clone();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if automatic_decision_response
+            || (blocked_context.is_some()
+                && blocked_context != self.current_unsendable_response_context())
+        {
+            self.unsendable_response_context = None;
+            self.notice = None;
+        }
         self.apply_effects(effects, writer, limit).await
     }
 
-    async fn cancel_current_command(
+    fn automatic_decision_label(&self, action: &UiAction) -> Option<&'static str> {
+        match action {
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(_))
+                if self.state.cancel_requested =>
+            {
+                Some("automatic approval denial")
+            }
+            UiAction::BackendEvent(BackendEvent::TrustRequested { .. })
+                if self.state.cancel_requested =>
+            {
+                Some("automatic trust denial")
+            }
+            _ => None,
+        }
+    }
+
+    fn automatic_decision_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let Some(label) = self.automatic_decision_label(action) else {
+            return Ok(None);
+        };
+        self.reduced_action_frame_limit_notice(action, label, limit)
+    }
+
+    fn decision_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let label = match action {
+            UiAction::ApprovalDecision { .. } => "approval response",
+            UiAction::TrustDecision { .. } => "trust response",
+            UiAction::Cancel if self.state.pending_approval.is_some() => "approval denial",
+            UiAction::Cancel if self.state.pending_trust_request_id.is_some() => "trust denial",
+            _ => return Ok(None),
+        };
+        self.reduced_action_frame_limit_notice(action, label, limit)
+    }
+
+    fn reduced_action_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        label: &str,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let mut state = self.state.clone();
+        let mut ids = self.ids.clone();
+        let effects = reducer::reduce(&mut state, action.clone(), &mut ids)?;
+        for effect in effects {
+            if let UiEffect::SendCommand(command) = effect {
+                let encoded_len = serde_json::to_vec(&command)?.len();
+                if encoded_len > limit {
+                    return Ok(Some(format!(
+                        "Esc/Ctrl-C again exits. Skipped {label}: its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the response remains pending."
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn dispatch_decision(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if let Some(notice) = self.decision_frame_limit_notice(&action, limit)? {
+            self.unsendable_response_context = self.current_unsendable_response_context();
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        self.unsendable_response_context = None;
+        self.notice = None;
+        self.dispatch(action, writer, limit).await
+    }
+
+    fn draw<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        connection: &ConnectionInfo,
+    ) -> Result<(), Error> {
+        let mut rendered_decision_context = None;
+        terminal.draw(|frame| {
+            if ui::decision_context_visible(frame.area()) {
+                rendered_decision_context = match self.state.view_status {
+                    ViewStatus::WaitingForApproval => {
+                        self.state.pending_approval.as_ref().map(|pending| {
+                            RenderedDecisionContext::Approval(pending.call_id.clone())
+                        })
+                    }
+                    ViewStatus::WaitingForTrust => self
+                        .state
+                        .pending_trust_request_id
+                        .clone()
+                        .map(RenderedDecisionContext::Trust),
+                    _ => None,
+                };
+            }
+            ui::render(
+                frame,
+                &self.state,
+                &self.editor,
+                connection,
+                self.notice.as_deref(),
+            );
+        })?;
+        self.rendered_decision_context = rendered_decision_context;
+        self.render_pending = false;
+        Ok(())
+    }
+
+    fn current_decision_context(&self) -> Option<RenderedDecisionContext> {
+        match self.state.view_status {
+            ViewStatus::WaitingForApproval => self
+                .state
+                .pending_approval
+                .as_ref()
+                .map(|pending| RenderedDecisionContext::Approval(pending.call_id.clone())),
+            ViewStatus::WaitingForTrust => self
+                .state
+                .pending_trust_request_id
+                .clone()
+                .map(RenderedDecisionContext::Trust),
+            _ => None,
+        }
+    }
+
+    fn current_unsendable_response_context(&self) -> Option<UnsendableResponseContext> {
+        if let Some(decision) = self.current_decision_context() {
+            return Some(UnsendableResponseContext::Interactive(decision));
+        }
+        if self.state.cancel_requested {
+            return self
+                .state
+                .current_command
+                .as_ref()
+                .map(|current| UnsendableResponseContext::Cancelling(current.id.clone()));
+        }
+        None
+    }
+
+    fn unsendable_current_response(&self) -> bool {
+        self.unsendable_response_context.is_some()
+            && self.unsendable_response_context == self.current_unsendable_response_context()
+    }
+
+    fn rendered_approval_matches(&self, pending: Option<&PendingApproval>) -> bool {
+        matches!(
+            (&self.rendered_decision_context, pending),
+            (
+                Some(RenderedDecisionContext::Approval(rendered_call_id)),
+                Some(pending),
+            ) if rendered_call_id == &pending.call_id
+        )
+    }
+
+    fn rendered_trust_matches(&self, request_id: Option<&str>) -> bool {
+        matches!(
+            (&self.rendered_decision_context, request_id),
+            (Some(RenderedDecisionContext::Trust(rendered_request_id)), Some(request_id))
+                if rendered_request_id == request_id
+        )
+    }
+
+    async fn drain_backend_events(
+        &mut self,
+        events: &mut mpsc::Receiver<QueuedEvent>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        while let Ok(event) = events.try_recv() {
+            let event = BackendEvent::from_live(&event.event)?;
+            if self
+                .dispatch(UiAction::BackendEvent(event), writer, limit)
+                .await?
+                == LoopControl::Exit
+            {
+                return Ok(LoopControl::Exit);
+            }
+        }
+        Ok(LoopControl::Continue)
+    }
+
+    async fn close_transport<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        connection: &ConnectionInfo,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+        error: Option<String>,
+    ) -> Result<LoopControl, Error> {
+        let control = self
+            .dispatch(UiAction::TransportClosed { error }, writer, limit)
+            .await?;
+        self.draw(terminal, connection)?;
+        Ok(control)
+    }
+
+    fn cancel_frame_limit_notice(&self, limit: usize) -> Result<Option<String>, Error> {
+        if self.state.pending_trust_request_id.is_some() || self.state.pending_approval.is_some() {
+            return self.decision_frame_limit_notice(&UiAction::Cancel, limit);
+        }
+        let Some(current) = self.state.current_command.as_ref() else {
+            return Ok(None);
+        };
+        if self.state.cancel_requested {
+            return Ok(None);
+        }
+        let id = self.ids.peek_id(CommandKind::Cancel);
+        let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len <= limit {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Skipped prompt cancellation because the negotiated {limit}-byte RPC frame limit is too small."
+        )))
+    }
+
+    async fn interrupt(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
-    ) -> Result<(), Error> {
-        let Some(current) = self.state.current_command.as_ref() else {
-            return Ok(());
-        };
-        if self.state.cancel_requested {
-            return Ok(());
+        quit_if_idle: bool,
+    ) -> Result<LoopControl, Error> {
+        if self.unsendable_current_response() {
+            return Ok(LoopControl::Exit);
         }
-        let id = self.ids.next_prefixed_id("cancel");
-        let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
-        let payload = Bytes::from(serde_json::to_vec(&command)?);
-        if payload.len() > limit {
-            self.notice = Some(format!(
-                "Skipped prompt cancellation because the negotiated {limit}-byte RPC frame limit is too small."
-            ));
+        if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
+            if quit_if_idle {
+                return Ok(LoopControl::Exit);
+            }
+            return Ok(LoopControl::Continue);
+        }
+        if let Some(notice) = self.cancel_frame_limit_notice(limit)? {
+            self.unsendable_response_context = self.current_unsendable_response_context();
+            self.notice = Some(notice);
             self.render_pending = true;
-            return Ok(());
+            return Ok(LoopControl::Continue);
         }
-        send_payload(writer, payload, limit).await?;
-        self.state.cancel_requested = true;
-        self.render_pending = true;
-        Ok(())
+        self.dispatch(UiAction::Cancel, writer, limit).await
     }
 
     fn prompt_editable(&self) -> bool {
@@ -399,9 +675,45 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match input {
-            Input::Key(key) if is_ctrl_c(key) => {
-                self.cancel_current_command(writer, limit).await?;
-                Ok(LoopControl::Exit)
+            Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
+            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
+                let context_visible =
+                    self.rendered_approval_matches(self.state.pending_approval.as_ref());
+                match approval_decision(key, self.state.pending_approval.as_ref()) {
+                    Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
+                        Ok(LoopControl::Continue)
+                    }
+                    Some(action) => self.dispatch_decision(action, writer, limit).await,
+                    None if key_can_edit(key) => {
+                        if !self.unsendable_current_response() {
+                            self.notice = Some(
+                                "Approve with y once, t tool, a all, or deny with n/Esc.".into(),
+                            );
+                        }
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    None => Ok(LoopControl::Continue),
+                }
+            }
+            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForTrust => {
+                let context_visible =
+                    self.rendered_trust_matches(self.state.pending_trust_request_id.as_deref());
+                match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
+                    Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
+                        Ok(LoopControl::Continue)
+                    }
+                    Some(action) => self.dispatch_decision(action, writer, limit).await,
+                    None if key_can_edit(key) => {
+                        if !self.unsendable_current_response() {
+                            self.notice = Some("Trust with y, or deny with n/Esc.".into());
+                        }
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    None => Ok(LoopControl::Continue),
+                }
             }
             Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
@@ -441,16 +753,21 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if key_can_edit(key) => {
-                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                if !self.unsendable_current_response() {
+                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Input::Paste(_) => {
-                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                if !self.unsendable_current_response() {
+                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Input::Redraw => {
+                self.rendered_decision_context = None;
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
@@ -462,6 +779,59 @@ impl LiveUi {
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn is_escape(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+}
+
+fn printable_char(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(character)
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            Some(character)
+        }
+        _ => None,
+    }
+}
+
+fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option<UiAction> {
+    let pending = pending?;
+    let approved = match printable_char(key)?.to_ascii_lowercase() {
+        'y' => true,
+        't' => true,
+        'a' => true,
+        'n' => false,
+        _ => return None,
+    };
+    let scope = match printable_char(key)?.to_ascii_lowercase() {
+        't' => Some(ApprovalScope::ToolSession),
+        'a' => Some(ApprovalScope::AllSession),
+        'y' => Some(ApprovalScope::Once),
+        _ => None,
+    };
+    Some(UiAction::ApprovalDecision {
+        call_id: pending.call_id.clone(),
+        approved,
+        reason: None,
+        scope,
+    })
+}
+
+fn trust_decision(key: KeyEvent, request_id: Option<&str>) -> Option<UiAction> {
+    let request_id = request_id?;
+    let trusted = match printable_char(key)?.to_ascii_lowercase() {
+        'y' => true,
+        'n' => false,
+        _ => return None,
+    };
+    Some(UiAction::TrustDecision {
+        request_id: request_id.to_owned(),
+        trusted,
+        reason: None,
+        transient: Some(false),
+    })
 }
 
 fn key_can_edit(key: KeyEvent) -> bool {
@@ -542,6 +912,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             event_schema_version: events,
         };
         let mut live_ui = LiveUi::default();
+        let mut transport_closed_diagnostic = None;
         let mut redraw = interval(FRAME_INTERVAL);
         redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let loop_result = loop {
@@ -589,27 +960,49 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 }
                 outcome = receive_reader_outcome(&mut reader_outcome) => {
                     reader_outcome = None;
-                    break unexpected_reader_outcome(outcome, &mut backend).await;
+                    match outcome {
+                        Ok(ReaderTermination::Eof) => {
+                            live_ui
+                                .drain_backend_events(
+                                    &mut event_rx,
+                                    &writer_tx,
+                                    max_client_frame,
+                                )
+                                .await?;
+                            live_ui
+                                .close_transport(
+                                    terminal.terminal(),
+                                    &connection,
+                                    &writer_tx,
+                                    max_client_frame,
+                                    None,
+                                )
+                                .await?;
+                            transport_closed_diagnostic =
+                                Some(render_transport_closed_diagnostic(&live_ui.state));
+                            backend
+                                .wait_gracefully(Duration::from_millis(100))
+                                .await?;
+                            let error = match backend.try_wait()? {
+                                Some(status) => classify_backend_exit(status),
+                                None => Error::BackendStreamEnded,
+                            };
+                            break Err(error);
+                        }
+                        Err(error) => break Err(error),
+                    }
                 }
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    live_ui
-                        .cancel_current_command(&writer_tx, max_client_frame)
-                        .await?;
-                    break Ok(());
+                    if live_ui.interrupt(&writer_tx, max_client_frame, true).await?
+                        == LoopControl::Exit
+                    {
+                        break Ok(());
+                    }
                 }
                 _ = redraw.tick() => {
                     if live_ui.render_pending {
-                        terminal.terminal().draw(|frame| {
-                            ui::render(
-                                frame,
-                                &live_ui.state,
-                                &live_ui.editor,
-                                &connection,
-                                live_ui.notice.as_deref(),
-                            );
-                        })?;
-                        live_ui.render_pending = false;
+                        live_ui.draw(terminal.terminal(), &connection)?;
                     }
                 }
             }
@@ -618,6 +1011,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
         drop(input_rx);
         input.await??;
         drop(terminal);
+        if let Some(diagnostic) = transport_closed_diagnostic {
+            eprintln!("{diagnostic}");
+        }
         loop_result?;
 
         queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
@@ -721,22 +1117,6 @@ async fn receive_reader_outcome(
     match outcome {
         Some(outcome) => outcome.await.map_err(|_| Error::ReaderStopped)?,
         None => pending().await,
-    }
-}
-
-async fn unexpected_reader_outcome(
-    outcome: Result<ReaderTermination, Error>,
-    backend: &mut BackendProcess,
-) -> Result<(), Error> {
-    match outcome {
-        Ok(ReaderTermination::Eof) => {
-            backend.wait_gracefully(Duration::from_millis(100)).await?;
-            match backend.try_wait()? {
-                Some(status) => Err(classify_backend_exit(status)),
-                None => Err(Error::BackendStreamEnded),
-            }
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -1075,6 +1455,7 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
 mod tests {
     use super::*;
     use crate::reducer::{ActiveCommand, ActiveCommandType};
+    use ratatui::backend::TestBackend;
     use serde_json::json;
     use tokio::io::duplex;
     use wisp_protocol::events;
@@ -1302,6 +1683,24 @@ mod tests {
     }
 
     #[test]
+    fn transport_closed_diagnostic_is_bounded_and_terminal_safe() {
+        let mut state = UiState::unconfigured();
+        state.retained_text =
+            Some("partial\u{1b}]0;owned\u{7}\u{202e}\n".repeat(TOP_LEVEL_ERROR_MAX_CHARS));
+        let rendered = render_transport_closed_diagnostic(&state);
+        assert!(rendered.starts_with("wisp-tui: backend stream ended unexpectedly"));
+        assert!(rendered.contains("partial assistant response"));
+        assert!(rendered.ends_with(TRUNCATION_NOTICE));
+        assert!(rendered.len() <= TOP_LEVEL_ERROR_MAX_BYTES);
+        assert!(rendered.chars().count() <= TOP_LEVEL_ERROR_MAX_CHARS);
+        assert!(
+            rendered
+                .chars()
+                .all(|character| !character.is_control() && !is_bidi_control(character))
+        );
+    }
+
+    #[test]
     fn top_level_protocol_errors_are_bounded_and_terminal_safe() {
         fn assert_safe(error: &Error) {
             let rendered = render_top_level_error(error);
@@ -1463,6 +1862,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_close_draws_retained_error_state_before_exit() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.last_submitted_prompt = Some("hello".into());
+        state.retained_text = Some("partial response".into());
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        event_tx
+            .send(QueuedEvent {
+                event: parsed_event(json!({
+                    "type": "message.delta",
+                    "schema_version": 34,
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "role": "assistant",
+                    "content_index": 0,
+                    "content_kind": "text",
+                    "delta": "final queued fragment"
+                })),
+                _wire_bytes: permit,
+            })
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        let drain_control = live_ui
+            .drain_backend_events(&mut event_rx, &writer_tx, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(drain_control, LoopControl::Continue);
+        assert_eq!(
+            live_ui.state.retained_text.as_deref(),
+            Some("final queued fragment")
+        );
+
+        let control = live_ui
+            .close_transport(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(!live_ui.render_pending);
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("final queued fragment"));
+        assert!(rendered.contains("prompt failed"));
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
     async fn live_submit_queues_exact_prompt_and_clears_editor() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut live_ui = LiveUi {
@@ -1497,9 +1966,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_c_cancels_active_prompt_before_exit() {
+    async fn ctrl_c_cancels_active_prompt_without_exiting() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -1519,7 +1989,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(control, LoopControl::Continue);
         assert!(live_ui.state.cancel_requested);
         assert!(live_ui.render_pending);
         let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
@@ -1533,9 +2003,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_ctrl_c_cancel_frame_does_not_abort_exit() {
+    async fn oversized_ctrl_c_cancel_frame_stays_in_the_loop() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -1557,7 +2028,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(control, LoopControl::Continue);
         assert!(!live_ui.state.cancel_requested);
         assert!(live_ui.render_pending);
         assert!(
@@ -1566,6 +2037,513 @@ mod tests {
                 .as_deref()
                 .is_some_and(|notice| notice.contains("prompt cancellation"))
         );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn idle_ctrl_c_exits_without_a_cancel_command() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Exit);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn approval_and_trust_keys_emit_typed_commands() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({}),
+            safety: "read".into(),
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+            )
+            .unwrap();
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval key must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "approval",
+                "id": "approval-1",
+                "call_id": "call-1",
+                "approved": true
+            })
+        );
+
+        live_ui.state.view_status = ViewStatus::WaitingForTrust;
+        live_ui.state.pending_trust_request_id = Some("trust-req-1".into());
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                    protocol_version: 2,
+                    event_schema_version: 34,
+                },
+            )
+            .unwrap();
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust key must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "trust",
+                "id": "trust-2",
+                "request_id": "trust-req-1",
+                "trusted": true,
+                "transient": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_decision_keys_require_visible_current_context() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({"path": "/sensitive"}),
+            safety: "read".into(),
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+            protocol_version: 2,
+            event_schema_version: 34,
+        };
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-2".into();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-1".into();
+
+        live_ui
+            .handle_input(Input::Redraw, &writer_tx, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        for key in ['y', 't', 'a'] {
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(29, 7)).unwrap();
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval denial must remain available in a small terminal");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "approval",
+                "id": "approval-1",
+                "call_id": "call-1",
+                "approved": false,
+                "reason": "Denied from TUI"
+            })
+        );
+
+        live_ui.state.view_status = ViewStatus::WaitingForTrust;
+        live_ui.state.pending_approval = None;
+        live_ui.state.pending_trust_request_id = Some("trust-req-1".into());
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust denial must remain available in a small terminal");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "trust",
+                "id": "trust-2",
+                "request_id": "trust-req-1",
+                "trusted": false,
+                "reason": "Denied from TUI",
+                "transient": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_responses_are_preflighted_before_state_changes() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let call_id = "c".repeat(32);
+        let mut approval_state = UiState::unconfigured();
+        approval_state.view_status = ViewStatus::WaitingForApproval;
+        approval_state.pending_approval = Some(PendingApproval {
+            call_id: call_id.clone(),
+            name: "read".into(),
+            arguments: json!({}),
+            safety: "read".into(),
+        });
+        let mut approval_ui = LiveUi {
+            state: approval_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let approval = WispTypedClientRpcCommands::approval(
+            "approval-1",
+            &call_id,
+            false,
+            Some("Denied from TUI"),
+            None,
+        )
+        .unwrap();
+        let approval_len = serde_json::to_vec(&approval).unwrap().len();
+
+        approval_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                approval_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            approval_ui.state.view_status,
+            ViewStatus::WaitingForApproval
+        );
+        assert_eq!(
+            approval_ui
+                .state
+                .pending_approval
+                .as_ref()
+                .map(|pending| pending.call_id.as_str()),
+            Some(call_id.as_str())
+        );
+        assert!(
+            approval_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("response remains pending"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        approval_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                approval_len,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval response must be sent once it fits");
+        };
+        assert_eq!(payload.as_ref(), serde_json::to_vec(&approval).unwrap());
+
+        let request_id = "t".repeat(32);
+        let mut trust_state = UiState::unconfigured();
+        trust_state.view_status = ViewStatus::WaitingForTrust;
+        trust_state.pending_trust_request_id = Some(request_id.clone());
+        let mut trust_ui = LiveUi {
+            state: trust_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let trust = WispTypedClientRpcCommands::trust(
+            "trust-1",
+            &request_id,
+            false,
+            Some("Trust prompt cancelled"),
+            Some(true),
+        )
+        .unwrap();
+        let trust_len = serde_json::to_vec(&trust).unwrap().len();
+
+        trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(trust_ui.state.view_status, ViewStatus::WaitingForTrust);
+        assert_eq!(
+            trust_ui.state.pending_trust_request_id.as_deref(),
+            Some(request_id.as_str())
+        );
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("response remains pending"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let replacement_request_id = "u".repeat(32);
+        trust_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::TrustRequested {
+                    request_id: replacement_request_id.clone(),
+                    project_path: "/replacement".into(),
+                }),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(trust_ui.notice, None);
+        assert_eq!(trust_ui.unsendable_response_context, None);
+
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Esc/Ctrl-C again exits"))
+        );
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(trust_ui.state.view_status, ViewStatus::WaitingForTrust);
+        assert_eq!(
+            trust_ui.state.pending_trust_request_id.as_deref(),
+            Some(replacement_request_id.as_str())
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn automatic_cancellation_denials_are_preflighted() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let call_id = "c".repeat(32);
+        let mut approval_state = UiState::unconfigured();
+        approval_state.view_status = ViewStatus::Running;
+        approval_state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        approval_state.cancel_requested = true;
+        let mut approval_ui = LiveUi {
+            state: approval_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let approval = WispTypedClientRpcCommands::approval(
+            "approval-1",
+            &call_id,
+            false,
+            Some("Denied from TUI: cancelling"),
+            None,
+        )
+        .unwrap();
+        let approval_len = serde_json::to_vec(&approval).unwrap().len();
+        let approval_event =
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id,
+                name: "shell".into(),
+                arguments: json!({}),
+                safety: "command".into(),
+            }));
+
+        let control = approval_ui
+            .dispatch(approval_event.clone(), &writer_tx, approval_len - 1)
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert!(approval_ui.state.cancel_requested);
+        assert_eq!(approval_ui.state.view_status, ViewStatus::Running);
+        assert_eq!(
+            approval_ui.unsendable_response_context,
+            Some(UnsendableResponseContext::Cancelling("prompt-1".into()))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        approval_ui
+            .dispatch(approval_event, &writer_tx, approval_len)
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("automatic approval denial must be sent once it fits");
+        };
+        assert_eq!(payload.as_ref(), serde_json::to_vec(&approval).unwrap());
+        assert_eq!(approval_ui.unsendable_response_context, None);
+        assert_eq!(approval_ui.notice, None);
+
+        let request_id = "t".repeat(32);
+        let mut trust_state = UiState::unconfigured();
+        trust_state.view_status = ViewStatus::Running;
+        trust_state.current_command = Some(ActiveCommand {
+            id: "prompt-2".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        trust_state.cancel_requested = true;
+        let mut trust_ui = LiveUi {
+            state: trust_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let trust = WispTypedClientRpcCommands::trust(
+            "trust-1",
+            &request_id,
+            false,
+            Some("Trust prompt cancelled"),
+            Some(true),
+        )
+        .unwrap();
+        let trust_len = serde_json::to_vec(&trust).unwrap().len();
+
+        trust_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::TrustRequested {
+                    request_id,
+                    project_path: "/workspace".into(),
+                }),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert!(trust_ui.state.cancel_requested);
+        assert_eq!(trust_ui.state.view_status, ViewStatus::Running);
+        assert_eq!(
+            trust_ui.unsendable_response_context,
+            Some(UnsendableResponseContext::Cancelling("prompt-2".into()))
+        );
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Esc/Ctrl-C again exits"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Exit);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

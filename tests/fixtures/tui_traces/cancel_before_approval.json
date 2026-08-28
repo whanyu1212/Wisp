@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "name": "cancel_before_approval",
+  "description": "A late approval request after cancellation is denied without reopening the prompt.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": null
+  },
+  "inputs": [
+    {
+      "type": "local.submit",
+      "content": "run command",
+      "clock_ms": 0
+    },
+    {
+      "type": "local.cancel",
+      "clock_ms": 10
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.approval.requested",
+        "call_id": "call-1",
+        "name": "shell",
+        "arguments": {
+          "command": "rm -rf /tmp/example"
+        },
+        "safety": "command"
+      },
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "command_id": "prompt-1",
+        "command_type": "prompt",
+        "ok": false,
+        "error": "RPC command cancelled: requested by user"
+      },
+      "clock_ms": 30
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "prompt",
+        "id": "prompt-1",
+        "prompt": "run command"
+      },
+      {
+        "type": "cancel",
+        "id": "cancel-1",
+        "target_id": "prompt-1"
+      },
+      {
+        "type": "approval",
+        "id": "approval-1",
+        "call_id": "call-1",
+        "approved": false,
+        "reason": "Denied from TUI: cancelling",
+        "scope": null
+      },
+      {
+        "type": "get_session_stats",
+        "id": "get_session_stats-1"
+      }
+    ],
+    "view": {
+      "status": "idle",
+      "input_mode": "idle",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "idle",
+      "current_command_id": null,
+      "current_command_type": null,
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null
+  }
+}

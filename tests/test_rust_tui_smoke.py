@@ -81,8 +81,16 @@ def test_rust_tui_cross_language_smoke(
                 else:
                     os.write(terminal_fd, b"hello rust\r")
                 prompt_sent = True
-            if exercise_prompt and not quit_sent and b"response" in output:
+            if exercise_prompt and not response_seen and b"fake response" in output:
                 response_seen = True
+            if (
+                exercise_prompt
+                and response_seen
+                and not quit_sent
+                and output.rfind(b"idle") > output.rfind(b"running")
+            ):
+                # Ctrl-C while the prompt is still running now cancels rather
+                # than quitting. Wait until the header returns to idle first.
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)

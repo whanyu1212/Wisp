@@ -74,12 +74,10 @@ enum TraceInput {
     },
     #[serde(rename = "local.trust")]
     Trust {
-        #[serde(rename = "request_id")]
-        _request_id: String,
-        #[serde(rename = "trusted")]
-        _trusted: bool,
-        #[serde(default, rename = "transient")]
-        _transient: Option<bool>,
+        request_id: String,
+        trusted: bool,
+        #[serde(default)]
+        transient: Option<bool>,
         clock_ms: u64,
     },
     #[serde(rename = "rpc.event")]
@@ -242,7 +240,7 @@ fn trace_runner_rejects_unsupported_actions_and_unbounded_values() {
         "name": "unsupported",
         "description": "unsupported action regression",
         "initial": {"provider": "fake"},
-        "inputs": [{"type": "local.cancel", "clock_ms": 0}],
+        "inputs": [{"type": "local.slash", "command": "help", "clock_ms": 0}],
         "expected": {
             "commands": [],
             "view": {
@@ -258,7 +256,7 @@ fn trace_runner_rejects_unsupported_actions_and_unbounded_values() {
     .unwrap();
     assert_eq!(
         replay(&unsupported).unwrap_err(),
-        "unsupported trace action local.cancel"
+        "unsupported trace action local.slash"
     );
 
     let too_deep = serde_json::json!([[[[[[[[["too deep"]]]]]]]]]);
@@ -359,6 +357,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
         state.cancel_requested = interaction.cancel_requested;
         state.exit_requested = interaction.exit_requested;
         state.pending_trust_request_id = interaction.pending_trust_request_id.clone();
+        state.pending_trust_project_path = None;
         if let Some(call_id) = &interaction.pending_approval_call_id {
             state.pending_approval = Some(PendingApproval {
                 call_id: call_id.clone(),
@@ -405,9 +404,19 @@ fn trace_action(input: &TraceInput) -> Result<UiAction, String> {
         TraceInput::RpcClosed { error, .. } => Ok(UiAction::TransportClosed {
             error: error.clone(),
         }),
+        TraceInput::Cancel { .. } => Ok(UiAction::Cancel),
+        TraceInput::Trust {
+            request_id,
+            trusted,
+            transient,
+            ..
+        } => Ok(UiAction::TrustDecision {
+            request_id: request_id.clone(),
+            trusted: *trusted,
+            reason: (!trusted).then(|| "Denied from trace".into()),
+            transient: *transient,
+        }),
         TraceInput::Slash { .. } => Err("unsupported trace action local.slash".into()),
-        TraceInput::Cancel { .. } => Err("unsupported trace action local.cancel".into()),
-        TraceInput::Trust { .. } => Err("unsupported trace action local.trust".into()),
     }
 }
 
@@ -494,10 +503,18 @@ fn assert_value_subset(expected: &Value, actual: &Value, path: &str) {
 }
 
 fn normalize_trace_command(value: &mut Value) {
-    if value.get("type").and_then(Value::as_str) == Some("approval") {
-        let object = value.as_object_mut().unwrap();
-        object.entry("reason").or_insert(Value::Null);
-        object.entry("scope").or_insert(Value::Null);
+    match value.get("type").and_then(Value::as_str) {
+        Some("approval") => {
+            let object = value.as_object_mut().unwrap();
+            object.entry("reason").or_insert(Value::Null);
+            object.entry("scope").or_insert(Value::Null);
+        }
+        Some("trust") => {
+            let object = value.as_object_mut().unwrap();
+            object.entry("reason").or_insert(Value::Null);
+            object.entry("transient").or_insert(Value::Bool(false));
+        }
+        _ => {}
     }
 }
 

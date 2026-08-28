@@ -2348,6 +2348,15 @@ class TuiShell:
 
         if isinstance(event, TrustRequested):
             self.state.pending_trust = event
+            if self.state.cancel_requested:
+                # The trust event may already be queued when the user cancels.
+                # Do not persist trust for a turn that is actively unwinding.
+                return await self._answer_pending_trust(
+                    "",
+                    trusted=False,
+                    reason="Trust prompt cancelled",
+                    transient=True,
+                )
             self.state.status = TuiStatus.waiting_for_trust
             self._sync_view()
             self.renderer.trust_request(event)

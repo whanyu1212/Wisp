@@ -10,6 +10,9 @@ mod event_projection;
 pub use event_projection::EventProjectionError;
 
 const DEFAULT_DENIAL_REASON: &str = "Denied from TUI";
+const CANCELLED_APPROVAL_REASON: &str = "Denied from TUI: cancelled";
+const CANCELLING_APPROVAL_REASON: &str = "Denied from TUI: cancelling";
+const CANCELLED_TRUST_REASON: &str = "Trust prompt cancelled";
 const RPC_CANCELLED_PREFIX: &str = "RPC command cancelled:";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -130,6 +133,7 @@ pub struct UiState {
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_trust_request_id: Option<String>,
+    pub pending_trust_project_path: Option<String>,
     pub cancel_requested: bool,
     pub exit_requested: bool,
     pub last_submitted_prompt: Option<String>,
@@ -166,6 +170,7 @@ impl UiState {
             current_command: None,
             pending_approval: None,
             pending_trust_request_id: None,
+            pending_trust_project_path: None,
             cancel_requested: false,
             exit_requested: false,
             last_submitted_prompt: None,
@@ -188,6 +193,8 @@ impl UiState {
 pub enum CommandKind {
     Prompt,
     Approval,
+    Cancel,
+    Trust,
     GetSessionStats,
 }
 
@@ -196,6 +203,8 @@ impl CommandKind {
         match self {
             Self::Prompt => "prompt",
             Self::Approval => "approval",
+            Self::Cancel => "cancel",
+            Self::Trust => "trust",
             Self::GetSessionStats => "get_session_stats",
         }
     }
@@ -229,6 +238,12 @@ pub enum BackendEvent {
     ToolApprovalRequested(PendingApproval),
     TrustRequested {
         request_id: String,
+        project_path: String,
+    },
+    ProjectConfigApplied {
+        provider: String,
+        model: Option<String>,
+        effort: Option<String>,
     },
     CommandFinished {
         command_id: String,
@@ -250,6 +265,13 @@ pub enum UiAction {
         reason: Option<String>,
         scope: Option<ApprovalScope>,
     },
+    TrustDecision {
+        request_id: String,
+        trusted: bool,
+        reason: Option<String>,
+        transient: Option<bool>,
+    },
+    Cancel,
     BackendEvent(BackendEvent),
     TransportClosed {
         error: Option<String>,
@@ -269,6 +291,8 @@ pub enum ReduceError {
     PromptAlreadyActive(String),
     #[error("no pending approval matches call {0:?}")]
     NoMatchingApproval(String),
+    #[error("no pending trust request matches {0:?}")]
+    NoMatchingTrust(String),
     #[error("invalid generated RPC command: {0}")]
     Protocol(#[from] ProtocolDecodeError),
 }
@@ -286,6 +310,13 @@ pub fn reduce(
             reason,
             scope,
         } => answer_approval(state, call_id, approved, reason, scope, ids),
+        UiAction::TrustDecision {
+            request_id,
+            trusted,
+            reason,
+            transient,
+        } => answer_trust(state, request_id, trusted, reason, transient, ids),
+        UiAction::Cancel => cancel(state, ids),
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
             state.view_status = ViewStatus::Error;
@@ -365,6 +396,95 @@ fn answer_approval(
         selected_scope,
     )?;
     state.pending_approval = None;
+    restore_active_or_idle(state);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn answer_trust(
+    state: &mut UiState,
+    request_id: String,
+    trusted: bool,
+    reason: Option<String>,
+    transient: Option<bool>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.pending_trust_request_id.as_ref() != Some(&request_id) {
+        return Err(ReduceError::NoMatchingTrust(request_id));
+    }
+    let id = ids.next_id(CommandKind::Trust);
+    let selected_reason = if trusted {
+        None
+    } else {
+        Some(reason.as_deref().unwrap_or(DEFAULT_DENIAL_REASON))
+    };
+    let selected_transient = Some(if trusted {
+        false
+    } else {
+        transient.unwrap_or(false)
+    });
+    let command = WispTypedClientRpcCommands::trust(
+        &id,
+        &request_id,
+        trusted,
+        selected_reason,
+        selected_transient,
+    )?;
+    state.pending_trust_request_id = None;
+    state.pending_trust_project_path = None;
+    restore_active_or_idle(state);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn cancel(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Some(request_id) = state.pending_trust_request_id.clone() {
+        return answer_trust(
+            state,
+            request_id,
+            false,
+            Some(CANCELLED_TRUST_REASON.into()),
+            Some(true),
+            ids,
+        );
+    }
+    if let Some(call_id) = state
+        .pending_approval
+        .as_ref()
+        .map(|pending| pending.call_id.clone())
+    {
+        return answer_approval(
+            state,
+            call_id,
+            false,
+            Some(CANCELLED_APPROVAL_REASON.into()),
+            None,
+            ids,
+        );
+    }
+    let Some(current) = state.current_command.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if state.cancel_requested {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::Cancel);
+    let command = WispTypedClientRpcCommands::cancel(&id, &current.id)?;
+    state.cancel_requested = true;
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn restore_active_or_idle(state: &mut UiState) {
     if state.current_command.is_some() {
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
@@ -372,10 +492,6 @@ fn answer_approval(
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
     }
-    Ok(vec![
-        UiEffect::SendCommand(command),
-        UiEffect::RequestRender,
-    ])
 }
 
 fn handle_backend_event(
@@ -415,15 +531,60 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolApprovalRequested(pending) => {
+            if state.cancel_requested {
+                let id = ids.next_id(CommandKind::Approval);
+                let command = WispTypedClientRpcCommands::approval(
+                    &id,
+                    &pending.call_id,
+                    false,
+                    Some(CANCELLING_APPROVAL_REASON),
+                    None,
+                )?;
+                state.pending_approval = None;
+                return Ok(vec![
+                    UiEffect::SendCommand(command),
+                    UiEffect::RequestRender,
+                ]);
+            }
             state.pending_approval = Some(pending);
             state.view_status = ViewStatus::WaitingForApproval;
             state.interaction_status = InteractionStatus::WaitingForApproval;
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::TrustRequested { request_id } => {
+        BackendEvent::TrustRequested {
+            request_id,
+            project_path,
+        } => {
+            if state.cancel_requested {
+                let id = ids.next_id(CommandKind::Trust);
+                let command = WispTypedClientRpcCommands::trust(
+                    &id,
+                    &request_id,
+                    false,
+                    Some(CANCELLED_TRUST_REASON),
+                    Some(true),
+                )?;
+                state.pending_trust_request_id = None;
+                state.pending_trust_project_path = None;
+                return Ok(vec![
+                    UiEffect::SendCommand(command),
+                    UiEffect::RequestRender,
+                ]);
+            }
             state.pending_trust_request_id = Some(request_id);
+            state.pending_trust_project_path = Some(project_path);
             state.view_status = ViewStatus::WaitingForTrust;
             state.interaction_status = InteractionStatus::WaitingForTrust;
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ProjectConfigApplied {
+            provider,
+            model,
+            effort,
+        } => {
+            state.provider = Some(provider);
+            state.model = model;
+            state.effort = effort;
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::CommandFinished {
@@ -442,6 +603,8 @@ fn handle_backend_event(
             let stats = WispTypedClientRpcCommands::get_session_stats(&stats_id)?;
             state.current_command = None;
             state.pending_approval = None;
+            state.pending_trust_request_id = None;
+            state.pending_trust_project_path = None;
             state.cancel_requested = false;
             state.stream_turn = None;
             state.streaming_text = false;
@@ -787,6 +950,7 @@ mod tests {
             &mut state,
             UiAction::BackendEvent(BackendEvent::TrustRequested {
                 request_id: "trust-1".into(),
+                project_path: "/workspace".into(),
             }),
             &mut ids,
         )
@@ -794,6 +958,10 @@ mod tests {
         assert_eq!(state.view_status, ViewStatus::WaitingForTrust);
         assert_eq!(state.interaction_status, InteractionStatus::WaitingForTrust);
         assert_eq!(state.pending_trust_request_id.as_deref(), Some("trust-1"));
+        assert_eq!(
+            state.pending_trust_project_path.as_deref(),
+            Some("/workspace")
+        );
         assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
     }
 
@@ -811,7 +979,223 @@ mod tests {
             BackendEvent::from_live(&live).unwrap(),
             BackendEvent::TrustRequested {
                 request_id: "trust-7".into(),
+                project_path: "/workspace".into(),
             }
         );
+    }
+
+    #[test]
+    fn project_config_applied_refreshes_authoritative_header_state() {
+        let mut state = UiState::new("fake".into(), Some("old-model".into()), Some("low".into()));
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ProjectConfigApplied {
+                provider: "anthropic".into(),
+                model: Some("claude-test".into()),
+                effort: Some("high".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.provider.as_deref(), Some("anthropic"));
+        assert_eq!(state.model.as_deref(), Some("claude-test"));
+        assert_eq!(state.effort.as_deref(), Some("high"));
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+    }
+
+    #[test]
+    fn stale_trust_does_not_mutate_state() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.pending_trust_request_id = Some("trust-1".into());
+        let before = state.clone();
+        let mut ids = DeterministicIds::default();
+        assert!(matches!(
+            reduce(
+                &mut state,
+                UiAction::TrustDecision {
+                    request_id: "wrong".into(),
+                    trusted: true,
+                    reason: None,
+                    transient: None,
+                },
+                &mut ids,
+            ),
+            Err(ReduceError::NoMatchingTrust(id)) if id == "wrong"
+        ));
+        assert_eq!(state, before);
+        assert!(ids.0.is_empty());
+    }
+
+    #[test]
+    fn trust_allow_and_deny_emit_typed_commands() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_trust_request_id = Some("trust-1".into());
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::TrustDecision {
+                request_id: "trust-1".into(),
+                trusted: true,
+                reason: None,
+                transient: None,
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "trust");
+        assert_eq!(command["id"], "trust-1");
+        assert_eq!(command["trusted"], true);
+        assert_eq!(command["transient"], false);
+        assert!(command.get("reason").is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert!(state.pending_trust_request_id.is_none());
+        assert!(state.pending_trust_project_path.is_none());
+    }
+
+    #[test]
+    fn cancel_active_prompt_emits_once() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        assert_eq!(
+            command_value(&effects[0]).unwrap(),
+            serde_json::json!({"type": "cancel", "id": "cancel-1", "target_id": "prompt-1"})
+        );
+        assert!(state.cancel_requested);
+        let repeated = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        assert!(repeated.is_empty());
+        assert_eq!(ids.0.get("cancel"), Some(&1));
+    }
+
+    #[test]
+    fn late_approval_after_cancel_is_denied_without_reopening_the_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.cancel_requested = true;
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "rm -rf /tmp/example"}),
+                safety: "ask".into(),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "approval");
+        assert_eq!(command["call_id"], "call-1");
+        assert_eq!(command["approved"], false);
+        assert_eq!(command["reason"], CANCELLING_APPROVAL_REASON);
+        assert!(state.cancel_requested);
+        assert!(state.pending_approval.is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
+    }
+
+    #[test]
+    fn cancel_denies_pending_approval_instead_of_cancelling() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.interaction_status = InteractionStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            safety: "read".into(),
+        });
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "approval");
+        assert_eq!(command["approved"], false);
+        assert_eq!(command["reason"], CANCELLED_APPROVAL_REASON);
+        assert!(state.pending_approval.is_none());
+        assert!(!state.cancel_requested);
+        assert_eq!(state.view_status, ViewStatus::Running);
+    }
+
+    #[test]
+    fn late_trust_after_cancel_is_transiently_denied_without_reopening_the_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.cancel_requested = true;
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::TrustRequested {
+                request_id: "trust-1".into(),
+                project_path: "/workspace".into(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "trust");
+        assert_eq!(command["request_id"], "trust-1");
+        assert_eq!(command["trusted"], false);
+        assert_eq!(command["reason"], CANCELLED_TRUST_REASON);
+        assert_eq!(command["transient"], true);
+        assert!(state.cancel_requested);
+        assert!(state.pending_trust_request_id.is_none());
+        assert!(state.pending_trust_project_path.is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
+    }
+
+    #[test]
+    fn cancel_denies_pending_trust_instead_of_cancelling() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::WaitingForTrust;
+        state.interaction_status = InteractionStatus::WaitingForTrust;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_trust_request_id = Some("trust-1".into());
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "trust");
+        assert_eq!(command["trusted"], false);
+        assert_eq!(command["reason"], CANCELLED_TRUST_REASON);
+        assert_eq!(command["transient"], true);
+        assert!(state.pending_trust_request_id.is_none());
+        assert!(!state.cancel_requested);
+        assert_eq!(state.view_status, ViewStatus::Running);
     }
 }

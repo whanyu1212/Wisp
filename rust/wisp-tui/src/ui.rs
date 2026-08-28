@@ -15,12 +15,18 @@ const COMPOSER_TAB_WIDTH: usize = 4;
 const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 16;
 const TRANSCRIPT_TAIL_MIN_BYTES: usize = 4 * 1024;
 const TRANSCRIPT_TAIL_MAX_BYTES: usize = 64 * 1024;
+const DECISION_PREVIEW_GRAPHEMES: usize = 160;
+const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
     pub backend_version: String,
     pub protocol_version: u32,
     pub event_schema_version: u32,
+}
+
+pub fn decision_context_visible(area: Rect) -> bool {
+    area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
 pub fn render(
@@ -31,7 +37,7 @@ pub fn render(
     notice: Option<&str>,
 ) {
     let area = frame.area();
-    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+    if !decision_context_visible(area) {
         frame.render_widget(
             Paragraph::new("Wisp: terminal too small (minimum 30x8)")
                 .alignment(Alignment::Center)
@@ -41,10 +47,30 @@ pub fn render(
         return;
     }
 
+    let decision_pending = matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    );
+    if decision_pending && area.height < 11 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(5)])
+            .split(area);
+        if let Some(notice) = notice {
+            render_compact_notice(frame, chunks[0], notice);
+        } else {
+            render_header(frame, chunks[0], state, connection);
+        }
+        render_composer(frame, chunks[1], state, editor);
+        return;
+    }
+
     let composer_height = if editable(state) {
         u16::try_from(editor.line_count().saturating_add(2))
             .unwrap_or(MAX_COMPOSER_HEIGHT)
             .clamp(3, MAX_COMPOSER_HEIGHT)
+    } else if decision_pending {
+        5
     } else {
         3
     };
@@ -212,16 +238,30 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         return;
     }
 
+    if matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    ) {
+        let lines = match state.view_status {
+            ViewStatus::WaitingForApproval => {
+                approval_composer_lines(state, usize::from(inner.width))
+            }
+            ViewStatus::WaitingForTrust => trust_composer_lines(state, usize::from(inner.width)),
+            _ => unreachable!("decision rows require a decision view"),
+        };
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+        return;
+    }
+
     let message = match state.view_status {
-        ViewStatus::Running => "Prompt in progress; active-run input arrives in #466.",
-        ViewStatus::WaitingForApproval => {
-            "A tool approval is waiting; approval controls arrive in the next PR."
+        ViewStatus::Running if state.cancel_requested => "Cancelling current prompt…".into(),
+        ViewStatus::Running => {
+            "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
-        ViewStatus::WaitingForTrust => {
-            "Project trust is waiting; trust controls arrive in the next PR."
+        ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
+        ViewStatus::Idle | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
+            String::new()
         }
-        ViewStatus::Error => "The prompt failed. Ctrl-C exits the current Rust TUI slice.",
-        ViewStatus::Idle => "",
     };
     frame.render_widget(
         Paragraph::new(message)
@@ -347,6 +387,16 @@ fn push_source_grapheme_window(
     Some(column)
 }
 
+fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str) {
+    frame.render_widget(
+        Paragraph::new(sanitize_for_terminal(notice))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
     let (content, style) = match notice {
         Some(notice) => (
@@ -368,6 +418,151 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
 
 fn editable(state: &UiState) -> bool {
     state.input_ready && state.current_command.is_none() && state.view_status == ViewStatus::Idle
+}
+
+fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+    let Some(pending) = state.pending_approval.as_ref() else {
+        return vec![
+            Line::from(decision_row("[y once/t tool/a all/N]", width)),
+            Line::default(),
+            Line::from(decision_row("args: unavailable", width)),
+        ];
+    };
+    vec![
+        Line::from(decision_row("[y once/t tool/a all/N]", width)),
+        Line::from(decision_row(
+            &format!(
+                "tool: {} ({})",
+                bounded_decision_preview(&pending.name),
+                bounded_decision_preview(&pending.safety)
+            ),
+            width,
+        )),
+        Line::from(decision_row(
+            &format!("args: {}", bounded_json_preview(&pending.arguments)),
+            width,
+        )),
+    ]
+}
+
+fn decision_row(content: &str, width: usize) -> String {
+    let safe = bounded_decision_preview(content);
+    if safe.width() <= width {
+        return safe;
+    }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let mut row = source_display_column_window(&safe, 0, width - 1).text;
+    row.push('…');
+    row
+}
+
+fn trust_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+    let path = state
+        .pending_trust_project_path
+        .as_deref()
+        .map(bounded_decision_tail_preview)
+        .unwrap_or_else(|| "unknown project".into());
+    vec![
+        Line::from(decision_row("[y trust/N deny]", width)),
+        Line::from(decision_row("trust project:", width)),
+        Line::from(decision_tail_row(&path, width)),
+    ]
+}
+
+fn decision_tail_row(content: &str, width: usize) -> String {
+    if content.width() <= width {
+        return content.to_owned();
+    }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let start = content.width().saturating_sub(width - 1);
+    let tail = source_display_column_window(content, start, width - 1).text;
+    format!("…{tail}")
+}
+
+fn bounded_decision_tail_preview(content: &str) -> String {
+    let mut graphemes = content.graphemes(true).rev();
+    let mut retained: Vec<_> = graphemes
+        .by_ref()
+        .take(DECISION_PREVIEW_GRAPHEMES)
+        .collect();
+    let truncated = graphemes.next().is_some();
+    retained.reverse();
+    let mut preview = bounded_decision_preview(&retained.concat());
+    if truncated {
+        preview.insert(0, '…');
+    }
+    preview
+}
+
+fn bounded_decision_preview(content: &str) -> String {
+    let mut preview = String::new();
+    let mut graphemes = content.graphemes(true);
+    for grapheme in graphemes.by_ref().take(DECISION_PREVIEW_GRAPHEMES) {
+        if matches!(grapheme, "\n" | "\r" | "\r\n" | "\t") {
+            preview.push(' ');
+        } else {
+            for character in grapheme.chars() {
+                if terminal_control_character(character) {
+                    preview.push('�');
+                } else {
+                    preview.push(character);
+                }
+            }
+        }
+    }
+    if graphemes.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+fn bounded_json_preview(value: &serde_json::Value) -> String {
+    let mut writer = DecisionPreviewWriter::default();
+    if serde_json::to_writer(&mut writer, value).is_err() && !writer.truncated {
+        return "<invalid arguments>".into();
+    }
+    let mut preview = bounded_decision_preview(&String::from_utf8_lossy(&writer.bytes));
+    if writer.truncated && !preview.ends_with('…') {
+        preview.push('…');
+    }
+    preview
+}
+
+#[derive(Default)]
+struct DecisionPreviewWriter {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl std::io::Write for DecisionPreviewWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let remaining = DECISION_PREVIEW_JSON_BYTES.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            self.truncated = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "decision preview limit reached",
+            ));
+        }
+        if buffer.len() > remaining {
+            self.bytes.extend_from_slice(&buffer[..remaining]);
+            self.truncated = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "decision preview limit reached",
+            ));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn push_content_lines(
@@ -572,10 +767,20 @@ mod tests {
     }
 
     fn render_to_string(width: u16, height: u16, state: &UiState, editor: &PromptEditor) -> String {
+        render_to_string_with_notice(width, height, state, editor, None)
+    }
+
+    fn render_to_string_with_notice(
+        width: u16,
+        height: u16,
+        state: &UiState,
+        editor: &PromptEditor,
+        notice: Option<&str>,
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, state, editor, &connection(), None))
+            .draw(|frame| render(frame, state, editor, &connection(), notice))
             .unwrap();
         terminal.backend().to_string()
     }
@@ -604,7 +809,12 @@ mod tests {
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("partial answer"));
-        assert!(rendered.contains("active-run input arrives in #466"));
+        assert!(rendered.contains("Esc/Ctrl-C cancels"));
+
+        state.cancel_requested = true;
+        let cancelling = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(cancelling.contains("Cancelling current prompt"));
+        assert!(!cancelling.contains("Esc/Ctrl-C cancels"));
     }
 
     #[test]
@@ -614,16 +824,120 @@ mod tests {
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
             name: "shell".into(),
-            arguments: json!({}),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(approval.contains("approval is waiting"));
+        assert!(approval.contains("tool: shell (ask)"));
+        assert!(approval.contains("args:"));
+        assert!(approval.contains("rm -rf /tmp/example"));
+        assert!(approval.contains("[y once/t tool/a all/N]"));
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-2".into(),
+            name: "shell\u{1b}[2J\u{202e}spoof\nnext".into(),
+            arguments: json!({}),
+            safety: "ask\u{2066}safe".into(),
+        });
+        let adversarial = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(!adversarial.contains('\u{1b}'));
+        assert!(!adversarial.contains('\u{202e}'));
+        assert!(!adversarial.contains('\u{2066}'));
+        assert!(adversarial.contains("shell�[2J�spoof next"));
+        assert!(adversarial.contains("ask�safe"));
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-3".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "x".repeat(DECISION_PREVIEW_GRAPHEMES + 20)}),
+            safety: "ask".into(),
+        });
+        let bounded = approval_composer_lines(&state, usize::MAX)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bounded.contains('…'));
+        assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 100);
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-4".into(),
+            name: "very-long-tool-name-".repeat(20),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            safety: "command".into(),
+        });
+        let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
+        assert!(narrow.contains("[y once/t tool/a all/N]"));
+        assert!(narrow.contains("args:"));
+        assert!(narrow.contains("rm -rf"));
+        let minimum_approval = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(minimum_approval.contains("[y once/t tool/a all/N]"));
+        assert!(minimum_approval.contains("args:"));
+        assert!(minimum_approval.contains("rm -rf"));
+        for height in 8..=10 {
+            let compact_notice = render_to_string_with_notice(
+                30,
+                height,
+                &state,
+                &PromptEditor::default(),
+                Some(
+                    "Esc/Ctrl-C again exits. Skipped approval response: frame exceeds the negotiated limit.",
+                ),
+            );
+            assert!(compact_notice.contains("Esc/Ctrl-C"));
+            assert!(compact_notice.contains("again exits"));
+            assert!(compact_notice.contains("[y once/t tool/a all/N]"));
+            assert!(compact_notice.contains("tool:"));
+            assert!(compact_notice.contains("args:"));
+        }
+
+        let mut writer = DecisionPreviewWriter::default();
+        let error =
+            std::io::Write::write(&mut writer, &vec![b'x'; DECISION_PREVIEW_JSON_BYTES + 1])
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        assert_eq!(writer.bytes.len(), DECISION_PREVIEW_JSON_BYTES);
+        assert!(writer.truncated);
 
         state.view_status = ViewStatus::WaitingForTrust;
         state.pending_trust_request_id = Some("trust-1".into());
+        state.pending_trust_project_path =
+            Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(trust.contains("Project trust is waiting"));
+        assert!(trust.contains("[y trust/N deny]"));
+        assert!(trust.contains("trust project:"));
+        assert!(trust.contains("/workspace/project�[2J�spoof next"));
+        assert!(!trust.contains('\u{1b}'));
+        assert!(!trust.contains('\u{202e}'));
+
+        state.pending_trust_project_path = Some(format!(
+            "/very/long/shared/prefix/{}/distinct-project",
+            "nested/".repeat(30)
+        ));
+        let narrow_trust = render_to_string(30, 14, &state, &PromptEditor::default());
+        assert!(narrow_trust.contains("[y trust/N deny]"));
+        assert!(narrow_trust.contains("distinct-project"));
+        assert!(!narrow_trust.contains("/very/long/shared/prefix"));
+        let minimum_trust = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(minimum_trust.contains("[y trust/N deny]"));
+        assert!(minimum_trust.contains("distinct-project"));
+        assert!(!minimum_trust.contains("/very/long/shared/prefix"));
+        for height in 8..=10 {
+            let compact_notice = render_to_string_with_notice(
+                30,
+                height,
+                &state,
+                &PromptEditor::default(),
+                Some(
+                    "Esc/Ctrl-C again exits. Skipped trust response: frame exceeds the negotiated limit.",
+                ),
+            );
+            assert!(compact_notice.contains("Esc/Ctrl-C"));
+            assert!(compact_notice.contains("again exits"));
+            assert!(compact_notice.contains("[y trust/N deny]"));
+            assert!(compact_notice.contains("trust project:"));
+            assert!(compact_notice.contains("distinct-project"));
+        }
     }
 
     #[test]
