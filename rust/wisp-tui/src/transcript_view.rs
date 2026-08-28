@@ -277,6 +277,31 @@ impl MarkdownSnapshot {
         best.map_or_else(|| self.normalize_offset(fallback), |(_, output)| output)
     }
 
+    fn line_break_end_at(&self, offset: usize) -> Option<usize> {
+        let offset = self.normalize_offset(offset);
+        if offset >= self.output_len || self.document.blocks.is_empty() {
+            return None;
+        }
+        let block_index = self
+            .block_starts
+            .partition_point(|block_start| *block_start <= offset)
+            .saturating_sub(1);
+        let block = &self.document.blocks[block_index];
+        let block_start = self.block_starts[block_index];
+        let local = offset.saturating_sub(block_start);
+        let mut span_start = 0_usize;
+        for span in &block.spans {
+            let span_end = span_start + span.text.len();
+            if local < span_end {
+                let relative = local - span_start;
+                let grapheme = span.text[relative..].graphemes(true).next()?;
+                return is_line_break(grapheme).then(|| offset + grapheme.len());
+            }
+            span_start = span_end;
+        }
+        None
+    }
+
     fn next_boundary(&self, offset: usize) -> usize {
         let offset = self.normalize_offset(offset);
         if offset >= self.output_len || self.document.blocks.is_empty() {
@@ -769,10 +794,6 @@ impl TranscriptRowCache {
                         block_start + span_start + relative_start + relative_offset;
                     if is_line_break(grapheme) {
                         cursor = absolute_offset + grapheme.len();
-                        if spans.is_empty() {
-                            advanced = true;
-                            continue;
-                        }
                         next_offset = Some(cursor);
                         ended_with_break = true;
                         break;
@@ -797,6 +818,10 @@ impl TranscriptRowCache {
                     cursor = absolute_offset + grapheme.len();
                     advanced = true;
                     if column >= width {
+                        if let Some(after_break) = snapshot.line_break_end_at(cursor) {
+                            cursor = after_break;
+                            ended_with_break = true;
+                        }
                         next_offset = Some(cursor);
                         break;
                     }
@@ -1767,6 +1792,39 @@ mod tests {
                 .any(|row| row.plain_text() == "authoritative answer")
         );
         assert!(rows.iter().all(|row| row.plain_text() != "streaming draft"));
+    }
+
+    #[test]
+    fn markdown_code_blocks_preserve_blank_source_lines() {
+        fn projected_content(source: &str, width: usize) -> Vec<String> {
+            let mut transcript = Transcript::default();
+            transcript.append_exchange("prompt".into());
+            transcript.complete_message(1, source.into());
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 10);
+            viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .filter(|row| {
+                    row.kind == TranscriptRowKind::Content && row.role == TranscriptRole::Assistant
+                })
+                .map(|row| row.plain_text())
+                .collect()
+        }
+
+        for source in ["```text\na\n\nb\n```", "    a\n\n    b"] {
+            let content = projected_content(source, 20);
+            assert!(
+                content.windows(3).any(|rows| rows == ["a", "", "b"]),
+                "missing blank code row for {source:?}: {content:?}"
+            );
+        }
+
+        let exact_width = projected_content("```text\n1234\nnext\n```", 4);
+        assert_eq!(&exact_width[..2], ["1234", "next"]);
+        let exact_width_with_blank = projected_content("```text\n1234\n\nnext\n```", 4);
+        assert_eq!(&exact_width_with_blank[..3], ["1234", "", "next"]);
     }
 
     #[test]
