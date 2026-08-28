@@ -189,6 +189,7 @@ impl IncrementalMarkdownState {
             self.bump_presentation_epoch();
         }
 
+        let was_full_reparse_only = self.full_reparse_only;
         let mutable_source = &source[self.stable_source_end..];
         if mutable_source.contains(REFERENCE_DEFINITION_MARKER) {
             if !self.full_reparse_only {
@@ -217,13 +218,20 @@ impl IncrementalMarkdownState {
                 syntax_lines: syntax_work.lines,
                 syntax_fragments: syntax_work.fragments,
             };
+            if was_full_reparse_only
+                && syntax_presentation_changed(&self.mutable_syntax_presentations, &blocks)
+            {
+                self.bump_presentation_epoch();
+            }
             if settled {
                 self.stable_source_end = source.len();
                 self.stable_blocks = blocks.clone();
                 self.full_reparse_only = false;
+                self.mutable_syntax_presentations.clear();
+            } else {
+                self.mutable_syntax_presentations = syntax_presentations(&blocks);
             }
             let stable_blocks = if settled { blocks.len() } else { 0 };
-            self.mutable_syntax_presentations.clear();
             return MarkdownBuild {
                 document: MarkdownDocument { blocks },
                 stable_blocks,
@@ -268,24 +276,12 @@ impl IncrementalMarkdownState {
                 .source
                 .end
                 .saturating_sub(presentation_start);
-            let syntax_presentation_changed = parsed[..promote].iter().any(|block| {
-                let previous = self
-                    .mutable_syntax_presentations
-                    .iter()
-                    .find(|(source, _)| source == &block.source)
-                    .map(|(_, highlighted)| *highlighted);
-                previous != Some(block.has_syntax())
-                    && (previous == Some(true) || block.has_syntax())
-            });
-            if syntax_presentation_changed {
+            if syntax_presentation_changed(&self.mutable_syntax_presentations, &parsed[..promote]) {
                 self.bump_presentation_epoch();
             }
             self.stable_blocks.extend(parsed[..promote].iter().cloned());
         }
-        self.mutable_syntax_presentations = parsed[promote..]
-            .iter()
-            .map(|block| (block.source.clone(), block.has_syntax()))
-            .collect();
+        self.mutable_syntax_presentations = syntax_presentations(&parsed[promote..]);
         let mut document = self.stable_blocks.clone();
         document.extend(parsed[promote..].iter().cloned());
         let presentation_source_end = presentation_start.saturating_add(source.len());
@@ -330,6 +326,26 @@ impl IncrementalMarkdownState {
             .checked_add(1)
             .expect("Markdown presentation epoch exhausted");
     }
+}
+
+fn syntax_presentations(blocks: &[Arc<MarkdownBlock>]) -> Vec<(Range<usize>, bool)> {
+    blocks
+        .iter()
+        .map(|block| (block.source.clone(), block.has_syntax()))
+        .collect()
+}
+
+fn syntax_presentation_changed(
+    previous: &[(Range<usize>, bool)],
+    current: &[Arc<MarkdownBlock>],
+) -> bool {
+    !previous
+        .iter()
+        .filter_map(|(source, highlighted)| highlighted.then_some(source))
+        .eq(current
+            .iter()
+            .filter(|block| block.has_syntax())
+            .map(|block| &block.source))
 }
 
 fn mutable_checkpoint_end(source: &str, stable_start: usize) -> usize {
@@ -1694,6 +1710,31 @@ mod tests {
 
         assert!(rendered.contains("• first\nsecond paragraph\n• third"));
         assert!(rendered.contains("│ first\n│ second"));
+    }
+
+    #[test]
+    fn full_reparse_completion_invalidates_new_fence_highlighting() {
+        let mut state = IncrementalMarkdownState::default();
+        let open_source = "[id]: https://example.test\n\n```rust\nfn main() {}";
+        let open = state.build(open_source, 0, 0, false);
+        assert_eq!(open.work.full_reparses, 1);
+        assert!(open.document.blocks.iter().all(|block| !block.has_syntax()));
+
+        let growing_source = format!("{open_source}\nlet value = 1;");
+        let growing = state.build(&growing_source, 0, 0, false);
+        assert_eq!(growing.presentation_epoch, open.presentation_epoch);
+
+        let closed_source = format!("{growing_source}\n```");
+        let closed = state.build(&closed_source, 0, 0, true);
+
+        assert!(closed.presentation_epoch > growing.presentation_epoch);
+        assert!(
+            closed
+                .document
+                .blocks
+                .iter()
+                .any(|block| block.has_syntax())
+        );
     }
 
     #[test]
