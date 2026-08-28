@@ -8,6 +8,7 @@ mod markdown;
 mod process;
 mod prompt_editor;
 pub mod reducer;
+mod syntax;
 mod terminal;
 mod transcript;
 mod transcript_view;

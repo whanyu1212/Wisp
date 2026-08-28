@@ -1,6 +1,7 @@
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
+use crate::syntax::SyntaxClass;
 use crate::transcript::TranscriptRole;
 use crate::transcript_view::{TranscriptRowCache, TranscriptRowKind, TranscriptViewport};
 use ratatui::Frame;
@@ -223,6 +224,18 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
             .add_modifier(Modifier::UNDERLINED),
         InlineStyle::QuoteMarker => style.fg(Color::DarkGray),
         InlineStyle::ListMarker => style.fg(Color::Cyan),
+    };
+    style = match semantic.syntax {
+        SyntaxClass::Plain => style,
+        SyntaxClass::Comment => style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        SyntaxClass::Keyword => style.fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        SyntaxClass::String => style.fg(Color::LightGreen),
+        SyntaxClass::Number | SyntaxClass::Constant => style.fg(Color::LightMagenta),
+        SyntaxClass::Type => style.fg(Color::LightCyan),
+        SyntaxClass::Function => style.fg(Color::LightBlue),
+        SyntaxClass::Variable => style.fg(Color::White),
+        SyntaxClass::Operator => style.fg(Color::Yellow),
+        SyntaxClass::Punctuation => style.fg(Color::Gray),
     };
     if semantic.strong {
         style = style.add_modifier(Modifier::BOLD);
@@ -673,6 +686,28 @@ mod tests {
         render_to_string_with_notice(width, height, state, editor, None)
     }
 
+    fn style_at_text(backend: &TestBackend, text: &str) -> Option<(Color, Color, Modifier)> {
+        let expected = text
+            .chars()
+            .map(|character| character.to_string())
+            .collect::<Vec<_>>();
+        let buffer = backend.buffer();
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..buffer.area.right() {
+                if expected.iter().enumerate().all(|(offset, symbol)| {
+                    let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+                    x.checked_add(offset)
+                        .filter(|candidate| *candidate < buffer.area.right())
+                        .is_some_and(|candidate| buffer[(candidate, y)].symbol() == symbol)
+                }) {
+                    let cell = &buffer[(x, y)];
+                    return Some((cell.fg, cell.bg, cell.modifier));
+                }
+            }
+        }
+        None
+    }
+
     fn render_to_string_with_notice(
         width: u16,
         height: u16,
@@ -1010,6 +1045,47 @@ mod tests {
     }
 
     #[test]
+    fn closed_fence_syntax_styles_reach_terminal_cells() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_exchange("show code".into());
+        state.transcript.complete_message(
+            1,
+            "```rust\nfn demo() {\n    // note\n    let value = \"text\";\n}\n```".into(),
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+
+        let (keyword_fg, keyword_bg, keyword_modifiers) =
+            style_at_text(terminal.backend(), "fn").unwrap();
+        assert_eq!(keyword_fg, Color::LightMagenta);
+        assert_eq!(keyword_bg, Color::Rgb(30, 30, 30));
+        assert!(keyword_modifiers.contains(Modifier::BOLD));
+        let (comment_fg, comment_bg, comment_modifiers) =
+            style_at_text(terminal.backend(), "// note").unwrap();
+        assert_eq!(comment_fg, Color::DarkGray);
+        assert_eq!(comment_bg, Color::Rgb(30, 30, 30));
+        assert!(comment_modifiers.contains(Modifier::ITALIC));
+        let (string_fg, string_bg, _) = style_at_text(terminal.backend(), "\"text\"").unwrap();
+        assert_eq!(string_fg, Color::LightGreen);
+        assert_eq!(string_bg, Color::Rgb(30, 30, 30));
+    }
+
+    #[test]
     fn semantic_markdown_styles_map_to_terminal_styles() {
         let heading = markdown_span_style(
             Style::default(),
@@ -1039,6 +1115,39 @@ mod tests {
             },
         );
         assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+
+        let uniform_code = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                block: BlockStyle::Code,
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert_eq!(uniform_code.fg, Some(Color::LightGreen));
+        assert_eq!(uniform_code.bg, Some(Color::Rgb(30, 30, 30)));
+
+        let keyword = markdown_span_style(
+            Style::default().bg(Color::Rgb(30, 30, 30)),
+            TranscriptSpanStyle {
+                block: BlockStyle::Code,
+                syntax: SyntaxClass::Keyword,
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert_eq!(keyword.fg, Some(Color::LightMagenta));
+        assert_eq!(keyword.bg, Some(Color::Rgb(30, 30, 30)));
+        assert!(keyword.add_modifier.contains(Modifier::BOLD));
+
+        let comment = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                block: BlockStyle::Code,
+                syntax: SyntaxClass::Comment,
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert_eq!(comment.fg, Some(Color::DarkGray));
+        assert!(comment.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

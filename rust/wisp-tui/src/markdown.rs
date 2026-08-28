@@ -3,7 +3,12 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+use crate::syntax::{
+    MAX_SYNTAX_FRAGMENTS_PER_BUILD, MAX_SYNTAX_SOURCE_BYTES_PER_BUILD, SyntaxClass,
+    SyntaxHighlight, highlight_fence,
+};
 
 const REFERENCE_DEFINITION_MARKER: &str = "]:";
 const MAX_MUTABLE_SOURCE_BYTES: usize = 8 * 1024;
@@ -36,6 +41,7 @@ pub enum InlineStyle {
 pub struct TranscriptSpanStyle {
     pub block: BlockStyle,
     pub inline: InlineStyle,
+    pub syntax: SyntaxClass,
     pub strong: bool,
     pub emphasis: bool,
     pub struck: bool,
@@ -59,6 +65,10 @@ pub struct TranscriptSpan {
 pub struct MarkdownBlock {
     pub source: Range<usize>,
     pub spans: Vec<TranscriptSpan>,
+    syntax_source_bytes: usize,
+    syntax_fragments: usize,
+    syntax_attempted_source_bytes: usize,
+    syntax_attempted_fragments: usize,
     truncated: bool,
 }
 
@@ -66,6 +76,12 @@ impl MarkdownBlock {
     #[cfg(test)]
     pub fn plain_text(&self) -> String {
         self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    fn has_syntax(&self) -> bool {
+        self.spans
+            .iter()
+            .any(|span| span.style.syntax != SyntaxClass::Plain)
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -117,6 +133,12 @@ pub struct MarkdownWork {
     pub full_reparses: usize,
     pub incremental_builds: usize,
     pub fragments_emitted: usize,
+    pub syntax_fences_considered: usize,
+    pub syntax_fences_highlighted: usize,
+    pub syntax_fallbacks: usize,
+    pub syntax_source_bytes: usize,
+    pub syntax_lines: usize,
+    pub syntax_fragments: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +158,7 @@ pub struct IncrementalMarkdownState {
     full_reparse_only: bool,
     used_literal_checkpoint: bool,
     presentation_epoch: u64,
+    mutable_syntax_presentations: Vec<(Range<usize>, bool)>,
 }
 
 impl IncrementalMarkdownState {
@@ -177,7 +200,9 @@ impl IncrementalMarkdownState {
         }
 
         if self.full_reparse_only {
-            let blocks = parse_blocks(source, presentation_start);
+            let parsed = parse_blocks(source, presentation_start, SyntaxUsage::default());
+            let blocks = parsed.blocks;
+            let syntax_work = parsed.syntax_work;
             let work = MarkdownWork {
                 source_bytes_parsed: source.len(),
                 source_bytes_reused: 0,
@@ -185,6 +210,12 @@ impl IncrementalMarkdownState {
                 full_reparses: 1,
                 incremental_builds: 0,
                 fragments_emitted: blocks.iter().map(|block| block.spans.len()).sum(),
+                syntax_fences_considered: syntax_work.fences_considered,
+                syntax_fences_highlighted: syntax_work.fences_highlighted,
+                syntax_fallbacks: syntax_work.fallbacks,
+                syntax_source_bytes: syntax_work.source_bytes,
+                syntax_lines: syntax_work.lines,
+                syntax_fragments: syntax_work.fragments,
             };
             if settled {
                 self.stable_source_end = source.len();
@@ -192,6 +223,7 @@ impl IncrementalMarkdownState {
                 self.full_reparse_only = false;
             }
             let stable_blocks = if settled { blocks.len() } else { 0 };
+            self.mutable_syntax_presentations.clear();
             return MarkdownBuild {
                 document: MarkdownDocument { blocks },
                 stable_blocks,
@@ -219,7 +251,13 @@ impl IncrementalMarkdownState {
         };
         let reused = self.stable_source_end;
         let mutable_source = &source[reused..];
-        let parsed = parse_blocks(mutable_source, presentation_start + reused);
+        let parsed_build = parse_blocks(
+            mutable_source,
+            presentation_start + reused,
+            SyntaxUsage::from_blocks(&self.stable_blocks),
+        );
+        let syntax_work = parsed_build.syntax_work;
+        let parsed = parsed_build.blocks;
         let promote = if settled {
             parsed.len()
         } else {
@@ -230,8 +268,24 @@ impl IncrementalMarkdownState {
                 .source
                 .end
                 .saturating_sub(presentation_start);
+            let syntax_presentation_changed = parsed[..promote].iter().any(|block| {
+                let previous = self
+                    .mutable_syntax_presentations
+                    .iter()
+                    .find(|(source, _)| source == &block.source)
+                    .map(|(_, highlighted)| *highlighted);
+                previous != Some(block.has_syntax())
+                    && (previous == Some(true) || block.has_syntax())
+            });
+            if syntax_presentation_changed {
+                self.bump_presentation_epoch();
+            }
             self.stable_blocks.extend(parsed[..promote].iter().cloned());
         }
+        self.mutable_syntax_presentations = parsed[promote..]
+            .iter()
+            .map(|block| (block.source.clone(), block.has_syntax()))
+            .collect();
         let mut document = self.stable_blocks.clone();
         document.extend(parsed[promote..].iter().cloned());
         let presentation_source_end = presentation_start.saturating_add(source.len());
@@ -246,6 +300,7 @@ impl IncrementalMarkdownState {
             }
             self.stable_source_end = source.len();
             self.stable_blocks = document.clone();
+            self.mutable_syntax_presentations.clear();
         }
         let work = MarkdownWork {
             source_bytes_parsed: checkpointed.saturating_add(mutable_source.len()),
@@ -254,6 +309,12 @@ impl IncrementalMarkdownState {
             full_reparses: 0,
             incremental_builds: 1,
             fragments_emitted: parsed.iter().map(|block| block.spans.len()).sum(),
+            syntax_fences_considered: syntax_work.fences_considered,
+            syntax_fences_highlighted: syntax_work.fences_highlighted,
+            syntax_fallbacks: syntax_work.fallbacks,
+            syntax_source_bytes: syntax_work.source_bytes,
+            syntax_lines: syntax_work.lines,
+            syntax_fragments: syntax_work.fragments,
         };
         MarkdownBuild {
             document: MarkdownDocument { blocks: document },
@@ -300,6 +361,10 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
                 },
             }]
         },
+        syntax_source_bytes: 0,
+        syntax_fragments: 0,
+        syntax_attempted_source_bytes: 0,
+        syntax_attempted_fragments: 0,
         truncated: false,
     }
 }
@@ -319,6 +384,10 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
                 output_offset: 0,
             },
         }],
+        syntax_source_bytes: 0,
+        syntax_fragments: 0,
+        syntax_attempted_source_bytes: 0,
+        syntax_attempted_fragments: 0,
         truncated: true,
     })
 }
@@ -340,6 +409,124 @@ struct ParseBudget {
     retained_bytes: usize,
     fragments: usize,
     truncated: bool,
+}
+
+#[derive(Default)]
+struct ParsedBlocks {
+    blocks: Vec<Arc<MarkdownBlock>>,
+    syntax_work: SyntaxBuildWork,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SyntaxBuildWork {
+    fences_considered: usize,
+    fences_highlighted: usize,
+    fallbacks: usize,
+    source_bytes: usize,
+    lines: usize,
+    fragments: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SyntaxUsage {
+    source_bytes: usize,
+    fragments: usize,
+    attempted_source_bytes: usize,
+    attempted_fragments: usize,
+}
+
+impl SyntaxUsage {
+    fn from_blocks(blocks: &[Arc<MarkdownBlock>]) -> Self {
+        blocks.iter().fold(Self::default(), |usage, block| Self {
+            source_bytes: usage.source_bytes.saturating_add(block.syntax_source_bytes),
+            fragments: usage.fragments.saturating_add(block.syntax_fragments),
+            attempted_source_bytes: usage
+                .attempted_source_bytes
+                .saturating_add(block.syntax_attempted_source_bytes),
+            attempted_fragments: usage
+                .attempted_fragments
+                .saturating_add(block.syntax_attempted_fragments),
+        })
+    }
+}
+
+#[derive(Default)]
+struct SyntaxBuildBudget {
+    usage: SyntaxUsage,
+    attempted_source_bytes: usize,
+    attempted_fragments: usize,
+    work: SyntaxBuildWork,
+}
+
+impl SyntaxBuildBudget {
+    fn new(usage: SyntaxUsage) -> Self {
+        Self {
+            attempted_source_bytes: usage.attempted_source_bytes,
+            attempted_fragments: usage.attempted_fragments,
+            usage,
+            ..Self::default()
+        }
+    }
+
+    fn attempt(&mut self, info: &str, source: &str, closed: bool) -> Option<SyntaxHighlight> {
+        self.work.fences_considered = self.work.fences_considered.saturating_add(1);
+        if !closed
+            || self.usage.source_bytes.saturating_add(source.len())
+                > MAX_SYNTAX_SOURCE_BYTES_PER_BUILD
+            || self.attempted_source_bytes.saturating_add(source.len())
+                > MAX_SYNTAX_SOURCE_BYTES_PER_BUILD
+            || self.attempted_fragments >= MAX_SYNTAX_FRAGMENTS_PER_BUILD
+        {
+            self.work.fallbacks = self.work.fallbacks.saturating_add(1);
+            return None;
+        }
+        match highlight_fence(info, source) {
+            Ok(highlighted) => {
+                self.attempted_source_bytes = self
+                    .attempted_source_bytes
+                    .saturating_add(highlighted.work.source_bytes);
+                self.work.source_bytes = self
+                    .work
+                    .source_bytes
+                    .saturating_add(highlighted.work.source_bytes);
+                self.work.lines = self.work.lines.saturating_add(highlighted.work.lines);
+                Some(highlighted)
+            }
+            Err(failure) => {
+                self.attempted_source_bytes = self
+                    .attempted_source_bytes
+                    .saturating_add(failure.work.source_bytes);
+                self.attempted_fragments = self
+                    .attempted_fragments
+                    .saturating_add(failure.work.fragments);
+                self.work.source_bytes = self
+                    .work
+                    .source_bytes
+                    .saturating_add(failure.work.source_bytes);
+                self.work.lines = self.work.lines.saturating_add(failure.work.lines);
+                self.work.fragments = self.work.fragments.saturating_add(failure.work.fragments);
+                self.work.fallbacks = self.work.fallbacks.saturating_add(1);
+                None
+            }
+        }
+    }
+
+    fn commit(&mut self, source_bytes: usize, mapped_fragments: usize) -> bool {
+        let exceeds_budget = self.usage.fragments.saturating_add(mapped_fragments)
+            > MAX_SYNTAX_FRAGMENTS_PER_BUILD
+            || self.attempted_fragments.saturating_add(mapped_fragments)
+                > MAX_SYNTAX_FRAGMENTS_PER_BUILD;
+        self.attempted_fragments = self.attempted_fragments.saturating_add(mapped_fragments);
+        self.work.fragments = self.work.fragments.saturating_add(mapped_fragments);
+        if exceeds_budget {
+            self.work.fallbacks = self.work.fallbacks.saturating_add(1);
+            return false;
+        }
+        self.usage.source_bytes = self.usage.source_bytes.saturating_add(source_bytes);
+        self.usage.fragments = self.usage.fragments.saturating_add(mapped_fragments);
+        self.work.fences_highlighted = self.work.fences_highlighted.saturating_add(1);
+        true
+    }
 }
 
 fn block_retained_bytes(block: &MarkdownBlock) -> usize {
@@ -428,11 +615,16 @@ fn enforce_document_budget(blocks: &mut Vec<Arc<MarkdownBlock>>, source_end: usi
     budget.truncated
 }
 
-fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
+fn parse_blocks(
+    source: &str,
+    base_offset: usize,
+    initial_syntax_usage: SyntaxUsage,
+) -> ParsedBlocks {
     let options = Options::ENABLE_STRIKETHROUGH;
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let mut blocks = Vec::new();
     let mut budget = ParseBudget::default();
+    let mut syntax_budget = SyntaxBuildBudget::new(initial_syntax_usage);
     let mut events = Vec::new();
     let mut depth = 0_usize;
     let mut block_start = None;
@@ -459,6 +651,8 @@ fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
                     &events,
                     (base_offset + start)..(base_offset + range.end),
                     base_offset,
+                    source,
+                    &mut syntax_budget,
                 ),
             );
             events.clear();
@@ -476,6 +670,8 @@ fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
                 &events,
                 (base_offset + start)..(base_offset + source.len()),
                 base_offset,
+                source,
+                &mut syntax_budget,
             ),
         );
     }
@@ -484,7 +680,10 @@ fn parse_blocks(source: &str, base_offset: usize) -> Vec<Arc<MarkdownBlock>> {
             finish_truncation_block(last, base_offset + source.len());
         }
     }
-    blocks
+    ParsedBlocks {
+        blocks,
+        syntax_work: syntax_budget.work,
+    }
 }
 
 fn is_block_tag(tag: &Tag<'_>) -> bool {
@@ -518,6 +717,12 @@ struct ListState {
     next: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+struct CodeTextSegment {
+    output: Range<usize>,
+    source: Range<usize>,
+}
+
 #[derive(Debug, Default)]
 struct BlockRenderer {
     spans: Vec<TranscriptSpan>,
@@ -531,40 +736,205 @@ struct BlockRenderer {
     truncated: bool,
 }
 
+fn collect_code_text(events: &[(Event<'_>, Range<usize>)]) -> (String, Vec<CodeTextSegment>) {
+    let mut code = String::new();
+    let mut segments = Vec::new();
+    for (event, source) in events {
+        let Event::Text(text) = event else {
+            continue;
+        };
+        let start = code.len();
+        code.push_str(text);
+        segments.push(CodeTextSegment {
+            output: start..code.len(),
+            source: source.clone(),
+        });
+    }
+    (code, segments)
+}
+
+fn mapped_syntax_fragment_count(
+    highlighted: &SyntaxHighlight,
+    segments: &[CodeTextSegment],
+) -> usize {
+    let mut token_index = 0_usize;
+    let mut segment_index = 0_usize;
+    let mut fragments = 0_usize;
+    while token_index < highlighted.tokens.len() && segment_index < segments.len() {
+        let token = &highlighted.tokens[token_index];
+        let segment = &segments[segment_index];
+        if token.range.start < segment.output.end && segment.output.start < token.range.end {
+            fragments = fragments.saturating_add(1);
+        }
+        if token.range.end <= segment.output.end {
+            token_index += 1;
+        } else {
+            segment_index += 1;
+        }
+    }
+    fragments
+}
+
+fn fenced_code_is_closed(source: &str, block: Range<usize>, segments: &[CodeTextSegment]) -> bool {
+    if block.start >= block.end || block.end > source.len() {
+        return false;
+    }
+    let delimiter = source.as_bytes()[block.start];
+    if !matches!(delimiter, b'`' | b'~') {
+        return false;
+    }
+    let opening_len = source.as_bytes()[block.start..block.end]
+        .iter()
+        .take_while(|byte| **byte == delimiter)
+        .count();
+    if opening_len < 3 {
+        return false;
+    }
+    let opening_end = source[block.start..block.end]
+        .find('\n')
+        .map_or(block.end, |newline| block.start + newline + 1);
+    let suffix_start = segments
+        .last()
+        .map_or(opening_end, |segment| segment.source.end)
+        .max(opening_end)
+        .min(block.end);
+    source[suffix_start..block.end]
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| is_closing_fence_line(line, delimiter, opening_len))
+}
+
+fn is_closing_fence_line(line: &str, delimiter: u8, opening_len: usize) -> bool {
+    let line = line.trim_end_matches('\r');
+    let candidate = line.trim_start_matches([' ', '\t', '>']);
+    let delimiter_len = candidate
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == delimiter)
+        .count();
+    delimiter_len >= opening_len
+        && candidate[delimiter_len..]
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t'))
+}
+
 impl BlockRenderer {
-    fn render(mut self, events: &[(Event<'_>, Range<usize>)], base: usize) -> Vec<TranscriptSpan> {
-        for (event, range) in events {
-            let source_offset = base + range.start;
-            let source_end = base + range.end;
-            match event {
-                Event::Start(tag) => self.start_tag(tag, source_offset),
-                Event::End(tag) => self.end_tag(*tag),
-                Event::Text(text) => self.emit_source(text, source_offset, source_end, self.style),
-                Event::Code(text) => {
-                    let mut style = self.style;
-                    style.inline = InlineStyle::Code;
-                    self.emit_source(text, source_offset, source_end, style);
+    fn render(
+        mut self,
+        events: &[(Event<'_>, Range<usize>)],
+        base: usize,
+        source: &str,
+        syntax_budget: &mut SyntaxBuildBudget,
+    ) -> Vec<TranscriptSpan> {
+        let mut index = 0_usize;
+        while index < events.len() {
+            let (event, range) = &events[index];
+            if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = event {
+                if let Some(end_index) = events[index + 1..]
+                    .iter()
+                    .position(|(event, _)| matches!(event, Event::End(TagEnd::CodeBlock)))
+                    .map(|relative| index + 1 + relative)
+                {
+                    self.start_tag(
+                        &Tag::CodeBlock(CodeBlockKind::Fenced(info.clone())),
+                        base + range.start,
+                    );
+                    let interior = &events[index + 1..end_index];
+                    let (code, segments) = collect_code_text(interior);
+                    let closed = fenced_code_is_closed(source, range.clone(), &segments);
+                    let highlighted =
+                        syntax_budget
+                            .attempt(info, &code, closed)
+                            .filter(|highlighted| {
+                                syntax_budget.commit(
+                                    code.len(),
+                                    mapped_syntax_fragment_count(highlighted, &segments),
+                                )
+                            });
+                    if let Some(highlighted) = highlighted {
+                        self.emit_highlighted_code(&code, &segments, highlighted, base);
+                    } else {
+                        for (event, range) in interior {
+                            self.render_event(event, range, base);
+                        }
+                    }
+                    self.end_tag(TagEnd::CodeBlock);
+                    index = end_index + 1;
+                    continue;
                 }
-                Event::Html(html) | Event::InlineHtml(html) => {
-                    let mut style = self.style;
-                    style.block = BlockStyle::RawHtml;
-                    self.emit_source(html, source_offset, source_end, style);
-                }
-                Event::SoftBreak | Event::HardBreak => self.emit_break(source_offset),
-                Event::Rule => {
-                    let mut style = self.style;
-                    style.inline = InlineStyle::ListMarker;
-                    self.emit("───", source_offset, style);
-                }
-                Event::TaskListMarker(checked) => {
-                    let mut style = self.style;
-                    style.inline = InlineStyle::ListMarker;
-                    self.emit(if *checked { "[x] " } else { "[ ] " }, source_offset, style);
-                }
-                _ => {}
             }
+            self.render_event(event, range, base);
+            index += 1;
         }
         self.spans
+    }
+
+    fn render_event(&mut self, event: &Event<'_>, range: &Range<usize>, base: usize) {
+        let source_offset = base + range.start;
+        let source_end = base + range.end;
+        match event {
+            Event::Start(tag) => self.start_tag(tag, source_offset),
+            Event::End(tag) => self.end_tag(*tag),
+            Event::Text(text) => self.emit_source(text, source_offset, source_end, self.style),
+            Event::Code(text) => {
+                let mut style = self.style;
+                style.inline = InlineStyle::Code;
+                self.emit_source(text, source_offset, source_end, style);
+            }
+            Event::Html(html) | Event::InlineHtml(html) => {
+                let mut style = self.style;
+                style.block = BlockStyle::RawHtml;
+                self.emit_source(html, source_offset, source_end, style);
+            }
+            Event::SoftBreak | Event::HardBreak => self.emit_break(source_offset),
+            Event::Rule => {
+                let mut style = self.style;
+                style.inline = InlineStyle::ListMarker;
+                self.emit("───", source_offset, style);
+            }
+            Event::TaskListMarker(checked) => {
+                let mut style = self.style;
+                style.inline = InlineStyle::ListMarker;
+                self.emit(if *checked { "[x] " } else { "[ ] " }, source_offset, style);
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_highlighted_code(
+        &mut self,
+        code: &str,
+        segments: &[CodeTextSegment],
+        highlighted: SyntaxHighlight,
+        base: usize,
+    ) {
+        let mut token_index = 0_usize;
+        let mut segment_index = 0_usize;
+        while token_index < highlighted.tokens.len() && segment_index < segments.len() {
+            let token = &highlighted.tokens[token_index];
+            let segment = &segments[segment_index];
+            let start = token.range.start.max(segment.output.start);
+            let end = token.range.end.min(segment.output.end);
+            if start < end {
+                let relative_start = start - segment.output.start;
+                let relative_end = end - segment.output.start;
+                let source_len = segment.source.end.saturating_sub(segment.source.start);
+                let mut style = self.style;
+                style.syntax = token.class;
+                self.emit_source(
+                    &code[start..end],
+                    base + segment.source.start + relative_start.min(source_len),
+                    base + segment.source.start + relative_end.min(source_len),
+                    style,
+                );
+            }
+            if token.range.end <= segment.output.end {
+                token_index += 1;
+            } else {
+                segment_index += 1;
+            }
+        }
     }
 
     fn start_tag(&mut self, tag: &Tag<'_>, source_offset: usize) {
@@ -751,12 +1121,32 @@ fn ends_with_source_line_break(text: &str) -> bool {
 
 fn render_block(
     events: &[(Event<'_>, Range<usize>)],
-    source: Range<usize>,
+    source_range: Range<usize>,
     base_offset: usize,
+    source: &str,
+    syntax_budget: &mut SyntaxBuildBudget,
 ) -> MarkdownBlock {
+    let usage_before = syntax_budget.usage;
+    let attempted_source_before = syntax_budget.attempted_source_bytes;
+    let attempted_fragments_before = syntax_budget.attempted_fragments;
+    let spans = BlockRenderer::default().render(events, base_offset, source, syntax_budget);
     MarkdownBlock {
-        source,
-        spans: BlockRenderer::default().render(events, base_offset),
+        source: source_range,
+        spans,
+        syntax_source_bytes: syntax_budget
+            .usage
+            .source_bytes
+            .saturating_sub(usage_before.source_bytes),
+        syntax_fragments: syntax_budget
+            .usage
+            .fragments
+            .saturating_sub(usage_before.fragments),
+        syntax_attempted_source_bytes: syntax_budget
+            .attempted_source_bytes
+            .saturating_sub(attempted_source_before),
+        syntax_attempted_fragments: syntax_budget
+            .attempted_fragments
+            .saturating_sub(attempted_fragments_before),
         truncated: false,
     }
 }
@@ -797,6 +1187,198 @@ mod tests {
                 .iter()
                 .flat_map(|block| &block.spans)
                 .any(|span| span.style.inline == InlineStyle::Code)
+        );
+    }
+
+    #[test]
+    fn highlights_only_recognized_closed_fenced_code() {
+        let cases = [
+            ("```rust\nfn main() {}\n```", true, 1, 0),
+            ("```rust\nfn main() {}\n", false, 0, 1),
+            ("```unknown-language\nfn main() {}\n```", false, 0, 1),
+            ("    fn main() {}", false, 0, 0),
+            ("> ```rust\n> fn main() {}\n> ```\n", true, 1, 0),
+            ("~~~~js\r\nconst value = 1;\r\n~~~~~~\r\n", true, 1, 0),
+        ];
+
+        for (source, highlighted, highlighted_count, fallback_count) in cases {
+            let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+            let syntax_spans = build
+                .document
+                .blocks
+                .iter()
+                .flat_map(|block| &block.spans)
+                .filter(|span| span.style.syntax != SyntaxClass::Plain)
+                .collect::<Vec<_>>();
+            assert_eq!(!syntax_spans.is_empty(), highlighted, "source: {source:?}");
+            assert_eq!(
+                build.work.syntax_fences_highlighted, highlighted_count,
+                "source: {source:?}"
+            );
+            assert_eq!(
+                build.work.syntax_fallbacks, fallback_count,
+                "source: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlighted_spans_preserve_code_text_and_source_affinity() {
+        let source = "```rust\nfn main() { let value = 42; }\n```";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let spans = build
+            .document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .collect::<Vec<_>>();
+        let rebuilt = spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(rebuilt, "fn main() { let value = 42; }\n");
+        let keyword = spans
+            .iter()
+            .find(|span| span.text == "fn" && span.style.syntax == SyntaxClass::Keyword)
+            .unwrap();
+        assert_eq!(
+            &source[keyword.affinity.source_offset..keyword.affinity.source_end],
+            "fn"
+        );
+        assert_eq!(build.work.syntax_fences_considered, 1);
+        assert_eq!(build.work.syntax_fences_highlighted, 1);
+        assert_eq!(build.work.syntax_source_bytes, rebuilt.len());
+        assert_eq!(build.work.syntax_fragments, spans.len());
+    }
+
+    #[test]
+    fn cumulative_syntax_source_budget_falls_back_per_fence() {
+        let code_line = format!("// {}\n", "x".repeat(54));
+        let code = code_line.repeat(500);
+        assert!(code.len() < crate::syntax::MAX_SYNTAX_SOURCE_BYTES_PER_FENCE);
+        let mut source = String::new();
+        for _ in 0..3 {
+            source.push_str("```rust\n");
+            source.push_str(&code);
+            source.push_str("```\n\n");
+        }
+
+        let build = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+
+        assert_eq!(build.work.syntax_fences_considered, 3);
+        assert_eq!(build.work.syntax_fences_highlighted, 2);
+        assert_eq!(build.work.syntax_fallbacks, 1);
+        assert!(build.work.syntax_source_bytes <= MAX_SYNTAX_SOURCE_BYTES_PER_BUILD);
+    }
+
+    #[test]
+    fn streamed_highlighting_matches_fresh_document_budgets() {
+        let code = format!("// {}\n", "x".repeat(54)).repeat(125);
+        assert!(code.len() < MAX_MUTABLE_SOURCE_BYTES);
+        let mut source = String::new();
+        let mut streamed = IncrementalMarkdownState::default();
+        for index in 0..10 {
+            source.push_str("```rust\n");
+            source.push_str(&code);
+            writeln!(source, "```\n\nafter {index}\n").unwrap();
+            let _ = streamed.build(&source, 0, 0, false);
+        }
+
+        let streamed_final = streamed.build(&source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+
+        assert_eq!(streamed_final.document, fresh.document);
+        assert_eq!(
+            streamed_final
+                .document
+                .blocks
+                .iter()
+                .filter(|block| block.has_syntax())
+                .count(),
+            9
+        );
+        assert!(
+            SyntaxUsage::from_blocks(&streamed_final.document.blocks).source_bytes
+                <= MAX_SYNTAX_SOURCE_BYTES_PER_BUILD
+        );
+    }
+
+    #[test]
+    fn streamed_failed_highlights_match_fresh_attempt_budgets() {
+        let mut dense = String::new();
+        for index in 0..250 {
+            writeln!(dense, "let value_{index}: i32 = {index};").unwrap();
+        }
+        assert!(dense.len() < MAX_MUTABLE_SOURCE_BYTES);
+        assert_eq!(
+            highlight_fence("rust", &dense).unwrap_err().reason,
+            crate::syntax::SyntaxFallback::FragmentLimit
+        );
+        let mut source = String::new();
+        let mut streamed = IncrementalMarkdownState::default();
+        for index in 0..2 {
+            source.push_str("```rust\n");
+            source.push_str(&dense);
+            writeln!(source, "```\n\nafter {index}\n").unwrap();
+            let _ = streamed.build(&source, 0, 0, false);
+        }
+        source.push_str("```rust\nfn final_fence() {}\n```\n\nafter final");
+
+        let streamed_final = streamed.build(&source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+
+        assert_eq!(streamed_final.document, fresh.document);
+        assert!(
+            streamed_final
+                .document
+                .blocks
+                .iter()
+                .all(|block| !block.has_syntax())
+        );
+    }
+
+    #[test]
+    fn mapped_fragment_rejection_is_charged_to_attempt_work() {
+        let mut budget = SyntaxBuildBudget::new(SyntaxUsage {
+            fragments: MAX_SYNTAX_FRAGMENTS_PER_BUILD - 1,
+            attempted_fragments: MAX_SYNTAX_FRAGMENTS_PER_BUILD - 1,
+            ..SyntaxUsage::default()
+        });
+        let highlighted = budget.attempt("rust", "fn demo() {}\n", true).unwrap();
+        let mapped_fragments = highlighted.tokens.len();
+        assert!(mapped_fragments > 1);
+
+        assert!(!budget.commit("fn demo() {}\n".len(), mapped_fragments));
+        assert_eq!(budget.work.fragments, mapped_fragments);
+        assert_eq!(
+            budget.attempted_fragments,
+            MAX_SYNTAX_FRAGMENTS_PER_BUILD - 1 + mapped_fragments
+        );
+        assert!(budget.attempt("rust", "fn later() {}\n", true).is_none());
+    }
+
+    #[test]
+    fn repeated_late_highlighter_failures_consume_work_budget() {
+        let mut dense = String::new();
+        for index in 0..400 {
+            writeln!(dense, "let value_{index}: i32 = {index};").unwrap();
+        }
+        let mut source = String::new();
+        for _ in 0..5 {
+            source.push_str("```rust\n");
+            source.push_str(&dense);
+            source.push_str("```\n\n");
+        }
+
+        let build = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+
+        assert_eq!(build.work.syntax_fences_highlighted, 0);
+        assert_eq!(build.work.syntax_fallbacks, 5);
+        assert!(build.work.syntax_source_bytes > 0);
+        assert!(build.work.syntax_source_bytes <= MAX_SYNTAX_SOURCE_BYTES_PER_BUILD);
+        assert!(
+            build.work.syntax_fragments
+                <= MAX_SYNTAX_FRAGMENTS_PER_BUILD + crate::syntax::MAX_SYNTAX_FRAGMENTS_PER_FENCE
         );
     }
 
@@ -850,14 +1432,27 @@ mod tests {
         let mut state = IncrementalMarkdownState::default();
         let first = state.build("before\n\n```rust\nlet x =", 0, 0, false);
         assert_eq!(first.stable_blocks, 1);
+        assert_eq!(first.work.syntax_fences_highlighted, 0);
+        assert_eq!(first.work.syntax_fallbacks, 1);
 
         let closed = state.build("before\n\n```rust\nlet x = 1;\n```", 0, 0, false);
         assert_eq!(closed.stable_blocks, 1);
+        assert_eq!(closed.work.syntax_fences_highlighted, 1);
 
         let promoted = state.build("before\n\n```rust\nlet x = 1;\n```\n\nafter", 0, 0, false);
         assert_eq!(promoted.stable_blocks, 2);
         assert!(promoted.work.source_bytes_reused > 0);
+        assert_eq!(promoted.work.syntax_fences_highlighted, 1);
         assert!(promoted.document.plain_text().contains("let x = 1;"));
+
+        let stable = state.build(
+            "before\n\n```rust\nlet x = 1;\n```\n\nafter grows",
+            0,
+            0,
+            false,
+        );
+        assert_eq!(stable.work.syntax_fences_considered, 0);
+        assert_eq!(stable.work.syntax_source_bytes, 0);
     }
 
     #[test]
@@ -883,6 +1478,30 @@ mod tests {
 
         let settled = paragraph_state.build(&paragraph, 0, 0, true);
         assert!(settled.document.plain_text().ends_with("tail"));
+    }
+
+    #[test]
+    fn settling_a_literal_checkpoint_rebuilds_closed_fence_highlighting() {
+        let code = format!("// {}\n", "x".repeat(54)).repeat(200);
+        let source = format!("```rust\n{code}```");
+        assert!(source.len() > MAX_MUTABLE_SOURCE_BYTES);
+        let mut streamed = IncrementalMarkdownState::default();
+        let checkpointed = streamed.build(&source, 0, 0, false);
+        assert_eq!(checkpointed.work.syntax_fences_highlighted, 0);
+
+        let settled = streamed.build(&source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+
+        assert_eq!(settled.document, fresh.document);
+        assert_eq!(settled.work.syntax_fences_highlighted, 1);
+        assert!(
+            settled
+                .document
+                .blocks
+                .iter()
+                .flat_map(|block| &block.spans)
+                .any(|span| span.style.syntax == SyntaxClass::Comment)
+        );
     }
 
     #[test]
@@ -987,6 +1606,10 @@ mod tests {
                         },
                     })
                     .collect(),
+                syntax_source_bytes: 0,
+                syntax_fragments: 0,
+                syntax_attempted_source_bytes: 0,
+                syntax_attempted_fragments: 0,
                 truncated: false,
             })
         }

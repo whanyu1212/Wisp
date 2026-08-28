@@ -120,6 +120,12 @@ pub struct LayoutWork {
     pub markdown_full_reparses: usize,
     pub markdown_incremental_builds: usize,
     pub markdown_fragments_emitted: usize,
+    pub syntax_fences_considered: usize,
+    pub syntax_fences_highlighted: usize,
+    pub syntax_fallbacks: usize,
+    pub syntax_source_bytes: usize,
+    pub syntax_lines: usize,
+    pub syntax_fragments: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -744,6 +750,27 @@ impl TranscriptRowCache {
             .work
             .markdown_fragments_emitted
             .saturating_add(work.fragments_emitted);
+        self.work.syntax_fences_considered = self
+            .work
+            .syntax_fences_considered
+            .saturating_add(work.syntax_fences_considered);
+        self.work.syntax_fences_highlighted = self
+            .work
+            .syntax_fences_highlighted
+            .saturating_add(work.syntax_fences_highlighted);
+        self.work.syntax_fallbacks = self
+            .work
+            .syntax_fallbacks
+            .saturating_add(work.syntax_fallbacks);
+        self.work.syntax_source_bytes = self
+            .work
+            .syntax_source_bytes
+            .saturating_add(work.syntax_source_bytes);
+        self.work.syntax_lines = self.work.syntax_lines.saturating_add(work.syntax_lines);
+        self.work.syntax_fragments = self
+            .work
+            .syntax_fragments
+            .saturating_add(work.syntax_fragments);
     }
 
     fn evict_markdown(&mut self, protected: MarkdownKey) {
@@ -1955,6 +1982,111 @@ mod tests {
     }
 
     #[test]
+    fn highlighted_tabs_keep_terminal_safe_text_and_source_affinity() {
+        let source = "```rust\nfn\tmain() {}\n```";
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.complete_message(1, source.into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 8);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let code = rows
+            .iter()
+            .find(|row| {
+                row.role == TranscriptRole::Assistant
+                    && row.kind == TranscriptRowKind::Content
+                    && row.plain_text().contains("main")
+            })
+            .unwrap();
+
+        assert_eq!(code.plain_text(), "fn  main() {}");
+        assert!(!code.plain_text().contains('\t'));
+        assert!(
+            code.spans
+                .iter()
+                .any(|span| span.style.syntax == crate::syntax::SyntaxClass::Keyword)
+        );
+        let expanded_tab = code.spans.iter().find(|span| span.text == "  ").unwrap();
+        assert_eq!(
+            &source[expanded_tab.affinity.source_offset..expanded_tab.affinity.source_end],
+            "\t"
+        );
+    }
+
+    #[test]
+    fn closing_and_promoting_a_fence_invalidates_uniform_cached_rows() {
+        let mut transcript = Transcript::default();
+        let (_, assistant) = transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        transcript.append_message_delta(1, "before\n\n```rust\nfn main() {}\n");
+        let mut cache = TranscriptRowCache::default();
+        let entry = transcript.entry(assistant).unwrap();
+        let snapshot = cache.markdown_snapshot(entry);
+        let code_start = snapshot.document.plain_text().find("fn main").unwrap();
+        let anchor = RowAnchor {
+            entry_id: assistant,
+            position: RowPosition::Markdown(snapshot.position_at(code_start)),
+        };
+        let uniform = cache.row_at(&transcript, anchor, 80).unwrap().row;
+        assert!(
+            uniform
+                .spans
+                .iter()
+                .all(|span| span.style.syntax == crate::syntax::SyntaxClass::Plain)
+        );
+
+        transcript.append_message_delta(1, "```\n\nafter");
+        cache.reset_work();
+        let highlighted = cache.row_at(&transcript, anchor, 80).unwrap().row;
+        assert!(
+            highlighted
+                .spans
+                .iter()
+                .any(|span| span.style.syntax != crate::syntax::SyntaxClass::Plain)
+        );
+        assert_eq!(cache.work().cache_hits, 0);
+        assert_eq!(cache.work().syntax_fences_highlighted, 1);
+
+        transcript.append_message_delta(1, " grows");
+        cache.reset_work();
+        let _ = cache.row_at(&transcript, anchor, 80).unwrap();
+        assert_eq!(cache.work().syntax_fences_considered, 0);
+        assert_eq!(cache.work().syntax_source_bytes, 0);
+    }
+
+    #[test]
+    fn promoting_an_already_highlighted_fence_reuses_cached_rows() {
+        let mut transcript = Transcript::default();
+        let (_, assistant) = transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        transcript.append_message_delta(1, "before\n\n```rust\nfn main() {}\n```");
+        let mut cache = TranscriptRowCache::default();
+        let entry = transcript.entry(assistant).unwrap();
+        let snapshot = cache.markdown_snapshot(entry);
+        let code_start = snapshot.document.plain_text().find("fn main").unwrap();
+        let anchor = RowAnchor {
+            entry_id: assistant,
+            position: RowPosition::Markdown(snapshot.position_at(code_start)),
+        };
+        let highlighted = cache.row_at(&transcript, anchor, 80).unwrap().row;
+        assert!(
+            highlighted
+                .spans
+                .iter()
+                .any(|span| span.style.syntax != crate::syntax::SyntaxClass::Plain)
+        );
+
+        transcript.append_message_delta(1, "\n\nafter");
+        cache.reset_work();
+        let promoted = cache.row_at(&transcript, anchor, 80).unwrap().row;
+
+        assert_eq!(promoted, highlighted);
+        assert_eq!(cache.work().cache_hits, 1);
+        assert_eq!(cache.work().syntax_fences_highlighted, 1);
+    }
+
+    #[test]
     fn markdown_checkpoint_transitions_invalidate_cached_rows() {
         let mut transcript = Transcript::default();
         let (_, assistant) = transcript.append_exchange("prompt".into());
@@ -2055,7 +2187,7 @@ mod tests {
         transcript.append_exchange("prompt".into());
         transcript.complete_message(
             1,
-            "# Heading\n\nUse **bold text** and `inline code` across a long line.".into(),
+            "# Heading\n\nUse **bold text** and `inline code` across a long line.\n\n```rust\nfn demo() {}\n```".into(),
         );
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
@@ -2070,6 +2202,8 @@ mod tests {
         assert!(!rows.is_empty());
         assert_eq!(work.markdown_source_bytes_parsed, 0);
         assert_eq!(work.markdown_blocks_built, 0);
+        assert_eq!(work.syntax_fences_considered, 0);
+        assert_eq!(work.syntax_source_bytes, 0);
     }
 
     #[test]
