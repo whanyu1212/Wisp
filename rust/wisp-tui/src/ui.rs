@@ -43,14 +43,25 @@ pub fn render(
         return;
     }
 
+    let decision_pending = matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    );
+    if decision_pending && area.height < 11 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(5)])
+            .split(area);
+        render_header(frame, chunks[0], state, connection);
+        render_composer(frame, chunks[1], state, editor);
+        return;
+    }
+
     let composer_height = if editable(state) {
         u16::try_from(editor.line_count().saturating_add(2))
             .unwrap_or(MAX_COMPOSER_HEIGHT)
             .clamp(3, MAX_COMPOSER_HEIGHT)
-    } else if matches!(
-        state.view_status,
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-    ) {
+    } else if decision_pending {
         5
     } else {
         3
@@ -831,6 +842,10 @@ mod tests {
         assert!(narrow.contains("[y once/t tool/a all/N]"));
         assert!(narrow.contains("args:"));
         assert!(narrow.contains("rm -rf"));
+        let minimum_approval = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(minimum_approval.contains("[y once/t tool/a all/N]"));
+        assert!(minimum_approval.contains("args:"));
+        assert!(minimum_approval.contains("rm -rf"));
 
         let mut writer = DecisionPreviewWriter::default();
         let error =
@@ -859,6 +874,10 @@ mod tests {
         assert!(narrow_trust.contains("[y trust/N deny]"));
         assert!(narrow_trust.contains("distinct-project"));
         assert!(!narrow_trust.contains("/very/long/shared/prefix"));
+        let minimum_trust = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(minimum_trust.contains("[y trust/N deny]"));
+        assert!(minimum_trust.contains("distinct-project"));
+        assert!(!minimum_trust.contains("/very/long/shared/prefix"));
     }
 
     #[test]
