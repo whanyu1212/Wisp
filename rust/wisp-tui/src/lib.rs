@@ -4,6 +4,7 @@
 
 mod cli;
 mod framing;
+mod markdown;
 mod process;
 mod prompt_editor;
 pub mod reducer;

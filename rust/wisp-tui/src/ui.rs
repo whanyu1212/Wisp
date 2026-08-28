@@ -1,3 +1,4 @@
+use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
 use crate::transcript::TranscriptRole;
@@ -164,9 +165,27 @@ fn render_transcript(
                     TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => {
                         Style::default().fg(Color::DarkGray)
                     }
+                    TranscriptRowKind::Content if row.role == TranscriptRole::Assistant => {
+                        Style::default().fg(Color::White)
+                    }
                     TranscriptRowKind::Content | TranscriptRowKind::Spacer => Style::default(),
                 };
-                Line::styled(row.text, style)
+                if row.spans.len() == 1 {
+                    let span = row.spans.into_iter().next().expect("one span exists");
+                    Line::styled(span.text, markdown_span_style(style, span.style))
+                } else {
+                    let spans = if row.spans.is_empty() {
+                        vec![Span::styled(String::new(), style)]
+                    } else {
+                        row.spans
+                            .into_iter()
+                            .map(|span| {
+                                Span::styled(span.text, markdown_span_style(style, span.style))
+                            })
+                            .collect()
+                    };
+                    Line::from(spans)
+                }
             })
             .collect()
     };
@@ -180,6 +199,41 @@ fn render_transcript(
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(paragraph, area);
+}
+
+fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
+    let mut style = match semantic.block {
+        BlockStyle::Normal => base,
+        BlockStyle::Heading(level) => {
+            let color = if level <= 2 {
+                Color::Cyan
+            } else {
+                Color::LightCyan
+            };
+            base.fg(color).add_modifier(Modifier::BOLD)
+        }
+        BlockStyle::Code => base.fg(Color::LightGreen).bg(Color::Rgb(30, 30, 30)),
+        BlockStyle::RawHtml => base.fg(Color::DarkGray),
+    };
+    style = match semantic.inline {
+        InlineStyle::Normal => style,
+        InlineStyle::Code => style.fg(Color::Yellow).bg(Color::Rgb(45, 45, 45)),
+        InlineStyle::Link => style
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::UNDERLINED),
+        InlineStyle::QuoteMarker => style.fg(Color::DarkGray),
+        InlineStyle::ListMarker => style.fg(Color::Cyan),
+    };
+    if semantic.strong {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if semantic.emphasis {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if semantic.struck {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    style
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &PromptEditor) {
@@ -932,6 +986,59 @@ mod tests {
             .unwrap();
 
         assert!(terminal.backend().to_string().contains("new ↓"));
+    }
+
+    #[test]
+    fn assistant_markdown_is_formatted_while_user_content_stays_literal() {
+        let mut state = UiState::unconfigured();
+        state
+            .transcript
+            .append_exchange("# literal **user** `code`".into());
+        state.transcript.complete_message(
+            1,
+            "# Plan\n\nUse **bold** and `code`.\n\n```rust\nlet x = 1;\n```".into(),
+        );
+
+        let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+
+        assert!(rendered.contains("# literal **user** `code`"));
+        assert!(rendered.contains("Plan"));
+        assert!(rendered.contains("Use bold and code."));
+        assert!(rendered.contains("let x = 1;"));
+        assert!(!rendered.contains("**bold**"));
+        assert!(!rendered.contains("```rust"));
+    }
+
+    #[test]
+    fn semantic_markdown_styles_map_to_terminal_styles() {
+        let heading = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                block: BlockStyle::Heading(1),
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert_eq!(heading.fg, Some(Color::Cyan));
+        assert!(heading.add_modifier.contains(Modifier::BOLD));
+
+        let code = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                inline: InlineStyle::Code,
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert_eq!(code.fg, Some(Color::Yellow));
+        assert!(code.bg.is_some());
+
+        let link = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                inline: InlineStyle::Link,
+                ..TranscriptSpanStyle::default()
+            },
+        );
+        assert!(link.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
