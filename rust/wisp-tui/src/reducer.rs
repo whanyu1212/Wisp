@@ -240,6 +240,11 @@ pub enum BackendEvent {
         request_id: String,
         project_path: String,
     },
+    ProjectConfigApplied {
+        provider: String,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     CommandFinished {
         command_id: String,
         command_type: String,
@@ -570,6 +575,16 @@ fn handle_backend_event(
             state.pending_trust_project_path = Some(project_path);
             state.view_status = ViewStatus::WaitingForTrust;
             state.interaction_status = InteractionStatus::WaitingForTrust;
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ProjectConfigApplied {
+            provider,
+            model,
+            effort,
+        } => {
+            state.provider = Some(provider);
+            state.model = model;
+            state.effort = effort;
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::CommandFinished {
@@ -967,6 +982,28 @@ mod tests {
                 project_path: "/workspace".into(),
             }
         );
+    }
+
+    #[test]
+    fn project_config_applied_refreshes_authoritative_header_state() {
+        let mut state = UiState::new("fake".into(), Some("old-model".into()), Some("low".into()));
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ProjectConfigApplied {
+                provider: "anthropic".into(),
+                model: Some("claude-test".into()),
+                effort: Some("high".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.provider.as_deref(), Some("anthropic"));
+        assert_eq!(state.model.as_deref(), Some("claude-test"));
+        assert_eq!(state.effort.as_deref(), Some("high"));
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
     }
 
     #[test]

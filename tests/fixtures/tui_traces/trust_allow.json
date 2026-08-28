@@ -33,6 +33,18 @@
     {
       "type": "rpc.event",
       "event": {
+        "type": "project.config.applied",
+        "provider": "anthropic",
+        "model": "claude-test",
+        "effort": null,
+        "auto_compaction_enabled": true,
+        "auth_path": "fixture-auth.json"
+      },
+      "clock_ms": 25
+    },
+    {
+      "type": "rpc.event",
+      "event": {
         "type": "rpc.command.finished",
         "command_id": "prompt-1",
         "command_type": "prompt",
@@ -67,8 +79,8 @@
       "input_ready": true,
       "queued_steering": 0,
       "queued_follow_ups": 0,
-      "provider": "fake",
-      "model": null,
+      "provider": "anthropic",
+      "model": "claude-test",
       "mode": "build",
       "last_session": null
     },

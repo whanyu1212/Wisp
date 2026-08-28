@@ -62,6 +62,11 @@ impl BackendEvent {
                 request_id: string_field(value, &event_type, "request_id")?,
                 project_path: string_field(value, &event_type, "project_path")?,
             },
+            "project.config.applied" => Self::ProjectConfigApplied {
+                provider: string_field(value, &event_type, "provider")?,
+                model: nullable_string_field(value, &event_type, "model")?,
+                effort: nullable_string_field(value, &event_type, "effort")?,
+            },
             "rpc.command.finished" => Self::CommandFinished {
                 command_id: string_field(value, &event_type, "command_id")?,
                 command_type: string_field(value, &event_type, "command_type")?,
@@ -90,6 +95,21 @@ fn string_field(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+fn nullable_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<String>, EventProjectionError> {
+    match value.get(field) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
 }
 
 fn u64_field(
