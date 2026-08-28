@@ -226,11 +226,27 @@ class TraceExpectedCommand(_TraceModel):
         return _bound_json_structure(value, label="expected command")
 
 
+class TraceToolCardProjection(_TraceModel):
+    """Language-neutral terminal lifecycle state for one generic tool card."""
+
+    call_id: str = Field(min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=128)
+    status: Literal[
+        "requested", "awaiting_approval", "running", "done", "error", "denied", "cancelled"
+    ]
+    arguments_available: bool
+
+
 class TraceExpected(_TraceModel):
     commands: tuple[TraceExpectedCommand, ...] = Field(max_length=_MAX_TRACE_COMMANDS, strict=False)
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None = Field(default=None, max_length=MAX_TRACE_CONTENT_CHARS)
+    tool_cards: tuple[TraceToolCardProjection, ...] | None = Field(
+        default=None,
+        max_length=_MAX_TRACE_EVENTS,
+        strict=False,
+    )
 
 
 class TraceFile(_TraceModel):

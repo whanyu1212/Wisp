@@ -10,14 +10,18 @@ use crate::markdown::{
     IncrementalMarkdownState, MarkdownDocument, MarkdownWork, SourceAffinity, TranscriptSpan,
     TranscriptSpanStyle,
 };
+use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::transcript::{
-    Transcript, TranscriptEntry, TranscriptEntryId, TranscriptEntryState, TranscriptRole,
+    Transcript, TranscriptEntry, TranscriptEntryId, TranscriptEntryKind, TranscriptEntryState,
+    TranscriptRole,
 };
 
 const CACHE_MAX_ROWS: usize = 4_096;
 const CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const MARKDOWN_CACHE_MAX_ENTRIES: usize = 128;
 const MARKDOWN_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const CARD_CACHE_MAX_ENTRIES: usize = 128;
+const CARD_CACHE_MAX_BYTES: usize = 1024 * 1024;
 const ENTRY_PRESENTATION_MAX_BYTES: usize = 64 * 1024;
 const ENTRY_PRESENTATION_CHUNK_BYTES: usize = 4 * 1024;
 const OVERSCAN_ROWS: usize = 8;
@@ -28,7 +32,21 @@ pub enum RowPosition {
     Omission,
     Content(usize),
     Markdown(MarkdownPosition),
+    Card(CardPosition),
     Spacer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CardSection {
+    Action,
+    Detail,
+    Omission,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CardPosition {
+    pub section: CardSection,
+    pub absolute_byte_offset: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -49,7 +67,22 @@ pub enum TranscriptRowKind {
     Content,
     Placeholder,
     Omission,
+    CardAction,
+    CardDetail,
+    CardOmission,
     Spacer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptRowTone {
+    Default,
+    User,
+    Assistant,
+    Muted,
+    Pending,
+    Success,
+    Warning,
+    Error,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +90,7 @@ pub struct TranscriptRow {
     pub anchor: RowAnchor,
     pub role: TranscriptRole,
     pub kind: TranscriptRowKind,
+    pub tone: TranscriptRowTone,
     pub spans: Vec<TranscriptSpan>,
 }
 
@@ -103,8 +137,23 @@ impl TranscriptRow {
             anchor,
             role,
             kind,
+            tone: default_row_tone(role, kind),
             spans,
         }
+    }
+}
+
+fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
+    match kind {
+        TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => TranscriptRowTone::Muted,
+        TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
+        TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
+            TranscriptRowTone::Assistant
+        }
+        TranscriptRowKind::Content if role == TranscriptRole::Assistant => {
+            TranscriptRowTone::Assistant
+        }
+        _ => TranscriptRowTone::Default,
     }
 }
 
@@ -151,11 +200,37 @@ struct ProjectedRow {
     next: Option<RowAnchor>,
 }
 
+#[derive(Debug)]
+struct CardProjection {
+    action: String,
+    detail: String,
+    detail_base: usize,
+    omission: Option<String>,
+    omission_before_detail: bool,
+    action_tone: TranscriptRowTone,
+}
+
+impl CardProjection {
+    fn retained_bytes(&self) -> usize {
+        self.action
+            .len()
+            .saturating_add(self.detail.len())
+            .saturating_add(self.omission.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct MarkdownKey {
     entry_id: TranscriptEntryId,
     layout_epoch: u64,
     presentation_start: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CardKey {
+    entry_id: TranscriptEntryId,
+    layout_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -404,6 +479,9 @@ pub struct TranscriptRowCache {
     markdown_order: VecDeque<MarkdownKey>,
     markdown_retained_bytes: usize,
     next_markdown_presentation_identity: u64,
+    cards: HashMap<CardKey, Arc<CardProjection>>,
+    card_order: VecDeque<CardKey>,
+    card_retained_bytes: usize,
     work: LayoutWork,
 }
 
@@ -477,6 +555,9 @@ impl TranscriptRowCache {
             })
         };
         let projected = match anchor.position {
+            RowPosition::Header if !matches!(entry.kind, TranscriptEntryKind::Message) => {
+                self.build_card_row(transcript, entry, anchor, CardSection::Action, 0, width)?
+            }
             RowPosition::Header => ProjectedRow {
                 row: TranscriptRow::plain(
                     anchor,
@@ -485,6 +566,7 @@ impl TranscriptRowCache {
                     match entry.role {
                         TranscriptRole::User => "you",
                         TranscriptRole::Assistant => "wisp",
+                        TranscriptRole::Tool => unreachable!("cards use card action rows"),
                     }
                     .into(),
                     0,
@@ -524,6 +606,15 @@ impl TranscriptRowCache {
             RowPosition::Markdown(position) if entry.role == TranscriptRole::Assistant => {
                 self.build_markdown_row(transcript, entry, anchor, position.output_offset, width)
             }
+            RowPosition::Card(position) if entry.role == TranscriptRole::Tool => self
+                .build_card_row(
+                    transcript,
+                    entry,
+                    anchor,
+                    position.section,
+                    position.absolute_byte_offset,
+                    width,
+                )?,
             RowPosition::Spacer if next_entry().is_some() => ProjectedRow {
                 row: TranscriptRow::plain(
                     anchor,
@@ -637,6 +728,208 @@ impl TranscriptRowCache {
             row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Content, text, start),
             next,
         }
+    }
+
+    fn card_snapshot(&mut self, entry: &TranscriptEntry) -> Option<Arc<CardProjection>> {
+        let key = CardKey {
+            entry_id: entry.id,
+            layout_epoch: entry.layout_epoch(),
+        };
+        if let Some(cached) = self.cards.get(&key) {
+            let snapshot = Arc::clone(cached);
+            self.card_order.retain(|candidate| candidate != &key);
+            self.card_order.push_back(key);
+            return Some(snapshot);
+        }
+        let snapshot = Arc::new(card_projection(entry)?);
+        self.card_retained_bytes = self
+            .card_retained_bytes
+            .saturating_add(snapshot.retained_bytes());
+        self.cards.insert(key, Arc::clone(&snapshot));
+        self.card_order.push_back(key);
+        while self.cards.len() > CARD_CACHE_MAX_ENTRIES
+            || self.card_retained_bytes > CARD_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self.card_order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.cards.remove(&oldest) {
+                self.card_retained_bytes = self
+                    .card_retained_bytes
+                    .saturating_sub(removed.retained_bytes());
+            }
+        }
+        Some(snapshot)
+    }
+
+    fn build_card_row(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        section: CardSection,
+        absolute_offset: usize,
+        width: usize,
+    ) -> Option<ProjectedRow> {
+        let projection = self.card_snapshot(entry)?;
+        match section {
+            CardSection::Action => {
+                let next = card_position_after_action(entry, &projection);
+                Some(self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    &projection.action,
+                    0,
+                    absolute_offset,
+                    width,
+                    TranscriptRowKind::CardAction,
+                    projection.action_tone,
+                    next.or_else(|| separator_after(transcript, entry)),
+                ))
+            }
+            CardSection::Detail if !projection.detail.is_empty() => {
+                let next = if projection.omission_before_detail {
+                    separator_after(transcript, entry)
+                } else {
+                    projection
+                        .omission
+                        .as_ref()
+                        .map(|_| RowAnchor {
+                            entry_id: entry.id,
+                            position: RowPosition::Card(CardPosition {
+                                section: CardSection::Omission,
+                                absolute_byte_offset: 0,
+                            }),
+                        })
+                        .or_else(|| separator_after(transcript, entry))
+                };
+                Some(self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    &projection.detail,
+                    projection.detail_base,
+                    absolute_offset,
+                    width,
+                    TranscriptRowKind::CardDetail,
+                    TranscriptRowTone::Default,
+                    next,
+                ))
+            }
+            CardSection::Omission => {
+                let omission = projection.omission.as_deref()?;
+                let next = if projection.omission_before_detail && !projection.detail.is_empty() {
+                    Some(RowAnchor {
+                        entry_id: entry.id,
+                        position: RowPosition::Card(CardPosition {
+                            section: CardSection::Detail,
+                            absolute_byte_offset: projection.detail_base,
+                        }),
+                    })
+                } else {
+                    separator_after(transcript, entry)
+                };
+                Some(self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    omission,
+                    0,
+                    absolute_offset,
+                    width,
+                    TranscriptRowKind::CardOmission,
+                    TranscriptRowTone::Warning,
+                    next,
+                ))
+            }
+            CardSection::Detail => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_card_text_row(
+        &mut self,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        section: CardSection,
+        source: &str,
+        base_offset: usize,
+        absolute_start: usize,
+        width: usize,
+        kind: TranscriptRowKind,
+        tone: TranscriptRowTone,
+        after_section: Option<RowAnchor>,
+    ) -> ProjectedRow {
+        let relative_start = absolute_start.saturating_sub(base_offset).min(source.len());
+        let mut relative_start = relative_start;
+        while relative_start > 0 && !source.is_char_boundary(relative_start) {
+            relative_start -= 1;
+        }
+        if relative_start == source.len() {
+            let mut row =
+                TranscriptRow::plain(anchor, entry.role, kind, String::new(), absolute_start);
+            row.tone = tone;
+            return ProjectedRow {
+                row,
+                next: after_section,
+            };
+        }
+
+        let mut text = String::new();
+        let mut column = 0_usize;
+        let mut next_offset = None;
+        let mut preserve_terminal_break = false;
+        for (offset, grapheme) in source[relative_start..].grapheme_indices(true) {
+            self.work.graphemes_scanned = self.work.graphemes_scanned.saturating_add(1);
+            self.work.bytes_scanned = self.work.bytes_scanned.saturating_add(grapheme.len());
+            let relative = relative_start + offset;
+            if is_line_break(grapheme) {
+                next_offset = Some(relative + grapheme.len());
+                preserve_terminal_break = true;
+                break;
+            }
+            let safe = sanitize_grapheme(grapheme, column);
+            let grapheme_width = UnicodeWidthStr::width(safe.as_str());
+            if !text.is_empty() && column.saturating_add(grapheme_width) > width {
+                next_offset = Some(relative);
+                break;
+            }
+            text.push_str(&safe);
+            column = column.saturating_add(grapheme_width);
+            if column >= width {
+                let mut boundary = relative + grapheme.len();
+                if let Some(line_break) = line_break_prefix_len(&source[boundary..]) {
+                    boundary = boundary.saturating_add(line_break);
+                }
+                next_offset = Some(boundary);
+                break;
+            }
+        }
+        let consumed_end = next_offset.unwrap_or(source.len());
+        let next = match next_offset {
+            Some(offset) if offset < source.len() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Card(CardPosition {
+                    section,
+                    absolute_byte_offset: base_offset.saturating_add(offset),
+                }),
+            }),
+            Some(offset) if preserve_terminal_break && offset == source.len() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Card(CardPosition {
+                    section,
+                    absolute_byte_offset: base_offset.saturating_add(offset),
+                }),
+            }),
+            _ => after_section,
+        };
+        let mut row = TranscriptRow::plain(anchor, entry.role, kind, text, absolute_start);
+        if let Some(span) = row.spans.first_mut() {
+            span.affinity.source_end = base_offset.saturating_add(consumed_end);
+        }
+        row.tone = tone;
+        ProjectedRow { row, next }
     }
 
     fn markdown_snapshot(&mut self, entry: &TranscriptEntry) -> Arc<MarkdownSnapshot> {
@@ -945,6 +1238,7 @@ impl TranscriptRowCache {
                 anchor,
                 role: entry.role,
                 kind: TranscriptRowKind::Content,
+                tone: TranscriptRowTone::Assistant,
                 spans,
             },
             next,
@@ -994,6 +1288,7 @@ impl TranscriptRowCache {
                 }
                 self.content_anchor_before(transcript, entry, position.output_offset, width)
             }
+            RowPosition::Card(_) => self.card_anchor_before(transcript, entry, anchor, width),
             RowPosition::Spacer => Some(self.last_anchor(transcript, entry, width)),
         }
     }
@@ -1051,12 +1346,64 @@ impl TranscriptRowCache {
         }
     }
 
+    fn card_anchor_before(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        target: RowAnchor,
+        width: usize,
+    ) -> Option<RowAnchor> {
+        let target_key = RowKey {
+            entry_id: entry.id,
+            layout_epoch: entry.layout_epoch(),
+            presentation_start: 0,
+            width: width.max(1),
+            position: target.position,
+        };
+        if let Some(previous) = self.predecessors.get(&target_key).copied() {
+            return Some(previous);
+        }
+        let mut current = RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Header,
+        };
+        loop {
+            let cached = self.row_at(transcript, current, width)?;
+            let next = cached.next?;
+            if next == target {
+                return Some(current);
+            }
+            if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+                return Some(current);
+            }
+            current = next;
+        }
+    }
+
     fn last_anchor(
         &mut self,
         transcript: &Transcript,
         entry: &TranscriptEntry,
         width: usize,
     ) -> RowAnchor {
+        if !matches!(entry.kind, TranscriptEntryKind::Message) {
+            let mut current = RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Header,
+            };
+            loop {
+                let Some(cached) = self.row_at(transcript, current, width) else {
+                    return current;
+                };
+                let Some(next) = cached.next else {
+                    return current;
+                };
+                if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+                    return current;
+                }
+                current = next;
+            }
+        }
         let (target, ends_with_break) =
             if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
                 let snapshot = self.markdown_snapshot(entry);
@@ -1149,6 +1496,110 @@ impl TranscriptRowCache {
             self.furthest_content.remove(&furthest_key);
         }
     }
+}
+
+fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
+    match &entry.kind {
+        TranscriptEntryKind::Message => None,
+        TranscriptEntryKind::Tool(card) => {
+            let retained_preview = card.retained_output.preview_head();
+            let detail = if card.detail.is_empty() {
+                retained_preview.text.clone()
+            } else if retained_preview.text.is_empty() || retained_preview.text == card.detail {
+                card.detail.clone()
+            } else {
+                format!("{}\n{}", card.detail, retained_preview.text)
+            };
+            let shown_output_bytes = retained_preview.text.len() as u64;
+            let omitted = card
+                .retained_output
+                .source_bytes
+                .saturating_sub(shown_output_bytes);
+            let omission = card_omission(omitted, card.backend_truncated);
+            Some(CardProjection {
+                action: format!("• {}", card.action()),
+                detail,
+                detail_base: 0,
+                omission,
+                omission_before_detail: false,
+                action_tone: tool_status_tone(card.status),
+            })
+        }
+        TranscriptEntryKind::Process(card) => {
+            let preview = card.preview();
+            let omitted = preview
+                .base_offset
+                .saturating_add(card.backend_dropped_bytes);
+            let omission = card_omission(omitted, card.backend_truncated);
+            Some(CardProjection {
+                action: format!("• {}", card.action()),
+                detail: preview.text,
+                detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
+                omission,
+                omission_before_detail: true,
+                action_tone: process_state_tone(card.display_state),
+            })
+        }
+    }
+}
+
+fn card_omission(omitted_bytes: u64, backend_truncated: bool) -> Option<String> {
+    match (omitted_bytes, backend_truncated) {
+        (0, false) => None,
+        (0, true) => Some("⋯ tool reported truncated output".into()),
+        (bytes, false) => Some(format!(
+            "⋯ {bytes} input or presentation bytes omitted before this preview"
+        )),
+        (bytes, true) => Some(format!(
+            "⋯ {bytes} input or presentation bytes omitted; tool also reported truncation"
+        )),
+    }
+}
+
+fn card_position_after_action(
+    entry: &TranscriptEntry,
+    projection: &CardProjection,
+) -> Option<RowAnchor> {
+    if projection.omission_before_detail && projection.omission.is_some() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Omission,
+                absolute_byte_offset: 0,
+            }),
+        });
+    }
+    if !projection.detail.is_empty() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Detail,
+                absolute_byte_offset: projection.detail_base,
+            }),
+        });
+    }
+    projection.omission.as_ref().map(|_| RowAnchor {
+        entry_id: entry.id,
+        position: RowPosition::Card(CardPosition {
+            section: CardSection::Omission,
+            absolute_byte_offset: 0,
+        }),
+    })
+}
+
+fn tool_status_tone(status: ToolStatus) -> TranscriptRowTone {
+    match status {
+        ToolStatus::Requested | ToolStatus::AwaitingApproval | ToolStatus::Running => {
+            TranscriptRowTone::Pending
+        }
+        ToolStatus::Done => TranscriptRowTone::Success,
+        ToolStatus::Denied | ToolStatus::Cancelled => TranscriptRowTone::Warning,
+        ToolStatus::Error => TranscriptRowTone::Error,
+    }
+}
+
+fn process_state_tone(state: ProcessDisplayState) -> TranscriptRowTone {
+    tool_status_tone(state.status())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1461,7 +1912,11 @@ fn cached_row_valid(
                 && offset <= cached.content_len
                 && entry.content.len() >= cached.content_len
         ),
-        TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => false,
+        TranscriptRowKind::CardAction
+        | TranscriptRowKind::CardDetail
+        | TranscriptRowKind::CardOmission
+        | TranscriptRowKind::Placeholder
+        | TranscriptRowKind::Omission => false,
     }
 }
 
@@ -1527,6 +1982,61 @@ fn normalize_anchor(
                 .map_or(clamped, |character| clamped + character.len_utf8());
             cache.content_anchor_before(transcript, entry, target, width)
         }
+        RowPosition::Card(position) => {
+            let projection = cache.card_snapshot(entry)?;
+            let normalized = match position.section {
+                CardSection::Action => {
+                    let offset = position.absolute_byte_offset.min(projection.action.len());
+                    RowAnchor {
+                        entry_id: entry.id,
+                        position: if offset == 0 {
+                            RowPosition::Header
+                        } else {
+                            RowPosition::Card(CardPosition {
+                                section: CardSection::Action,
+                                absolute_byte_offset: offset,
+                            })
+                        },
+                    }
+                }
+                CardSection::Detail if !projection.detail.is_empty() => {
+                    let end = projection
+                        .detail_base
+                        .saturating_add(projection.detail.len());
+                    let offset = position
+                        .absolute_byte_offset
+                        .clamp(projection.detail_base, end);
+                    RowAnchor {
+                        entry_id: entry.id,
+                        position: RowPosition::Card(CardPosition {
+                            section: CardSection::Detail,
+                            absolute_byte_offset: offset,
+                        }),
+                    }
+                }
+                CardSection::Omission if projection.omission.is_some() => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Card(CardPosition {
+                        section: CardSection::Omission,
+                        absolute_byte_offset: position
+                            .absolute_byte_offset
+                            .min(projection.omission.as_ref().map_or(0, String::len)),
+                    }),
+                },
+                _ => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Header,
+                },
+            };
+            if cache.row_at(transcript, normalized, width).is_some() {
+                Some(normalized)
+            } else {
+                Some(RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Header,
+                })
+            }
+        }
         _ => Some(anchor),
     }
 }
@@ -1539,7 +2049,10 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
     match position {
         RowPosition::Content(offset) => Some(offset),
         RowPosition::Markdown(position) => Some(position.output_offset),
-        RowPosition::Header | RowPosition::Omission | RowPosition::Spacer => None,
+        RowPosition::Header
+        | RowPosition::Omission
+        | RowPosition::Card(_)
+        | RowPosition::Spacer => None,
     }
 }
 
@@ -1594,6 +2107,16 @@ fn is_line_break(grapheme: &str) -> bool {
     matches!(grapheme, "\n" | "\r\n" | "\r")
 }
 
+fn line_break_prefix_len(source: &str) -> Option<usize> {
+    if source.starts_with("\r\n") {
+        Some(2)
+    } else if source.starts_with('\n') || source.starts_with('\r') {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 fn sanitize_grapheme(grapheme: &str, column: usize) -> String {
     if grapheme == "\t" {
         return " ".repeat(4 - (column % 4));
@@ -1641,6 +2164,341 @@ mod tests {
         transcript.start_message(1);
         transcript.complete_message(1, numbered_lines("line", lines));
         transcript
+    }
+
+    fn tool_result(call_id: &str, output: &str) -> crate::tool_cards::ToolResultInput {
+        crate::tool_cards::ToolResultInput {
+            call_id: call_id.into(),
+            name: "read".into(),
+            output: output.into(),
+            output_source_bytes: output.len() as u64,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: None,
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn tool_card_rows_update_in_place_with_semantic_tones() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card_id = transcript.observe_approval_requested(crate::tool_cards::ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "README.md"}),
+        });
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 8);
+        let pending = viewport.visible_rows(&transcript, &mut cache);
+        let pending_action = pending
+            .iter()
+            .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction)
+            .unwrap();
+        assert!(
+            pending_action
+                .plain_text()
+                .contains("Awaiting approval to read")
+        );
+        assert_eq!(pending_action.tone, TranscriptRowTone::Pending);
+
+        transcript.observe_approval_resolved("call-1", true, None);
+        transcript.observe_tool_result(tool_result("call-1", "first\nsecond"));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        cache.reset_work();
+        let completed = viewport.visible_rows(&transcript, &mut cache);
+        let action = completed
+            .iter()
+            .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction)
+            .unwrap();
+        assert!(action.plain_text().contains("Read  README.md"));
+        assert_eq!(action.tone, TranscriptRowTone::Success);
+        assert!(completed.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardDetail && row.plain_text() == "first"
+        }));
+    }
+
+    #[test]
+    fn process_card_coalesces_calls_and_bounds_terminal_safe_tail_rows() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let call = |call_id: &str| crate::tool_cards::ToolCallInput {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({
+                "operation": "poll",
+                "process_id": "process-1"
+            }),
+        };
+        let card_id = transcript.observe_tool_call(call("poll-1"));
+        let mut first = tool_result("poll-1", "");
+        first.name = "bash".into();
+        first.process_id = Some("process-1".into());
+        first.process_state = Some("running".into());
+        first.stdout = Some(format!("old\n{}", "x\n".repeat(20_000)));
+        transcript.observe_tool_result(first);
+        assert_eq!(transcript.observe_tool_call(call("poll-2")), card_id);
+        let mut second = tool_result("poll-2", "");
+        second.name = "bash".into();
+        second.process_id = Some("process-1".into());
+        second.process_state = Some("completed".into());
+        second.stdout = Some("safe\u{1b}[2Jtail".into());
+        transcript.observe_tool_result(second);
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 100, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let card_rows = rows
+            .iter()
+            .filter(|row| row.anchor.entry_id == card_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            card_rows
+                .iter()
+                .filter(|row| row.kind == TranscriptRowKind::CardAction)
+                .count(),
+            1
+        );
+        assert!(card_rows[0].plain_text().contains("2 calls · 2 polls"));
+        assert_eq!(card_rows[0].tone, TranscriptRowTone::Success);
+        assert!(
+            card_rows
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardOmission)
+        );
+        let rendered = card_rows
+            .iter()
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("safe"));
+        assert!(rendered.contains('\u{fffd}'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains("old"));
+    }
+
+    #[test]
+    fn narrow_process_tail_projection_scans_each_bounded_preview_once() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        });
+        let mut completed = tool_result("poll-1", "");
+        completed.name = "bash".into();
+        completed.process_id = Some("process-1".into());
+        completed.process_state = Some("completed".into());
+        completed.stdout = Some("x".repeat(crate::tool_cards::TOOL_OUTPUT_MAX_BYTES));
+        completed.stdout_source_bytes = crate::tool_cards::TOOL_OUTPUT_MAX_BYTES as u64;
+        transcript.observe_tool_result(completed);
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 1, 5);
+        cache.reset_work();
+
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+
+        assert!(rows.iter().any(|row| row.anchor.entry_id == card_id));
+        assert!(cache.work().bytes_scanned <= 5_000);
+        assert_eq!(cache.cards.len(), 1);
+    }
+
+    #[test]
+    fn card_exact_width_breaks_and_sanitized_affinities_are_precise() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        });
+        transcript.observe_tool_result(tool_result("call-1", "1234\nnext"));
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 4, 20);
+        let details = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| {
+                row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardDetail
+            })
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+        assert_eq!(details, ["1234", "next"]);
+
+        let mut sanitized = Transcript::default();
+        sanitized.append_prompt("read".into());
+        let card_id = sanitized.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-2".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        });
+        let source = "a\tb\u{1b}";
+        sanitized.observe_tool_result(tool_result("call-2", source));
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&sanitized, &mut cache, 40, 20);
+        let detail = viewport
+            .visible_rows(&sanitized, &mut cache)
+            .into_iter()
+            .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardDetail)
+            .unwrap();
+        assert_eq!(detail.plain_text(), "a   b\u{fffd}");
+        let affinity = detail.spans.first().unwrap().affinity;
+        assert_eq!(affinity.source_offset, 0);
+        assert_eq!(affinity.source_end, source.len());
+    }
+
+    #[test]
+    fn process_tail_updates_preserve_scrolled_card_anchor_and_mark_unseen() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let call = |call_id: &str| crate::tool_cards::ToolCallInput {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({
+                "operation": "poll",
+                "process_id": "process-1"
+            }),
+        };
+        let card_id = transcript.observe_tool_call(call("poll-1"));
+        let mut first = tool_result("poll-1", "");
+        first.name = "bash".into();
+        first.process_id = Some("process-1".into());
+        first.process_state = Some("running".into());
+        first.stdout = Some("first\n".repeat(5_000));
+        transcript.observe_tool_result(first);
+        let first_base = usize::try_from(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .preview()
+                .base_offset,
+        )
+        .unwrap();
+
+        let mut viewport = TranscriptViewport {
+            top: Some(RowAnchor {
+                entry_id: card_id,
+                position: RowPosition::Card(CardPosition {
+                    section: CardSection::Detail,
+                    absolute_byte_offset: first_base,
+                }),
+            }),
+            follow_tail: false,
+            unseen_output: false,
+            width: 40,
+            height: 5,
+        };
+        let mut cache = TranscriptRowCache::default();
+        let before = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            before
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardDetail)
+        );
+
+        transcript.observe_tool_call(call("poll-2"));
+        let mut second = tool_result("poll-2", "");
+        second.name = "bash".into();
+        second.process_id = Some("process-1".into());
+        second.process_state = Some("running".into());
+        second.stdout = Some("second\n".repeat(20_000));
+        transcript.observe_tool_result(second);
+        let new_base = usize::try_from(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .preview()
+                .base_offset,
+        )
+        .unwrap();
+        assert!(new_base > first_base);
+
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+
+        assert!(viewport.has_unseen_output());
+        assert!(!viewport.follows_tail());
+        assert!(matches!(
+            viewport.top,
+            Some(RowAnchor {
+                entry_id,
+                position: RowPosition::Card(CardPosition {
+                    section: CardSection::Detail,
+                    absolute_byte_offset,
+                }),
+            }) if entry_id == card_id && absolute_byte_offset >= new_base
+        ));
+    }
+
+    #[test]
+    fn omission_row_resize_preserves_its_semantic_offset() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        });
+        let mut completed = tool_result("poll-1", "");
+        completed.name = "bash".into();
+        completed.process_id = Some("process-1".into());
+        completed.process_state = Some("completed".into());
+        completed.stdout = Some("x".repeat(20_000));
+        completed.stdout_source_bytes = 20_000;
+        transcript.observe_tool_result(completed);
+        let mut viewport = TranscriptViewport {
+            top: Some(RowAnchor {
+                entry_id: card_id,
+                position: RowPosition::Card(CardPosition {
+                    section: CardSection::Omission,
+                    absolute_byte_offset: 8,
+                }),
+            }),
+            follow_tail: false,
+            unseen_output: false,
+            width: 10,
+            height: 4,
+        };
+        let mut cache = TranscriptRowCache::default();
+
+        viewport.set_geometry(&transcript, &mut cache, 8, 4);
+
+        assert!(matches!(
+            viewport.top,
+            Some(RowAnchor {
+                entry_id,
+                position: RowPosition::Card(CardPosition {
+                    section: CardSection::Omission,
+                    absolute_byte_offset: 8,
+                }),
+            }) if entry_id == card_id
+        ));
     }
 
     #[test]
@@ -1774,6 +2632,35 @@ mod tests {
         assert!(cache.predecessors.len() <= CACHE_MAX_ROWS);
         assert!(cache.furthest_content.len() <= CACHE_MAX_ROWS);
         assert!(cache.retained_bytes <= CACHE_MAX_BYTES);
+    }
+
+    #[test]
+    fn card_projection_cache_enforces_entry_and_byte_caps() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("tools".into());
+        for index in 0..500 {
+            let call_id = format!("call-{index}");
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.clone(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": format!("file-{index}")}),
+            });
+            transcript.observe_tool_result(tool_result(&call_id, &"x".repeat(4_000)));
+        }
+        let mut cache = TranscriptRowCache::default();
+        for entry in transcript.entries() {
+            let _ = cache.row_at(
+                &transcript,
+                RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Header,
+                },
+                80,
+            );
+        }
+
+        assert!(cache.cards.len() <= CARD_CACHE_MAX_ENTRIES);
+        assert!(cache.card_retained_bytes <= CARD_CACHE_MAX_BYTES);
     }
 
     #[test]

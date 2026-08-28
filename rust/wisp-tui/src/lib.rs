@@ -10,6 +10,7 @@ mod prompt_editor;
 pub mod reducer;
 mod syntax;
 mod terminal;
+mod tool_cards;
 mod transcript;
 mod transcript_view;
 mod ui;
@@ -44,7 +45,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use transcript_view::{TranscriptRowCache, TranscriptViewAction, TranscriptViewport};
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
-use wisp_protocol::events::{CommandFinishedOutcome, WispCurrentLiveEventOutput};
+use wisp_protocol::events::WispCurrentLiveEventOutput;
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 use wisp_protocol::handshake_response::RpcHandshakeResponse;
 use wisp_protocol::{
@@ -183,7 +184,7 @@ enum ReaderTermination {
 }
 
 struct QueuedEvent {
-    event: WispCurrentLiveEventOutput,
+    event: BackendEvent,
     _wire_bytes: OwnedSemaphorePermit,
 }
 
@@ -200,17 +201,28 @@ struct ShutdownObservation {
 }
 
 impl ShutdownObservation {
-    fn observe_event(&mut self, event: &WispCurrentLiveEventOutput) -> Result<(), Error> {
-        match event.command_finished_outcome(SHUTDOWN_COMMAND_ID, "shutdown") {
-            Some(CommandFinishedOutcome::Succeeded) => self.command_succeeded = true,
-            Some(CommandFinishedOutcome::Failed { error }) => {
-                return Err(Error::ShutdownCommandFailed {
-                    message: error.unwrap_or_else(|| "backend reported failure".into()),
-                });
-            }
-            None => {}
+    fn observe_event(&mut self, event: &BackendEvent) -> Result<(), Error> {
+        let BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } = event
+        else {
+            return Ok(());
+        };
+        if command_id != SHUTDOWN_COMMAND_ID || command_type != "shutdown" {
+            return Ok(());
         }
-        Ok(())
+        if *ok {
+            self.command_succeeded = true;
+            return Ok(());
+        }
+        Err(Error::ShutdownCommandFailed {
+            message: error
+                .clone()
+                .unwrap_or_else(|| "backend reported failure".into()),
+        })
     }
 
     fn observe_exit(&mut self, status: std::process::ExitStatus) -> Result<(), Error> {
@@ -566,9 +578,8 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         while let Ok(event) = events.try_recv() {
-            let event = BackendEvent::from_live(&event.event)?;
             if self
-                .dispatch(UiAction::BackendEvent(event), writer, limit)
+                .dispatch(UiAction::BackendEvent(event.event), writer, limit)
                 .await?
                 == LoopControl::Exit
             {
@@ -996,9 +1007,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 event = receive_event(&mut event_rx, events_open) => {
                     match event {
                         Some(event) => {
-                            let event = BackendEvent::from_live(&event.event)?;
                             if live_ui.dispatch(
-                                UiAction::BackendEvent(event),
+                                UiAction::BackendEvent(event.event),
                                 &writer_tx,
                                 max_client_frame,
                             ).await? == LoopControl::Exit {
@@ -1309,6 +1319,10 @@ async fn stdout_reader_task<R: AsyncRead + Unpin>(
                             Ok(permit) => permit,
                             Err(_) => break Err(Error::InboundOverloaded),
                         };
+                    let event = match BackendEvent::from_live(&event) {
+                        Ok(event) => event,
+                        Err(error) => break Err(Error::EventProjection(error)),
+                    };
                     let queued = QueuedEvent {
                         event,
                         _wire_bytes: permit,
@@ -1562,6 +1576,10 @@ mod tests {
         events::deserialize(value).unwrap()
     }
 
+    fn projected_event(value: serde_json::Value) -> BackendEvent {
+        BackendEvent::from_live(&parsed_event(value)).unwrap()
+    }
+
     fn exit_status(code: u8) -> std::process::ExitStatus {
         std::process::Command::new("/bin/sh")
             .args(["-c", &format!("exit {code}")])
@@ -1592,11 +1610,80 @@ mod tests {
         let response = handshake_rx.await.unwrap().unwrap();
         assert_eq!(response.backend_package_version(), "0.1.0");
         let event = event_rx.recv().await.unwrap();
-        assert!(
-            event
-                .event
-                .successful_command_finished("rust-tui-shutdown", "shutdown")
-        );
+        assert!(matches!(
+            event.event,
+            BackendEvent::CommandFinished {
+                command_id,
+                command_type,
+                ok: true,
+                ..
+            } if command_id == "rust-tui-shutdown" && command_type == "shutdown"
+        ));
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            Ok(ReaderTermination::Eof)
+        ));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_queues_only_bounded_tool_result_projection() {
+        let (mut server, client) = duplex(4096);
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        let task = tokio::spawn(stdout_reader_task(
+            client,
+            handshake_tx,
+            event_tx,
+            Arc::new(Semaphore::new(EVENT_RETAINED_WIRE_BYTES)),
+            outcome_tx,
+        ));
+        let event = json!({
+            "type": "tool.result",
+            "schema_version": 34,
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-large",
+            "name": "bash",
+            "output": "x".repeat(200_000),
+            "is_error": false,
+            "failure_code": null,
+            "retryable": false,
+            "recovery_hint": null,
+            "exit_code": null,
+            "output_has_exit_status": false,
+            "before_text": null,
+            "created": false,
+            "summary": null,
+            "truncated": false,
+            "process_id": "process-1",
+            "process_state": "running",
+            "process_error": null,
+            "stdout": "y".repeat(200_000),
+            "stderr": null,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "stdout_dropped_bytes": 0,
+            "stderr_dropped_bytes": 0
+        })
+        .to_string();
+        let mut accepted = handshake();
+        accepted["limits"]["max_server_frame_bytes"] = json!(1024 * 1024);
+        server
+            .write_all(format!("{accepted}\n{event}\n").as_bytes())
+            .await
+            .unwrap();
+        server.shutdown().await.unwrap();
+        handshake_rx.await.unwrap().unwrap();
+        let queued = event_rx.recv().await.unwrap();
+        let BackendEvent::ToolResult(result) = queued.event else {
+            panic!("bounded tool result expected");
+        };
+        assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert!(result.stdout.unwrap().len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert_eq!(result.output_source_bytes, 200_000);
+        assert_eq!(result.stdout_source_bytes, 200_000);
+        drop(queued._wire_bytes);
         assert!(matches!(
             outcome_rx.await.unwrap(),
             Ok(ReaderTermination::Eof)
@@ -1636,12 +1723,19 @@ mod tests {
         );
         let started_event = event_rx.recv().await.unwrap();
         let finished_event = event_rx.recv().await.unwrap();
-        assert_eq!(started_event.event.event_type(), "rpc.command.started");
-        assert!(
-            finished_event
-                .event
-                .successful_command_finished(SHUTDOWN_COMMAND_ID, "shutdown")
-        );
+        assert!(matches!(
+            &started_event.event,
+            BackendEvent::Other { event_type } if event_type == "rpc.command.started"
+        ));
+        assert!(matches!(
+            &finished_event.event,
+            BackendEvent::CommandFinished {
+                command_id,
+                command_type,
+                ok: true,
+                ..
+            } if command_id == SHUTDOWN_COMMAND_ID && command_type == "shutdown"
+        ));
         drop((started_event, finished_event));
         assert_eq!(
             event_wire_budget.available_permits(),
@@ -1845,7 +1939,7 @@ mod tests {
     fn shutdown_requires_exact_success_and_zero_exit() {
         let mut shutdown = ShutdownObservation::default();
         shutdown
-            .observe_event(&parsed_event(shutdown_event(SHUTDOWN_COMMAND_ID)))
+            .observe_event(&projected_event(shutdown_event(SHUTDOWN_COMMAND_ID)))
             .unwrap();
         assert!(!shutdown.completed());
         shutdown.observe_exit(exit_status(0)).unwrap();
@@ -1856,13 +1950,13 @@ mod tests {
     fn failed_or_missing_shutdown_completion_is_an_error() {
         let mut shutdown = ShutdownObservation::default();
         assert!(matches!(
-            shutdown.observe_event(&parsed_event(failed_shutdown_event(SHUTDOWN_COMMAND_ID))),
+            shutdown.observe_event(&projected_event(failed_shutdown_event(SHUTDOWN_COMMAND_ID))),
             Err(Error::ShutdownCommandFailed { .. })
         ));
 
         let mut missing = ShutdownObservation::default();
         missing
-            .observe_event(&parsed_event(shutdown_event("different-command")))
+            .observe_event(&projected_event(shutdown_event("different-command")))
             .unwrap();
         missing.observe_exit(exit_status(0)).unwrap();
         assert!(matches!(
@@ -1875,7 +1969,7 @@ mod tests {
     fn shutdown_timeout_and_nonzero_exit_are_errors() {
         let mut timeout = ShutdownObservation::default();
         timeout
-            .observe_event(&parsed_event(shutdown_event(SHUTDOWN_COMMAND_ID)))
+            .observe_event(&projected_event(shutdown_event(SHUTDOWN_COMMAND_ID)))
             .unwrap();
         assert!(matches!(
             timeout.deadline_error(),
@@ -1937,7 +2031,7 @@ mod tests {
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
         event_tx
             .send(QueuedEvent {
-                event: parsed_event(json!({
+                event: BackendEvent::from_live(&parsed_event(json!({
                     "type": "message.delta",
                     "schema_version": 34,
                     "timestamp": "2026-01-02T03:04:05Z",
@@ -1946,7 +2040,8 @@ mod tests {
                     "content_index": 0,
                     "content_kind": "text",
                     "delta": "final queued fragment"
-                })),
+                })))
+                .unwrap(),
                 _wire_bytes: permit,
             })
             .await

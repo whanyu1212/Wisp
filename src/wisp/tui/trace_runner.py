@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -17,10 +17,15 @@ from wisp.events import (
     KnownWispEvent,
     KnownWispEventAdapter,
     MessageCompleted,
+    RpcCommandFinished,
     ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
     TrustRequested,
 )
 from wisp.rpc.commands import ApprovalScope
+from wisp.tool_presentation import tool_result_status
 from wisp.tui.input_types import SubmissionId, new_submission_id
 from wisp.tui.rendering import LineTuiRenderer
 from wisp.tui.shell import TuiShell
@@ -36,6 +41,7 @@ from wisp.tui.trace_schema import (
     TraceFile,
     TraceFileAdapter,
     TraceInteractionProjection,
+    TraceToolCardProjection,
     TraceViewProjection,
 )
 
@@ -99,6 +105,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.errors: list[str] = []
         self.tokens: list[str] = []
         self.retained_text: str | None = None
+        self.tool_cards: list[TraceToolCardProjection] = []
+        self._active_tool_cards: dict[str, int] = {}
+        self._process_call_ids: set[str] = set()
+        self._trace_current_command_id: str | None = None
         self._streaming = False
 
     def view_updated(self, snapshot: Any) -> None:
@@ -131,11 +141,157 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self._streaming = False
         super().end_token_stream()
 
+    def approval_request(self, event: ToolApprovalRequested) -> None:
+        if _trace_process_call(event.name, event.arguments):
+            self._process_call_ids.add(event.call_id)
+            super().approval_request(event)
+            return
+        self._set_tool_card(
+            event.call_id,
+            event.name,
+            "awaiting_approval",
+            arguments_available=True,
+            lifecycle_start=True,
+        )
+        super().approval_request(event)
+
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, MessageCompleted):
             self.retained_text = event.content
             self._streaming = False
+        elif isinstance(event, ToolCallRequested):
+            if _trace_process_call(event.name, event.arguments):
+                self._process_call_ids.add(event.call_id)
+                super().event(event)
+                return
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            status = (
+                current.status
+                if current is not None
+                and current.status not in {"done", "error", "denied", "cancelled"}
+                else "requested"
+            )
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                status,
+                arguments_available=True,
+                lifecycle_start=True,
+            )
+        elif isinstance(event, ToolApprovalResolved):
+            if event.call_id in self._process_call_ids:
+                if not event.approved:
+                    self._process_call_ids.discard(event.call_id)
+                super().event(event)
+                return
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                "running" if event.approved else "denied",
+                arguments_available=True,
+                lifecycle_start=False,
+            )
+        elif isinstance(event, ToolResultReady):
+            if event.call_id in self._process_call_ids:
+                self._process_call_ids.discard(event.call_id)
+                super().event(event)
+                return
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            status = tool_result_status(
+                event.is_error,
+                event.exit_code,
+                process_state=event.process_state,
+            )
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                status,
+                arguments_available=current.arguments_available if current is not None else False,
+                lifecycle_start=False,
+            )
+        elif (
+            isinstance(event, RpcCommandFinished)
+            and event.command_type == "prompt"
+            and event.command_id == self._trace_current_command_id
+        ):
+            self._settle_tool_cards()
         super().event(event)
+
+    def rpc_stream_ended_before_command(self, command_id: str) -> None:
+        self._settle_tool_cards()
+        super().rpc_stream_ended_before_command(command_id)
+
+    def rpc_stream_ended_unexpectedly(self) -> None:
+        self._settle_tool_cards()
+        super().rpc_stream_ended_unexpectedly()
+
+    def _settle_tool_cards(self) -> None:
+        self._process_call_ids.clear()
+        for index, current in enumerate(self.tool_cards):
+            if current.status in {"done", "error", "denied", "cancelled"}:
+                continue
+            self.tool_cards[index] = current.model_copy(update={"status": "cancelled"})
+
+    def _set_tool_card(
+        self,
+        call_id: str,
+        name: str,
+        status: Literal[
+            "requested",
+            "awaiting_approval",
+            "running",
+            "done",
+            "error",
+            "denied",
+            "cancelled",
+        ],
+        *,
+        arguments_available: bool,
+        lifecycle_start: bool,
+    ) -> None:
+        index = self._active_tool_cards.get(call_id)
+        current = self.tool_cards[index] if index is not None else None
+        if (
+            lifecycle_start
+            and current is not None
+            and current.status
+            in {
+                "done",
+                "error",
+                "denied",
+                "cancelled",
+            }
+        ):
+            index = None
+            current = None
+        elif (
+            not lifecycle_start
+            and current is not None
+            and current.status
+            in {
+                "done",
+                "error",
+                "denied",
+                "cancelled",
+            }
+        ):
+            return
+        projection = TraceToolCardProjection(
+            call_id=call_id,
+            name=name,
+            status=status,
+            arguments_available=arguments_available,
+        )
+        if index is None:
+            self.tool_cards.append(projection)
+            self._active_tool_cards[call_id] = len(self.tool_cards) - 1
+        else:
+            self.tool_cards[index] = projection
+
+    def tool_card_projection(self) -> tuple[TraceToolCardProjection, ...]:
+        return tuple(self.tool_cards)
 
 
 class TraceController:
@@ -351,9 +507,20 @@ class TraceRunResult:
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None
+    tool_cards: tuple[TraceToolCardProjection, ...]
     notices: tuple[str, ...]
     errors: tuple[str, ...]
     tokens: tuple[str, ...]
+
+
+def _trace_process_call(name: str, arguments: object) -> bool:
+    if name != "bash" or not isinstance(arguments, dict):
+        return False
+    return (
+        arguments.get("operation") in {"poll", "cancel"}
+        and isinstance(arguments.get("process_id"), str)
+        and bool(arguments["process_id"].strip())
+    )
 
 
 def _reset_submission_ids() -> None:
@@ -534,6 +701,7 @@ class TraceRunner:
                 )
             elif inp.type == "rpc.event":
                 event = KnownWispEventAdapter.validate_python(inp.event)
+                self.renderer._trace_current_command_id = self.shell.state.current_command_id
                 should_exit = await self.shell._handle_rpc_event(event)
             elif inp.type == "rpc.closed":
                 should_exit = self.shell._handle_rpc_closed(_RpcEventsClosed(error=inp.error))
@@ -558,6 +726,7 @@ class TraceRunner:
             view=view,
             interaction=interaction,
             retained_text=self.renderer.retained_text,
+            tool_cards=self.renderer.tool_card_projection(),
             notices=tuple(self.renderer.notices),
             errors=tuple(self.renderer.errors),
             tokens=tuple(self.renderer.tokens),

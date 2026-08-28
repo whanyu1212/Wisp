@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from wisp import __version__
+
 
 @pytest.mark.process
 @pytest.mark.parametrize(
@@ -125,3 +127,180 @@ def test_rust_tui_cross_language_smoke(
     if rust_process_group is not None:
         with pytest.raises(ProcessLookupError):
             os.killpg(rust_process_group, 0)
+
+
+@pytest.mark.process
+def test_rust_tui_renders_bounded_tool_and_process_cards(tmp_path: Path) -> None:
+    binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
+    if binary_value is None:
+        pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
+    binary = Path(binary_value).resolve(strict=True)
+    backend = tmp_path / "tool_backend.py"
+    backend.write_text(
+        """
+import json
+import sys
+
+from wisp.events import RpcCommandFinished, ToolCallRequested, ToolResultReady
+
+
+def emit(event):
+    print(event.model_dump_json(), flush=True)
+
+
+request = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": request["frontend_version"],
+    "protocol_version": 2,
+    "event_schema_version": 34,
+    "min_protocol_version": 2,
+    "max_protocol_version": 2,
+    "capabilities": [],
+    "limits": {
+        "max_client_frame_bytes": 67108864,
+        "max_server_frame_bytes": 67108864
+    }
+}), flush=True)
+
+for line in sys.stdin:
+    command = json.loads(line)
+    command_type = command["type"]
+    command_id = command["id"]
+    if command_type == "prompt":
+        emit(ToolCallRequested(
+            call_id="read-1",
+            name="read",
+            arguments={"path": "README.md"},
+        ))
+        emit(ToolResultReady(
+            call_id="read-1",
+            name="read",
+            output="contents",
+            is_error=False,
+            summary="Read README.md",
+        ))
+        emit(ToolCallRequested(
+            call_id="poll-1",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        ))
+        emit(ToolResultReady(
+            call_id="poll-1",
+            name="bash",
+            output="running",
+            is_error=False,
+            process_id="process-1",
+            process_state="running",
+            stdout="first chunk",
+        ))
+        emit(ToolCallRequested(
+            call_id="poll-2",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        ))
+        emit(ToolResultReady(
+            call_id="poll-2",
+            name="bash",
+            output="completed",
+            is_error=False,
+            process_id="process-1",
+            process_state="completed",
+            stdout="safe\\u001b[2Jtail",
+        ))
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type="prompt",
+            ok=True,
+        ))
+    elif command_type == "shutdown":
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type="shutdown",
+            ok=True,
+        ))
+        break
+    else:
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type=command_type,
+            ok=True,
+        ))
+""",
+        encoding="utf-8",
+    )
+
+    child_pid, terminal_fd = pty.fork()
+    if child_pid == 0:
+        os.execve(
+            str(binary),
+            [
+                str(binary),
+                "--expected-backend-version",
+                __version__,
+                "--",
+                sys.executable,
+                str(backend),
+            ],
+            os.environ,
+        )
+
+    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    initial_terminal = termios.tcgetattr(terminal_fd)
+    output = bytearray()
+    status: int | None = None
+    prompt_sent = False
+    quit_sent = False
+    deadline = time.monotonic() + 20
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([terminal_fd], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(terminal_fd, 65536))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            if not prompt_sent and b"Type a prompt below to start." in output:
+                os.write(terminal_fd, b"tools\r")
+                prompt_sent = True
+            cards_visible = all(
+                marker in output
+                for marker in (
+                    b"README.md",
+                    b"contents",
+                    b"Process completed",
+                    b"safe",
+                    b"tail",
+                )
+            )
+            if cards_visible and not quit_sent and output.rfind(b"idle") > output.rfind(b"running"):
+                os.write(terminal_fd, b"\x03")
+                quit_sent = True
+            waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
+            if waited_pid == child_pid:
+                status = waited_status
+                break
+        if status is None:
+            pytest.fail(f"Rust TUI tool-card test timed out; output={bytes(output)!r}")
+    finally:
+        if status is None:
+            try:
+                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child_pid, 0)
+
+    assert prompt_sent, bytes(output)
+    assert quit_sent, bytes(output)
+    assert b"README.md" in output
+    assert b"Process completed" in output
+    assert b"safe" in output and b"tail" in output
+    assert b"safe\xef\xbf\xbd[2Jtail" in output
+    assert b"safe\x1b[2Jtail" not in output
+    assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
+    assert termios.tcgetattr(terminal_fd) == initial_terminal

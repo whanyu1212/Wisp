@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "name": "tool_card_lifecycle",
+  "description": "Generic tool cards retain request order while results resolve out of order or arrive without a request.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": null
+  },
+  "inputs": [
+    {
+      "type": "local.submit",
+      "content": "use tools",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-a",
+        "name": "read",
+        "arguments": {"path": "a.txt"}
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-b",
+        "name": "grep",
+        "arguments": {"pattern": "needle", "path": "src"}
+      },
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-b",
+        "name": "grep",
+        "output": "failed",
+        "is_error": true,
+        "failure_code": "internal_error",
+        "retryable": false,
+        "recovery_hint": null
+      },
+      "clock_ms": 30
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-a",
+        "name": "read",
+        "output": "A",
+        "is_error": false
+      },
+      "clock_ms": 40
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-orphan",
+        "name": "extension_tool",
+        "output": "orphan result",
+        "is_error": false
+      },
+      "clock_ms": 50
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-a",
+        "name": "read",
+        "arguments": {"path": "a-again.txt"}
+      },
+      "clock_ms": 52
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-a",
+        "name": "read",
+        "output": "A again",
+        "is_error": false
+      },
+      "clock_ms": 53
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-pending",
+        "name": "read",
+        "arguments": {"path": "missing.txt"}
+      },
+      "clock_ms": 55
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "command_id": "stale-prompt",
+        "command_type": "prompt",
+        "ok": false,
+        "error": "stale"
+      },
+      "clock_ms": 56
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-pending",
+        "name": "read",
+        "output": "late result",
+        "is_error": false
+      },
+      "clock_ms": 57
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-missing",
+        "name": "read",
+        "arguments": {"path": "missing-result.txt"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "command_id": "prompt-1",
+        "command_type": "prompt",
+        "ok": true
+      },
+      "clock_ms": 60
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "prompt",
+        "id": "prompt-1",
+        "prompt": "use tools"
+      },
+      {
+        "type": "get_session_stats",
+        "id": "get_session_stats-1"
+      }
+    ],
+    "view": {
+      "status": "idle",
+      "input_mode": "idle",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "idle",
+      "current_command_id": null,
+      "current_command_type": null,
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null,
+    "tool_cards": [
+      {
+        "call_id": "call-a",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-b",
+        "name": "grep",
+        "status": "error",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-orphan",
+        "name": "extension_tool",
+        "status": "done",
+        "arguments_available": false
+      },
+      {
+        "call_id": "call-a",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-pending",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-missing",
+        "name": "read",
+        "status": "cancelled",
+        "arguments_available": true
+      }
+    ]
+  }
+}

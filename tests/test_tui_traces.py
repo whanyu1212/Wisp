@@ -117,6 +117,12 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
             f"  actual:   {result.retained_text!r}\n"
             f"  expected: {trace.expected.retained_text!r}"
         )
+        if trace.expected.tool_cards is not None:
+            assert result.tool_cards == trace.expected.tool_cards, (
+                f"tool_cards mismatch in {path.name}\n"
+                f"  actual:   {[card.model_dump() for card in result.tool_cards]!r}\n"
+                f"  expected: {[card.model_dump() for card in trace.expected.tool_cards]!r}"
+            )
 
     anyio.run(run)
 

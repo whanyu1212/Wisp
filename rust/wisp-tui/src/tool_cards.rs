@@ -1,0 +1,1276 @@
+//! Terminal-independent, bounded tool and managed-process presentation state.
+
+use std::fmt::Write as _;
+
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+pub const TOOL_OUTPUT_MAX_LINES: usize = 500;
+pub const TOOL_PREVIEW_MAX_BYTES: usize = 2_000;
+pub const TOOL_PREVIEW_MAX_LINES: usize = 8;
+pub const INTERRUPTED_TOOL_RESULT_TEXT: &str =
+    "Tool call interrupted before completion; execution outcome is unknown.";
+const BUILTIN_ACTION_MAX_CHARS: usize = 200;
+const GENERIC_ACTION_MAX_CHARS: usize = 160;
+const GENERIC_VALUE_MAX_CHARS: usize = 64;
+const GENERIC_MAX_ITEMS: usize = 8;
+const PATH_MAX_CHARS: usize = 80;
+const REASON_MAX_BYTES: usize = 512;
+const TOOL_NAME_MAX_CHARS: usize = 128;
+const CALL_ID_RETAINED_MAX_CHARS: usize = 128;
+const PROCESS_ID_DISPLAY_MAX_CHARS: usize = 64;
+const IDENTITY_MAX_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolStatus {
+    Requested,
+    AwaitingApproval,
+    Running,
+    Done,
+    Error,
+    Denied,
+    Cancelled,
+}
+
+impl ToolStatus {
+    pub fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Done | Self::Error | Self::Denied | Self::Cancelled
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Denied => "denied",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessOperation {
+    Poll,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessDisplayState {
+    Polling,
+    Cancelling,
+    Running,
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    PollDenied,
+    CancelDenied,
+    PollInterrupted,
+    CancelInterrupted,
+    PollFailed,
+    CancelFailed,
+    Observed,
+}
+
+impl ProcessDisplayState {
+    pub fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::TimedOut | Self::Cancelled
+        )
+    }
+
+    pub fn status(self) -> ToolStatus {
+        match self {
+            Self::Polling | Self::Cancelling | Self::Running | Self::Observed => {
+                ToolStatus::Running
+            }
+            Self::Completed => ToolStatus::Done,
+            Self::Cancelled
+            | Self::PollDenied
+            | Self::CancelDenied
+            | Self::PollInterrupted
+            | Self::CancelInterrupted => ToolStatus::Cancelled,
+            Self::Failed | Self::TimedOut | Self::PollFailed | Self::CancelFailed => {
+                ToolStatus::Error
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BoundedText {
+    pub text: String,
+    pub source_bytes: u64,
+    pub source_lines: u64,
+    pub dropped_bytes: u64,
+    pub dropped_lines: u64,
+    /// Absolute source byte represented by `text[0]`; nonzero for retained tails.
+    pub base_offset: u64,
+}
+
+impl BoundedText {
+    pub fn head(source: &str, max_bytes: usize, max_lines: usize) -> Self {
+        bounded_text(source, max_bytes, max_lines, Retention::Head)
+    }
+
+    pub fn tail(source: &str, max_bytes: usize, max_lines: usize) -> Self {
+        bounded_text(source, max_bytes, max_lines, Retention::Tail)
+    }
+
+    pub fn preview_head(&self) -> Self {
+        Self::head(&self.text, TOOL_PREVIEW_MAX_BYTES, TOOL_PREVIEW_MAX_LINES)
+    }
+
+    pub fn preview_tail(&self) -> Self {
+        let mut preview = Self::tail(&self.text, TOOL_PREVIEW_MAX_BYTES, TOOL_PREVIEW_MAX_LINES);
+        preview.base_offset = preview.base_offset.saturating_add(self.base_offset);
+        preview.source_bytes = self.source_bytes;
+        preview.source_lines = self.source_lines;
+        preview.dropped_bytes = preview.base_offset;
+        preview.dropped_lines = self
+            .source_lines
+            .saturating_sub(logical_line_count(&preview.text));
+        preview
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallInput {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolResultInput {
+    pub call_id: String,
+    pub name: String,
+    pub output: String,
+    pub output_source_bytes: u64,
+    pub is_error: bool,
+    pub failure_code: Option<String>,
+    pub retryable: bool,
+    pub recovery_hint: Option<String>,
+    pub exit_code: Option<i64>,
+    pub output_has_exit_status: bool,
+    pub before_text: Option<String>,
+    pub created: bool,
+    pub summary: Option<String>,
+    pub truncated: bool,
+    pub process_id: Option<String>,
+    pub process_state: Option<String>,
+    pub process_error: Option<String>,
+    pub stdout: Option<String>,
+    pub stdout_source_bytes: u64,
+    pub stderr: Option<String>,
+    pub stderr_source_bytes: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub stdout_dropped_bytes: u64,
+    pub stderr_dropped_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessCallIdentity {
+    pub process_id: String,
+    pub operation: ProcessOperation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCardSnapshot {
+    pub call_id: String,
+    pub name: String,
+    pub action_arguments: String,
+    pub status: ToolStatus,
+    pub arguments_available: bool,
+    pub detail: String,
+    pub retained_output: BoundedText,
+    pub backend_truncated: bool,
+    pub failure_code: Option<String>,
+    pub retryable: bool,
+}
+
+impl ToolCardSnapshot {
+    pub fn requested(input: &ToolCallInput, status: ToolStatus) -> Self {
+        Self {
+            call_id: clip_chars(
+                identity_for_display(&input.call_id),
+                CALL_ID_RETAINED_MAX_CHARS,
+            ),
+            name: clip_chars(&input.name, TOOL_NAME_MAX_CHARS),
+            action_arguments: format_tool_arguments(&input.name, &input.arguments),
+            status,
+            arguments_available: true,
+            detail: String::new(),
+            retained_output: BoundedText::default(),
+            backend_truncated: false,
+            failure_code: None,
+            retryable: false,
+        }
+    }
+
+    pub fn result_without_request(input: &ToolResultInput) -> Self {
+        let call = ToolCallInput {
+            call_id: input.call_id.clone(),
+            name: input.name.clone(),
+            arguments: Value::Object(Map::new()),
+        };
+        let mut card = Self::requested(&call, ToolStatus::Requested);
+        card.arguments_available = false;
+        card.apply_result(input);
+        card
+    }
+
+    pub fn enrich_call(&mut self, input: &ToolCallInput) -> bool {
+        if self.status.terminal() {
+            return false;
+        }
+        let name = clip_chars(&input.name, TOOL_NAME_MAX_CHARS);
+        if self.arguments_available
+            && (self.name != name
+                || self.action_arguments != format_tool_arguments(&input.name, &input.arguments))
+        {
+            self.status = ToolStatus::Error;
+            self.detail = "conflicting tool lifecycle metadata".into();
+            return true;
+        }
+        self.name = name;
+        self.action_arguments = format_tool_arguments(&input.name, &input.arguments);
+        self.arguments_available = true;
+        true
+    }
+
+    pub fn approval_requested(&mut self) -> bool {
+        if self.status.terminal() || self.status == ToolStatus::AwaitingApproval {
+            return false;
+        }
+        self.status = ToolStatus::AwaitingApproval;
+        true
+    }
+
+    pub fn approval_resolved(&mut self, approved: bool, reason: Option<&str>) -> bool {
+        if self.status.terminal() {
+            return false;
+        }
+        if approved {
+            if self.status == ToolStatus::Running {
+                return false;
+            }
+            self.status = ToolStatus::Running;
+        } else {
+            self.status = ToolStatus::Denied;
+            self.detail = bounded_reason(reason.unwrap_or("denied"));
+        }
+        true
+    }
+
+    pub fn apply_result(&mut self, input: &ToolResultInput) -> bool {
+        if self.status == ToolStatus::Denied || self.status.terminal() {
+            return false;
+        }
+        self.status = tool_result_status(input);
+        self.retained_output = BoundedText::head(
+            &normalize_newlines(&input.output),
+            TOOL_OUTPUT_MAX_BYTES,
+            TOOL_OUTPUT_MAX_LINES,
+        );
+        self.retained_output.source_bytes = input
+            .output_source_bytes
+            .max(u64::try_from(input.output.len()).unwrap_or(u64::MAX));
+        self.retained_output.dropped_bytes = self
+            .retained_output
+            .source_bytes
+            .saturating_sub(u64::try_from(self.retained_output.text.len()).unwrap_or(u64::MAX));
+        let preview = self.retained_output.preview_head();
+        self.detail = preferred_result_detail(input, &preview.text, self.status);
+        self.backend_truncated = input.truncated;
+        self.failure_code = input.failure_code.as_deref().map(bounded_reason);
+        self.retryable = input.retryable;
+        true
+    }
+
+    pub fn cancel(&mut self, reason: &str) -> bool {
+        if self.status.terminal() {
+            return false;
+        }
+        self.status = ToolStatus::Cancelled;
+        self.detail = bounded_reason(reason);
+        true
+    }
+
+    pub fn action(&self) -> String {
+        let verb = action_verb(&self.name, self.status);
+        let mut action = if known_tool(&self.name) {
+            verb.to_owned()
+        } else {
+            format!("{verb} {}", self.name)
+        };
+        if !self.arguments_available {
+            action.push_str("  (arguments unavailable)");
+        } else if !self.action_arguments.is_empty() {
+            action.push_str("  ");
+            action.push_str(&self.action_arguments);
+        }
+        action
+    }
+
+    pub fn preview(&self) -> &str {
+        &self.detail
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessCardSnapshot {
+    pub process_id: String,
+    pub display_state: ProcessDisplayState,
+    pub poll_count: u32,
+    pub call_count: u32,
+    pub retained_output: BoundedText,
+    pub backend_truncated: bool,
+    pub backend_dropped_bytes: u64,
+    last_stream_label: Option<&'static str>,
+    last_sequence: Option<u64>,
+}
+
+impl ProcessCardSnapshot {
+    pub fn new(process_id: String) -> Self {
+        Self {
+            process_id,
+            display_state: ProcessDisplayState::Observed,
+            poll_count: 0,
+            call_count: 0,
+            retained_output: BoundedText::default(),
+            backend_truncated: false,
+            backend_dropped_bytes: 0,
+            last_stream_label: None,
+            last_sequence: None,
+        }
+    }
+
+    pub fn begin(&mut self, operation: ProcessOperation, sequence: u64) -> bool {
+        if !self.accept_sequence(sequence) {
+            return false;
+        }
+        self.call_count = self.call_count.saturating_add(1);
+        self.display_state = match operation {
+            ProcessOperation::Poll => {
+                self.poll_count = self.poll_count.saturating_add(1);
+                ProcessDisplayState::Polling
+            }
+            ProcessOperation::Cancel => ProcessDisplayState::Cancelling,
+        };
+        true
+    }
+
+    pub fn deny(
+        &mut self,
+        operation: ProcessOperation,
+        reason: Option<&str>,
+        sequence: u64,
+    ) -> bool {
+        if !self.accept_sequence(sequence) {
+            return false;
+        }
+        if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+            self.append_unlabelled(&bounded_reason(reason));
+        }
+        self.display_state = match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollDenied,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelDenied,
+        };
+        true
+    }
+
+    pub fn interrupt(&mut self, operation: ProcessOperation, sequence: u64) -> bool {
+        if !self.accept_sequence(sequence) {
+            return false;
+        }
+        self.display_state = match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollInterrupted,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelInterrupted,
+        };
+        true
+    }
+
+    pub fn observe(
+        &mut self,
+        operation: ProcessOperation,
+        result: &ToolResultInput,
+        sequence: u64,
+    ) -> bool {
+        if !self.accept_sequence(sequence) {
+            return false;
+        }
+        let stdout = result.stdout.as_deref().unwrap_or("");
+        let stderr = result.stderr.as_deref().unwrap_or("");
+        if !stdout.is_empty() {
+            self.append_stream("stdout:", stdout);
+        }
+        if !stderr.is_empty() {
+            self.append_stream("stderr:", stderr);
+        }
+        if stdout.is_empty() && stderr.is_empty() {
+            if let Some(error) = result
+                .process_error
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                self.append_unlabelled(&bounded_reason(error));
+            } else if !result.output.is_empty() {
+                self.append_unlabelled(&result.output);
+            }
+        }
+        self.backend_truncated |=
+            result.truncated || result.stdout_truncated || result.stderr_truncated;
+        self.backend_dropped_bytes = self
+            .backend_dropped_bytes
+            .saturating_add(result.stdout_dropped_bytes)
+            .saturating_add(result.stderr_dropped_bytes)
+            .saturating_add(
+                result
+                    .stdout_source_bytes
+                    .saturating_sub(u64::try_from(stdout.len()).unwrap_or(u64::MAX)),
+            )
+            .saturating_add(
+                result
+                    .stderr_source_bytes
+                    .saturating_sub(u64::try_from(stderr.len()).unwrap_or(u64::MAX)),
+            );
+        self.display_state = process_result_state(operation, result);
+        true
+    }
+
+    fn accept_sequence(&mut self, sequence: u64) -> bool {
+        if self.last_sequence.is_some_and(|current| sequence < current) {
+            return false;
+        }
+        self.last_sequence = Some(sequence);
+        true
+    }
+
+    pub fn action(&self) -> String {
+        let state = match self.display_state {
+            ProcessDisplayState::Polling => "Polling process",
+            ProcessDisplayState::Cancelling => "Cancelling process",
+            ProcessDisplayState::Running => "Running process",
+            ProcessDisplayState::Completed => "Process completed",
+            ProcessDisplayState::Failed => "Process failed",
+            ProcessDisplayState::TimedOut => "Process timed out",
+            ProcessDisplayState::Cancelled => "Process cancelled",
+            ProcessDisplayState::PollDenied => "Process poll denied",
+            ProcessDisplayState::CancelDenied => "Process cancellation denied",
+            ProcessDisplayState::PollInterrupted => "Process poll interrupted",
+            ProcessDisplayState::CancelInterrupted => "Process cancellation interrupted",
+            ProcessDisplayState::PollFailed => "Process poll failed",
+            ProcessDisplayState::CancelFailed => "Process cancellation failed",
+            ProcessDisplayState::Observed => "Observed process",
+        };
+        format!(
+            "{state}  {} · {} call{} · {} poll{}",
+            clip_chars(
+                &one_line(identity_for_display(&self.process_id)),
+                PROCESS_ID_DISPLAY_MAX_CHARS,
+            ),
+            self.call_count,
+            if self.call_count == 1 { "" } else { "s" },
+            self.poll_count,
+            if self.poll_count == 1 { "" } else { "s" },
+        )
+    }
+
+    pub fn preview(&self) -> BoundedText {
+        self.retained_output.preview_tail()
+    }
+
+    fn append_stream(&mut self, label: &'static str, output: &str) {
+        let normalized = normalize_newlines(output);
+        if normalized.is_empty() {
+            return;
+        }
+        let content = normalized.trim_end_matches('\n');
+        let content = if content.is_empty() { "\n" } else { content };
+        let chunk = if self.last_stream_label == Some(label) {
+            content.to_owned()
+        } else {
+            format!("{label}\n{content}")
+        };
+        self.append_chunk(&chunk);
+        self.last_stream_label = self
+            .retained_output
+            .text
+            .lines()
+            .any(|line| line == label)
+            .then_some(label);
+    }
+
+    fn append_unlabelled(&mut self, output: &str) {
+        let normalized = normalize_newlines(output);
+        if normalized.is_empty() {
+            return;
+        }
+        let content = normalized.trim_end_matches('\n');
+        self.append_chunk(if content.is_empty() { "\n" } else { content });
+        self.last_stream_label = None;
+    }
+
+    fn append_chunk(&mut self, chunk: &str) {
+        let combined = if self.retained_output.text.is_empty() {
+            chunk.to_owned()
+        } else {
+            format!("{}\n{chunk}", self.retained_output.text)
+        };
+        let previously_dropped = self.retained_output.base_offset;
+        let previously_dropped_lines = self.retained_output.dropped_lines;
+        let mut bounded =
+            BoundedText::tail(&combined, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
+        bounded.base_offset = bounded.base_offset.saturating_add(previously_dropped);
+        bounded.source_bytes = bounded.source_bytes.saturating_add(previously_dropped);
+        bounded.source_lines = bounded
+            .source_lines
+            .saturating_add(previously_dropped_lines);
+        bounded.dropped_bytes = bounded.base_offset;
+        bounded.dropped_lines = bounded
+            .dropped_lines
+            .saturating_add(previously_dropped_lines);
+        self.retained_output = bounded;
+    }
+}
+
+pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
+    let Some(arguments) = arguments.as_object() else {
+        return Value::Object(Map::new());
+    };
+    let keys: &[&str] = match name {
+        "read" => &["path", "offset", "limit"],
+        "grep" => &[
+            "pattern",
+            "path",
+            "glob",
+            "ignore_case",
+            "literal",
+            "context",
+            "max_results",
+        ],
+        "find" => &["pattern", "path", "max_results"],
+        "ls" => &["path", "all"],
+        "bash" => &[
+            "operation",
+            "command",
+            "process_id",
+            "wait_seconds",
+            "lifetime_seconds",
+            "yield_seconds",
+        ],
+        "edit" | "write" => &["path"],
+        _ => {
+            let mut bounded = Map::new();
+            let mut selected: Vec<&String> = Vec::with_capacity(GENERIC_MAX_ITEMS);
+            for key in arguments.keys() {
+                let position = selected
+                    .binary_search_by(|candidate| candidate.as_str().cmp(key.as_str()))
+                    .unwrap_or_else(|position| position);
+                if position < GENERIC_MAX_ITEMS {
+                    selected.insert(position, key);
+                    if selected.len() > GENERIC_MAX_ITEMS {
+                        selected.pop();
+                    }
+                }
+            }
+            for key in selected {
+                let value = arguments.get(key).expect("selected key exists");
+                bounded.insert(
+                    clip_chars(key, 64),
+                    bounded_argument_value(value, GENERIC_VALUE_MAX_CHARS),
+                );
+            }
+            return Value::Object(bounded);
+        }
+    };
+    let mut bounded = Map::new();
+    for key in keys {
+        let Some(value) = arguments.get(*key) else {
+            continue;
+        };
+        let retained = if *key == "process_id" {
+            value
+                .as_str()
+                .map(bounded_identity)
+                .map(Value::String)
+                .unwrap_or_else(|| bounded_argument_value(value, 64))
+        } else {
+            let max_chars = if *key == "command" {
+                BUILTIN_ACTION_MAX_CHARS
+            } else {
+                256
+            };
+            bounded_argument_value(value, max_chars)
+        };
+        bounded.insert((*key).to_owned(), retained);
+    }
+    Value::Object(bounded)
+}
+
+fn bounded_argument_value(value: &Value, max_chars: usize) -> Value {
+    match value {
+        Value::String(value) => Value::String(clip_chars(value, max_chars)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::Array(values) => Value::String(format!("[{} items]", values.len())),
+        Value::Object(values) => Value::String(format!("{{{} fields}}", values.len())),
+    }
+}
+
+pub fn bounded_identity(source: &str) -> String {
+    if source.len() <= IDENTITY_MAX_BYTES {
+        return format!("r{}:{source}", source.len());
+    }
+    let digest = Sha256::digest(source.as_bytes());
+    let mut encoded = String::with_capacity(2 + digest.len() * 2);
+    encoded.push_str("h:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn identity_for_display(identity: &str) -> &str {
+    let Some(encoded) = identity.strip_prefix('r') else {
+        return identity;
+    };
+    let Some((length, source)) = encoded.split_once(':') else {
+        return identity;
+    };
+    if length.parse::<usize>().ok() == Some(source.len()) {
+        source
+    } else {
+        identity
+    }
+}
+
+pub fn process_call_identity(name: &str, arguments: &Value) -> Option<ProcessCallIdentity> {
+    if name != "bash" {
+        return None;
+    }
+    let object = arguments.as_object()?;
+    let operation = match object.get("operation").and_then(Value::as_str)? {
+        "poll" => ProcessOperation::Poll,
+        "cancel" => ProcessOperation::Cancel,
+        _ => return None,
+    };
+    let process_id = object.get("process_id")?.as_str()?.trim();
+    if process_id.is_empty() {
+        return None;
+    }
+    Some(ProcessCallIdentity {
+        process_id: process_id.to_owned(),
+        operation,
+    })
+}
+
+pub fn tool_result_status(result: &ToolResultInput) -> ToolStatus {
+    if result.process_state.as_deref() == Some("cancelled") {
+        ToolStatus::Cancelled
+    } else if result.is_error
+        || result.exit_code.is_some_and(|code| code != 0)
+        || matches!(
+            result.process_state.as_deref(),
+            Some("failed" | "timed_out")
+        )
+    {
+        ToolStatus::Error
+    } else {
+        ToolStatus::Done
+    }
+}
+
+fn process_result_state(
+    operation: ProcessOperation,
+    result: &ToolResultInput,
+) -> ProcessDisplayState {
+    match result.process_state.as_deref() {
+        Some("running") => ProcessDisplayState::Running,
+        Some("completed") => {
+            if tool_result_status(result) == ToolStatus::Done {
+                ProcessDisplayState::Completed
+            } else {
+                ProcessDisplayState::Failed
+            }
+        }
+        Some("failed") => ProcessDisplayState::Failed,
+        Some("timed_out") => ProcessDisplayState::TimedOut,
+        Some("cancelled") => ProcessDisplayState::Cancelled,
+        _ if tool_result_status(result) == ToolStatus::Error => match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollFailed,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelFailed,
+        },
+        _ => ProcessDisplayState::Observed,
+    }
+}
+
+fn preferred_result_detail(result: &ToolResultInput, preview: &str, status: ToolStatus) -> String {
+    if status == ToolStatus::Error {
+        if let Some(error) = result
+            .process_error
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            return bounded_reason(error);
+        }
+        if let Some(hint) = result
+            .recovery_hint
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            return bounded_reason(hint);
+        }
+    }
+    if status == ToolStatus::Done {
+        if let Some(summary) = result.summary.as_deref().filter(|value| !value.is_empty()) {
+            return bounded_reason(summary);
+        }
+    }
+    preview.to_owned()
+}
+
+fn action_verb(name: &str, status: ToolStatus) -> &'static str {
+    let words = match name {
+        "bash" => [
+            "Run",
+            "Awaiting approval to run",
+            "Running",
+            "Ran",
+            "Failed to run",
+            "Denied running",
+            "Cancelled running",
+        ],
+        "read" => [
+            "Read",
+            "Awaiting approval to read",
+            "Reading",
+            "Read",
+            "Failed to read",
+            "Denied reading",
+            "Cancelled reading",
+        ],
+        "grep" | "find" => [
+            "Search",
+            "Awaiting approval to search",
+            "Searching",
+            "Searched",
+            "Failed to search",
+            "Denied searching",
+            "Cancelled searching",
+        ],
+        "ls" => [
+            "List",
+            "Awaiting approval to list",
+            "Listing",
+            "Listed",
+            "Failed to list",
+            "Denied listing",
+            "Cancelled listing",
+        ],
+        "edit" => [
+            "Edit",
+            "Awaiting approval to edit",
+            "Editing",
+            "Edited",
+            "Failed to edit",
+            "Denied editing",
+            "Cancelled editing",
+        ],
+        "write" => [
+            "Write",
+            "Awaiting approval to write",
+            "Writing",
+            "Wrote",
+            "Failed to write",
+            "Denied writing",
+            "Cancelled writing",
+        ],
+        _ => [
+            "Call",
+            "Awaiting approval to call",
+            "Calling",
+            "Called",
+            "Failed to call",
+            "Denied calling",
+            "Cancelled calling",
+        ],
+    };
+    words[match status {
+        ToolStatus::Requested => 0,
+        ToolStatus::AwaitingApproval => 1,
+        ToolStatus::Running => 2,
+        ToolStatus::Done => 3,
+        ToolStatus::Error => 4,
+        ToolStatus::Denied => 5,
+        ToolStatus::Cancelled => 6,
+    }]
+}
+
+fn known_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "bash" | "read" | "grep" | "find" | "ls" | "edit" | "write"
+    )
+}
+
+fn format_tool_arguments(name: &str, arguments: &Value) -> String {
+    let Some(arguments) = arguments.as_object() else {
+        return clip_chars(&scalar_value(arguments), GENERIC_VALUE_MAX_CHARS);
+    };
+    let formatted = match name {
+        "read" => format_read(arguments),
+        "grep" => format_grep(arguments),
+        "find" => format_find(arguments),
+        "ls" => path_value(arguments, "path", "."),
+        "bash" => format_bash(arguments),
+        "edit" | "write" => path_value(arguments, "path", "<path>"),
+        _ => return format_generic(arguments),
+    };
+    clip_chars(&formatted, BUILTIN_ACTION_MAX_CHARS)
+}
+
+fn format_read(arguments: &Map<String, Value>) -> String {
+    let mut output = path_value(arguments, "path", "<path>");
+    let offset = positive_u64(arguments.get("offset"));
+    let limit = positive_u64(arguments.get("limit"));
+    if offset.is_some() || limit.is_some() {
+        let start = offset.unwrap_or(1);
+        let end = limit.map(|limit| start.saturating_add(limit).saturating_sub(1));
+        output.push(':');
+        output.push_str(&start.to_string());
+        output.push('-');
+        if let Some(end) = end {
+            output.push_str(&end.to_string());
+        }
+    }
+    output
+}
+
+fn format_grep(arguments: &Map<String, Value>) -> String {
+    let pattern = string_value(arguments, "pattern", "");
+    let path = path_value(arguments, "path", ".");
+    format!("/{}/ in {path}", clip_chars(&one_line(&pattern), 64))
+}
+
+fn format_find(arguments: &Map<String, Value>) -> String {
+    let pattern = string_value(arguments, "pattern", "*");
+    let path = path_value(arguments, "path", ".");
+    format!("{} in {path}", clip_chars(&one_line(&pattern), 64))
+}
+
+fn format_bash(arguments: &Map<String, Value>) -> String {
+    let operation = arguments
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("run");
+    if matches!(operation, "poll" | "cancel") {
+        return format!(
+            "{operation} {}",
+            clip_chars(
+                &one_line(&string_value(arguments, "process_id", "<process>")),
+                PROCESS_ID_DISPLAY_MAX_CHARS,
+            )
+        );
+    }
+    let command = string_value(arguments, "command", "");
+    if operation == "start" {
+        format!("start {}", clip_chars(&one_line(&command), 180))
+    } else {
+        clip_chars(&one_line(&command), 190)
+    }
+}
+
+fn format_generic(arguments: &Map<String, Value>) -> String {
+    let mut keys: Vec<&String> = Vec::with_capacity(GENERIC_MAX_ITEMS);
+    for key in arguments.keys() {
+        let position = keys
+            .binary_search_by(|candidate| candidate.as_str().cmp(key.as_str()))
+            .unwrap_or_else(|position| position);
+        if position < GENERIC_MAX_ITEMS {
+            keys.insert(position, key);
+            if keys.len() > GENERIC_MAX_ITEMS {
+                keys.pop();
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for key in keys {
+        let value = arguments.get(key).expect("key came from map");
+        parts.push(format!(
+            "{}={}",
+            clip_chars(&one_line(key), 32),
+            clip_chars(&scalar_value(value), GENERIC_VALUE_MAX_CHARS)
+        ));
+    }
+    if arguments.len() > GENERIC_MAX_ITEMS {
+        parts.push(format!("… +{} fields", arguments.len() - GENERIC_MAX_ITEMS));
+    }
+    clip_chars(&parts.join(" "), GENERIC_ACTION_MAX_CHARS)
+}
+
+fn scalar_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => one_line(value),
+        Value::Array(values) => format!("[{} items]", values.len()),
+        Value::Object(values) => format!("{{{} fields}}", values.len()),
+    }
+}
+
+fn path_value(arguments: &Map<String, Value>, key: &str, default: &str) -> String {
+    middle_clip_chars(
+        &one_line(&string_value(arguments, key, default)),
+        PATH_MAX_CHARS,
+    )
+}
+
+fn string_value(arguments: &Map<String, Value>, key: &str, default: &str) -> String {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+        .to_owned()
+}
+
+fn positive_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|value| *value > 0)
+}
+
+fn bounded_reason(reason: &str) -> String {
+    clip_utf8_bytes(&normalize_newlines(reason), REASON_MAX_BYTES)
+}
+
+fn normalize_newlines(source: &str) -> String {
+    source.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut output = value.chars().take(keep).collect::<String>();
+    output.push('…');
+    output
+}
+
+fn middle_clip_chars(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_owned();
+    }
+    let left = max_chars.saturating_sub(1) / 2;
+    let right = max_chars.saturating_sub(1).saturating_sub(left);
+    let prefix = value.chars().take(left).collect::<String>();
+    let suffix = value
+        .chars()
+        .skip(count.saturating_sub(right))
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
+fn clip_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+#[derive(Clone, Copy)]
+enum Retention {
+    Head,
+    Tail,
+}
+
+fn bounded_text(
+    source: &str,
+    max_bytes: usize,
+    max_lines: usize,
+    retention: Retention,
+) -> BoundedText {
+    let source_bytes = u64::try_from(source.len()).unwrap_or(u64::MAX);
+    let source_lines = logical_line_count(source);
+    let (start, end) = match retention {
+        Retention::Head => head_bounds(source, max_bytes, max_lines),
+        Retention::Tail => tail_bounds(source, max_bytes, max_lines),
+    };
+    let text = source[start..end].to_owned();
+    let retained_lines = logical_line_count(&text);
+    BoundedText {
+        text,
+        source_bytes,
+        source_lines,
+        dropped_bytes: source_bytes.saturating_sub(u64::try_from(end - start).unwrap_or(u64::MAX)),
+        dropped_lines: source_lines.saturating_sub(retained_lines),
+        base_offset: u64::try_from(start).unwrap_or(u64::MAX),
+    }
+}
+
+fn head_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usize) {
+    let mut end = source.len().min(max_bytes);
+    while end > 0 && !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    if max_lines == 0 {
+        return (0, 0);
+    }
+    let mut lines = 1_usize;
+    for (index, byte) in source.as_bytes()[..end].iter().enumerate() {
+        if *byte == b'\n' {
+            if lines == max_lines {
+                end = index;
+                break;
+            }
+            lines += 1;
+        }
+    }
+    (0, end)
+}
+
+fn tail_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usize) {
+    if max_lines == 0 {
+        return (source.len(), source.len());
+    }
+    let mut start = source.len().saturating_sub(max_bytes);
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut lines = 1_usize;
+    for index in (start..source.len()).rev() {
+        if source.as_bytes()[index] == b'\n' {
+            if lines == max_lines {
+                start = index + 1;
+                break;
+            }
+            lines += 1;
+        }
+    }
+    (start, source.len())
+}
+
+fn logical_line_count(source: &str) -> u64 {
+    if source.is_empty() {
+        return 0;
+    }
+    u64::try_from(
+        source
+            .as_bytes()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+    .saturating_add(u64::from(!source.ends_with('\n')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(output: &str) -> ToolResultInput {
+        ToolResultInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            output: output.into(),
+            output_source_bytes: output.len() as u64,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: None,
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn argument_formatting_never_retains_write_or_edit_payloads() {
+        let huge = "secret".repeat(100_000);
+        let write = serde_json::json!({"path": "/tmp/file", "content": huge});
+        let edit = serde_json::json!({
+            "path": "/tmp/file",
+            "edits": [{"oldText": huge, "newText": huge}]
+        });
+
+        assert_eq!(format_tool_arguments("write", &write), "/tmp/file");
+        assert_eq!(format_tool_arguments("edit", &edit), "/tmp/file");
+        assert!(format_tool_arguments("extension", &edit).len() <= GENERIC_ACTION_MAX_CHARS + 3);
+    }
+
+    #[test]
+    fn bounded_text_respects_utf8_byte_and_line_limits() {
+        let source = format!("{}\n{}", "界".repeat(1_000), "tail\n".repeat(20));
+        let head = BoundedText::head(&source, 101, 3);
+        let tail = BoundedText::tail(&source, 101, 3);
+
+        assert!(head.text.len() <= 101);
+        assert!(tail.text.len() <= 101);
+        assert!(head.text.is_char_boundary(head.text.len()));
+        assert!(tail.text.is_char_boundary(0));
+        assert!(logical_line_count(&head.text) <= 3);
+        assert!(logical_line_count(&tail.text) <= 3);
+        assert_eq!(tail.base_offset, tail.dropped_bytes);
+    }
+
+    #[test]
+    fn tool_cards_are_monotonic_and_results_are_bounded() {
+        let input = ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "README.md"}),
+        };
+        let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+        assert!(card.approval_requested());
+        assert!(card.approval_resolved(true, None));
+        let mut completed = result(&"line\n".repeat(20_000));
+        completed.summary = Some("Read 20,000 lines".into());
+        assert!(card.apply_result(&completed));
+        assert_eq!(card.status, ToolStatus::Done);
+        assert!(card.retained_output.text.len() <= TOOL_OUTPUT_MAX_BYTES);
+        assert_eq!(card.detail, "Read 20,000 lines");
+        assert!(!card.approval_resolved(false, Some("late")));
+    }
+
+    #[test]
+    fn denial_is_not_overwritten_by_the_synthetic_result() {
+        let input = ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut card = ToolCardSnapshot::requested(&input, ToolStatus::AwaitingApproval);
+        assert!(card.approval_resolved(false, Some("policy")));
+        assert!(!card.apply_result(&result("denied")));
+        assert_eq!(card.status, ToolStatus::Denied);
+        assert_eq!(card.detail, "policy");
+    }
+
+    #[test]
+    fn process_calls_are_identified_only_from_poll_or_cancel_arguments() {
+        assert_eq!(
+            process_call_identity(
+                "bash",
+                &serde_json::json!({"operation": "poll", "process_id": "abc"})
+            ),
+            Some(ProcessCallIdentity {
+                process_id: "abc".into(),
+                operation: ProcessOperation::Poll,
+            })
+        );
+        assert!(
+            process_call_identity("bash", &serde_json::json!({"operation": "start"})).is_none()
+        );
+        assert!(process_call_identity("read", &serde_json::json!({"process_id": "abc"})).is_none());
+    }
+
+    #[test]
+    fn process_lifecycle_coalesces_output_with_a_bounded_tail() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut first = result("");
+        first.name = "bash".into();
+        first.process_id = Some("process-1".into());
+        first.process_state = Some("running".into());
+        first.stdout = Some("first".into());
+        card.observe(ProcessOperation::Poll, &first, 0);
+        assert_eq!(card.display_state, ProcessDisplayState::Running);
+        assert!(card.retained_output.text.contains("stdout:\nfirst"));
+
+        card.begin(ProcessOperation::Poll, 1);
+        let mut second = first.clone();
+        second.stdout = Some("x\n".repeat(100_000));
+        second.process_state = Some("completed".into());
+        card.observe(ProcessOperation::Poll, &second, 1);
+
+        assert_eq!(card.display_state, ProcessDisplayState::Completed);
+        assert_eq!(card.call_count, 2);
+        assert_eq!(card.poll_count, 2);
+        assert!(card.retained_output.text.len() <= TOOL_OUTPUT_MAX_BYTES);
+        assert!(logical_line_count(&card.retained_output.text) <= TOOL_OUTPUT_MAX_LINES as u64);
+        assert!(card.retained_output.base_offset > 0);
+    }
+
+    #[test]
+    fn process_stream_labels_reappear_after_tail_eviction_and_blank_chunks_are_visible() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.append_stream("stdout:", &"x".repeat(TOOL_OUTPUT_MAX_BYTES + 100));
+        assert!(!card.retained_output.text.contains("stdout:"));
+        assert_eq!(card.last_stream_label, None);
+
+        card.append_stream("stdout:", "next");
+        assert!(card.retained_output.text.contains("stdout:\nnext"));
+        card.append_stream("stderr:", "\n\n");
+        assert!(card.retained_output.text.contains("stderr:"));
+    }
+
+    #[test]
+    fn bounded_identity_namespaces_raw_and_hashed_values() {
+        let long = "x".repeat(IDENTITY_MAX_BYTES + 1);
+        let hashed = bounded_identity(&long);
+        let raw_lookalike = bounded_identity(&hashed);
+
+        assert!(hashed.starts_with("h:"));
+        assert!(raw_lookalike.starts_with('r'));
+        assert_ne!(hashed, raw_lookalike);
+        assert_eq!(identity_for_display(&bounded_identity("call-1")), "call-1");
+    }
+
+    #[test]
+    fn completed_process_with_failed_exit_is_terminal_failure() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut failed = result("failed");
+        failed.name = "bash".into();
+        failed.exit_code = Some(2);
+        failed.process_id = Some("process-1".into());
+        failed.process_state = Some("completed".into());
+
+        assert!(card.observe(ProcessOperation::Poll, &failed, 0));
+        assert_eq!(card.display_state, ProcessDisplayState::Failed);
+        assert!(card.display_state.terminal());
+    }
+
+    #[test]
+    fn result_status_matches_shared_python_semantics() {
+        let mut value = result("ok");
+        assert_eq!(tool_result_status(&value), ToolStatus::Done);
+        value.exit_code = Some(2);
+        assert_eq!(tool_result_status(&value), ToolStatus::Error);
+        value.exit_code = None;
+        value.process_state = Some("cancelled".into());
+        assert_eq!(tool_result_status(&value), ToolStatus::Cancelled);
+    }
+}

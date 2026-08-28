@@ -1,4 +1,8 @@
 use super::{BackendEvent, MessageContentKind, PendingApproval};
+use crate::tool_cards::{
+    BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
+    bounded_identity, bounded_tool_arguments,
+};
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::events::WispCurrentLiveEventOutput;
@@ -47,17 +51,96 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
             },
-            "tool.approval.requested" => Self::ToolApprovalRequested(PendingApproval {
-                call_id: string_field(value, &event_type, "call_id")?,
-                name: string_field(value, &event_type, "name")?,
-                arguments: value.get("arguments").cloned().ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "arguments",
-                    }
-                })?,
-                safety: string_field(value, &event_type, "safety")?,
-            }),
+            "tool.call" => {
+                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
+                let arguments = object_field(value, &event_type, "arguments")?;
+                Self::ToolCall(ToolCallInput {
+                    call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                    arguments: bounded_tool_arguments(&name, &arguments),
+                    name,
+                })
+            }
+            "tool.approval.requested" => {
+                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
+                let arguments = object_field(value, &event_type, "arguments")?;
+                Self::ToolApprovalRequested(PendingApproval {
+                    call_id: string_field(value, &event_type, "call_id")?,
+                    arguments: bounded_tool_arguments(&name, &arguments),
+                    name,
+                    safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
+                })
+            }
+            "tool.approval.resolved" => Self::ToolApprovalResolved {
+                call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                name: bounded_display_string_field(value, &event_type, "name", 512)?,
+                approved: bool_field(value, &event_type, "approved")?,
+                reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
+            },
+            "tool.result" => {
+                let (output, output_source_bytes) =
+                    bounded_string_field(value, &event_type, "output", false)?;
+                let (stdout, stdout_source_bytes) =
+                    optional_bounded_string_field(value, &event_type, "stdout", true)?;
+                let (stderr, stderr_source_bytes) =
+                    optional_bounded_string_field(value, &event_type, "stderr", true)?;
+                Self::ToolResult(Box::new(ToolResultInput {
+                    call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                    name: bounded_display_string_field(value, &event_type, "name", 512)?,
+                    output,
+                    output_source_bytes,
+                    is_error: bool_field(value, &event_type, "is_error")?,
+                    failure_code: optional_string_field(value, &event_type, "failure_code")?,
+                    retryable: bool_field_or(value, &event_type, "retryable", false)?,
+                    recovery_hint: optional_bounded_display_string_field(
+                        value,
+                        &event_type,
+                        "recovery_hint",
+                        512,
+                    )?,
+                    exit_code: optional_i64_field(value, &event_type, "exit_code")?,
+                    output_has_exit_status: bool_field_or(
+                        value,
+                        &event_type,
+                        "output_has_exit_status",
+                        false,
+                    )?,
+                    before_text: None,
+                    created: bool_field_or(value, &event_type, "created", false)?,
+                    summary: optional_bounded_display_string_field(
+                        value,
+                        &event_type,
+                        "summary",
+                        512,
+                    )?,
+                    truncated: bool_field_or(value, &event_type, "truncated", false)?,
+                    process_id: optional_identity_field(value, &event_type, "process_id")?,
+                    process_state: optional_string_field(value, &event_type, "process_state")?,
+                    process_error: optional_bounded_display_string_field(
+                        value,
+                        &event_type,
+                        "process_error",
+                        512,
+                    )?,
+                    stdout,
+                    stdout_source_bytes,
+                    stderr,
+                    stderr_source_bytes,
+                    stdout_truncated: bool_field_or(value, &event_type, "stdout_truncated", false)?,
+                    stderr_truncated: bool_field_or(value, &event_type, "stderr_truncated", false)?,
+                    stdout_dropped_bytes: u64_field_or(
+                        value,
+                        &event_type,
+                        "stdout_dropped_bytes",
+                        0,
+                    )?,
+                    stderr_dropped_bytes: u64_field_or(
+                        value,
+                        &event_type,
+                        "stderr_dropped_bytes",
+                        0,
+                    )?,
+                }))
+            }
             "trust.requested" => Self::TrustRequested {
                 request_id: string_field(value, &event_type, "request_id")?,
                 project_path: string_field(value, &event_type, "project_path")?,
@@ -97,6 +180,91 @@ fn string_field(
         })
 }
 
+fn bounded_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    retain_tail: bool,
+) -> Result<(String, u64), EventProjectionError> {
+    let source = value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }
+    })?;
+    let bounded = if retain_tail {
+        BoundedText::tail(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+    } else {
+        BoundedText::head(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+    };
+    Ok((bounded.text, bounded.source_bytes))
+}
+
+fn bounded_display_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<String, EventProjectionError> {
+    let source = value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }
+    })?;
+    Ok(BoundedText::head(source, max_bytes, 8).text)
+}
+
+fn optional_bounded_display_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<Option<String>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(_)) => {
+            bounded_display_string_field(value, event_type, field, max_bytes).map(Some)
+        }
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
+fn optional_identity_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<String>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(bounded_identity(value))),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
+fn optional_bounded_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    retain_tail: bool,
+) -> Result<(Option<String>, u64), EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok((None, 0)),
+        Some(Value::String(_)) => bounded_string_field(value, event_type, field, retain_tail)
+            .map(|(text, bytes)| (Some(text), bytes)),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
 fn nullable_string_field(
     value: &Value,
     event_type: &str,
@@ -109,6 +277,52 @@ fn nullable_string_field(
             event_type: event_type.to_owned(),
             field,
         }),
+    }
+}
+
+fn optional_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<String>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
+fn object_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Value, EventProjectionError> {
+    match value.get(field) {
+        Some(Value::Object(object)) => Ok(Value::Object(object.clone())),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
+fn optional_i64_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<i64>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
     }
 }
 
@@ -138,4 +352,38 @@ fn bool_field(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+fn bool_field_or(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    default: bool,
+) -> Result<bool, EventProjectionError> {
+    match value.get(field) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
+    }
+}
+
+fn u64_field_or(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    default: u64,
+) -> Result<u64, EventProjectionError> {
+    match value.get(field) {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
+    }
 }

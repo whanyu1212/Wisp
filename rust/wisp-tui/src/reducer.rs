@@ -4,6 +4,7 @@ use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
 
+use crate::tool_cards::{ToolCallInput, ToolResultInput, bounded_identity};
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 
@@ -235,7 +236,15 @@ pub enum BackendEvent {
         turn: u64,
         content: String,
     },
+    ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
+    ToolApprovalResolved {
+        call_id: String,
+        name: String,
+        approved: bool,
+        reason: Option<String>,
+    },
+    ToolResult(Box<ToolResultInput>),
     TrustRequested {
         request_id: String,
         project_path: String,
@@ -321,6 +330,9 @@ pub fn reduce(
         UiAction::TransportClosed { .. } => {
             state.view_status = ViewStatus::Error;
             state.transcript.finish_active_response();
+            state
+                .transcript
+                .settle_unresolved_tools("event stream closed");
             Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
         }
     }
@@ -347,7 +359,7 @@ fn submit(
     });
     state.pending_approval = None;
     state.cancel_requested = false;
-    state.transcript.append_exchange(content);
+    state.transcript.append_prompt(content);
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -497,7 +509,7 @@ fn handle_backend_event(
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     match event {
         BackendEvent::MessageStarted { turn } => {
-            state.transcript.start_message(turn);
+            state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta {
@@ -513,7 +525,16 @@ fn handle_backend_event(
             state.transcript.complete_message(turn, content);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::ToolCall(input) => {
+            state.transcript.observe_tool_call(input);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::ToolApprovalRequested(pending) => {
+            state.transcript.observe_approval_requested(ToolCallInput {
+                call_id: bounded_identity(&pending.call_id),
+                name: pending.name.clone(),
+                arguments: pending.arguments.clone(),
+            });
             if state.cancel_requested {
                 let id = ids.next_id(CommandKind::Approval);
                 let command = WispTypedClientRpcCommands::approval(
@@ -532,6 +553,21 @@ fn handle_backend_event(
             state.pending_approval = Some(pending);
             state.view_status = ViewStatus::WaitingForApproval;
             state.interaction_status = InteractionStatus::WaitingForApproval;
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ToolApprovalResolved {
+            call_id,
+            name: _,
+            approved,
+            reason,
+        } => {
+            state
+                .transcript
+                .observe_approval_resolved(&call_id, approved, reason.as_deref());
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ToolResult(result) => {
+            state.transcript.observe_tool_result(*result);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::TrustRequested {
@@ -590,6 +626,16 @@ fn handle_backend_event(
             state.pending_trust_project_path = None;
             state.cancel_requested = false;
             state.transcript.finish_active_response();
+            state.transcript.settle_unresolved_tools(if ok {
+                "tool result missing"
+            } else if error
+                .as_deref()
+                .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX))
+            {
+                "prompt cancelled"
+            } else {
+                "command failed"
+            });
             state.interaction_status = InteractionStatus::Idle;
             let was_cancelled = !ok
                 && error
@@ -637,7 +683,7 @@ mod tests {
         assert_eq!(command_value(&effects[0]).unwrap()["id"], "prompt-1");
         assert_eq!(state.interaction_status, InteractionStatus::Running);
         assert_eq!(state.transcript.latest_user_text(), Some("hello"));
-        assert_eq!(state.latest_assistant_text(), Some(""));
+        assert_eq!(state.latest_assistant_text(), Some("stale answer"));
 
         for delta in ["hel", "lo"] {
             reduce(
@@ -921,6 +967,300 @@ mod tests {
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
             }
+        );
+    }
+
+    #[test]
+    fn tool_event_projection_preserves_structured_fields_and_trace_defaults() {
+        assert!(matches!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "call-1",
+                "name": "read",
+                "arguments": {"path": "README.md"}
+            }))
+            .unwrap(),
+            BackendEvent::ToolCall(ToolCallInput { call_id, name, arguments })
+                if call_id == bounded_identity("call-1")
+                    && name == "read"
+                    && arguments["path"] == "README.md"
+        ));
+        assert_eq!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.approval.resolved",
+                "call_id": "call-1",
+                "name": "read",
+                "approved": true
+            }))
+            .unwrap(),
+            BackendEvent::ToolApprovalResolved {
+                call_id: bounded_identity("call-1"),
+                name: "read".into(),
+                approved: true,
+                reason: None,
+            }
+        );
+        let projected = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "tool.result",
+            "call_id": "call-1",
+            "name": "bash",
+            "output": "still running",
+            "is_error": false,
+            "process_id": "process-1",
+            "process_state": "running",
+            "stdout": "chunk",
+            "stdout_dropped_bytes": 7
+        }))
+        .unwrap();
+        assert!(matches!(
+            projected,
+            BackendEvent::ToolResult(result) if result.call_id == bounded_identity("call-1")
+                && result.process_id.as_deref() == Some(bounded_identity("process-1").as_str())
+                && result.process_state.as_deref() == Some("running")
+                && result.stdout.as_deref() == Some("chunk")
+                && result.stdout_dropped_bytes == 7
+                && !result.truncated
+        ));
+    }
+
+    #[test]
+    fn tool_argument_projection_drops_payload_bodies_and_bounds_generic_maps() {
+        let BackendEvent::ToolCall(write) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "write-1",
+                "name": "write",
+                "arguments": {"path": "file.txt", "content": "secret".repeat(200_000)}
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        assert_eq!(write.arguments, serde_json::json!({"path": "file.txt"}));
+
+        let arguments = (0..1_000)
+            .map(|index| {
+                (
+                    format!("key-{index:04}"),
+                    serde_json::json!("x".repeat(1_000)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let BackendEvent::ToolCall(generic) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "generic-1",
+                "name": "extension",
+                "arguments": arguments
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        assert_eq!(generic.arguments.as_object().unwrap().len(), 8);
+        assert!(generic.arguments.to_string().len() < 1_000);
+    }
+
+    #[test]
+    fn tool_result_projection_bounds_large_strings_before_reducer_queueing() {
+        let output = format!("head{}tail", "x".repeat(200_000));
+        let stdout = format!("old{}new", "y".repeat(200_000));
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "call".repeat(5_000),
+                "name": "tool".repeat(5_000),
+                "output": output,
+                "is_error": false,
+                "recovery_hint": "hint".repeat(5_000),
+                "before_text": "before".repeat(50_000),
+                "summary": "summary".repeat(5_000),
+                "process_id": "process".repeat(5_000),
+                "process_error": "error".repeat(5_000),
+                "stdout": stdout
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+
+        assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert!(result.stdout.as_ref().unwrap().len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert_eq!(result.output_source_bytes, 200_008);
+        assert_eq!(result.stdout_source_bytes, 200_006);
+        assert!(result.output.starts_with("head"));
+        assert!(result.stdout.as_deref().unwrap().ends_with("new"));
+        assert!(result.call_id.starts_with("h:"));
+        assert!(result.process_id.as_deref().unwrap().starts_with("h:"));
+        assert!(result.name.len() <= 512);
+        assert!(result.recovery_hint.as_ref().unwrap().len() <= 512);
+        assert!(result.summary.as_ref().unwrap().len() <= 512);
+        assert!(result.process_error.as_ref().unwrap().len() <= 512);
+        assert!(result.before_text.is_none());
+    }
+
+    #[test]
+    fn validated_live_tool_result_projects_all_promoted_metadata() {
+        let value = serde_json::json!({
+            "type": "tool.result",
+            "schema_version": 34,
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-7",
+            "name": "bash",
+            "output": "output",
+            "is_error": true,
+            "failure_code": "internal_error",
+            "retryable": true,
+            "recovery_hint": "retry",
+            "exit_code": 1,
+            "output_has_exit_status": true,
+            "before_text": null,
+            "created": false,
+            "summary": null,
+            "truncated": true,
+            "process_id": "process-7",
+            "process_state": "failed",
+            "process_error": null,
+            "stdout": "out",
+            "stderr": "err",
+            "stdout_truncated": true,
+            "stderr_truncated": false,
+            "stdout_dropped_bytes": 11,
+            "stderr_dropped_bytes": 12
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let BackendEvent::ToolResult(result) = BackendEvent::from_live(&live).unwrap() else {
+            panic!("tool result expected");
+        };
+        assert_eq!(result.call_id, bounded_identity("call-7"));
+        assert_eq!(result.exit_code, Some(1));
+        assert_eq!(result.failure_code.as_deref(), Some("internal_error"));
+        assert_eq!(result.recovery_hint.as_deref(), Some("retry"));
+        assert_eq!(result.process_state.as_deref(), Some("failed"));
+        assert_eq!(result.stderr.as_deref(), Some("err"));
+        assert_eq!(result.stdout_dropped_bytes, 11);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn reducer_updates_one_card_across_approval_call_and_result() {
+        use crate::tool_cards::ToolStatus;
+
+        let mut state = UiState::new("fake".into(), None, None);
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.transcript.append_prompt("read".into());
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+                safety: "read".into(),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolCall(ToolCallInput {
+                call_id: bounded_identity("call-1"),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalResolved {
+                call_id: bounded_identity("call-1"),
+                name: "read".into(),
+                approved: true,
+                reason: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(
+                BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "output": "contents",
+                    "is_error": false,
+                    "summary": "Read README.md"
+                }))
+                .unwrap(),
+            ),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.transcript.entries().len(), 2);
+        let card = state.transcript.entries()[1].tool_card().unwrap();
+        assert_eq!(card.status, ToolStatus::Done);
+        assert_eq!(card.detail, "Read README.md");
+    }
+
+    #[test]
+    fn long_approval_identity_remains_exact_for_command_and_bounded_for_card_pairing() {
+        let long_call_id = "call".repeat(5_000);
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id: long_call_id.clone(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+                safety: "read".into(),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::ApprovalDecision {
+                call_id: long_call_id.clone(),
+                approved: true,
+                reason: None,
+                scope: None,
+            },
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(command_value(&effects[0]).unwrap()["call_id"], long_call_id);
+        let hashed = bounded_identity(&long_call_id);
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolCall(ToolCallInput {
+                call_id: hashed.clone(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.tool_card().is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            state.transcript.entries()[0]
+                .tool_card()
+                .map(|card| card.call_id.as_str()),
+            Some(hashed.as_str())
         );
     }
 

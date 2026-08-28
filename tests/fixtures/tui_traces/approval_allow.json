@@ -115,6 +115,14 @@
       "cancel_requested": false,
       "exit_requested": false
     },
-    "retained_text": null
+    "retained_text": null,
+    "tool_cards": [
+      {
+        "call_id": "call-1",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      }
+    ]
   }
 }

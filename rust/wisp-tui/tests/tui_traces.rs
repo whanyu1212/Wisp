@@ -140,6 +140,14 @@ struct TraceInteraction {
     exit_requested: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct TraceToolCard {
+    call_id: String,
+    name: String,
+    status: String,
+    arguments_available: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceExpected {
     commands: Vec<Value>,
@@ -147,6 +155,8 @@ struct TraceExpected {
     interaction: TraceInteraction,
     #[serde(default)]
     retained_text: Option<String>,
+    #[serde(default)]
+    tool_cards: Option<Vec<TraceToolCard>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,6 +165,7 @@ struct ReplayOutput {
     view: TraceView,
     interaction: TraceInteraction,
     retained_text: Option<String>,
+    tool_cards: Vec<TraceToolCard>,
 }
 
 #[derive(Default)]
@@ -336,6 +347,19 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
             .latest_assistant_text()
             .filter(|content| !content.is_empty())
             .map(str::to_owned),
+        tool_cards: state
+            .transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                entry.tool_card().map(|card| TraceToolCard {
+                    call_id: card.call_id.clone(),
+                    name: card.name.clone(),
+                    status: card.status.as_str().into(),
+                    arguments_available: card.arguments_available,
+                })
+            })
+            .collect(),
     })
 }
 
@@ -489,6 +513,13 @@ fn assert_expected(trace: &TraceFile, actual: &ReplayOutput) {
         "trace {} retained text",
         trace.name
     );
+    if let Some(expected) = &trace.expected.tool_cards {
+        assert_eq!(
+            &actual.tool_cards, expected,
+            "trace {} tool cards",
+            trace.name
+        );
+    }
 }
 
 fn assert_value_subset(expected: &Value, actual: &Value, path: &str) {
