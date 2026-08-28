@@ -235,6 +235,7 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
     }
 
     let message = match state.view_status {
+        ViewStatus::Running if state.cancel_requested => "Cancelling current prompt…".into(),
         ViewStatus::Running => {
             "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
         }
@@ -770,6 +771,11 @@ mod tests {
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("partial answer"));
         assert!(rendered.contains("Esc/Ctrl-C cancels"));
+
+        state.cancel_requested = true;
+        let cancelling = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(cancelling.contains("Cancelling current prompt"));
+        assert!(!cancelling.contains("Esc/Ctrl-C cancels"));
     }
 
     #[test]
