@@ -780,7 +780,14 @@ async fn run(cli: Cli) -> Result<(), Error> {
                                 .await?;
                             transport_closed_diagnostic =
                                 Some(render_transport_closed_diagnostic(&live_ui.state));
-                            break Ok(());
+                            backend
+                                .wait_gracefully(Duration::from_millis(100))
+                                .await?;
+                            let error = match backend.try_wait()? {
+                                Some(status) => classify_backend_exit(status),
+                                None => Error::BackendStreamEnded,
+                            };
+                            break Err(error);
                         }
                         Err(error) => break Err(error),
                     }
@@ -920,7 +927,6 @@ fn shutdown_reader_outcome(outcome: Result<ReaderTermination, Error>) -> Result<
     }
 }
 
-#[cfg(test)]
 fn classify_backend_exit(status: std::process::ExitStatus) -> Error {
     if status.success() {
         Error::BackendExited(status)
