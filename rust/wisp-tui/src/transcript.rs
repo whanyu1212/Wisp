@@ -333,6 +333,7 @@ impl Transcript {
                             process_error: Some(
                                 "tool result referenced a different process".into(),
                             ),
+                            recovery_hint: None,
                             stdout: None,
                             stdout_source_bytes: 0,
                             stderr: None,
@@ -348,18 +349,50 @@ impl Transcript {
                         binding.sequence,
                     )
                 } else if input.process_id.is_none() {
+                    let preserve_bound_error = input.is_error
+                        && (!input.output.is_empty()
+                            || input
+                                .process_error
+                                .as_deref()
+                                .is_some_and(|error| !error.is_empty())
+                            || input
+                                .recovery_hint
+                                .as_deref()
+                                .is_some_and(|hint| !hint.is_empty()));
+                    let process_error = if preserve_bound_error {
+                        input.process_error.clone().or_else(|| {
+                            input
+                                .output
+                                .is_empty()
+                                .then(|| input.recovery_hint.clone())
+                                .flatten()
+                        })
+                    } else {
+                        Some("tool result did not identify its process".into())
+                    };
                     card.observe(
                         operation,
                         &ToolResultInput {
-                            output: String::new(),
-                            output_source_bytes: 0,
+                            output: if preserve_bound_error {
+                                input.output.clone()
+                            } else {
+                                String::new()
+                            },
+                            output_source_bytes: if preserve_bound_error {
+                                input.output_source_bytes
+                            } else {
+                                0
+                            },
                             process_state: None,
-                            process_error: Some("tool result did not identify its process".into()),
+                            process_error,
+                            recovery_hint: preserve_bound_error
+                                .then(|| input.recovery_hint.clone())
+                                .flatten(),
                             stdout: None,
                             stdout_source_bytes: 0,
                             stderr: None,
                             stderr_source_bytes: 0,
-                            truncated: false,
+                            truncated: preserve_bound_error && input.truncated,
                             stdout_truncated: false,
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
@@ -1079,6 +1112,7 @@ mod tests {
         mismatched.truncated = true;
         mismatched.stdout_truncated = true;
         mismatched.stdout_dropped_bytes = 99;
+        mismatched.recovery_hint = Some("trust the foreign process".into());
 
         transcript.observe_tool_result(mismatched);
 
@@ -1086,6 +1120,12 @@ mod tests {
         assert_eq!(card.display_state, ProcessDisplayState::PollFailed);
         assert!(card.retained_output.text.contains("different process"));
         assert!(!card.retained_output.text.contains("foreign"));
+        assert!(
+            !card
+                .retained_output
+                .text
+                .contains("trust the foreign process")
+        );
         assert!(!card.backend_truncated);
         assert_eq!(card.backend_dropped_bytes, 0);
     }
@@ -1107,6 +1147,7 @@ mod tests {
         missing.truncated = true;
         missing.stdout_truncated = true;
         missing.stdout_dropped_bytes = 99;
+        missing.recovery_hint = Some("trust unattributed metadata".into());
 
         transcript.observe_tool_result(missing);
 
@@ -1114,8 +1155,42 @@ mod tests {
         assert_eq!(card.display_state, ProcessDisplayState::PollFailed);
         assert!(card.retained_output.text.contains("did not identify"));
         assert!(!card.retained_output.text.contains("unattributed"));
+        assert!(
+            !card
+                .retained_output
+                .text
+                .contains("trust unattributed metadata")
+        );
         assert!(!card.backend_truncated);
         assert_eq!(card.backend_dropped_bytes, 0);
+    }
+
+    #[test]
+    fn missing_process_identity_preserves_bound_tool_error_context() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let card_id = transcript.observe_tool_call(call(
+            "poll-1",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "expired-process"}),
+        ));
+        let mut failed = result("poll-1", "process expired before it could be polled");
+        failed.name = "bash".into();
+        failed.is_error = true;
+        failed.failure_code = Some("tool_error".into());
+        failed.recovery_hint = Some("start the command again".into());
+
+        transcript.observe_tool_result(failed);
+
+        let card = transcript.entry(card_id).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::PollFailed);
+        assert!(card.retained_output.text.contains("process expired"));
+        assert!(
+            card.retained_output
+                .text
+                .contains("start the command again")
+        );
+        assert!(!card.retained_output.text.contains("did not identify"));
     }
 
     #[test]

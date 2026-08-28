@@ -426,6 +426,13 @@ impl ProcessCardSnapshot {
             } else if !result.output.is_empty() {
                 self.append_unlabelled(&result.output);
             }
+            if let Some(hint) = result
+                .recovery_hint
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                self.append_unlabelled(&format!("Recovery: {}", bounded_reason(hint)));
+            }
         }
         self.backend_truncated |=
             result.truncated || result.stdout_truncated || result.stderr_truncated;
