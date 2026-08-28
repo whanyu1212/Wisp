@@ -288,6 +288,7 @@ struct LiveUi {
     notice: Option<String>,
     render_pending: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
+    unsendable_decision_context: Option<RenderedDecisionContext>,
 }
 
 impl Default for LiveUi {
@@ -299,6 +300,7 @@ impl Default for LiveUi {
             notice: None,
             render_pending: true,
             rendered_decision_context: None,
+            unsendable_decision_context: None,
         }
     }
 }
@@ -339,7 +341,12 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        let blocked_context = self.unsendable_decision_context.clone();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if blocked_context.is_some() && blocked_context != self.current_decision_context() {
+            self.unsendable_decision_context = None;
+            self.notice = None;
+        }
         self.apply_effects(effects, writer, limit).await
     }
 
@@ -363,7 +370,7 @@ impl LiveUi {
                 let encoded_len = serde_json::to_vec(&command)?.len();
                 if encoded_len > limit {
                     return Ok(Some(format!(
-                        "Skipped {label} because its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the decision remains pending."
+                        "Skipped {label} because its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the decision remains pending. Press Esc or Ctrl-C again to exit."
                     )));
                 }
             }
@@ -378,10 +385,12 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         if let Some(notice) = self.decision_frame_limit_notice(&action, limit)? {
+            self.unsendable_decision_context = self.current_decision_context();
             self.notice = Some(notice);
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
+        self.unsendable_decision_context = None;
         self.notice = None;
         self.dispatch(action, writer, limit).await
     }
@@ -419,6 +428,27 @@ impl LiveUi {
         self.rendered_decision_context = rendered_decision_context;
         self.render_pending = false;
         Ok(())
+    }
+
+    fn current_decision_context(&self) -> Option<RenderedDecisionContext> {
+        match self.state.view_status {
+            ViewStatus::WaitingForApproval => self
+                .state
+                .pending_approval
+                .as_ref()
+                .map(|pending| RenderedDecisionContext::Approval(pending.call_id.clone())),
+            ViewStatus::WaitingForTrust => self
+                .state
+                .pending_trust_request_id
+                .clone()
+                .map(RenderedDecisionContext::Trust),
+            _ => None,
+        }
+    }
+
+    fn unsendable_current_decision(&self) -> bool {
+        self.unsendable_decision_context.is_some()
+            && self.unsendable_decision_context == self.current_decision_context()
     }
 
     fn rendered_approval_matches(&self, pending: Option<&PendingApproval>) -> bool {
@@ -500,6 +530,9 @@ impl LiveUi {
         limit: usize,
         quit_if_idle: bool,
     ) -> Result<LoopControl, Error> {
+        if self.unsendable_current_decision() {
+            return Ok(LoopControl::Exit);
+        }
         if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
             if quit_if_idle {
                 return Ok(LoopControl::Exit);
@@ -507,6 +540,7 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         if let Some(notice) = self.cancel_frame_limit_notice(limit)? {
+            self.unsendable_decision_context = self.current_decision_context();
             self.notice = Some(notice);
             self.render_pending = true;
             return Ok(LoopControl::Continue);
@@ -586,8 +620,11 @@ impl LiveUi {
                     }
                     Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
-                        self.notice =
-                            Some("Approve with y once, t tool, a all, or deny with n/Esc.".into());
+                        if !self.unsendable_current_decision() {
+                            self.notice = Some(
+                                "Approve with y once, t tool, a all, or deny with n/Esc.".into(),
+                            );
+                        }
                         self.render_pending = true;
                         Ok(LoopControl::Continue)
                     }
@@ -603,7 +640,9 @@ impl LiveUi {
                     }
                     Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
-                        self.notice = Some("Trust with y, or deny with n/Esc.".into());
+                        if !self.unsendable_current_decision() {
+                            self.notice = Some("Trust with y, or deny with n/Esc.".into());
+                        }
                         self.render_pending = true;
                         Ok(LoopControl::Continue)
                     }
@@ -648,12 +687,16 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if key_can_edit(key) => {
-                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                if !self.unsendable_current_decision() {
+                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Input::Paste(_) => {
-                self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                if !self.unsendable_current_decision() {
+                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+                }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
@@ -2275,18 +2318,51 @@ mod tests {
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
 
+        let replacement_request_id = "u".repeat(32);
         trust_ui
-            .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::TrustRequested {
+                    request_id: replacement_request_id.clone(),
+                    project_path: "/replacement".into(),
+                }),
                 &writer_tx,
-                trust_len,
+                trust_len - 1,
             )
             .await
             .unwrap();
-        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
-            panic!("trust denial must be sent once it fits");
-        };
-        assert_eq!(payload.as_ref(), serde_json::to_vec(&trust).unwrap());
+        assert_eq!(trust_ui.notice, None);
+        assert_eq!(trust_ui.unsendable_decision_context, None);
+
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Continue);
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Press Esc or Ctrl-C again to exit"))
+        );
+        let control = trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control, LoopControl::Exit);
+        assert_eq!(trust_ui.state.view_status, ViewStatus::WaitingForTrust);
+        assert_eq!(
+            trust_ui.state.pending_trust_request_id.as_deref(),
+            Some(replacement_request_id.as_str())
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
