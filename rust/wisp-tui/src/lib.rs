@@ -230,7 +230,7 @@ impl ShutdownObservation {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SequentialCommandIds {
     next: u64,
 }
@@ -343,6 +343,49 @@ impl LiveUi {
         self.apply_effects(effects, writer, limit).await
     }
 
+    fn decision_frame_limit_notice(
+        &self,
+        action: &UiAction,
+        limit: usize,
+    ) -> Result<Option<String>, Error> {
+        let label = match action {
+            UiAction::ApprovalDecision { .. } => "approval response",
+            UiAction::TrustDecision { .. } => "trust response",
+            UiAction::Cancel if self.state.pending_approval.is_some() => "approval denial",
+            UiAction::Cancel if self.state.pending_trust_request_id.is_some() => "trust denial",
+            _ => return Ok(None),
+        };
+        let mut state = self.state.clone();
+        let mut ids = self.ids.clone();
+        let effects = reducer::reduce(&mut state, action.clone(), &mut ids)?;
+        for effect in effects {
+            if let UiEffect::SendCommand(command) = effect {
+                let encoded_len = serde_json::to_vec(&command)?.len();
+                if encoded_len > limit {
+                    return Ok(Some(format!(
+                        "Skipped {label} because its {encoded_len}-byte RPC frame exceeds the negotiated {limit}-byte limit; the decision remains pending."
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn dispatch_decision(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if let Some(notice) = self.decision_frame_limit_notice(&action, limit)? {
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        self.notice = None;
+        self.dispatch(action, writer, limit).await
+    }
+
     fn draw<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
@@ -431,13 +474,13 @@ impl LiveUi {
     }
 
     fn cancel_frame_limit_notice(&self, limit: usize) -> Result<Option<String>, Error> {
+        if self.state.pending_trust_request_id.is_some() || self.state.pending_approval.is_some() {
+            return self.decision_frame_limit_notice(&UiAction::Cancel, limit);
+        }
         let Some(current) = self.state.current_command.as_ref() else {
             return Ok(None);
         };
-        if self.state.pending_trust_request_id.is_some()
-            || self.state.pending_approval.is_some()
-            || self.state.cancel_requested
-        {
+        if self.state.cancel_requested {
             return Ok(None);
         }
         let id = self.ids.peek_id(CommandKind::Cancel);
@@ -541,10 +584,7 @@ impl LiveUi {
                     Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
                         Ok(LoopControl::Continue)
                     }
-                    Some(action) => {
-                        self.notice = None;
-                        self.dispatch(action, writer, limit).await
-                    }
+                    Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
                         self.notice =
                             Some("Approve with y once, t tool, a all, or deny with n/Esc.".into());
@@ -561,10 +601,7 @@ impl LiveUi {
                     Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
                         Ok(LoopControl::Continue)
                     }
-                    Some(action) => {
-                        self.notice = None;
-                        self.dispatch(action, writer, limit).await
-                    }
+                    Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
                         self.notice = Some("Trust with y, or deny with n/Esc.".into());
                         self.render_pending = true;
@@ -2128,6 +2165,128 @@ mod tests {
                 "transient": false
             })
         );
+    }
+
+    #[tokio::test]
+    async fn decision_responses_are_preflighted_before_state_changes() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let call_id = "c".repeat(32);
+        let mut approval_state = UiState::unconfigured();
+        approval_state.view_status = ViewStatus::WaitingForApproval;
+        approval_state.pending_approval = Some(PendingApproval {
+            call_id: call_id.clone(),
+            name: "read".into(),
+            arguments: json!({}),
+            safety: "read".into(),
+        });
+        let mut approval_ui = LiveUi {
+            state: approval_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let approval = WispTypedClientRpcCommands::approval(
+            "approval-1",
+            &call_id,
+            false,
+            Some("Denied from TUI"),
+            None,
+        )
+        .unwrap();
+        let approval_len = serde_json::to_vec(&approval).unwrap().len();
+
+        approval_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                approval_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            approval_ui.state.view_status,
+            ViewStatus::WaitingForApproval
+        );
+        assert_eq!(
+            approval_ui
+                .state
+                .pending_approval
+                .as_ref()
+                .map(|pending| pending.call_id.as_str()),
+            Some(call_id.as_str())
+        );
+        assert!(
+            approval_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("decision remains pending"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        approval_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                approval_len,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval response must be sent once it fits");
+        };
+        assert_eq!(payload.as_ref(), serde_json::to_vec(&approval).unwrap());
+
+        let request_id = "t".repeat(32);
+        let mut trust_state = UiState::unconfigured();
+        trust_state.view_status = ViewStatus::WaitingForTrust;
+        trust_state.pending_trust_request_id = Some(request_id.clone());
+        let mut trust_ui = LiveUi {
+            state: trust_state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let trust = WispTypedClientRpcCommands::trust(
+            "trust-1",
+            &request_id,
+            false,
+            Some("Trust prompt cancelled"),
+            Some(true),
+        )
+        .unwrap();
+        let trust_len = serde_json::to_vec(&trust).unwrap().len();
+
+        trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                trust_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(trust_ui.state.view_status, ViewStatus::WaitingForTrust);
+        assert_eq!(
+            trust_ui.state.pending_trust_request_id.as_deref(),
+            Some(request_id.as_str())
+        );
+        assert!(
+            trust_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("decision remains pending"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        trust_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                trust_len,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust denial must be sent once it fits");
+        };
+        assert_eq!(payload.as_ref(), serde_json::to_vec(&trust).unwrap());
     }
 
     #[tokio::test]
