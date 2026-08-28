@@ -1515,7 +1515,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .retained_output
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
-            let omission = card_omission(omitted, card.backend_truncated);
+            let omission = card_omission(omitted, card.backend_truncated, false);
             Some(CardProjection {
                 action: format!("• {}", card.action()),
                 detail,
@@ -1530,7 +1530,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let omitted = preview
                 .base_offset
                 .saturating_add(card.backend_dropped_bytes);
-            let omission = card_omission(omitted, card.backend_truncated);
+            let omission = card_omission(omitted, card.backend_truncated, true);
             Some(CardProjection {
                 action: format!("• {}", card.action()),
                 detail: preview.text,
@@ -1543,15 +1543,21 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     }
 }
 
-fn card_omission(omitted_bytes: u64, backend_truncated: bool) -> Option<String> {
+fn card_omission(
+    omitted_bytes: u64,
+    backend_truncated: bool,
+    before_preview: bool,
+) -> Option<String> {
     match (omitted_bytes, backend_truncated) {
         (0, false) => None,
         (0, true) => Some("⋯ tool reported truncated output".into()),
         (bytes, false) => Some(format!(
-            "⋯ {bytes} input or presentation bytes omitted before this preview"
+            "⋯ {bytes} input or presentation bytes omitted {} this preview",
+            if before_preview { "before" } else { "after" }
         )),
         (bytes, true) => Some(format!(
-            "⋯ {bytes} input or presentation bytes omitted; tool also reported truncation"
+            "⋯ {bytes} input or presentation bytes omitted {} this preview; tool also reported truncation",
+            if before_preview { "before" } else { "after" }
         )),
     }
 }
@@ -2237,6 +2243,24 @@ mod tests {
     }
 
     #[test]
+    fn generic_head_preview_labels_omitted_output_as_following_the_preview() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-large".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "large.txt"}),
+        });
+        transcript.observe_tool_result(tool_result("call-large", &"x".repeat(4_000)));
+
+        let projection = card_projection(transcript.entry(card_id).unwrap()).unwrap();
+        let omission = projection.omission.unwrap();
+        assert!(omission.contains("omitted after this preview"));
+        assert!(!omission.contains("omitted before this preview"));
+        assert!(!projection.omission_before_detail);
+    }
+
+    #[test]
     fn process_card_coalesces_calls_and_bounds_terminal_safe_tail_rows() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("poll".into());
@@ -2280,10 +2304,14 @@ mod tests {
         );
         assert!(card_rows[0].plain_text().contains("2 calls · 2 polls"));
         assert_eq!(card_rows[0].tone, TranscriptRowTone::Success);
+        let omission = card_rows
+            .iter()
+            .find(|row| row.kind == TranscriptRowKind::CardOmission)
+            .unwrap();
         assert!(
-            card_rows
-                .iter()
-                .any(|row| row.kind == TranscriptRowKind::CardOmission)
+            omission
+                .plain_text()
+                .contains("omitted before this preview")
         );
         let rendered = card_rows
             .iter()
