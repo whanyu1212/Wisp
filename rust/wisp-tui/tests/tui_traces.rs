@@ -332,7 +332,10 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
         commands,
         view: view_projection(&state),
         interaction: interaction_projection(&state),
-        retained_text: state.retained_text.clone(),
+        retained_text: state
+            .latest_assistant_text()
+            .filter(|content| !content.is_empty())
+            .map(str::to_owned),
     })
 }
 

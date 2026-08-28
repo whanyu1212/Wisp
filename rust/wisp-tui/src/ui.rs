@@ -1,20 +1,19 @@
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
+use crate::transcript::TranscriptRole;
+use crate::transcript_view::{TranscriptRowCache, TranscriptRowKind, TranscriptViewport};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
 const MAX_COMPOSER_HEIGHT: u16 = 8;
 const COMPOSER_TAB_WIDTH: usize = 4;
-const TRANSCRIPT_TAIL_BYTES_PER_CELL: usize = 16;
-const TRANSCRIPT_TAIL_MIN_BYTES: usize = 4 * 1024;
-const TRANSCRIPT_TAIL_MAX_BYTES: usize = 64 * 1024;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 
@@ -32,6 +31,8 @@ pub fn decision_context_visible(area: Rect) -> bool {
 pub fn render(
     frame: &mut Frame<'_>,
     state: &UiState,
+    viewport: &mut TranscriptViewport,
+    row_cache: &mut TranscriptRowCache,
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
@@ -85,7 +86,7 @@ pub fn render(
         .split(area);
 
     render_header(frame, chunks[0], state, connection);
-    render_transcript(frame, chunks[1], state);
+    render_transcript(frame, chunks[1], state, viewport, row_cache);
     render_composer(frame, chunks[2], state, editor);
     render_footer(frame, chunks[3], notice);
 }
@@ -132,60 +133,52 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
     );
 }
 
-fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
-    let mut lines = Vec::new();
+fn render_transcript(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    viewport: &mut TranscriptViewport,
+    row_cache: &mut TranscriptRowCache,
+) {
     let content_width = usize::from(area.width.saturating_sub(2)).max(1);
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
-    if let Some(prompt) = state.last_submitted_prompt.as_deref() {
-        push_transcript_line(
-            &mut lines,
-            Line::styled(
-                "you",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            visible_lines,
-        );
-        push_content_lines(&mut lines, prompt, content_width, visible_lines);
-        push_transcript_line(&mut lines, Line::default(), visible_lines);
-        push_transcript_line(
-            &mut lines,
-            Line::styled(
-                "wisp",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            visible_lines,
-        );
-        match state.retained_text.as_deref() {
-            Some(content) if !content.is_empty() => {
-                push_content_lines(&mut lines, content, content_width, visible_lines);
-            }
-            _ if state.view_status == ViewStatus::Running => {
-                push_transcript_line(
-                    &mut lines,
-                    Line::styled("working…", Style::default().fg(Color::DarkGray)),
-                    visible_lines,
-                );
-            }
-            _ => push_transcript_line(&mut lines, Line::default(), visible_lines),
-        }
+    viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
+    let rows = viewport.visible_rows(&state.transcript, row_cache);
+    let lines = if rows.is_empty() {
+        vec![Line::styled(
+            "Type a prompt below to start.",
+            Style::default().fg(Color::DarkGray),
+        )]
     } else {
-        push_transcript_line(
-            &mut lines,
-            Line::styled(
-                "Type a prompt below to start.",
-                Style::default().fg(Color::DarkGray),
-            ),
-            visible_lines,
-        );
-    }
-    let block = Block::default()
-        .title(" conversation ")
-        .borders(Borders::ALL);
-    let paragraph = Paragraph::new(Text::from(lines)).block(block);
+        rows.into_iter()
+            .map(|row| {
+                let style = match row.kind {
+                    TranscriptRowKind::Header => match row.role {
+                        TranscriptRole::User => Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                        TranscriptRole::Assistant => Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    },
+                    TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => {
+                        Style::default().fg(Color::DarkGray)
+                    }
+                    TranscriptRowKind::Content | TranscriptRowKind::Spacer => Style::default(),
+                };
+                Line::styled(row.text, style)
+            })
+            .collect()
+    };
+    let title = if viewport.has_unseen_output() {
+        " conversation • new ↓ "
+    } else if viewport.follows_tail() {
+        " conversation "
+    } else {
+        " conversation • scrolled "
+    };
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 
@@ -404,7 +397,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
             Style::default().fg(Color::Yellow),
         ),
         None => (
-            "Enter send  •  Shift+Enter/Ctrl+J newline  •  Ctrl-C quit".into(),
+            "Enter send • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • Ctrl-C quit".into(),
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -565,29 +558,6 @@ impl std::io::Write for DecisionPreviewWriter {
     }
 }
 
-fn push_content_lines(
-    lines: &mut Vec<Line<'static>>,
-    content: &str,
-    width: usize,
-    max_lines: usize,
-) {
-    let safe = sanitize_for_terminal(transcript_tail_slice(content, width, max_lines));
-    for hard_line in safe.split('\n') {
-        let mut rendered = String::new();
-        let mut rendered_width = 0_usize;
-        for grapheme in hard_line.graphemes(true) {
-            let grapheme_width = grapheme.width();
-            if !rendered.is_empty() && rendered_width.saturating_add(grapheme_width) > width {
-                push_transcript_line(lines, Line::from(std::mem::take(&mut rendered)), max_lines);
-                rendered_width = 0;
-            }
-            rendered.push_str(grapheme);
-            rendered_width = rendered_width.saturating_add(grapheme_width);
-        }
-        push_transcript_line(lines, Line::from(rendered), max_lines);
-    }
-}
-
 fn sanitize_for_terminal(content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut safe = String::with_capacity(normalized.len());
@@ -629,127 +599,6 @@ fn terminal_control_character(character: char) -> bool {
     character.is_control() || crate::is_bidi_control(character)
 }
 
-fn push_transcript_line(lines: &mut Vec<Line<'static>>, line: Line<'static>, max_lines: usize) {
-    lines.push(line);
-    if lines.len() > max_lines {
-        let extra = lines.len() - max_lines;
-        lines.drain(0..extra);
-    }
-}
-
-fn transcript_tail_slice(content: &str, width: usize, max_lines: usize) -> &str {
-    if content.is_empty() {
-        return content;
-    }
-    let width = width.max(1);
-    let max_lines = max_lines.max(1);
-    let byte_start =
-        transcript_tail_byte_start(content, transcript_tail_byte_budget(width, max_lines));
-    let bounded_content = &content[byte_start..];
-    let candidate_start =
-        byte_start + transcript_tail_candidate_start(bounded_content, width, max_lines);
-    let candidate = &content[candidate_start..];
-    let mut line_starts = vec![candidate_start];
-    let mut column = 0_usize;
-    let mut line_empty = true;
-
-    for (relative_offset, grapheme) in candidate.grapheme_indices(true) {
-        let offset = candidate_start + relative_offset;
-        if is_line_break_grapheme(grapheme) {
-            line_starts.push(offset + grapheme.len());
-            column = 0;
-            line_empty = true;
-            continue;
-        }
-
-        let width_at_column = transcript_tail_grapheme_width(grapheme, column);
-        if !line_empty && column.saturating_add(width_at_column) > width {
-            line_starts.push(offset);
-            column = 0;
-        }
-        column = column.saturating_add(transcript_tail_grapheme_width(grapheme, column));
-        line_empty = false;
-    }
-
-    if line_starts.len() > max_lines {
-        return &content[line_starts[line_starts.len() - max_lines]..];
-    }
-
-    candidate
-}
-
-fn transcript_tail_candidate_start(content: &str, width: usize, max_lines: usize) -> usize {
-    let visible_cells = width.saturating_mul(max_lines);
-    let mut display_cells = 0_usize;
-    let mut hard_lines = 0_usize;
-
-    for (offset, grapheme) in content.grapheme_indices(true).rev() {
-        if is_line_break_grapheme(grapheme) {
-            hard_lines += 1;
-            if hard_lines >= max_lines {
-                return offset + grapheme.len();
-            }
-            continue;
-        }
-
-        display_cells =
-            display_cells.saturating_add(transcript_tail_grapheme_min_width(grapheme).max(1));
-        if display_cells >= visible_cells {
-            return offset;
-        }
-    }
-
-    0
-}
-
-fn transcript_tail_byte_budget(width: usize, max_lines: usize) -> usize {
-    width
-        .saturating_mul(max_lines)
-        .saturating_mul(TRANSCRIPT_TAIL_BYTES_PER_CELL)
-        .clamp(TRANSCRIPT_TAIL_MIN_BYTES, TRANSCRIPT_TAIL_MAX_BYTES)
-}
-
-fn transcript_tail_byte_start(content: &str, budget: usize) -> usize {
-    if content.len() <= budget {
-        return 0;
-    }
-    let mut start = content.len() - budget;
-    while start < content.len() && !content.is_char_boundary(start) {
-        start += 1;
-    }
-    start
-}
-
-fn is_line_break_grapheme(grapheme: &str) -> bool {
-    matches!(grapheme, "\n" | "\r\n" | "\r")
-}
-
-fn transcript_tail_grapheme_min_width(grapheme: &str) -> usize {
-    if grapheme == "\t" {
-        return 1;
-    }
-    transcript_tail_grapheme_width(grapheme, 0)
-}
-
-fn transcript_tail_grapheme_width(grapheme: &str, column: usize) -> usize {
-    if grapheme == "\t" {
-        return 4 - (column % 4);
-    }
-    if grapheme.chars().any(terminal_control_character) {
-        return grapheme
-            .chars()
-            .map(|character| {
-                if terminal_control_character(character) {
-                    '�'.width().unwrap_or(0)
-                } else {
-                    character.width().unwrap_or(0)
-                }
-            })
-            .sum();
-    }
-    grapheme.width()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,8 +628,20 @@ mod tests {
     ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
         terminal
-            .draw(|frame| render(frame, state, editor, &connection(), notice))
+            .draw(|frame| {
+                render(
+                    frame,
+                    state,
+                    &mut viewport,
+                    &mut row_cache,
+                    editor,
+                    &connection(),
+                    notice,
+                );
+            })
             .unwrap();
         terminal.backend().to_string()
     }
@@ -800,8 +661,8 @@ mod tests {
     fn running_screen_shows_user_and_streaming_assistant_text() {
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::Running;
-        state.last_submitted_prompt = Some("hello".into());
-        state.retained_text = Some("partial answer".into());
+        state.transcript.append_exchange("hello".into());
+        state.transcript.append_message_delta(1, "partial answer");
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -943,8 +804,12 @@ mod tests {
     #[test]
     fn terminal_controls_are_rendered_inertly() {
         let mut state = UiState::unconfigured();
-        state.last_submitted_prompt = Some("safe\u{1b}[2Jtail\u{202e}spoof".into());
-        state.retained_text = Some("answer\u{2066}tail".into());
+        state
+            .transcript
+            .append_exchange("safe\u{1b}[2Jtail\u{202e}spoof".into());
+        state
+            .transcript
+            .complete_message(1, "answer\u{2066}tail".into());
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!rendered.contains('\u{1b}'));
         assert!(!rendered.contains('\u{202e}'));
@@ -1016,49 +881,83 @@ mod tests {
     }
 
     #[test]
+    fn transcript_title_reports_unseen_output_while_anchored() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_exchange("prompt".into());
+        state.transcript.start_message(1);
+        state
+            .transcript
+            .append_message_delta(1, &("history\n".repeat(50)));
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        viewport.reduce(
+            crate::transcript_view::TranscriptViewAction::PageUp,
+            &state.transcript,
+            &mut row_cache,
+        );
+        state.transcript.append_message_delta(1, "new output");
+        viewport.reduce(
+            crate::transcript_view::TranscriptViewAction::OutputChanged,
+            &state.transcript,
+            &mut row_cache,
+        );
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+
+        assert!(terminal.backend().to_string().contains("new ↓"));
+    }
+
+    #[test]
+    fn transcript_renders_multiple_retained_turns() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_exchange("first prompt".into());
+        state.transcript.complete_message(1, "first answer".into());
+        state.transcript.append_exchange("second prompt".into());
+        state.transcript.complete_message(2, "second answer".into());
+
+        let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+
+        assert!(rendered.contains("first prompt"));
+        assert!(rendered.contains("first answer"));
+        assert!(rendered.contains("second prompt"));
+        assert!(rendered.contains("second answer"));
+    }
+
+    #[test]
     fn transcript_auto_follows_wrapped_output_tail() {
         let mut state = UiState::unconfigured();
-        state.last_submitted_prompt = Some("hello".into());
-        state.retained_text = Some(format!("{}TAIL", "wrapped output ".repeat(80)));
+        state.transcript.append_exchange("hello".into());
+        state
+            .transcript
+            .complete_message(1, format!("{}TAIL", "wrapped output ".repeat(80)));
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
-    }
-
-    #[test]
-    fn transcript_tail_slice_bounds_large_unbroken_content() {
-        let content = format!("HEAD{}TAIL", "x".repeat(1024 * 1024));
-        let tail = transcript_tail_slice(&content, 80, 5);
-        assert!(!tail.contains("HEAD"));
-        assert!(tail.ends_with("TAIL"));
-        assert!(tail.len() <= 80 * 5);
-    }
-
-    #[test]
-    fn transcript_tail_slice_uses_grapheme_display_width() {
-        let family = "👨‍👩‍👧‍👦";
-        let content = format!("HEAD{}TAIL", family.repeat(240));
-        let tail = transcript_tail_slice(&content, 80, 5);
-        assert!(!tail.contains("HEAD"));
-        assert!(tail.starts_with(family));
-        assert!(tail.ends_with("TAIL"));
-        assert!(tail.len() > 80 * 5 * 8);
-    }
-
-    #[test]
-    fn transcript_tail_slice_uses_current_column_for_tabs() {
-        let content = format!("HEAD{}TAIL", "abc\t".repeat(200));
-        let tail = transcript_tail_slice(&content, 80, 5);
-        assert!(!tail.contains("HEAD"));
-        assert!(tail.ends_with("TAIL"));
-        assert!(tail.matches("abc\t").count() >= 75);
-    }
-
-    #[test]
-    fn transcript_tail_slice_bounds_enormous_grapheme_by_bytes() {
-        let content = format!("HEADa{}TAIL", "\u{301}".repeat(200_000));
-        let tail = transcript_tail_slice(&content, 80, 5);
-        assert!(!tail.contains("HEAD"));
-        assert!(tail.ends_with("TAIL"));
-        assert!(tail.len() <= transcript_tail_byte_budget(80, 5));
     }
 }
