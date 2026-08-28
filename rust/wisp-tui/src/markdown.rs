@@ -656,29 +656,7 @@ impl BlockRenderer {
         if self.spans.len() >= MAX_PRESENTATION_FRAGMENTS
             || self.output_bytes.saturating_add(text.len()) > MAX_PRESENTATION_OUTPUT_BYTES
         {
-            self.truncated = true;
-            if self.spans.len() < MAX_PRESENTATION_FRAGMENTS
-                && self
-                    .output_bytes
-                    .saturating_add(PRESENTATION_TRUNCATED.len())
-                    <= MAX_PRESENTATION_OUTPUT_BYTES
-            {
-                self.spans.push(TranscriptSpan {
-                    text: PRESENTATION_TRUNCATED.to_owned(),
-                    style: TranscriptSpanStyle {
-                        inline: InlineStyle::ListMarker,
-                        ..TranscriptSpanStyle::default()
-                    },
-                    affinity: SourceAffinity {
-                        source_offset,
-                        source_end: source_offset,
-                        output_offset: u32::try_from(self.output_bytes).unwrap_or(u32::MAX),
-                    },
-                });
-                self.output_bytes = self
-                    .output_bytes
-                    .saturating_add(PRESENTATION_TRUNCATED.len());
-            }
+            self.truncate(source_offset);
             return;
         }
         let output_offset = u32::try_from(self.output_bytes).unwrap_or(u32::MAX);
@@ -697,6 +675,73 @@ impl BlockRenderer {
                 output_offset,
             },
         });
+    }
+
+    fn truncate(&mut self, source_offset: usize) {
+        self.truncated = true;
+        let mut marker_source = source_offset;
+        while self.spans.len() >= MAX_PRESENTATION_FRAGMENTS {
+            let removed = self
+                .spans
+                .pop()
+                .expect("a full fragment budget must contain a span");
+            marker_source = marker_source.min(removed.affinity.source_offset);
+            self.output_bytes = self.output_bytes.saturating_sub(removed.text.len());
+        }
+        while self
+            .output_bytes
+            .saturating_add(PRESENTATION_TRUNCATED.len())
+            > MAX_PRESENTATION_OUTPUT_BYTES
+        {
+            let Some(last) = self.spans.last_mut() else {
+                return;
+            };
+            let excess = self
+                .output_bytes
+                .saturating_add(PRESENTATION_TRUNCATED.len())
+                .saturating_sub(MAX_PRESENTATION_OUTPUT_BYTES);
+            if excess >= last.text.len() {
+                let removed = self.spans.pop().expect("last span must exist");
+                marker_source = marker_source.min(removed.affinity.source_offset);
+                self.output_bytes = self.output_bytes.saturating_sub(removed.text.len());
+                continue;
+            }
+            let mut keep = last.text.len() - excess;
+            while keep > 0 && !last.text.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            let source_len = last
+                .affinity
+                .source_end
+                .saturating_sub(last.affinity.source_offset);
+            marker_source = marker_source.min(
+                last.affinity
+                    .source_offset
+                    .saturating_add(keep.min(source_len)),
+            );
+            let removed = last.text.len() - keep;
+            last.text.truncate(keep);
+            self.output_bytes = self.output_bytes.saturating_sub(removed);
+            if last.text.is_empty() {
+                self.spans.pop();
+            }
+        }
+        let output_offset = u32::try_from(self.output_bytes).unwrap_or(u32::MAX);
+        self.spans.push(TranscriptSpan {
+            text: PRESENTATION_TRUNCATED.to_owned(),
+            style: TranscriptSpanStyle {
+                inline: InlineStyle::ListMarker,
+                ..TranscriptSpanStyle::default()
+            },
+            affinity: SourceAffinity {
+                source_offset: marker_source,
+                source_end: source_offset,
+                output_offset,
+            },
+        });
+        self.output_bytes = self
+            .output_bytes
+            .saturating_add(PRESENTATION_TRUNCATED.len());
     }
 }
 
@@ -874,6 +919,52 @@ mod tests {
         assert_eq!(settled.document, from_scratch.document);
         assert!(settled.document.blocks.len() <= MAX_PRESENTATION_BLOCKS);
         assert!(settled.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn block_renderer_reserves_a_visible_truncation_marker() {
+        let mut fragments = BlockRenderer::default();
+        for index in 0..MAX_PRESENTATION_FRAGMENTS {
+            fragments.emit_source("x", index, index + 1, TranscriptSpanStyle::default());
+        }
+        assert_eq!(fragments.spans.len(), MAX_PRESENTATION_FRAGMENTS);
+        assert!(
+            fragments
+                .spans
+                .iter()
+                .all(|span| span.text != PRESENTATION_TRUNCATED)
+        );
+        fragments.emit(
+            "tail",
+            MAX_PRESENTATION_FRAGMENTS,
+            TranscriptSpanStyle::default(),
+        );
+        assert_eq!(fragments.spans.len(), MAX_PRESENTATION_FRAGMENTS);
+        assert_eq!(fragments.spans.last().unwrap().text, PRESENTATION_TRUNCATED);
+
+        let mut bytes = BlockRenderer::default();
+        bytes.emit_source(
+            &"x".repeat(MAX_PRESENTATION_OUTPUT_BYTES),
+            0,
+            MAX_PRESENTATION_OUTPUT_BYTES,
+            TranscriptSpanStyle::default(),
+        );
+        assert_eq!(bytes.output_bytes, MAX_PRESENTATION_OUTPUT_BYTES);
+        bytes.emit(
+            "tail",
+            MAX_PRESENTATION_OUTPUT_BYTES,
+            TranscriptSpanStyle::default(),
+        );
+        assert_eq!(bytes.spans.last().unwrap().text, PRESENTATION_TRUNCATED);
+        assert!(bytes.output_bytes <= MAX_PRESENTATION_OUTPUT_BYTES);
+        assert_eq!(
+            bytes.spans.first().unwrap().text.len() + PRESENTATION_TRUNCATED.len(),
+            MAX_PRESENTATION_OUTPUT_BYTES
+        );
+        assert_eq!(
+            bytes.spans.last().unwrap().affinity.source_offset,
+            bytes.spans.first().unwrap().text.len()
+        );
     }
 
     #[test]
