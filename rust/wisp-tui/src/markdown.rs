@@ -123,6 +123,7 @@ pub struct MarkdownWork {
 pub struct MarkdownBuild {
     pub document: MarkdownDocument,
     pub stable_blocks: usize,
+    pub presentation_epoch: u64,
     pub work: MarkdownWork,
 }
 
@@ -134,6 +135,7 @@ pub struct IncrementalMarkdownState {
     stable_blocks: Vec<Arc<MarkdownBlock>>,
     full_reparse_only: bool,
     used_literal_checkpoint: bool,
+    presentation_epoch: u64,
 }
 
 impl IncrementalMarkdownState {
@@ -161,10 +163,14 @@ impl IncrementalMarkdownState {
             self.stable_source_end = 0;
             self.stable_blocks.clear();
             self.used_literal_checkpoint = false;
+            self.bump_presentation_epoch();
         }
 
         let mutable_source = &source[self.stable_source_end..];
         if mutable_source.contains(REFERENCE_DEFINITION_MARKER) {
+            if !self.full_reparse_only {
+                self.bump_presentation_epoch();
+            }
             self.full_reparse_only = true;
             self.stable_source_end = 0;
             self.stable_blocks.clear();
@@ -189,6 +195,7 @@ impl IncrementalMarkdownState {
             return MarkdownBuild {
                 document: MarkdownDocument { blocks },
                 stable_blocks,
+                presentation_epoch: self.presentation_epoch,
                 work,
             };
         }
@@ -205,6 +212,7 @@ impl IncrementalMarkdownState {
             let checkpointed = checkpoint.len();
             self.stable_source_end = checkpoint_end;
             self.used_literal_checkpoint = true;
+            self.bump_presentation_epoch();
             checkpointed
         } else {
             0
@@ -227,8 +235,15 @@ impl IncrementalMarkdownState {
         let mut document = self.stable_blocks.clone();
         document.extend(parsed[promote..].iter().cloned());
         let presentation_source_end = presentation_start.saturating_add(source.len());
+        let was_truncated = self
+            .stable_blocks
+            .last()
+            .is_some_and(|block| is_truncation_block(block));
         let document_truncated = enforce_document_budget(&mut document, presentation_source_end);
         if document_truncated {
+            if !was_truncated {
+                self.bump_presentation_epoch();
+            }
             self.stable_source_end = source.len();
             self.stable_blocks = document.clone();
         }
@@ -243,8 +258,16 @@ impl IncrementalMarkdownState {
         MarkdownBuild {
             document: MarkdownDocument { blocks: document },
             stable_blocks: self.stable_blocks.len(),
+            presentation_epoch: self.presentation_epoch,
             work,
         }
+    }
+
+    fn bump_presentation_epoch(&mut self) {
+        self.presentation_epoch = self
+            .presentation_epoch
+            .checked_add(1)
+            .expect("Markdown presentation epoch exhausted");
     }
 }
 

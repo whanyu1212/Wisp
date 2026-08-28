@@ -1,6 +1,6 @@
 //! Bounded styled projection and viewport navigation for transcripts.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -137,6 +137,7 @@ struct CachedRow {
     next: Option<RowAnchor>,
     entry_revision: u64,
     content_len: usize,
+    markdown_presentation_identity: Option<u64>,
 }
 
 struct ProjectedRow {
@@ -157,10 +158,11 @@ struct MarkdownSnapshot {
     block_starts: Vec<usize>,
     output_len: usize,
     stable_output_len: usize,
+    presentation_identity: u64,
 }
 
 impl MarkdownSnapshot {
-    fn new(document: MarkdownDocument, stable_blocks: usize) -> Self {
+    fn new(document: MarkdownDocument, stable_blocks: usize, presentation_identity: u64) -> Self {
         let mut block_starts = Vec::with_capacity(document.blocks.len());
         let mut output_len = 0_usize;
         for (index, block) in document.blocks.iter().enumerate() {
@@ -186,6 +188,7 @@ impl MarkdownSnapshot {
             block_starts,
             output_len,
             stable_output_len,
+            presentation_identity,
         }
     }
 
@@ -379,6 +382,8 @@ struct MarkdownCacheEntry {
     state: IncrementalMarkdownState,
     snapshot: Arc<MarkdownSnapshot>,
     entry_revision: Option<u64>,
+    state_presentation_epoch: Option<u64>,
+    presentation_identity: u64,
     retained_bytes: usize,
 }
 
@@ -392,6 +397,7 @@ pub struct TranscriptRowCache {
     markdown: HashMap<MarkdownKey, MarkdownCacheEntry>,
     markdown_order: VecDeque<MarkdownKey>,
     markdown_retained_bytes: usize,
+    next_markdown_presentation_identity: u64,
     work: LayoutWork,
 }
 
@@ -436,7 +442,15 @@ impl TranscriptRowCache {
             self.insertion_order.retain(|candidate| candidate != &key);
         }
 
-        let cached = self.build_row(transcript, entry, anchor, width.max(1))?;
+        let cached = self.build_row(
+            transcript,
+            entry,
+            anchor,
+            width.max(1),
+            markdown_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.presentation_identity),
+        )?;
         self.work.rows_built = self.work.rows_built.saturating_add(1);
         self.insert(key, cached.clone());
         Some(cached)
@@ -448,6 +462,7 @@ impl TranscriptRowCache {
         entry: &TranscriptEntry,
         anchor: RowAnchor,
         width: usize,
+        markdown_presentation_identity: Option<u64>,
     ) -> Option<CachedRow> {
         let next_entry = || {
             transcript.entry_after(entry.id).map(|next| RowAnchor {
@@ -520,6 +535,7 @@ impl TranscriptRowCache {
             next: projected.next,
             entry_revision: entry.revision(),
             content_len: entry.content.len(),
+            markdown_presentation_identity,
         })
     }
 
@@ -632,8 +648,22 @@ impl TranscriptRowCache {
                 return snapshot;
             }
         }
-        let (snapshot, old_bytes, new_bytes, work) = {
-            let cached = self.markdown.entry(key).or_default();
+        if let Entry::Vacant(vacant) = self.markdown.entry(key) {
+            let presentation_identity = self.next_markdown_presentation_identity;
+            self.next_markdown_presentation_identity = self
+                .next_markdown_presentation_identity
+                .checked_add(1)
+                .expect("Markdown presentation identity exhausted");
+            vacant.insert(MarkdownCacheEntry {
+                presentation_identity,
+                ..MarkdownCacheEntry::default()
+            });
+        }
+        let (old_bytes, build, presentation_changed) = {
+            let cached = self
+                .markdown
+                .get_mut(&key)
+                .expect("Markdown cache entry must exist");
             let old_bytes = cached.retained_bytes;
             let build = cached.state.build(
                 &entry.content[start..],
@@ -641,16 +671,33 @@ impl TranscriptRowCache {
                 entry.layout_epoch(),
                 entry.state == TranscriptEntryState::Complete,
             );
+            let presentation_changed = cached
+                .state_presentation_epoch
+                .is_some_and(|epoch| epoch != build.presentation_epoch);
+            cached.state_presentation_epoch = Some(build.presentation_epoch);
+            (old_bytes, build, presentation_changed)
+        };
+        if presentation_changed {
+            let presentation_identity = self.allocate_markdown_presentation_identity();
+            self.markdown
+                .get_mut(&key)
+                .expect("Markdown cache entry must exist")
+                .presentation_identity = presentation_identity;
+        }
+        let (snapshot, new_bytes, work) = {
+            let cached = self
+                .markdown
+                .get_mut(&key)
+                .expect("Markdown cache entry must exist");
             let work = build.work;
-            cached.snapshot = Arc::new(MarkdownSnapshot::new(build.document, build.stable_blocks));
+            cached.snapshot = Arc::new(MarkdownSnapshot::new(
+                build.document,
+                build.stable_blocks,
+                cached.presentation_identity,
+            ));
             cached.entry_revision = Some(entry.revision());
             cached.retained_bytes = cached.snapshot.retained_bytes();
-            (
-                Arc::clone(&cached.snapshot),
-                old_bytes,
-                cached.retained_bytes,
-                work,
-            )
+            (Arc::clone(&cached.snapshot), cached.retained_bytes, work)
         };
         self.markdown_retained_bytes = self
             .markdown_retained_bytes
@@ -661,6 +708,15 @@ impl TranscriptRowCache {
         self.markdown_order.push_back(key);
         self.evict_markdown(key);
         snapshot
+    }
+
+    fn allocate_markdown_presentation_identity(&mut self) -> u64 {
+        let identity = self.next_markdown_presentation_identity;
+        self.next_markdown_presentation_identity = self
+            .next_markdown_presentation_identity
+            .checked_add(1)
+            .expect("Markdown presentation identity exhausted");
+        identity
     }
 
     fn record_markdown_work(&mut self, work: MarkdownWork) {
@@ -1326,6 +1382,14 @@ fn cached_row_valid(
     entry: &TranscriptEntry,
     markdown: Option<&MarkdownSnapshot>,
 ) -> bool {
+    if cached.row.kind == TranscriptRowKind::Content
+        && entry.role == TranscriptRole::Assistant
+        && markdown.is_none_or(|snapshot| {
+            cached.markdown_presentation_identity != Some(snapshot.presentation_identity)
+        })
+    {
+        return false;
+    }
     if cached.entry_revision == entry.revision() {
         return true;
     }
@@ -1888,6 +1952,101 @@ mod tests {
         assert!(content[0].spans.iter().all(|span| span.style.strong));
         assert_eq!(content[1].plain_text(), "cd");
         assert!(content[1].spans.iter().all(|span| !span.style.strong));
+    }
+
+    #[test]
+    fn markdown_checkpoint_transitions_invalidate_cached_rows() {
+        let mut transcript = Transcript::default();
+        let (_, assistant) = transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        transcript.append_message_delta(1, &"**bold** ".repeat(800));
+        let anchor = RowAnchor {
+            entry_id: assistant,
+            position: RowPosition::Markdown(MarkdownPosition {
+                source_offset: 0,
+                output_offset: 0,
+            }),
+        };
+        let mut cache = TranscriptRowCache::default();
+
+        let parsed = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(!parsed.contains("**bold**"));
+
+        transcript.append_message_delta(1, &"**bold** ".repeat(400));
+        let checkpointed = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(checkpointed.contains("**bold**"));
+
+        let authoritative = transcript.entry(assistant).unwrap().content.clone();
+        transcript.complete_message(1, authoritative);
+        let settled = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(!settled.contains("**bold**"));
+    }
+
+    #[test]
+    fn markdown_state_eviction_cannot_reuse_a_checkpoint_identity() {
+        let mut transcript = Transcript::default();
+        let (_, assistant) = transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        transcript.append_message_delta(1, &"**bold** ".repeat(1_200));
+        let anchor = RowAnchor {
+            entry_id: assistant,
+            position: RowPosition::Markdown(MarkdownPosition {
+                source_offset: 0,
+                output_offset: 0,
+            }),
+        };
+        let mut cache = TranscriptRowCache::default();
+        let checkpointed = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(checkpointed.contains("**bold**"));
+
+        let markdown_key = MarkdownKey {
+            entry_id: assistant,
+            layout_epoch: transcript.entry(assistant).unwrap().layout_epoch(),
+            presentation_start: 0,
+        };
+        let removed = cache.markdown.remove(&markdown_key).unwrap();
+        cache.markdown_retained_bytes = cache
+            .markdown_retained_bytes
+            .saturating_sub(removed.retained_bytes);
+        cache
+            .markdown_order
+            .retain(|candidate| candidate != &markdown_key);
+        cache.reset_work();
+        let rebuilt = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(rebuilt.contains("**bold**"));
+        assert_eq!(cache.work().rows_built, 1);
+        assert_eq!(cache.work().cache_hits, 0);
+
+        transcript.append_message_delta(1, "\n\n[label]: /target\n\n[linked][label]");
+        let authoritative = transcript.entry(assistant).unwrap().content.clone();
+        transcript.complete_message(1, authoritative);
+        let settled = cache
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row
+            .plain_text();
+
+        assert!(!settled.contains("**bold**"));
     }
 
     #[test]
