@@ -414,23 +414,25 @@ impl ProcessCardSnapshot {
         if !stderr.is_empty() {
             self.append_stream("stderr:", stderr);
         }
-        if stdout.is_empty() && stderr.is_empty() {
-            if let Some(error) = result
-                .process_error
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                self.append_unlabelled(&bounded_reason(error));
-            } else if !result.output.is_empty() {
-                self.append_unlabelled(&result.output);
-            }
-            if let Some(hint) = result
-                .recovery_hint
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                self.append_unlabelled(&format!("Recovery: {}", bounded_reason(hint)));
-            }
+        let process_error = result
+            .process_error
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        if let Some(error) = process_error {
+            self.append_unlabelled(&bounded_reason(error));
+        } else if stdout.is_empty()
+            && stderr.is_empty()
+            && result.process_state.is_none()
+            && !result.output.is_empty()
+        {
+            self.append_unlabelled(&result.output);
+        }
+        if let Some(hint) = result
+            .recovery_hint
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            self.append_unlabelled(&format!("Recovery: {}", bounded_reason(hint)));
         }
         self.backend_truncated |=
             result.truncated || result.stdout_truncated || result.stderr_truncated;
@@ -1201,6 +1203,48 @@ mod tests {
             process_call_identity("bash", &serde_json::json!({"operation": "start"})).is_none()
         );
         assert!(process_call_identity("read", &serde_json::json!({"process_id": "abc"})).is_none());
+    }
+
+    #[test]
+    fn process_errors_and_recovery_are_retained_alongside_stream_output() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut failed = result("generated failure envelope");
+        failed.name = "bash".into();
+        failed.process_id = Some("process-1".into());
+        failed.process_state = Some("failed".into());
+        failed.process_error = Some("cleanup failed after reading output".into());
+        failed.recovery_hint = Some("restart the command".into());
+        failed.stdout = Some("buffered stdout".into());
+
+        card.observe(ProcessOperation::Poll, &failed, 0);
+
+        assert!(card.retained_output.text.contains("buffered stdout"));
+        assert!(card.retained_output.text.contains("cleanup failed"));
+        assert!(card.retained_output.text.contains("restart the command"));
+        assert!(
+            !card
+                .retained_output
+                .text
+                .contains("generated failure envelope")
+        );
+    }
+
+    #[test]
+    fn silent_structured_polls_do_not_retain_generated_status_envelopes() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        for sequence in 0..600 {
+            card.begin(ProcessOperation::Poll, sequence);
+            let mut silent = result("Process process-1 is still running");
+            silent.name = "bash".into();
+            silent.process_id = Some("process-1".into());
+            silent.process_state = Some("running".into());
+            card.observe(ProcessOperation::Poll, &silent, sequence);
+        }
+
+        assert!(card.retained_output.text.is_empty());
+        assert_eq!(card.retained_output.source_bytes, 0);
+        assert_eq!(card.retained_output.source_lines, 0);
     }
 
     #[test]
