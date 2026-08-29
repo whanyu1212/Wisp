@@ -515,6 +515,10 @@ fn build_write_presentation(
     ))
 }
 
+fn unified_diff_start(start: usize, len: usize) -> usize {
+    start.saturating_add(usize::from(len > 0))
+}
+
 fn append_diff_rows(
     rows: &mut Vec<DetailRow>,
     before: &str,
@@ -538,14 +542,14 @@ fn append_diff_rows(
             let new_end = operations
                 .last()
                 .map_or(new_start, |operation| operation.new_range().end);
+            let old_len = old_end.saturating_sub(old_start);
+            let new_len = new_end.saturating_sub(new_start);
             rows.push(row(
                 DetailRowKind::Hunk,
                 format!(
-                    "@@ -{},{} +{},{} @@",
-                    old_start.saturating_add(1),
-                    old_end.saturating_sub(old_start),
-                    new_start.saturating_add(1),
-                    new_end.saturating_sub(new_start),
+                    "@@ -{},{old_len} +{},{new_len} @@",
+                    unified_diff_start(old_start, old_len),
+                    unified_diff_start(new_start, new_len),
                 ),
             ));
         } else if group_index > 0 {
@@ -1196,6 +1200,19 @@ mod tests {
                 .iter()
                 .any(|row| { row.kind == DetailRowKind::Note && row.text.contains("new file") })
         );
+    }
+
+    #[test]
+    fn unified_diff_zero_length_ranges_use_line_zero_anchors() {
+        let mut rows = Vec::new();
+        append_diff_rows(&mut rows, "", "first\nsecond\n", true, &mut 0, &mut 0);
+        assert_eq!(rows[0].text, "@@ -0,0 +1,2 @@");
+
+        rows.clear();
+        append_diff_rows(&mut rows, "first\nsecond\n", "", true, &mut 0, &mut 0);
+        assert_eq!(rows[0].text, "@@ -1,2 +0,0 @@");
+        assert_eq!(unified_diff_start(5, 0), 5);
+        assert_eq!(unified_diff_start(5, 2), 6);
     }
 
     #[test]
