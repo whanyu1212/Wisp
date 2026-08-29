@@ -277,6 +277,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
             if event.call_id not in self._active_tool_cards:
                 super().event(event)
                 return
+            if not event.approved:
+                self._unresolved_tool_conflicts.discard(event.call_id)
             self._set_tool_card(
                 event.call_id,
                 event.name,
@@ -865,7 +867,7 @@ def _clip_trace_metadata(value: str, max_chars: int) -> str:
 
 
 def _bounded_trace_internal_identity(value: str) -> str:
-    if not value.strip():
+    if _rust_whitespace_only(value):
         return "b:"
     encoded = value.encode()
     if len(encoded) <= 4 * 1024:
@@ -881,10 +883,19 @@ def _trace_process_identity(name: str, arguments: object) -> tuple[str, str] | N
     if (
         operation not in {"poll", "cancel"}
         or not isinstance(process_id, str)
-        or not process_id.strip()
+        or _rust_whitespace_only(process_id)
     ):
         return None
     return process_id, operation
+
+
+def _rust_whitespace_only(value: str) -> bool:
+    return all(
+        character in "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680"
+        or "\u2000" <= character <= "\u200a"
+        or character in "\u2028\u2029\u202f\u205f\u3000"
+        for character in value
+    )
 
 
 def _trace_process_call(name: str, arguments: object) -> bool:

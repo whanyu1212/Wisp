@@ -786,6 +786,41 @@ def test_blank_process_ids_share_canonical_generic_metadata() -> None:
     assert card.status == "requested"
 
 
+def test_control_separator_process_id_uses_rust_whitespace_semantics() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="control-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "\u001c\u001d\u001e\u001f"},
+        )
+    )
+
+    assert renderer.tool_card_projection() == ()
+
+
+def test_denial_resolves_unresolved_metadata_conflict() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "a"})
+    )
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "b"})
+    )
+    renderer.event(
+        ToolApprovalResolved(
+            call_id="denied-conflict", name="read", approved=False, reason="policy"
+        )
+    )
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "c"})
+    )
+
+    conflict, reuse = renderer.tool_card_projection()
+    assert conflict.status == "error"
+    assert reuse.status == "cancelled"
+
+
 def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

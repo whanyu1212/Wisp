@@ -1390,6 +1390,15 @@ mod tests {
         );
         assert!(process_call_identity("bash", &oversized_multibyte_blank).is_none());
 
+        let control_separator = bounded_tool_arguments(
+            "bash",
+            &serde_json::json!({
+                "operation": "poll",
+                "process_id": "\u{001c}\u{001d}\u{001e}\u{001f}",
+            }),
+        );
+        assert!(process_call_identity("bash", &control_separator).is_some());
+
         assert_eq!(
             process_call_identity(
                 "bash",
