@@ -157,6 +157,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
                     arguments_available=True,
                     lifecycle_start=True,
                 )
+            elif event.call_id in self._active_tool_cards:
+                self._set_conflicting_tool_card(event.call_id)
             else:
                 self._process_call_ids.add(event.call_id)
             super().approval_request(event)
@@ -197,6 +199,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
                         arguments_available=True,
                         lifecycle_start=True,
                     )
+                elif event.call_id in self._active_tool_cards:
+                    self._set_conflicting_tool_card(event.call_id)
                 else:
                     self._process_call_ids.add(event.call_id)
                 super().event(event)

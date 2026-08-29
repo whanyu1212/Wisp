@@ -688,6 +688,24 @@ def test_conflicting_unresolved_tool_calls_project_an_error() -> None:
     assert card.arguments_available
 
 
+def test_unresolved_generic_to_process_crossing_projects_an_error() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="call-cross", name="read", arguments={"path": "a"}))
+    renderer.event(
+        ToolCallRequested(
+            call_id="call-cross",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "call-cross"
+    assert card.name == "read"
+    assert card.status == "error"
+    assert card.arguments_available
+
+
 def test_rpc_event_payloads_are_bounded() -> None:
     oversized = _inline_trace(
         "oversized_rpc_event",

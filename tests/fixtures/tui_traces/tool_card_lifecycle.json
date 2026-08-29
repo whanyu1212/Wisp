@@ -148,6 +148,47 @@
       "type": "rpc.event",
       "event": {
         "type": "tool.call",
+        "call_id": "bad/id",
+        "name": "read",
+        "arguments": {"path": "unsafe-id.txt"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "bad/id",
+        "name": "read",
+        "output": "safe identity",
+        "is_error": false
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-cross",
+        "name": "read",
+        "arguments": {"path": "cross.txt"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "call-cross",
+        "name": "bash",
+        "arguments": {"operation": "poll", "process_id": "process-cross"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
         "call_id": "call-process",
         "name": "bash",
         "arguments": {"operation": "poll", "process_id": "process-1"}
@@ -269,6 +310,18 @@
         "call_id": "call-missing",
         "name": "read",
         "status": "cancelled",
+        "arguments_available": true
+      },
+      {
+        "call_id": "h-efbd41af988429404cd11f12d623256c46f0ebc90b6c695c874bc9daff597c43",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-cross",
+        "name": "read",
+        "status": "error",
         "arguments_available": true
       },
       {

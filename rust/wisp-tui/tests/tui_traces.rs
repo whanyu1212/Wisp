@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use wisp_protocol::commands::ApprovalScope;
@@ -353,7 +355,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
             .iter()
             .filter_map(|entry| {
                 entry.tool_card().map(|card| TraceToolCard {
-                    call_id: card.call_id.clone(),
+                    call_id: trace_card_id(&card.call_id),
                     name: card.name.clone(),
                     status: card.status.as_str().into(),
                     arguments_available: card.arguments_available,
@@ -361,6 +363,26 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
             })
             .collect(),
     })
+}
+
+fn trace_card_id(value: &str) -> String {
+    let schema_safe = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        });
+    if schema_safe {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(66);
+    encoded.push_str("h-");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
 }
 
 fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
