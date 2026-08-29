@@ -903,7 +903,7 @@ def test_control_separator_process_id_uses_rust_whitespace_semantics() -> None:
     assert renderer.tool_card_projection() == ()
 
 
-def test_denial_resolves_unresolved_metadata_conflict() -> None:
+def test_ignored_denial_preserves_unresolved_metadata_conflict() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(
         ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "a"})
@@ -920,9 +920,8 @@ def test_denial_resolves_unresolved_metadata_conflict() -> None:
         ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "c"})
     )
 
-    conflict, reuse = renderer.tool_card_projection()
+    (conflict,) = renderer.tool_card_projection()
     assert conflict.status == "error"
-    assert reuse.status == "cancelled"
 
 
 def test_generic_to_process_conflict_remains_unresolved_across_starts() -> None:
@@ -1061,6 +1060,17 @@ def test_delayed_duplicate_approval_request_does_not_regress_running_card() -> N
 
     (card,) = renderer.tool_card_projection()
     assert card.status == "running"
+
+
+def test_duplicate_denial_after_approval_does_not_suppress_result() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="approved", name="read", arguments={}))
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=True))
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=False))
+    renderer.event(ToolResultReady(call_id="approved", name="read", output="done", is_error=False))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "done"
 
 
 def test_approval_request_reusing_terminal_call_id_is_a_conflict() -> None:

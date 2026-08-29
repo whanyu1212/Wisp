@@ -277,6 +277,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
             if event.call_id not in self._active_tool_cards:
                 super().event(event)
                 return
+            current = self.tool_cards[self._active_tool_cards[event.call_id]]
+            if current.status in {"running", "done", "error", "denied", "cancelled"}:
+                super().event(event)
+                return
             if not event.approved:
                 self._unresolved_tool_conflicts.discard(event.call_id)
             self._set_tool_card(
