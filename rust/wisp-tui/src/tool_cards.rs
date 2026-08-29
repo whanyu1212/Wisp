@@ -304,9 +304,10 @@ impl ToolCardSnapshot {
                 TOOL_OUTPUT_MAX_LINES,
             )
         };
-        self.retained_output.source_bytes = input
-            .output_source_bytes
-            .max(u64::try_from(input.output.len()).unwrap_or(u64::MAX));
+        let raw_output_bytes = u64::try_from(input.output.len()).unwrap_or(u64::MAX);
+        let normalized_output_bytes = u64::try_from(normalized_output.len()).unwrap_or(u64::MAX);
+        self.retained_output.source_bytes = normalized_output_bytes
+            .saturating_add(input.output_source_bytes.saturating_sub(raw_output_bytes));
         self.retained_output.dropped_bytes = self
             .retained_output
             .source_bytes
@@ -1237,6 +1238,23 @@ mod tests {
         assert!(card.retained_output.text.len() <= TOOL_OUTPUT_MAX_BYTES);
         assert_eq!(card.detail, "Read 20,000 lines");
         assert!(!card.approval_resolved(false, Some("late")));
+    }
+
+    #[test]
+    fn newline_normalization_does_not_report_phantom_omitted_bytes() {
+        let input = ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+        let mut completed = result("one\r\ntwo\rthree");
+        completed.output_source_bytes = completed.output.len() as u64;
+
+        assert!(card.apply_result(&completed));
+        assert_eq!(card.retained_output.text, "one\ntwo\nthree");
+        assert_eq!(card.retained_output.source_bytes, 13);
+        assert_eq!(card.retained_output.dropped_bytes, 0);
     }
 
     #[test]

@@ -704,6 +704,41 @@ def test_duplicate_metadata_is_compared_after_presentation_bounds() -> None:
     assert card.name == f"{'n' * 127}…"
 
 
+def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="timing-only",
+            name="bash",
+            arguments={"command": "echo ok", "wait_seconds": 1},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="timing-only",
+            name="bash",
+            arguments={"command": "echo ok", "wait_seconds": 99},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
+def test_result_and_approval_updates_preserve_the_requested_name() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="name-result", name="read", arguments={}))
+    renderer.event(
+        ToolResultReady(call_id="name-result", name="grep", output="done", is_error=False)
+    )
+    renderer.event(ToolCallRequested(call_id="name-approval", name="read", arguments={}))
+    renderer.event(ToolApprovalResolved(call_id="name-approval", name="grep", approved=True))
+
+    result, approval = renderer.tool_card_projection()
+    assert result.name == "read"
+    assert approval.name == "read"
+
+
 def test_generic_approval_reusing_resolved_process_id_is_cancelled() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

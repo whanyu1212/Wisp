@@ -358,7 +358,9 @@ class RecordingTraceRenderer(LineTuiRenderer):
             return
         projection = TraceToolCardProjection(
             call_id=_clip_trace_card_id(call_id),
-            name=_clip_trace_card_field(name),
+            name=current.name
+            if current is not None and not lifecycle_start
+            else _clip_trace_card_field(name),
             status=status,
             arguments_available=arguments_available,
         )
@@ -714,10 +716,95 @@ def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, s
                         arguments[key], 200 if key == "command" else 256
                     )
                 bounded_arguments[key] = value
+    return (bounded_name, _trace_action_arguments(name, bounded_arguments))
+
+
+def _trace_action_arguments(name: str, arguments: dict[str, object]) -> str:
+    if name == "read":
+        output = _trace_path_value(arguments, "path", "<path>")
+        offset = _trace_positive_int(arguments.get("offset"))
+        limit = _trace_positive_int(arguments.get("limit"))
+        if offset is not None or limit is not None:
+            start = offset or 1
+            output += f":{start}-"
+            if limit is not None:
+                output += str(min(start + limit - 1, 2**64 - 1))
+        return _clip_trace_metadata(output, 200)
+    if name == "grep":
+        pattern = _trace_string_value(arguments, "pattern", "")
+        path = _trace_path_value(arguments, "path", ".")
+        return _clip_trace_metadata(
+            f"/{_clip_trace_metadata(_trace_one_line(pattern), 64)}/ in {path}", 200
+        )
+    if name == "find":
+        pattern = _trace_string_value(arguments, "pattern", "*")
+        path = _trace_path_value(arguments, "path", ".")
+        return _clip_trace_metadata(
+            f"{_clip_trace_metadata(_trace_one_line(pattern), 64)} in {path}", 200
+        )
+    if name == "ls":
+        return _clip_trace_metadata(_trace_path_value(arguments, "path", "."), 200)
+    if name == "bash":
+        operation = _trace_string_value(arguments, "operation", "run")
+        if operation in {"poll", "cancel"}:
+            process_id = _trace_string_value(arguments, "process_id", "<process>")
+            return _clip_trace_metadata(
+                f"{operation} {_clip_trace_metadata(_trace_one_line(process_id), 64)}", 200
+            )
+        command = _trace_string_value(arguments, "command", "")
+        if operation == "start":
+            rendered = f"start {_clip_trace_metadata(_trace_one_line(command), 180)}"
+        else:
+            rendered = _clip_trace_metadata(_trace_one_line(command), 190)
+        return _clip_trace_metadata(rendered, 200)
+    if name in {"edit", "write"}:
+        return _clip_trace_metadata(_trace_path_value(arguments, "path", "<path>"), 200)
+    parts = [
+        f"{_clip_trace_metadata(_trace_one_line(key), 32)}="
+        f"{_clip_trace_metadata(_trace_scalar_value(arguments[key]), 64)}"
+        for key in sorted(arguments)[:8]
+    ]
+    return _clip_trace_metadata(" ".join(parts), 160)
+
+
+def _trace_path_value(arguments: dict[str, object], key: str, default: str) -> str:
+    value = _trace_one_line(_trace_string_value(arguments, key, default))
+    if len(value) <= 80:
+        return value
+    left = 39
+    right = 40
+    return f"{value[:left]}…{value[-right:]}"
+
+
+def _trace_string_value(arguments: dict[str, object], key: str, default: str) -> str:
+    value = arguments.get(key)
+    return value if isinstance(value, str) else default
+
+
+def _trace_positive_int(value: object) -> int | None:
     return (
-        bounded_name,
-        json.dumps(bounded_arguments, sort_keys=True, separators=(",", ":")),
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 2**64 - 1
+        else None
     )
+
+
+def _trace_one_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _trace_scalar_value(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, str):
+        return _trace_one_line(value)
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    if isinstance(value, dict):
+        return f"{{{len(value)} fields}}"
+    return str(value)
 
 
 def _bounded_trace_argument(value: object, max_chars: int) -> object:
