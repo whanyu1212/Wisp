@@ -690,7 +690,7 @@ impl Transcript {
             let terminal = self
                 .entry(entry_id)
                 .and_then(TranscriptEntry::process_card)
-                .is_some_and(|card| card.display_state.terminal());
+                .is_some_and(|card| card.display_state.evictable());
             if terminal && !has_unresolved_call {
                 self.process_entries.remove(&process_id);
                 self.process_index_bytes =
@@ -1435,6 +1435,33 @@ mod tests {
         );
         assert!(transcript.process_entries.contains_key("process-137"));
         assert!(!transcript.process_entries.contains_key("process-0"));
+    }
+
+    #[test]
+    fn process_index_evicts_resolved_operation_states() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("denied process operations".into());
+        for index in 0..MAX_PROCESS_INDEX_ENTRIES {
+            let process_id = format!("process-{index}");
+            let call_id = format!("poll-{index}");
+            transcript.observe_tool_call(call(
+                &call_id,
+                "bash",
+                serde_json::json!({"operation": "poll", "process_id": process_id}),
+            ));
+            transcript.observe_approval_resolved(&call_id, false, Some("policy"));
+        }
+
+        let overflow = transcript.observe_tool_call(call(
+            "poll-overflow",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-overflow"}),
+        ));
+
+        assert!(transcript.entry(overflow).unwrap().process_card().is_some());
+        assert!(transcript.process_entries.contains_key("process-overflow"));
+        assert!(!transcript.process_entries.contains_key("process-0"));
+        assert_eq!(transcript.process_entries.len(), MAX_PROCESS_INDEX_ENTRIES);
     }
 
     #[test]

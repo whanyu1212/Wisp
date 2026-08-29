@@ -86,6 +86,21 @@ impl ProcessDisplayState {
         )
     }
 
+    /// Whether this card has no active process operation and may leave the
+    /// bounded process index once all call bindings targeting it are resolved.
+    pub fn evictable(self) -> bool {
+        self.terminal()
+            || matches!(
+                self,
+                Self::PollDenied
+                    | Self::CancelDenied
+                    | Self::PollInterrupted
+                    | Self::CancelInterrupted
+                    | Self::PollFailed
+                    | Self::CancelFailed
+            )
+    }
+
     pub fn status(self) -> ToolStatus {
         match self {
             Self::Polling | Self::Cancelling | Self::Running | Self::Observed => {
