@@ -305,7 +305,11 @@ pub fn project_tool_detail_source(name: &str, arguments: &Map<String, Value>) ->
             })
         }
         "grep" => ToolDetailSource::Grep(GrepDetailSource {
-            path: bounded_path(arguments.get("path")),
+            path: arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .map(|path| one_line(&clip_chars(path, DETAIL_PATH_MAX_CHARS)))
+                .unwrap_or_else(|| ".".into()),
             pattern: arguments
                 .get("pattern")
                 .and_then(Value::as_str)
@@ -1229,6 +1233,23 @@ mod tests {
             build_tool_detail(&grep, result("a.rs:2:needle\n", Some("grep: 1 match"))),
             DetailAvailability::LiveRetained(_)
         ));
+        let default_grep = project_tool_detail_source(
+            "grep",
+            serde_json::json!({"pattern": "needle"})
+                .as_object()
+                .unwrap(),
+        );
+        let ToolDetailSource::Grep(default_grep_source) = &default_grep else {
+            panic!("grep source expected");
+        };
+        assert_eq!(default_grep_source.path, ".");
+        let DetailAvailability::LiveRetained(default_grep_detail) = build_tool_detail(
+            &default_grep,
+            result("a.rs:2:needle\n", Some("grep: 1 match")),
+        ) else {
+            panic!("grep detail expected");
+        };
+        assert_eq!(default_grep_detail.title, ".");
         assert_eq!(
             build_tool_detail(&grep, result("a:2:needle:3:other\n", Some("grep: 1 match"))),
             DetailAvailability::None

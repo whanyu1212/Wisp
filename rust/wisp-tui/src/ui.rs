@@ -184,6 +184,22 @@ fn render_transcript(
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let rows = viewport.visible_rows(&state.transcript, row_cache);
+    let selected_row = browse_selected.and_then(|selected_entry| {
+        rows.iter()
+            .find(|row| {
+                row.anchor.entry_id == selected_entry && row.kind == TranscriptRowKind::CardAction
+            })
+            .or_else(|| {
+                rows.iter().find(|row| {
+                    row.anchor.entry_id == selected_entry
+                        && matches!(
+                            row.kind,
+                            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
+                        )
+                })
+            })
+            .map(|row| row.anchor)
+    });
     let lines = if rows.is_empty() {
         vec![Line::styled(
             "Type a prompt below to start.",
@@ -192,8 +208,7 @@ fn render_transcript(
     } else {
         rows.into_iter()
             .map(|row| {
-                let selected = browse_selected == Some(row.anchor.entry_id)
-                    && row.kind == TranscriptRowKind::CardAction;
+                let selected = selected_row == Some(row.anchor);
                 let mut style = match row.tone {
                     TranscriptRowTone::Default => Style::default(),
                     TranscriptRowTone::User => Style::default()
@@ -1282,6 +1297,37 @@ mod tests {
         assert!(collapsed.contains("+ new value"));
         assert!(collapsed.contains("F6 browse"));
         assert!(!collapsed.contains('\u{1b}'));
+
+        let backend = TestBackend::new(60, 10);
+        let mut browse_terminal = Terminal::new(backend).unwrap();
+        let mut browse_viewport = TranscriptViewport::default();
+        let mut browse_cache = TranscriptRowCache::default();
+        browse_terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut browse_viewport,
+                    &mut browse_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    Some(card_id),
+                    None,
+                );
+            })
+            .unwrap();
+        let visible = browse_viewport.visible_rows(&state.transcript, &mut browse_cache);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].anchor.entry_id, card_id);
+        assert!(matches!(
+            visible[0].kind,
+            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
+        ));
+        let visible_text = visible[0].plain_text();
+        let (_, selected_background, _) =
+            style_at_text(browse_terminal.backend(), &visible_text).unwrap();
+        assert_eq!(selected_background, Color::Blue);
 
         let card = state
             .transcript
