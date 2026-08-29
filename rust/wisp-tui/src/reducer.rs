@@ -1127,6 +1127,31 @@ mod tests {
     }
 
     #[test]
+    fn successful_bash_projection_retains_summary_tail_before_queueing() {
+        let output = format!(
+            "STARTING BUILD\n{}BUILD FINISHED SUCCESSFULLY",
+            "compiling\n".repeat(20_000)
+        );
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "call-success",
+                "name": "bash",
+                "output": output,
+                "is_error": false,
+                "exit_code": 0
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+
+        assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert!(result.output.ends_with("BUILD FINISHED SUCCESSFULLY"));
+        assert!(!result.output.contains("STARTING BUILD"));
+    }
+
+    #[test]
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",

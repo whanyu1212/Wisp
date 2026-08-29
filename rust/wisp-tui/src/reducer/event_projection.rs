@@ -77,13 +77,15 @@ impl BackendEvent {
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
             "tool.result" => {
+                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
                 let is_error = bool_field(value, &event_type, "is_error")?;
                 let exit_code = optional_i64_field(value, &event_type, "exit_code")?;
                 let process_state = optional_string_field(value, &event_type, "process_state")?;
-                let retain_output_tail = process_state.as_deref() != Some("cancelled")
-                    && (is_error
-                        || exit_code.is_some_and(|code| code != 0)
-                        || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
+                let retain_output_tail = name == "bash"
+                    || (process_state.as_deref() != Some("cancelled")
+                        && (is_error
+                            || exit_code.is_some_and(|code| code != 0)
+                            || matches!(process_state.as_deref(), Some("failed" | "timed_out"))));
                 let (output, output_source_bytes) =
                     bounded_string_field(value, &event_type, "output", retain_output_tail)?;
                 let (stdout, stdout_source_bytes) =
@@ -92,7 +94,7 @@ impl BackendEvent {
                     optional_bounded_string_field(value, &event_type, "stderr", true)?;
                 Self::ToolResult(Box::new(ToolResultInput {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                    name: bounded_display_string_field(value, &event_type, "name", 512)?,
+                    name,
                     output,
                     output_source_bytes,
                     is_error,
