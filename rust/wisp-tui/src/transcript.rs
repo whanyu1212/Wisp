@@ -292,7 +292,7 @@ impl Transcript {
         if changed {
             self.bump_card(binding.entry_id);
         }
-        if !approved {
+        if !approved && changed {
             self.mark_tool_binding_resolved(call_id);
         }
         Some(binding.entry_id)
@@ -1069,6 +1069,16 @@ mod tests {
                 .display_state,
             ProcessDisplayState::Polling
         );
+        transcript.observe_approval_resolved("poll-approved", false, Some("late duplicate"));
+        assert_eq!(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::Polling
+        );
         transcript.observe_approval_requested(request);
         assert_eq!(
             transcript
@@ -1078,6 +1088,20 @@ mod tests {
                 .unwrap()
                 .display_state,
             ProcessDisplayState::Polling
+        );
+        let mut completed = result("poll-approved", "done");
+        completed.name = "bash".into();
+        completed.process_id = Some("process".into());
+        completed.process_state = Some("completed".into());
+        transcript.observe_tool_result(completed);
+        assert_eq!(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::Completed
         );
     }
 

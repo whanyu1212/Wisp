@@ -277,7 +277,7 @@ impl ToolCardSnapshot {
     }
 
     pub fn approval_resolved(&mut self, approved: bool, reason: Option<&str>) -> bool {
-        if self.status.terminal() {
+        if self.status.terminal() || self.status == ToolStatus::Running {
             return false;
         }
         if approved {
@@ -452,7 +452,9 @@ impl ProcessCardSnapshot {
         reason: Option<&str>,
         sequence: u64,
     ) -> bool {
-        if !self.accept_sequence(sequence) {
+        if (self.approval_sequence == Some(sequence) && self.approval_resolved)
+            || !self.accept_sequence(sequence)
+        {
             return false;
         }
         self.approval_sequence = Some(sequence);
@@ -1451,6 +1453,7 @@ mod tests {
         assert!(card.approval_resolved(true, None));
 
         assert!(!card.approval_requested());
+        assert!(!card.approval_resolved(false, Some("late duplicate")));
         assert_eq!(card.status, ToolStatus::Running);
     }
 

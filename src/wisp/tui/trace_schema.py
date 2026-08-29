@@ -240,12 +240,12 @@ class TraceRpcEvent(_TraceModel):
         boolean_fields: tuple[str, ...]
         if isinstance(bounded, dict) and bounded.get("type") == "tool.result":
             exit_code = bounded.get("exit_code")
-            if (
-                isinstance(exit_code, int)
-                and not isinstance(exit_code, bool)
-                and not -(2**63) <= exit_code <= 2**63 - 1
+            if exit_code is not None and (
+                not isinstance(exit_code, int)
+                or isinstance(exit_code, bool)
+                or not -(2**63) <= exit_code <= 2**63 - 1
             ):
-                raise ValueError("tool.result exit_code exceeds the signed 64-bit trace range")
+                raise ValueError("tool.result exit_code must be a signed 64-bit integer or null")
             for field in ("stdout_dropped_bytes", "stderr_dropped_bytes"):
                 count = bounded.get(field)
                 if count is not None and (

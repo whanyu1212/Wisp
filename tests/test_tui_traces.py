@@ -117,6 +117,30 @@ def test_trace_schema_rejects_coerced_tool_booleans() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+def test_trace_model_rejects_integral_float_exit_codes_before_event_coercion() -> None:
+    data = _inline_trace(
+        "float_exit_code",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "output": "",
+                    "is_error": False,
+                    "exit_code": 1.0,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(ValueError, match="signed 64-bit integer"):
+        TraceFileAdapter.validate_python(data)
+
+
 def test_trace_schema_rejects_out_of_range_dropped_byte_counts() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     data = _inline_trace(
