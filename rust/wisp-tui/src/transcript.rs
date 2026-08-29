@@ -518,7 +518,7 @@ impl Transcript {
                         unreachable!("non-tool binding must target a process operation")
                     };
                     let incoming = process_call_identity(&input.name, &input.arguments);
-                    let changed = {
+                    let (conflicts, changed) = {
                         let entry = self.entry_mut(binding.entry_id);
                         let TranscriptEntryKind::Process(card) = &mut entry.kind else {
                             unreachable!("process binding must target a process card")
@@ -527,10 +527,13 @@ impl Transcript {
                             identity.operation != operation
                                 || identity.process_id != card.process_id
                         });
-                        conflicts && card.conflict(operation, binding.sequence)
+                        let changed = conflicts && card.conflict(operation, binding.sequence);
+                        (conflicts, changed)
                     };
                     if changed {
                         self.bump_card(binding.entry_id);
+                    }
+                    if conflicts {
                         self.mark_tool_binding_resolved(&input.call_id);
                     }
                 }
@@ -1413,6 +1416,39 @@ mod tests {
             assert!(card.preview().text.contains("metadata changed"));
             assert!(!card.preview().text.contains("must be ignored"));
         }
+    }
+
+    #[test]
+    fn stale_process_metadata_conflict_still_resolves_the_older_binding() {
+        let mut transcript = Transcript::default();
+        let process = transcript.observe_tool_call(call(
+            "older",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process"}),
+        ));
+        assert_eq!(
+            transcript.observe_tool_call(call(
+                "newer",
+                "bash",
+                serde_json::json!({"operation": "poll", "process_id": "process"}),
+            )),
+            process
+        );
+
+        assert_eq!(
+            transcript.observe_tool_call(call(
+                "older",
+                "bash",
+                serde_json::json!({"operation": "cancel", "process_id": "process"}),
+            )),
+            process
+        );
+        assert!(transcript.call_entries["older"].resolved);
+        transcript.observe_tool_result(result("older", "must be ignored"));
+
+        let card = transcript.entry(process).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
+        assert!(card.preview().text.is_empty());
     }
 
     #[test]
