@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,12 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JsonSchemaValidationError
 
+from wisp.events import (
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
+)
 from wisp.tui.trace_runner import RecordingTraceRenderer, TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
     DEFAULT_TRACE_SCHEMA_DIRECTORY,
@@ -55,6 +62,135 @@ def test_initial_view_schema_excludes_derived_state() -> None:
     )
     with pytest.raises(JsonSchemaValidationError, match="provider"):
         Draft202012Validator(schema).validate(data)
+
+
+def test_trace_schema_rejects_out_of_range_tool_exit_codes() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "out_of_range_exit_code",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "output": "",
+                    "is_error": False,
+                    "exit_code": 2**63,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_trace_schema_rejects_coerced_tool_booleans() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "coerced_tool_boolean",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "output": "",
+                    "is_error": 0,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="trace boolean"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_trace_schema_rejects_integers_beyond_the_finite_json_number_range() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "oversized_generic_integer",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.call",
+                    "call_id": "call-1",
+                    "name": "extension",
+                    "arguments": {"value": 10**400},
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="finite JSON number range"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_trace_model_rejects_integral_float_exit_codes_before_event_coercion() -> None:
+    data = _inline_trace(
+        "float_exit_code",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "output": "",
+                    "is_error": False,
+                    "exit_code": 1.0,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(ValueError, match="signed 64-bit integer"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_trace_schema_rejects_out_of_range_dropped_byte_counts() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "out_of_range_dropped_bytes",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "output": "",
+                    "is_error": False,
+                    "stdout_dropped_bytes": 2**64,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        TraceFileAdapter.validate_python(data)
 
 
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
@@ -117,6 +253,12 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
             f"  actual:   {result.retained_text!r}\n"
             f"  expected: {trace.expected.retained_text!r}"
         )
+        if trace.expected.tool_cards is not None:
+            assert result.tool_cards == trace.expected.tool_cards, (
+                f"tool_cards mismatch in {path.name}\n"
+                f"  actual:   {[card.model_dump() for card in result.tool_cards]!r}\n"
+                f"  expected: {[card.model_dump() for card in trace.expected.tool_cards]!r}"
+            )
 
     anyio.run(run)
 
@@ -586,6 +728,543 @@ def test_partial_response_retention_is_bounded_across_deltas() -> None:
     renderer.token_delta("x" * 3000)
     with pytest.raises(TraceReplayError, match="retained characters"):
         renderer.token_delta("y" * 1001)
+
+
+def test_denied_process_result_does_not_create_a_generic_trace_card() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="poll-denied",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolApprovalResolved(
+            call_id="poll-denied",
+            name="bash",
+            approved=False,
+            reason="denied",
+        )
+    )
+    renderer.event(
+        ToolResultReady(
+            call_id="poll-denied",
+            name="bash",
+            output="Denied by user",
+            is_error=True,
+        )
+    )
+
+    assert renderer.tool_card_projection() == ()
+
+
+def test_trace_tool_card_projection_bounds_display_identities() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="c" * 256,
+            name="n" * 256,
+            arguments={},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert len(card.call_id) <= 128
+    assert len(card.name) == 128
+    assert card.call_id == f"h-{hashlib.sha256(('c' * 256).encode()).hexdigest()}"
+    assert card.name == f"{'n' * 127}…"
+
+    for unsafe in ("bad/id", ""):
+        renderer = RecordingTraceRenderer()
+        renderer.event(ToolCallRequested(call_id=unsafe, name="read", arguments={}))
+        (card,) = renderer.tool_card_projection()
+        assert card.call_id == f"h-{hashlib.sha256(unsafe.encode()).hexdigest()}"
+
+
+def test_settlement_tombstones_unresolved_process_call_ids() -> None:
+    renderer = RecordingTraceRenderer()
+    process_call = ToolCallRequested(
+        call_id="settled-process",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "process-1"},
+    )
+    renderer.event(process_call)
+    renderer._settle_tool_cards()
+    renderer.event(process_call)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+    assert card.arguments_available
+
+
+def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
+    renderer = RecordingTraceRenderer()
+    process_call = ToolCallRequested(
+        call_id="poll-reused",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "process-1"},
+    )
+    renderer.event(process_call)
+    renderer.event(
+        ToolResultReady(
+            call_id="poll-reused",
+            name="bash",
+            output="running",
+            is_error=False,
+            process_id="process-1",
+            process_state="running",
+        )
+    )
+    renderer.rpc_stream_ended_unexpectedly()
+    renderer.event(process_call)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "poll-reused"
+    assert card.name == "bash"
+    assert card.status == "cancelled"
+    assert card.arguments_available
+
+
+def test_duplicate_metadata_is_compared_after_presentation_bounds() -> None:
+    renderer = RecordingTraceRenderer()
+    shared_name = "n" * 127
+    renderer.event(
+        ToolCallRequested(
+            call_id="bounded-name",
+            name=f"{shared_name}aa",
+            arguments={"value": "x" * 64 + "a"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="bounded-name",
+            name=f"{shared_name}ab",
+            arguments={"value": "x" * 64 + "b"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+    assert card.name == f"{'n' * 127}…"
+
+
+def test_unresolved_metadata_conflict_survives_lifecycle_starts() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "first"}))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "second"}))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "second"}))
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="conflict",
+            name="read",
+            arguments={"path": "second"},
+            safety="read",
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+    renderer.event(ToolResultReady(call_id="conflict", name="read", output="late", is_error=True))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "third"}))
+    original, reuse = renderer.tool_card_projection()
+    assert original.status == "error"
+    assert reuse.status == "cancelled"
+
+
+def test_out_of_range_integer_metadata_matches_rust_number_rounding() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="large-number",
+            name="extension",
+            arguments={"value": 2**64},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="large-number",
+            name="extension",
+            arguments={"value": 2**64 + 1},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
+def test_blank_process_ids_share_canonical_generic_metadata() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="blank-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": ""},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="blank-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": " "},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
+def test_control_separator_process_id_uses_rust_whitespace_semantics() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="control-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "\u001c\u001d\u001e\u001f"},
+        )
+    )
+
+    assert renderer.tool_card_projection() == ()
+
+
+def test_ignored_denial_preserves_unresolved_metadata_conflict() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "a"})
+    )
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "b"})
+    )
+    renderer.event(
+        ToolApprovalResolved(
+            call_id="denied-conflict", name="read", approved=False, reason="policy"
+        )
+    )
+    renderer.event(
+        ToolCallRequested(call_id="denied-conflict", name="read", arguments={"path": "c"})
+    )
+
+    (conflict,) = renderer.tool_card_projection()
+    assert conflict.status == "error"
+
+
+def test_generic_to_process_conflict_remains_unresolved_across_starts() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="cross-kind", name="read", arguments={"path": "a"}))
+    renderer.event(
+        ToolCallRequested(
+            call_id="cross-kind",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="cross-kind", name="read", arguments={"path": "b"}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_action_summaries_use_rust_whitespace_semantics() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="separator",
+            name="extension",
+            arguments={"value": "left\u001cright"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="separator",
+            name="extension",
+            arguments={"value": "left right"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_generic_float_metadata_uses_rust_exponent_formatting() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="float-format",
+            name="extension",
+            arguments={"value": 1e-7},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="float-format",
+            name="extension",
+            arguments={"value": "1e-07"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_generic_float_metadata_uses_rust_fixed_decimal_threshold() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="fixed-float-format",
+            name="extension",
+            arguments={"value": 1e-5},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="fixed-float-format",
+            name="extension",
+            arguments={"value": "0.00001"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
+def test_clipped_generic_key_collisions_count_as_omissions() -> None:
+    renderer = RecordingTraceRenderer()
+    prefix = "k" * 64
+    renderer.event(
+        ToolCallRequested(
+            call_id="key-collision",
+            name="extension",
+            arguments={f"{prefix}a": 1, f"{prefix}b": 2},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="key-collision",
+            name="extension",
+            arguments={f"{prefix}b": 2},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_generic_argument_omission_count_affects_canonical_metadata() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="omitted-fields",
+            name="extension",
+            arguments={f"key-{index}": index for index in range(9)},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="omitted-fields",
+            name="extension",
+            arguments={f"key-{index}": index for index in range(10)},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="timing-only",
+            name="bash",
+            arguments={"command": "echo ok", "wait_seconds": 1},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="timing-only",
+            name="bash",
+            arguments={"command": "echo ok", "wait_seconds": 99},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
+def test_delayed_duplicate_approval_request_does_not_regress_running_card() -> None:
+    renderer = RecordingTraceRenderer()
+    request = ToolApprovalRequested(
+        call_id="approved",
+        name="read",
+        arguments={},
+        safety="read",
+    )
+    renderer.approval_request(request)
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=True))
+    renderer.approval_request(request)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "running"
+
+
+def test_duplicate_denial_after_approval_does_not_suppress_result() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="approved", name="read", arguments={}))
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=True))
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=False))
+    renderer.event(ToolResultReady(call_id="approved", name="read", output="done", is_error=False))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "done"
+
+
+def test_approval_request_reusing_terminal_call_id_is_a_conflict() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="reused", name="read", arguments={}))
+    renderer.event(ToolResultReady(call_id="reused", name="read", output="done", is_error=False))
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="reused",
+            name="read",
+            arguments={},
+            safety="read",
+        )
+    )
+
+    first, conflict = renderer.tool_card_projection()
+    assert first.status == "done"
+    assert conflict.status == "cancelled"
+
+
+def test_requestless_approval_resolution_does_not_create_a_card() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolApprovalResolved(call_id="orphan", name="read", approved=True))
+
+    assert renderer.tool_card_projection() == ()
+
+
+def test_result_and_approval_updates_preserve_the_requested_name() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="name-result", name="read", arguments={}))
+    renderer.event(
+        ToolResultReady(call_id="name-result", name="grep", output="done", is_error=False)
+    )
+    renderer.event(ToolCallRequested(call_id="name-approval", name="read", arguments={}))
+    renderer.event(ToolApprovalResolved(call_id="name-approval", name="grep", approved=True))
+
+    result, approval = renderer.tool_card_projection()
+    assert result.name == "read"
+    assert approval.name == "read"
+
+
+def test_generic_approval_reusing_resolved_process_id_is_cancelled() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="resolved-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolResultReady(
+            call_id="resolved-process",
+            name="bash",
+            output="running",
+            is_error=False,
+            process_id="process-1",
+            process_state="running",
+        )
+    )
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="resolved-process",
+            name="read",
+            arguments={"path": "README.md"},
+            safety="read",
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+    assert card.name == "read"
+
+
+def test_conflicting_unresolved_tool_calls_project_an_error() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="call-conflict", name="read", arguments={"path": "a"}))
+    renderer.event(ToolCallRequested(call_id="call-conflict", name="grep", arguments={"path": "b"}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "call-conflict"
+    assert card.name == "read"
+    assert card.status == "error"
+    assert card.arguments_available
+
+
+def test_empty_and_multibyte_tool_names_have_bounded_trace_fields() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="empty", name="", arguments={}))
+    renderer.event(ToolCallRequested(call_id="multibyte", name="🦀" * 129, arguments={}))
+
+    empty, multibyte = renderer.tool_card_projection()
+    assert empty.name == "(unnamed)"
+    assert multibyte.name == f"{'🦀' * 127}…"
+
+
+def test_unresolved_generic_to_process_crossing_projects_an_error() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="call-cross", name="read", arguments={"path": "a"}))
+    renderer.event(
+        ToolCallRequested(
+            call_id="call-cross",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "call-cross"
+    assert card.name == "read"
+    assert card.status == "error"
+    assert card.arguments_available
+
+
+def test_changed_process_metadata_resolves_the_ambiguous_binding() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="changed-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="changed-process",
+            name="bash",
+            arguments={"operation": "cancel", "process_id": "process-2"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="changed-process", name="read", arguments={}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+
+
+def test_unresolved_process_to_generic_crossing_does_not_rebind_the_call() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="call-cross",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="call-cross", name="read", arguments={"path": "a"}))
+
+    assert renderer.tool_card_projection() == ()
 
 
 def test_rpc_event_payloads_are_bounded() -> None:

@@ -2,8 +2,9 @@ use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
-use crate::transcript::TranscriptRole;
-use crate::transcript_view::{TranscriptRowCache, TranscriptRowKind, TranscriptViewport};
+use crate::transcript_view::{
+    TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
+};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -154,22 +155,30 @@ fn render_transcript(
     } else {
         rows.into_iter()
             .map(|row| {
-                let style = match row.kind {
-                    TranscriptRowKind::Header => match row.role {
-                        TranscriptRole::User => Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                        TranscriptRole::Assistant => Style::default()
+                let style = match row.tone {
+                    TranscriptRowTone::Default => Style::default(),
+                    TranscriptRowTone::User => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    TranscriptRowTone::Assistant if row.kind == TranscriptRowKind::Header => {
+                        Style::default()
                             .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    },
-                    TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => {
-                        Style::default().fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
                     }
-                    TranscriptRowKind::Content if row.role == TranscriptRole::Assistant => {
-                        Style::default().fg(Color::White)
+                    TranscriptRowTone::Assistant => Style::default().fg(Color::White),
+                    TranscriptRowTone::Muted => Style::default().fg(Color::DarkGray),
+                    TranscriptRowTone::Pending => Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    TranscriptRowTone::Success => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    TranscriptRowTone::Warning => Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                    TranscriptRowTone::Error => {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     }
-                    TranscriptRowKind::Content | TranscriptRowKind::Spacer => Style::default(),
                 };
                 if row.spans.len() == 1 {
                     let span = row.spans.into_iter().next().expect("one span exists");
@@ -682,6 +691,37 @@ mod tests {
         }
     }
 
+    fn tool_result(call_id: &str, output: &str) -> crate::tool_cards::ToolResultInput {
+        crate::tool_cards::ToolResultInput {
+            call_id: call_id.into(),
+            name: "read".into(),
+            output: output.into(),
+            output_tail: None,
+            output_source_bytes: output.len() as u64,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: None,
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+        }
+    }
+
     fn render_to_string(width: u16, height: u16, state: &UiState, editor: &PromptEditor) -> String {
         render_to_string_with_notice(width, height, state, editor, None)
     }
@@ -1021,6 +1061,64 @@ mod tests {
             .unwrap();
 
         assert!(terminal.backend().to_string().contains("new ↓"));
+    }
+
+    #[test]
+    fn tool_card_status_tones_reach_terminal_cells() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("read".into());
+        state
+            .transcript
+            .observe_approval_requested(crate::tool_cards::ToolCallInput {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "README.md"}),
+            });
+        let draw = |state: &UiState| {
+            let backend = TestBackend::new(80, 18);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut viewport = TranscriptViewport::default();
+            let mut row_cache = TranscriptRowCache::default();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        state,
+                        &mut viewport,
+                        &mut row_cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal
+        };
+        let pending = draw(&state);
+        assert!(
+            pending
+                .backend()
+                .to_string()
+                .contains("Awaiting approval to read")
+        );
+        let (pending_fg, _, pending_modifiers) =
+            style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
+        assert_eq!(pending_fg, Color::Cyan);
+        assert!(pending_modifiers.contains(Modifier::BOLD));
+
+        state
+            .transcript
+            .observe_approval_resolved("call-1", true, None);
+        state
+            .transcript
+            .observe_tool_result(tool_result("call-1", "contents"));
+        let complete = draw(&state);
+        assert!(complete.backend().to_string().contains("Read  README.md"));
+        assert!(complete.backend().to_string().contains("contents"));
+        let (success_fg, _, success_modifiers) =
+            style_at_text(complete.backend(), "Read  README.md").unwrap();
+        assert_eq!(success_fg, Color::Green);
+        assert!(success_modifiers.contains(Modifier::BOLD));
     }
 
     #[test]

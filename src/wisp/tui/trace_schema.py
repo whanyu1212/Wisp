@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -41,11 +42,20 @@ _TRACE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*$"
 _SlashArgument = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 _JsonString = Annotated[str, StringConstraints(max_length=MAX_TRACE_CONTENT_CHARS)]
 _JsonKey = Annotated[str, StringConstraints(max_length=128)]
+_MAX_FINITE_FLOAT_INTEGER = int(sys.float_info.max)
+_JsonInteger = Annotated[
+    int,
+    Field(ge=-_MAX_FINITE_FLOAT_INTEGER, le=_MAX_FINITE_FLOAT_INTEGER),
+]
+_JsonFloat = Annotated[
+    float,
+    Field(allow_inf_nan=False, ge=-sys.float_info.max, le=sys.float_info.max),
+]
 type JsonValue = (
     None
     | bool
-    | int
-    | float
+    | _JsonInteger
+    | _JsonFloat
     | _JsonString
     | Annotated[list["JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
     | Annotated[dict[_JsonKey, "JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
@@ -73,6 +83,15 @@ def _bound_json_structure(value: Any, *, label: str) -> Any:
             if len(node) > _MAX_JSON_COLLECTION_ITEMS:
                 raise ValueError(f"{label} array exceeds {_MAX_JSON_COLLECTION_ITEMS} items")
             stack.extend((child, depth + 1) for child in node)
+        elif isinstance(node, int) and not isinstance(node, bool):
+            try:
+                finite = math.isfinite(float(node))
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{label} integer exceeds the finite JSON number range")
+        elif isinstance(node, float) and not math.isfinite(node):
+            raise ValueError(f"{label} contains a non-finite JSON number")
     return value
 
 
@@ -173,6 +192,60 @@ class TraceRpcEvent(_TraceModel):
     event: JsonObject = Field(
         json_schema_extra={
             "required": ["type"],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.result"}},
+                        "required": ["type"],
+                    },
+                    "then": {
+                        "properties": {
+                            "exit_code": {
+                                "type": ["integer", "null"],
+                                "minimum": -(2**63),
+                                "maximum": 2**63 - 1,
+                            },
+                            "stdout_dropped_bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 2**64 - 1,
+                            },
+                            "stderr_dropped_bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 2**64 - 1,
+                            },
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.result"}},
+                        "required": ["type"],
+                    },
+                    "then": {
+                        "properties": {
+                            field: {"type": "boolean"}
+                            for field in (
+                                "is_error",
+                                "retryable",
+                                "output_has_exit_status",
+                                "created",
+                                "truncated",
+                                "stdout_truncated",
+                                "stderr_truncated",
+                            )
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.approval.resolved"}},
+                        "required": ["type"],
+                    },
+                    "then": {"properties": {"approved": {"type": "boolean"}}},
+                },
+            ],
             "x-wisp-max-depth": _MAX_JSON_DEPTH,
             "x-wisp-max-nodes": _MAX_JSON_NODES,
         }
@@ -182,7 +255,41 @@ class TraceRpcEvent(_TraceModel):
     @field_validator("event", mode="before")
     @classmethod
     def _bound_event_structure(cls, value: Any) -> Any:
-        return _bound_json_structure(value, label="RPC event")
+        bounded = _bound_json_structure(value, label="RPC event")
+        boolean_fields: tuple[str, ...]
+        if isinstance(bounded, dict) and bounded.get("type") == "tool.result":
+            exit_code = bounded.get("exit_code")
+            if exit_code is not None and (
+                not isinstance(exit_code, int)
+                or isinstance(exit_code, bool)
+                or not -(2**63) <= exit_code <= 2**63 - 1
+            ):
+                raise ValueError("tool.result exit_code must be a signed 64-bit integer or null")
+            for field in ("stdout_dropped_bytes", "stderr_dropped_bytes"):
+                count = bounded.get(field)
+                if count is not None and (
+                    not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or not 0 <= count <= 2**64 - 1
+                ):
+                    raise ValueError(f"tool.result {field} exceeds the unsigned 64-bit trace range")
+            boolean_fields = (
+                "is_error",
+                "retryable",
+                "output_has_exit_status",
+                "created",
+                "truncated",
+                "stdout_truncated",
+                "stderr_truncated",
+            )
+        elif isinstance(bounded, dict) and bounded.get("type") == "tool.approval.resolved":
+            boolean_fields = ("approved",)
+        else:
+            boolean_fields = ()
+        for field in boolean_fields:
+            if field in bounded and not isinstance(bounded[field], bool):
+                raise ValueError(f"{bounded['type']} {field} must be a trace boolean")
+        return bounded
 
 
 class TraceRpcClosed(_TraceModel):
@@ -226,11 +333,27 @@ class TraceExpectedCommand(_TraceModel):
         return _bound_json_structure(value, label="expected command")
 
 
+class TraceToolCardProjection(_TraceModel):
+    """Language-neutral terminal lifecycle state for one generic tool card."""
+
+    call_id: str = Field(min_length=1, max_length=128, pattern=_TRACE_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=128)
+    status: Literal[
+        "requested", "awaiting_approval", "running", "done", "error", "denied", "cancelled"
+    ]
+    arguments_available: bool
+
+
 class TraceExpected(_TraceModel):
     commands: tuple[TraceExpectedCommand, ...] = Field(max_length=_MAX_TRACE_COMMANDS, strict=False)
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None = Field(default=None, max_length=MAX_TRACE_CONTENT_CHARS)
+    tool_cards: tuple[TraceToolCardProjection, ...] | None = Field(
+        default=None,
+        max_length=_MAX_TRACE_EVENTS,
+        strict=False,
+    )
 
 
 class TraceFile(_TraceModel):

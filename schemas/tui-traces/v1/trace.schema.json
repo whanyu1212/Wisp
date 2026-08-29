@@ -16,9 +16,13 @@
           "type": "boolean"
         },
         {
+          "maximum": 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368,
+          "minimum": -179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368,
           "type": "integer"
         },
         {
+          "maximum": 1.7976931348623157e+308,
+          "minimum": -1.7976931348623157e+308,
           "type": "number"
         },
         {
@@ -73,6 +77,22 @@
           ],
           "default": null,
           "title": "Retained Text"
+        },
+        "tool_cards": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/TraceToolCardProjection"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Cards"
         },
         "view": {
           "$ref": "#/$defs/TraceViewProjection"
@@ -569,6 +589,98 @@
         },
         "event": {
           "$ref": "#/$defs/JsonObject",
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tool.result"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "exit_code": {
+                    "maximum": 9223372036854775807,
+                    "minimum": -9223372036854775808,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "stderr_dropped_bytes": {
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "stdout_dropped_bytes": {
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tool.result"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "created": {
+                    "type": "boolean"
+                  },
+                  "is_error": {
+                    "type": "boolean"
+                  },
+                  "output_has_exit_status": {
+                    "type": "boolean"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "stderr_truncated": {
+                    "type": "boolean"
+                  },
+                  "stdout_truncated": {
+                    "type": "boolean"
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tool.approval.resolved"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          ],
           "required": [
             "type"
           ],
@@ -587,6 +699,50 @@
         "clock_ms"
       ],
       "title": "TraceRpcEvent",
+      "type": "object"
+    },
+    "TraceToolCardProjection": {
+      "additionalProperties": false,
+      "description": "Language-neutral terminal lifecycle state for one generic tool card.",
+      "properties": {
+        "arguments_available": {
+          "title": "Arguments Available",
+          "type": "boolean"
+        },
+        "call_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "title": "Call Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "requested",
+            "awaiting_approval",
+            "running",
+            "done",
+            "error",
+            "denied",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "status",
+        "arguments_available"
+      ],
+      "title": "TraceToolCardProjection",
       "type": "object"
     },
     "TraceViewProjection": {

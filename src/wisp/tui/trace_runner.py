@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
 import shlex
 from collections import deque
 from dataclasses import dataclass
+from decimal import Decimal
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -17,10 +21,15 @@ from wisp.events import (
     KnownWispEvent,
     KnownWispEventAdapter,
     MessageCompleted,
+    RpcCommandFinished,
     ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
     TrustRequested,
 )
 from wisp.rpc.commands import ApprovalScope
+from wisp.tool_presentation import tool_result_status
 from wisp.tui.input_types import SubmissionId, new_submission_id
 from wisp.tui.rendering import LineTuiRenderer
 from wisp.tui.shell import TuiShell
@@ -36,6 +45,7 @@ from wisp.tui.trace_schema import (
     TraceFile,
     TraceFileAdapter,
     TraceInteractionProjection,
+    TraceToolCardProjection,
     TraceViewProjection,
 )
 
@@ -99,6 +109,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.errors: list[str] = []
         self.tokens: list[str] = []
         self.retained_text: str | None = None
+        self.tool_cards: list[TraceToolCardProjection] = []
+        self._active_tool_cards: dict[str, int] = {}
+        self._active_tool_metadata: dict[str, tuple[str, str]] = {}
+        self._unresolved_tool_conflicts: set[str] = set()
+        self._process_call_ids: set[str] = set()
+        self._active_process_metadata: dict[str, tuple[str, str]] = {}
+        self._resolved_process_call_ids: set[str] = set()
+        self._resolved_process_call_order: deque[str] = deque()
+        self._resolved_process_call_bytes = 0
+        self._trace_current_command_id: str | None = None
         self._streaming = False
 
     def view_updated(self, snapshot: Any) -> None:
@@ -131,11 +151,328 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self._streaming = False
         super().end_token_stream()
 
+    def approval_request(self, event: ToolApprovalRequested) -> None:
+        if event.call_id in self._resolved_process_call_ids:
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                "cancelled",
+                arguments_available=True,
+                lifecycle_start=True,
+            )
+            super().approval_request(event)
+            return
+        if _trace_process_call(event.name, event.arguments):
+            if self._process_identity_was_resolved(event.call_id):
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "cancelled",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+            elif event.call_id in self._active_tool_cards:
+                self._set_conflicting_tool_card(event.call_id, unresolved=True)
+            elif event.call_id in self._process_call_ids:
+                if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
+                    event.name, event.arguments
+                ):
+                    self._mark_resolved_process_call(event.call_id)
+            else:
+                self._process_call_ids.add(event.call_id)
+                identity = _trace_process_identity(event.name, event.arguments)
+                assert identity is not None
+                self._active_process_metadata[event.call_id] = identity
+            super().approval_request(event)
+            return
+        if event.call_id in self._process_call_ids:
+            self._mark_resolved_process_call(event.call_id)
+            super().approval_request(event)
+            return
+        if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
+            self._set_conflicting_tool_card(event.call_id, unresolved=True)
+        else:
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            if current is None or current.status != "running":
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "awaiting_approval",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+        super().approval_request(event)
+
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, MessageCompleted):
             self.retained_text = event.content
             self._streaming = False
+        elif isinstance(event, ToolCallRequested):
+            if event.call_id in self._resolved_process_call_ids:
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "cancelled",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+                super().event(event)
+                return
+            if _trace_process_call(event.name, event.arguments):
+                if self._process_identity_was_resolved(event.call_id):
+                    self._set_tool_card(
+                        event.call_id,
+                        event.name,
+                        "cancelled",
+                        arguments_available=True,
+                        lifecycle_start=True,
+                    )
+                elif event.call_id in self._active_tool_cards:
+                    self._set_conflicting_tool_card(event.call_id, unresolved=True)
+                elif event.call_id in self._process_call_ids:
+                    if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
+                        event.name, event.arguments
+                    ):
+                        self._mark_resolved_process_call(event.call_id)
+                else:
+                    self._process_call_ids.add(event.call_id)
+                    identity = _trace_process_identity(event.name, event.arguments)
+                    assert identity is not None
+                    self._active_process_metadata[event.call_id] = identity
+                super().event(event)
+                return
+            if event.call_id in self._process_call_ids:
+                self._mark_resolved_process_call(event.call_id)
+                super().event(event)
+                return
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
+                self._set_conflicting_tool_card(event.call_id, unresolved=True)
+            else:
+                status = (
+                    current.status
+                    if current is not None
+                    and current.status not in {"done", "error", "denied", "cancelled"}
+                    else "requested"
+                )
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    status,
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+        elif isinstance(event, ToolApprovalResolved):
+            if event.call_id in self._resolved_process_call_ids:
+                self._touch_resolved_process_call(event.call_id)
+                super().event(event)
+                return
+            if event.call_id in self._process_call_ids:
+                if not event.approved:
+                    self._mark_resolved_process_call(event.call_id)
+                # Keep denied process calls as tombstones through settlement;
+                # otherwise synthetic or duplicate results become generic cards.
+                super().event(event)
+                return
+            if event.call_id not in self._active_tool_cards:
+                super().event(event)
+                return
+            current = self.tool_cards[self._active_tool_cards[event.call_id]]
+            if current.status in {"running", "done", "error", "denied", "cancelled"}:
+                super().event(event)
+                return
+            if not event.approved:
+                self._unresolved_tool_conflicts.discard(event.call_id)
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                "running" if event.approved else "denied",
+                arguments_available=True,
+                lifecycle_start=False,
+            )
+        elif isinstance(event, ToolResultReady):
+            if event.call_id in self._resolved_process_call_ids:
+                self._touch_resolved_process_call(event.call_id)
+                super().event(event)
+                return
+            if event.call_id in self._process_call_ids:
+                # Keep the resolved process binding as a trace tombstone so
+                # delayed duplicate results stay ignored like Rust call entries.
+                self._mark_resolved_process_call(event.call_id)
+                super().event(event)
+                return
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            status = tool_result_status(
+                event.is_error,
+                event.exit_code,
+                process_state=event.process_state,
+            )
+            self._unresolved_tool_conflicts.discard(event.call_id)
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                status,
+                arguments_available=current.arguments_available if current is not None else False,
+                lifecycle_start=False,
+            )
+        elif (
+            isinstance(event, RpcCommandFinished)
+            and event.command_type == "prompt"
+            and event.command_id == self._trace_current_command_id
+        ):
+            self._settle_tool_cards()
         super().event(event)
+
+    def rpc_stream_ended_before_command(self, command_id: str) -> None:
+        self._settle_tool_cards()
+        super().rpc_stream_ended_before_command(command_id)
+
+    def rpc_stream_ended_unexpectedly(self) -> None:
+        self._settle_tool_cards()
+        super().rpc_stream_ended_unexpectedly()
+
+    def _settle_tool_cards(self) -> None:
+        ordered_process_calls = tuple(self._active_process_metadata)
+        remaining_process_calls = sorted(self._process_call_ids.difference(ordered_process_calls))
+        for call_id in (*ordered_process_calls, *remaining_process_calls):
+            self._mark_resolved_process_call(call_id)
+        self._unresolved_tool_conflicts.clear()
+        for index, current in enumerate(self.tool_cards):
+            if current.status in {"done", "error", "denied", "cancelled"}:
+                continue
+            self.tool_cards[index] = current.model_copy(update={"status": "cancelled"})
+
+    def _set_tool_card(
+        self,
+        call_id: str,
+        name: str,
+        status: Literal[
+            "requested",
+            "awaiting_approval",
+            "running",
+            "done",
+            "error",
+            "denied",
+            "cancelled",
+        ],
+        *,
+        arguments_available: bool,
+        lifecycle_start: bool,
+    ) -> None:
+        index = self._active_tool_cards.get(call_id)
+        current = self.tool_cards[index] if index is not None else None
+        if lifecycle_start and call_id in self._unresolved_tool_conflicts:
+            return
+        if (
+            lifecycle_start
+            and current is not None
+            and current.status
+            in {
+                "done",
+                "error",
+                "denied",
+                "cancelled",
+            }
+        ):
+            # A result carries no generation beyond call_id, so reopening a
+            # terminal identity would let a delayed duplicate resolve the new
+            # lifecycle. Mirror the Rust TUI's explicit untracked conflict card.
+            index = None
+            current = None
+            status = "cancelled"
+        elif (
+            not lifecycle_start
+            and current is not None
+            and current.status
+            in {
+                "done",
+                "error",
+                "denied",
+                "cancelled",
+            }
+        ):
+            return
+        projection = TraceToolCardProjection(
+            call_id=_clip_trace_card_id(call_id),
+            name=current.name
+            if current is not None and not lifecycle_start
+            else _clip_trace_card_field(name),
+            status=status,
+            arguments_available=arguments_available,
+        )
+        if index is None:
+            self.tool_cards.append(projection)
+            self._active_tool_cards[call_id] = len(self.tool_cards) - 1
+        else:
+            self.tool_cards[index] = projection
+
+    def _tool_lifecycle_conflicts(self, call_id: str, name: str, arguments: object) -> bool:
+        index = self._active_tool_cards.get(call_id)
+        current = self.tool_cards[index] if index is not None else None
+        if current is not None and current.status in {"done", "error", "denied", "cancelled"}:
+            return False
+        metadata = _canonical_trace_tool_metadata(name, arguments)
+        previous = self._active_tool_metadata.get(call_id)
+        if previous is None:
+            self._active_tool_metadata[call_id] = metadata
+            return False
+        return previous != metadata
+
+    def _set_conflicting_tool_card(self, call_id: str, *, unresolved: bool = False) -> None:
+        index = self._active_tool_cards[call_id]
+        current = self.tool_cards[index]
+        self._set_tool_card(
+            call_id,
+            current.name,
+            "error",
+            arguments_available=current.arguments_available,
+            lifecycle_start=False,
+        )
+        if unresolved:
+            self._unresolved_tool_conflicts.add(call_id)
+
+    def _mark_resolved_process_call(self, call_id: str) -> None:
+        self._process_call_ids.discard(call_id)
+        self._active_process_metadata.pop(call_id, None)
+        if call_id in self._resolved_process_call_ids:
+            self._touch_resolved_process_call(call_id)
+            return
+        self._resolved_process_call_ids.add(call_id)
+        self._resolved_process_call_order.append(call_id)
+        self._resolved_process_call_bytes += len(call_id.encode())
+        while (
+            len(self._resolved_process_call_ids) > 1_024
+            or self._resolved_process_call_bytes > 1024 * 1024
+        ):
+            oldest = self._resolved_process_call_order.popleft()
+            if oldest not in self._resolved_process_call_ids:
+                continue
+            self._resolved_process_call_ids.remove(oldest)
+            self._resolved_process_call_bytes -= len(oldest.encode())
+
+    def _touch_resolved_process_call(self, call_id: str) -> None:
+        self._resolved_process_call_order = deque(
+            candidate for candidate in self._resolved_process_call_order if candidate != call_id
+        )
+        self._resolved_process_call_order.append(call_id)
+
+    def _process_identity_was_resolved(self, call_id: str) -> bool:
+        if call_id in self._resolved_process_call_ids:
+            self._touch_resolved_process_call(call_id)
+            return True
+        index = self._active_tool_cards.get(call_id)
+        return index is not None and self.tool_cards[index].status in {
+            "done",
+            "error",
+            "denied",
+            "cancelled",
+        }
+
+    def tool_card_projection(self) -> tuple[TraceToolCardProjection, ...]:
+        return tuple(self.tool_cards)
 
 
 class TraceController:
@@ -351,9 +688,272 @@ class TraceRunResult:
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None
+    tool_cards: tuple[TraceToolCardProjection, ...]
     notices: tuple[str, ...]
     errors: tuple[str, ...]
     tokens: tuple[str, ...]
+
+
+_TRACE_CARD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+
+def _clip_trace_card_id(value: str) -> str:
+    if _TRACE_CARD_ID_RE.fullmatch(value):
+        return value
+    return f"h-{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _clip_trace_card_field(value: str) -> str:
+    if not value:
+        return "(unnamed)"
+    if len(value) <= 128:
+        return value
+    return f"{value[:127]}…"
+
+
+def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, str]:
+    bounded_name = _clip_trace_card_field(name)
+    generic_omitted = 0
+    if not isinstance(arguments, dict):
+        bounded_arguments: dict[str, object] = {}
+    else:
+        keys_by_name: dict[str, tuple[str, ...]] = {
+            "read": ("path", "offset", "limit"),
+            "grep": (
+                "pattern",
+                "path",
+                "glob",
+                "ignore_case",
+                "literal",
+                "context",
+                "max_results",
+            ),
+            "find": ("pattern", "path", "max_results"),
+            "ls": ("path", "all"),
+            "bash": (
+                "operation",
+                "command",
+                "process_id",
+                "wait_seconds",
+                "lifetime_seconds",
+                "yield_seconds",
+            ),
+            "edit": ("path",),
+            "write": ("path",),
+        }
+        selected = keys_by_name.get(name)
+        if selected is None:
+            bounded_arguments = {}
+            for key in sorted(arguments)[:8]:
+                bounded_arguments[_clip_trace_metadata(str(key), 64)] = _bounded_trace_argument(
+                    arguments[key], 64
+                )
+            generic_omitted = max(0, len(arguments) - len(bounded_arguments))
+        else:
+            bounded_arguments = {}
+            for key in selected:
+                if key not in arguments:
+                    continue
+                if key == "process_id" and isinstance(arguments[key], str):
+                    value: object = _bounded_trace_internal_identity(arguments[key])
+                else:
+                    value = _bounded_trace_argument(
+                        arguments[key], 200 if key == "command" else 256
+                    )
+                bounded_arguments[key] = value
+            generic_omitted = 0
+    return (
+        bounded_name,
+        _trace_action_arguments(name, bounded_arguments, generic_omitted=generic_omitted),
+    )
+
+
+def _trace_action_arguments(
+    name: str,
+    arguments: dict[str, object],
+    *,
+    generic_omitted: int = 0,
+) -> str:
+    if name == "read":
+        output = _trace_path_value(arguments, "path", "<path>")
+        offset = _trace_positive_int(arguments.get("offset"))
+        limit = _trace_positive_int(arguments.get("limit"))
+        if offset is not None or limit is not None:
+            start = offset or 1
+            output += f":{start}-"
+            if limit is not None:
+                output += str(min(start + limit - 1, 2**64 - 1))
+        return _clip_trace_metadata(output, 200)
+    if name == "grep":
+        pattern = _trace_string_value(arguments, "pattern", "")
+        path = _trace_path_value(arguments, "path", ".")
+        return _clip_trace_metadata(
+            f"/{_clip_trace_metadata(_trace_one_line(pattern), 64)}/ in {path}", 200
+        )
+    if name == "find":
+        pattern = _trace_string_value(arguments, "pattern", "*")
+        path = _trace_path_value(arguments, "path", ".")
+        return _clip_trace_metadata(
+            f"{_clip_trace_metadata(_trace_one_line(pattern), 64)} in {path}", 200
+        )
+    if name == "ls":
+        return _clip_trace_metadata(_trace_path_value(arguments, "path", "."), 200)
+    if name == "bash":
+        operation = _trace_string_value(arguments, "operation", "run")
+        if operation in {"poll", "cancel"}:
+            process_id = _trace_string_value(arguments, "process_id", "<process>")
+            return _clip_trace_metadata(
+                f"{operation} {_clip_trace_metadata(_trace_one_line(process_id), 64)}", 200
+            )
+        command = _trace_string_value(arguments, "command", "")
+        if operation == "start":
+            rendered = f"start {_clip_trace_metadata(_trace_one_line(command), 180)}"
+        else:
+            rendered = _clip_trace_metadata(_trace_one_line(command), 190)
+        return _clip_trace_metadata(rendered, 200)
+    if name in {"edit", "write"}:
+        return _clip_trace_metadata(_trace_path_value(arguments, "path", "<path>"), 200)
+    parts = [
+        f"{_clip_trace_metadata(_trace_one_line(key), 32)}="
+        f"{_clip_trace_metadata(_trace_scalar_value(arguments[key]), 64)}"
+        for key in sorted(arguments)[:8]
+    ]
+    if generic_omitted > 0:
+        marker = f"… +{generic_omitted} fields"
+        while parts and len(" ".join(parts)) + 1 + len(marker) > 160:
+            parts.pop()
+        parts.append(marker)
+    return _clip_trace_metadata(" ".join(parts), 160)
+
+
+def _trace_path_value(arguments: dict[str, object], key: str, default: str) -> str:
+    value = _trace_one_line(_trace_string_value(arguments, key, default))
+    if len(value) <= 80:
+        return value
+    left = 39
+    right = 40
+    return f"{value[:left]}…{value[-right:]}"
+
+
+def _trace_string_value(arguments: dict[str, object], key: str, default: str) -> str:
+    value = arguments.get(key)
+    return value if isinstance(value, str) else default
+
+
+def _trace_positive_int(value: object) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 2**64 - 1
+        else None
+    )
+
+
+def _trace_one_line(value: str) -> str:
+    words: list[str] = []
+    current: list[str] = []
+    for character in value:
+        if _rust_whitespace_character(character):
+            if current:
+                words.append("".join(current))
+                current.clear()
+        else:
+            current.append(character)
+    if current:
+        words.append("".join(current))
+    return " ".join(words)
+
+
+def _trace_scalar_value(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, str):
+        return _trace_one_line(value)
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    if isinstance(value, dict):
+        return f"{{{len(value)} fields}}"
+    if isinstance(value, float):
+        rendered = repr(value)
+        mantissa, separator, exponent = rendered.partition("e")
+        if separator:
+            exponent_value = int(exponent)
+            if -5 <= exponent_value < 0:
+                return format(Decimal(rendered), "f")
+            sign = "+" if exponent.startswith("+") else ""
+            return f"{mantissa}e{sign}{exponent_value}"
+        return rendered
+    return str(value)
+
+
+def _bounded_trace_argument(value: object, max_chars: int) -> object:
+    if isinstance(value, str):
+        return _clip_trace_metadata(value, max_chars)
+    if isinstance(value, int) and not isinstance(value, bool):
+        if -(2**63) <= value <= 2**64 - 1:
+            return value
+        try:
+            converted = float(value)
+        except OverflowError as exc:
+            raise TraceReplayError(
+                "tool argument integer exceeds the finite JSON number range"
+            ) from exc
+        if not math.isfinite(converted):
+            raise TraceReplayError("tool argument integer exceeds the finite JSON number range")
+        return converted
+    if value is None or isinstance(value, bool | float):
+        return value
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    if isinstance(value, dict):
+        return f"{{{len(value)} fields}}"
+    return _clip_trace_metadata(str(value), max_chars)
+
+
+def _clip_trace_metadata(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[: max_chars - 1]}…"
+
+
+def _bounded_trace_internal_identity(value: str) -> str:
+    if _rust_whitespace_only(value):
+        return "b:"
+    encoded = value.encode()
+    if len(encoded) <= 4 * 1024:
+        return f"r{len(encoded)}:{value}"
+    return f"h:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _trace_process_identity(name: str, arguments: object) -> tuple[str, str] | None:
+    if name != "bash" or not isinstance(arguments, dict):
+        return None
+    operation = arguments.get("operation")
+    process_id = arguments.get("process_id")
+    if (
+        operation not in {"poll", "cancel"}
+        or not isinstance(process_id, str)
+        or _rust_whitespace_only(process_id)
+    ):
+        return None
+    return process_id, operation
+
+
+def _rust_whitespace_character(character: str) -> bool:
+    return (
+        character in "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680"
+        or "\u2000" <= character <= "\u200a"
+        or character in "\u2028\u2029\u202f\u205f\u3000"
+    )
+
+
+def _rust_whitespace_only(value: str) -> bool:
+    return all(_rust_whitespace_character(character) for character in value)
+
+
+def _trace_process_call(name: str, arguments: object) -> bool:
+    return _trace_process_identity(name, arguments) is not None
 
 
 def _reset_submission_ids() -> None:
@@ -534,6 +1134,7 @@ class TraceRunner:
                 )
             elif inp.type == "rpc.event":
                 event = KnownWispEventAdapter.validate_python(inp.event)
+                self.renderer._trace_current_command_id = self.shell.state.current_command_id
                 should_exit = await self.shell._handle_rpc_event(event)
             elif inp.type == "rpc.closed":
                 should_exit = self.shell._handle_rpc_closed(_RpcEventsClosed(error=inp.error))
@@ -558,6 +1159,7 @@ class TraceRunner:
             view=view,
             interaction=interaction,
             retained_text=self.renderer.retained_text,
+            tool_cards=self.renderer.tool_card_projection(),
             notices=tuple(self.renderer.notices),
             errors=tuple(self.renderer.errors),
             tokens=tuple(self.renderer.tokens),

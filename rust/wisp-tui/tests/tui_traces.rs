@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use wisp_protocol::commands::ApprovalScope;
@@ -140,6 +142,14 @@ struct TraceInteraction {
     exit_requested: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct TraceToolCard {
+    call_id: String,
+    name: String,
+    status: String,
+    arguments_available: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceExpected {
     commands: Vec<Value>,
@@ -147,6 +157,8 @@ struct TraceExpected {
     interaction: TraceInteraction,
     #[serde(default)]
     retained_text: Option<String>,
+    #[serde(default)]
+    tool_cards: Option<Vec<TraceToolCard>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,6 +167,7 @@ struct ReplayOutput {
     view: TraceView,
     interaction: TraceInteraction,
     retained_text: Option<String>,
+    tool_cards: Vec<TraceToolCard>,
 }
 
 #[derive(Default)]
@@ -336,7 +349,56 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
             .latest_assistant_text()
             .filter(|content| !content.is_empty())
             .map(str::to_owned),
+        tool_cards: state
+            .transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                entry.tool_card().map(|card| TraceToolCard {
+                    call_id: trace_card_id(&card.call_id),
+                    name: card.name.clone(),
+                    status: card.status.as_str().into(),
+                    arguments_available: card.arguments_available,
+                })
+            })
+            .collect(),
     })
+}
+
+fn trace_card_id(value: &str) -> String {
+    if let Some(encoded) = value.strip_prefix('r') {
+        if let Some((length, source)) = encoded.split_once(':') {
+            if length.parse::<usize>().ok() == Some(source.len()) {
+                return trace_raw_card_id(source);
+            }
+        }
+    }
+    if let Some(digest) = value.strip_prefix("h:") {
+        if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return format!("h-{digest}");
+        }
+    }
+    trace_raw_card_id(value)
+}
+
+fn trace_raw_card_id(value: &str) -> String {
+    let schema_safe = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        });
+    if schema_safe {
+        return value.to_owned();
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(66);
+    encoded.push_str("h-");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
 }
 
 fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
@@ -489,6 +551,13 @@ fn assert_expected(trace: &TraceFile, actual: &ReplayOutput) {
         "trace {} retained text",
         trace.name
     );
+    if let Some(expected) = &trace.expected.tool_cards {
+        assert_eq!(
+            &actual.tool_cards, expected,
+            "trace {} tool cards",
+            trace.name
+        );
+    }
 }
 
 fn assert_value_subset(expected: &Value, actual: &Value, path: &str) {
