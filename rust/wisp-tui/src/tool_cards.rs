@@ -219,7 +219,7 @@ impl ToolCardSnapshot {
                 identity_for_display(&input.call_id),
                 CALL_ID_RETAINED_MAX_CHARS,
             ),
-            name: clip_chars(&input.name, TOOL_NAME_MAX_CHARS),
+            name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
             status,
             arguments_available: true,
@@ -425,6 +425,18 @@ impl ProcessCardSnapshot {
         if !self.accept_sequence(sequence) {
             return false;
         }
+        self.display_state = match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollInterrupted,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelInterrupted,
+        };
+        true
+    }
+
+    pub fn conflict(&mut self, operation: ProcessOperation, sequence: u64) -> bool {
+        if !self.accept_sequence(sequence) {
+            return false;
+        }
+        self.append_unlabelled("call ID metadata changed; result correlation is ambiguous");
         self.display_state = match operation {
             ProcessOperation::Poll => ProcessDisplayState::PollInterrupted,
             ProcessOperation::Cancel => ProcessDisplayState::CancelInterrupted,
@@ -999,6 +1011,13 @@ fn normalize_newlines(source: &str) -> String {
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn bounded_tool_name(value: &str) -> String {
+    if value.is_empty() {
+        return "(unnamed)".to_owned();
+    }
+    clip_chars(value, TOOL_NAME_MAX_CHARS)
 }
 
 fn clip_chars(value: &str, max_chars: usize) -> String {

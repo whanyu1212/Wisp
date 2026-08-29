@@ -163,6 +163,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 self._process_call_ids.add(event.call_id)
             super().approval_request(event)
             return
+        if event.call_id in self._process_call_ids:
+            self._mark_resolved_process_call(event.call_id)
+            super().approval_request(event)
+            return
         if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
             self._set_conflicting_tool_card(event.call_id)
         else:
@@ -203,6 +207,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
                     self._set_conflicting_tool_card(event.call_id)
                 else:
                     self._process_call_ids.add(event.call_id)
+                super().event(event)
+                return
+            if event.call_id in self._process_call_ids:
+                self._mark_resolved_process_call(event.call_id)
                 super().event(event)
                 return
             index = self._active_tool_cards.get(event.call_id)
@@ -641,6 +649,8 @@ def _clip_trace_card_id(value: str) -> str:
 
 
 def _clip_trace_card_field(value: str) -> str:
+    if not value:
+        return "(unnamed)"
     if len(value) <= 128:
         return value
     return f"{value[:127]}…"

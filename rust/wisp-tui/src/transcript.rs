@@ -513,6 +513,21 @@ impl Transcript {
                     if changed {
                         self.bump_card(binding.entry_id);
                     }
+                } else if process_call_identity(&input.name, &input.arguments).is_none() {
+                    let ToolBindingKind::Process(operation) = binding.kind else {
+                        unreachable!("non-tool binding must target a process operation")
+                    };
+                    let changed = {
+                        let entry = self.entry_mut(binding.entry_id);
+                        let TranscriptEntryKind::Process(card) = &mut entry.kind else {
+                            unreachable!("process binding must target a process card")
+                        };
+                        card.conflict(operation, binding.sequence)
+                    };
+                    if changed {
+                        self.bump_card(binding.entry_id);
+                    }
+                    self.mark_tool_binding_resolved(&input.call_id);
                 }
                 return binding.entry_id;
             }
@@ -1343,6 +1358,29 @@ mod tests {
         assert!(transcript.call_entries.contains_key("poll-0"));
         assert!(!transcript.call_entries.contains_key("poll-1"));
         assert_eq!(transcript.process_entries.len(), 1);
+    }
+
+    #[test]
+    fn generic_call_conflicting_with_an_unresolved_process_is_explicit() {
+        let mut transcript = Transcript::default();
+        let process = transcript.observe_tool_call(call(
+            "crossed",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process"}),
+        ));
+
+        let conflict = transcript.observe_tool_call(call(
+            "crossed",
+            "read",
+            serde_json::json!({"path": "README.md"}),
+        ));
+        transcript.observe_tool_result(result("crossed", "must be ignored"));
+
+        assert_eq!(process, conflict);
+        let card = transcript.entry(process).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::PollInterrupted);
+        assert!(card.preview().text.contains("metadata changed"));
+        assert!(!card.preview().text.contains("must be ignored"));
     }
 
     #[test]

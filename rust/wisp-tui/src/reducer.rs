@@ -1062,6 +1062,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_name_projection_is_nonempty_and_character_bounded() {
+        let BackendEvent::ToolCall(unnamed) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "empty-name",
+                "name": "",
+                "arguments": {}
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        assert_eq!(unnamed.name, "(unnamed)");
+
+        let BackendEvent::ToolCall(multibyte) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "multibyte-name",
+                "name": "🦀".repeat(129),
+                "arguments": {}
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        assert_eq!(multibyte.name.chars().count(), 128);
+        assert!(multibyte.name.ends_with('…'));
+    }
+
+    #[test]
     fn tool_result_projection_bounds_large_strings_before_reducer_queueing() {
         let output = format!("head{}tail", "x".repeat(200_000));
         let stdout = format!("old{}new", "y".repeat(200_000));

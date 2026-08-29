@@ -189,6 +189,26 @@
       "type": "rpc.event",
       "event": {
         "type": "tool.call",
+        "call_id": "reverse-cross",
+        "name": "bash",
+        "arguments": {"operation": "poll", "process_id": "process-reverse"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
+        "call_id": "reverse-cross",
+        "name": "read",
+        "arguments": {"path": "reverse.txt"}
+      },
+      "clock_ms": 58
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.call",
         "call_id": "call-process",
         "name": "bash",
         "arguments": {"operation": "poll", "process_id": "process-1"}

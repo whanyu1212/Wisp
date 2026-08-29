@@ -688,6 +688,16 @@ def test_conflicting_unresolved_tool_calls_project_an_error() -> None:
     assert card.arguments_available
 
 
+def test_empty_and_multibyte_tool_names_have_bounded_trace_fields() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="empty", name="", arguments={}))
+    renderer.event(ToolCallRequested(call_id="multibyte", name="🦀" * 129, arguments={}))
+
+    empty, multibyte = renderer.tool_card_projection()
+    assert empty.name == "(unnamed)"
+    assert multibyte.name == f"{'🦀' * 127}…"
+
+
 def test_unresolved_generic_to_process_crossing_projects_an_error() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(ToolCallRequested(call_id="call-cross", name="read", arguments={"path": "a"}))
@@ -704,6 +714,20 @@ def test_unresolved_generic_to_process_crossing_projects_an_error() -> None:
     assert card.name == "read"
     assert card.status == "error"
     assert card.arguments_available
+
+
+def test_unresolved_process_to_generic_crossing_does_not_rebind_the_call() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="call-cross",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="call-cross", name="read", arguments={"path": "a"}))
+
+    assert renderer.tool_card_projection() == ()
 
 
 def test_rpc_event_payloads_are_bounded() -> None:

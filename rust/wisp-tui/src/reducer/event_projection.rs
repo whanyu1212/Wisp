@@ -1,7 +1,7 @@
 use super::{BackendEvent, MessageContentKind, PendingApproval};
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
-    bounded_identity, bounded_tool_arguments,
+    bounded_identity, bounded_tool_arguments, bounded_tool_name,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -52,37 +52,37 @@ impl BackendEvent {
                 content: string_field(value, &event_type, "content")?,
             },
             "tool.call" => {
-                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
+                let raw_name = string_field_ref(value, &event_type, "name")?;
                 let arguments = object_field(value, &event_type, "arguments")?;
                 Self::ToolCall(ToolCallInput {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                    arguments: bounded_tool_arguments(&name, &arguments),
-                    name,
+                    arguments: bounded_tool_arguments(raw_name, &arguments),
+                    name: bounded_tool_name(raw_name),
                 })
             }
             "tool.approval.requested" => {
-                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
+                let raw_name = string_field_ref(value, &event_type, "name")?;
                 let arguments = object_field(value, &event_type, "arguments")?;
                 Self::ToolApprovalRequested(PendingApproval {
                     call_id: string_field(value, &event_type, "call_id")?,
-                    arguments: bounded_tool_arguments(&name, &arguments),
-                    name,
+                    arguments: bounded_tool_arguments(raw_name, &arguments),
+                    name: bounded_tool_name(raw_name),
                     safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
                 })
             }
             "tool.approval.resolved" => Self::ToolApprovalResolved {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                name: bounded_display_string_field(value, &event_type, "name", 512)?,
+                name: bounded_tool_name(string_field_ref(value, &event_type, "name")?),
                 approved: bool_field(value, &event_type, "approved")?,
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
             "tool.result" => {
-                let name = bounded_display_string_field(value, &event_type, "name", 512)?;
+                let raw_name = string_field_ref(value, &event_type, "name")?;
                 let is_error = bool_field(value, &event_type, "is_error")?;
                 let exit_code = optional_i64_field(value, &event_type, "exit_code")?;
                 let process_state = optional_string_field(value, &event_type, "process_state")?;
                 let retain_output_tail = process_state.as_deref() != Some("cancelled")
-                    && (name == "bash"
+                    && (raw_name == "bash"
                         || is_error
                         || exit_code.is_some_and(|code| code != 0)
                         || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
@@ -94,7 +94,7 @@ impl BackendEvent {
                     optional_bounded_string_field(value, &event_type, "stderr", true)?;
                 Self::ToolResult(Box::new(ToolResultInput {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                    name,
+                    name: bounded_tool_name(raw_name),
                     output,
                     output_source_bytes,
                     is_error,
@@ -174,19 +174,26 @@ impl BackendEvent {
     }
 }
 
+fn string_field_ref<'a>(
+    value: &'a Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<&'a str, EventProjectionError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        })
+}
+
 fn string_field(
     value: &Value,
     event_type: &str,
     field: &'static str,
 ) -> Result<String, EventProjectionError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| EventProjectionError::InvalidField {
-            event_type: event_type.to_owned(),
-            field,
-        })
+    string_field_ref(value, event_type, field).map(str::to_owned)
 }
 
 fn bounded_string_field(
