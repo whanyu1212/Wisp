@@ -208,6 +208,23 @@ for line in sys.stdin:
             process_state="completed",
             stdout="safe\\u001b[2Jtail",
         ))
+        emit(ToolCallRequested(
+            call_id="edit-1",
+            name="edit",
+            arguments={
+                "path": "demo.txt",
+                "edits": [{
+                    "oldText": "old\\u001b[2J value\\n",
+                    "newText": "new value\\n",
+                }],
+            },
+        ))
+        emit(ToolResultReady(
+            call_id="edit-1",
+            name="edit",
+            output="Applied 1 edit",
+            is_error=False,
+        ))
         emit(RpcCommandFinished(
             command_id=command_id,
             command_type="prompt",
@@ -250,6 +267,8 @@ for line in sys.stdin:
     output = bytearray()
     status: int | None = None
     prompt_sent = False
+    browse_sent = False
+    detail_seen = False
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -272,10 +291,30 @@ for line in sys.stdin:
                     b"Process completed",
                     b"safe",
                     b"tail",
+                    b"demo.txt",
+                    b"new",
+                    b"value",
+                    b"F6",
+                    b"browse",
                 )
             )
-            if cards_visible and not quit_sent and output.rfind(b"idle") > output.rfind(b"running"):
-                os.write(terminal_fd, b"\x03")
+            if (
+                cards_visible
+                and not browse_sent
+                and output.rfind(b"idle") > output.rfind(b"running")
+            ):
+                # F6 enters visible-card browse mode; Enter opens retained detail.
+                os.write(terminal_fd, b"\x1b[17~\r")
+                browse_sent = True
+            if browse_sent and not detail_seen and b"live retained detail" in output:
+                detail_seen = True
+                fcntl.ioctl(
+                    terminal_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 30, 120, 0, 0),
+                )
+                # Close detail, leave card browse, then quit from the idle prompt.
+                os.write(terminal_fd, b"\x1b\x1b\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
@@ -296,11 +335,16 @@ for line in sys.stdin:
             os.waitpid(child_pid, 0)
 
     assert prompt_sent, bytes(output)
+    assert browse_sent, bytes(output)
+    assert detail_seen, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
     assert b"safe" in output and b"tail" in output
     assert b"safe\xef\xbf\xbd[2Jtail" in output
     assert b"safe\x1b[2Jtail" not in output
+    assert b"old\xef\xbf\xbd[2J" in output
+    assert b"old\x1b[2J" not in output
+    assert b"live retained detail" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal

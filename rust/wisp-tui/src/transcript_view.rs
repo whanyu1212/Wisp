@@ -11,6 +11,7 @@ use crate::markdown::{
     TranscriptSpanStyle,
 };
 use crate::tool_cards::{ProcessDisplayState, ToolStatus};
+use crate::tool_detail::{DetailAvailability, DetailRow, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{
     Transcript, TranscriptEntry, TranscriptEntryId, TranscriptEntryKind, TranscriptEntryState,
     TranscriptRole,
@@ -1502,6 +1503,16 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
+            if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
+                return Some(CardProjection {
+                    action: format!("• {}", card.action()),
+                    detail: structured_card_preview(detail),
+                    detail_base: 0,
+                    omission: None,
+                    omission_before_detail: false,
+                    action_tone: tool_status_tone(card.status),
+                });
+            }
             let tail_preview = card.status == ToolStatus::Error
                 || (card.status == ToolStatus::Done && card.name == "bash");
             let retained_preview = if tail_preview {
@@ -1550,6 +1561,62 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 action_tone: process_state_tone(card.display_state),
             })
         }
+    }
+}
+
+fn structured_card_preview(detail: &ToolDetailPresentation) -> String {
+    let mut lines = Vec::new();
+    let heading = if detail.summary.is_empty() {
+        detail.title.clone()
+    } else {
+        format!("{}  {}", detail.title, detail.summary)
+    };
+    lines.push(heading);
+    lines.extend(
+        detail
+            .visible_rows(false)
+            .iter()
+            .map(format_structured_detail_row),
+    );
+    if detail.truncated {
+        lines.push("⋯ retained detail is incomplete".into());
+    }
+    lines.push("F6 browse · Enter details".into());
+    lines.join("\n")
+}
+
+pub(crate) fn format_structured_detail_row(row: &DetailRow) -> String {
+    match row.kind {
+        DetailRowKind::Addition => format!(
+            "{:>4} + {}",
+            row.new_line.map_or(String::new(), |line| line.to_string()),
+            row.text
+        ),
+        DetailRowKind::Deletion => format!(
+            "{:>4} - {}",
+            row.old_line.map_or(String::new(), |line| line.to_string()),
+            row.text
+        ),
+        DetailRowKind::Context => format!(
+            "{:>4}   {}",
+            row.new_line
+                .or(row.old_line)
+                .map_or(String::new(), |line| line.to_string()),
+            row.text
+        ),
+        DetailRowKind::ReadLine => format!(
+            "{:>4} │ {}",
+            row.old_line.map_or(String::new(), |line| line.to_string()),
+            row.text
+        ),
+        DetailRowKind::GrepMatch => format!(
+            "{:>4} │ {}",
+            row.old_line.map_or(String::new(), |line| line.to_string()),
+            row.text
+        ),
+        DetailRowKind::FindPath => format!("  {}", row.text),
+        DetailRowKind::Hunk | DetailRowKind::Header | DetailRowKind::Note => row.text.clone(),
+        DetailRowKind::Omission => format!("⋯ {}", row.text.trim_matches('…').trim()),
     }
 }
 
@@ -2133,7 +2200,7 @@ fn line_break_prefix_len(source: &str) -> Option<usize> {
     }
 }
 
-fn sanitize_grapheme(grapheme: &str, column: usize) -> String {
+pub(crate) fn sanitize_grapheme(grapheme: &str, column: usize) -> String {
     if grapheme == "\t" {
         return " ".repeat(4 - (column % 4));
     }
@@ -2189,6 +2256,8 @@ mod tests {
             output: output.into(),
             output_tail: None,
             output_source_bytes: output.len() as u64,
+            output_source_lines: crate::tool_cards::logical_line_count(output),
+            output_projection_cut_mid_line: false,
             is_error: false,
             failure_code: None,
             retryable: false,
@@ -2220,6 +2289,7 @@ mod tests {
         let card_id = transcript.observe_approval_requested(crate::tool_cards::ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"path": "README.md"}),
         });
         let mut viewport = TranscriptViewport::default();
@@ -2260,6 +2330,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "call-large".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"path": "large.txt"}),
         });
         transcript.observe_tool_result(tool_result("call-large", &"x".repeat(4_000)));
@@ -2278,6 +2349,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "call-failed".into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"command": "pytest"}),
         });
         let output = format!(
@@ -2314,6 +2386,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "call-success".into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"command": "cargo build"}),
         });
         let output = format!(
@@ -2353,6 +2426,7 @@ mod tests {
         let call = |call_id: &str| crate::tool_cards::ToolCallInput {
             call_id: call_id.into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({
                 "operation": "poll",
                 "process_id": "process-1"
@@ -2417,6 +2491,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "poll-1".into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
         });
         let mut completed = tool_result("poll-1", "");
@@ -2445,6 +2520,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({}),
         });
         transcript.observe_tool_result(tool_result("call-1", "1234\nnext"));
@@ -2466,6 +2542,7 @@ mod tests {
         let card_id = sanitized.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "call-2".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({}),
         });
         let source = "a\tb\u{1b}";
@@ -2491,6 +2568,7 @@ mod tests {
         let call = |call_id: &str| crate::tool_cards::ToolCallInput {
             call_id: call_id.into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({
                 "operation": "poll",
                 "process_id": "process-1"
@@ -2577,6 +2655,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
             call_id: "poll-1".into(),
             name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
         });
         let mut completed = tool_result("poll-1", "");
@@ -2757,6 +2836,7 @@ mod tests {
             transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
                 call_id: call_id.clone(),
                 name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: serde_json::json!({"path": format!("file-{index}")}),
             });
             transcript.observe_tool_result(tool_result(&call_id, &"x".repeat(4_000)));

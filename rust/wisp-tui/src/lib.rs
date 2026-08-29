@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod detail_view;
 mod framing;
 mod markdown;
 mod process;
@@ -11,6 +12,7 @@ pub mod reducer;
 mod syntax;
 mod terminal;
 mod tool_cards;
+mod tool_detail;
 mod transcript;
 mod transcript_view;
 mod ui;
@@ -19,6 +21,7 @@ use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use detail_view::DetailView;
 use framing::FrameReader;
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
@@ -29,7 +32,7 @@ use reducer::{
     BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
     ViewStatus,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::pending;
 use std::io;
@@ -42,6 +45,8 @@ use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
+use tool_detail::{DetailAvailability, ToolDetailPresentation};
+use transcript::TranscriptEntryId;
 use transcript_view::{TranscriptRowCache, TranscriptViewAction, TranscriptViewport};
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
@@ -307,6 +312,8 @@ struct LiveUi {
     state: UiState,
     transcript_viewport: TranscriptViewport,
     transcript_row_cache: TranscriptRowCache,
+    detail_view: DetailView,
+    browse_selected: Option<TranscriptEntryId>,
     editor: PromptEditor,
     ids: SequentialCommandIds,
     notice: Option<String>,
@@ -321,6 +328,8 @@ impl Default for LiveUi {
             state: UiState::unconfigured(),
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
+            detail_view: DetailView::default(),
+            browse_selected: None,
             editor: PromptEditor::default(),
             ids: SequentialCommandIds::default(),
             notice: None,
@@ -378,6 +387,27 @@ impl LiveUi {
         let follow_after_update = matches!(&action, UiAction::Submit(_));
         let transcript_generation = self.state.transcript.generation();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            self.detail_view.close();
+            self.browse_selected = None;
+        } else {
+            if self
+                .detail_view
+                .selected_entry()
+                .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
+            {
+                self.detail_view.close();
+            }
+            if self
+                .browse_selected
+                .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
+            {
+                self.browse_selected = None;
+            }
+        }
         if self.state.transcript.generation() != transcript_generation {
             let action = if follow_after_update {
                 TranscriptViewAction::FollowTail
@@ -503,7 +533,7 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            ui::render(
+            ui::render_interactive(
                 frame,
                 &self.state,
                 &mut self.transcript_viewport,
@@ -511,6 +541,8 @@ impl LiveUi {
                 &self.editor,
                 connection,
                 self.notice.as_deref(),
+                self.browse_selected,
+                Some(&mut self.detail_view),
             );
         })?;
         self.rendered_decision_context = rendered_decision_context;
@@ -703,6 +735,155 @@ impl LiveUi {
         )))
     }
 
+    fn visible_detail_entries(&mut self) -> Vec<TranscriptEntryId> {
+        let rows = self
+            .transcript_viewport
+            .visible_rows(&self.state.transcript, &mut self.transcript_row_cache);
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            if !seen.insert(row.anchor.entry_id) {
+                continue;
+            }
+            let eligible = self
+                .state
+                .transcript
+                .entry(row.anchor.entry_id)
+                .and_then(|entry| entry.tool_card())
+                .is_some_and(|card| card.has_retained_detail());
+            if eligible {
+                entries.push(row.anchor.entry_id);
+            }
+        }
+        entries
+    }
+
+    fn enter_or_cycle_browse(&mut self) {
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            return;
+        }
+        let entries = self.visible_detail_entries();
+        if entries.is_empty() {
+            self.browse_selected = None;
+            self.notice =
+                Some("No visible tool card has retained detail; scroll one into view.".into());
+        } else if let Some(selected) = self.browse_selected {
+            let next = entries
+                .iter()
+                .position(|entry| *entry == selected)
+                .map_or(entries.len() - 1, |index| (index + 1) % entries.len());
+            self.browse_selected = Some(entries[next]);
+            self.notice =
+                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into());
+        } else {
+            self.browse_selected = entries.last().copied();
+            self.notice =
+                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into());
+        }
+        self.render_pending = true;
+    }
+
+    fn cycle_browse(&mut self, reverse: bool) {
+        let entries = self.visible_detail_entries();
+        if entries.is_empty() {
+            self.browse_selected = None;
+            self.notice =
+                Some("No visible tool card has retained detail; scroll one into view.".into());
+            self.render_pending = true;
+            return;
+        }
+        let current = self
+            .browse_selected
+            .and_then(|selected| entries.iter().position(|entry| *entry == selected));
+        let index = match (current, reverse) {
+            (Some(0), true) | (None, true) => entries.len() - 1,
+            (Some(index), true) => index - 1,
+            (Some(index), false) => (index + 1) % entries.len(),
+            (None, false) => 0,
+        };
+        self.browse_selected = Some(entries[index]);
+        self.render_pending = true;
+    }
+
+    fn reconcile_browse_selection(&mut self) {
+        if self.browse_selected.is_none() {
+            return;
+        }
+        let entries = self.visible_detail_entries();
+        if !entries.contains(&self.browse_selected.expect("checked above")) {
+            self.browse_selected = entries.last().copied();
+        }
+    }
+
+    fn open_selected_detail(&mut self) {
+        let Some(entry_id) = self.browse_selected else {
+            return;
+        };
+        let Some(presentation) = retained_detail(&self.state, entry_id) else {
+            self.reconcile_browse_selection();
+            return;
+        };
+        self.detail_view.open(entry_id, presentation);
+        self.notice = None;
+        self.render_pending = true;
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent) -> LoopControl {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
+            self.detail_view.close();
+            self.render_pending = true;
+            return LoopControl::Continue;
+        }
+        let Some(entry_id) = self.detail_view.selected_entry() else {
+            return LoopControl::Continue;
+        };
+        let Some(presentation) = retained_detail(&self.state, entry_id) else {
+            self.detail_view.close();
+            self.browse_selected = None;
+            self.notice = Some("Retained detail is no longer available.".into());
+            self.render_pending = true;
+            return LoopControl::Continue;
+        };
+        match key.code {
+            KeyCode::Up => self.detail_view.scroll_lines(presentation, -1),
+            KeyCode::Down => self.detail_view.scroll_lines(presentation, 1),
+            KeyCode::PageUp => self.detail_view.page_up(presentation),
+            KeyCode::PageDown => self.detail_view.page_down(presentation),
+            KeyCode::Home => self.detail_view.home(presentation),
+            KeyCode::End => self.detail_view.end(presentation),
+            _ => return LoopControl::Continue,
+        }
+        self.render_pending = true;
+        LoopControl::Continue
+    }
+
+    fn handle_browse_key(&mut self, key: KeyEvent) -> LoopControl {
+        match key.code {
+            KeyCode::Esc => {
+                self.browse_selected = None;
+                self.notice = None;
+            }
+            KeyCode::F(6) | KeyCode::Tab => self.cycle_browse(false),
+            KeyCode::BackTab => self.cycle_browse(true),
+            KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_detail(),
+            _ => {
+                if let Some(action) = transcript_view_action(key) {
+                    self.transcript_viewport.reduce(
+                        action,
+                        &self.state.transcript,
+                        &mut self.transcript_row_cache,
+                    );
+                    self.reconcile_browse_selection();
+                }
+            }
+        }
+        self.render_pending = true;
+        LoopControl::Continue
+    }
+
     async fn handle_input(
         &mut self,
         input: Input,
@@ -711,6 +892,14 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         match input {
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) if self.detail_view.is_open() => Ok(self.handle_detail_key(key)),
+            Input::Paste(_) if self.detail_view.is_open() => Ok(LoopControl::Continue),
+            Input::Key(key) if self.browse_selected.is_some() => Ok(self.handle_browse_key(key)),
+            Input::Paste(_) if self.browse_selected.is_some() => Ok(LoopControl::Continue),
+            Input::Key(key) if is_browse_key(key) => {
+                self.enter_or_cycle_browse();
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
             Input::Key(key) if transcript_view_action(key).is_some() => {
                 self.transcript_viewport.reduce(
@@ -821,12 +1010,27 @@ impl LiveUi {
     }
 }
 
+fn retained_detail(
+    state: &UiState,
+    entry_id: TranscriptEntryId,
+) -> Option<&ToolDetailPresentation> {
+    let card = state.transcript.entry(entry_id)?.tool_card()?;
+    let DetailAvailability::LiveRetained(presentation) = &card.structured_detail else {
+        return None;
+    };
+    Some(presentation)
+}
+
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn is_escape(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
+}
+
+fn is_browse_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::F(6) && key.modifiers == KeyModifiers::NONE
 }
 
 fn transcript_view_action(key: KeyEvent) -> Option<TranscriptViewAction> {
@@ -2224,6 +2428,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             arguments: json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         let mut live_ui = LiveUi {
@@ -2314,6 +2519,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             arguments: json!({"path": "/sensitive"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         let mut live_ui = LiveUi {
@@ -2436,6 +2642,7 @@ mod tests {
             call_id: call_id.clone(),
             name: "read".into(),
             arguments: json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         let mut approval_ui = LiveUi {
@@ -2611,6 +2818,7 @@ mod tests {
                 call_id,
                 name: "shell".into(),
                 arguments: json!({}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "command".into(),
             }));
 
@@ -2809,6 +3017,141 @@ mod tests {
                 .is_some_and(|notice| notice.contains("stats refresh"))
         );
         assert!(live_ui.render_pending);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn explicit_detail_modes_preserve_prompt_and_transcript_viewport() {
+        let mut live_ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            ..LiveUi::default()
+        };
+        let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.call",
+            "call_id": "edit-detail",
+            "name": "edit",
+            "arguments": {
+                "path": "file.txt",
+                "edits": [{"oldText": "old\n", "newText": "new\n"}]
+            }
+        }))
+        .unwrap() else {
+            panic!("tool call expected");
+        };
+        let card_id = live_ui.state.transcript.observe_tool_call(call);
+        let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.result",
+            "call_id": "edit-detail",
+            "name": "edit",
+            "output": "Applied 1 edit",
+            "is_error": false
+        }))
+        .unwrap() else {
+            panic!("tool result expected");
+        };
+        live_ui.state.transcript.observe_tool_result(*result);
+        live_ui.editor.insert_paste("draft");
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            60,
+            10,
+        );
+        let before = live_ui
+            .transcript_viewport
+            .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache)
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect::<Vec<_>>();
+        let (writer_tx, mut writer_rx) = mpsc::channel(4);
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.editor.text(), "draft");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.detail_view.is_open());
+        live_ui
+            .handle_input(
+                Input::Paste("ignored".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "draft");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(!live_ui.detail_view.is_open());
+        assert_eq!(live_ui.browse_selected, Some(card_id));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.browse_selected.is_none());
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "draftx");
+        let after = live_ui
+            .transcript_viewport
+            .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache)
+            .into_iter()
+            .map(|row| row.anchor)
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+
+        live_ui.enter_or_cycle_browse();
+        live_ui.open_selected_detail();
+        assert!(live_ui.detail_view.is_open());
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                    call_id: "approval".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "README.md"}),
+                    detail_source: tool_detail::ToolDetailSource::None,
+                    safety: "read".into(),
+                })),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(!live_ui.detail_view.is_open());
+        assert!(live_ui.browse_selected.is_none());
+        assert_eq!(live_ui.state.view_status, ViewStatus::WaitingForApproval);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

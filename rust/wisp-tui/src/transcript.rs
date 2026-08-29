@@ -9,12 +9,15 @@ const MAX_CALL_INDEX_BYTES: usize = 1024 * 1024;
 const MAX_PROCESS_INDEX_ENTRIES: usize = 128;
 const MAX_PROCESS_INDEX_BYTES: usize = 256 * 1024;
 const MAX_TRACKED_PROCESS_ID_BYTES: usize = 4 * 1024;
+const MAX_PENDING_DETAIL_SOURCES: usize = 128;
+const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
 
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
     ToolCallInput, ToolCardSnapshot, ToolResultInput, ToolStatus, identity_for_display,
     process_call_identity,
 };
+use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SharedTranscript(Arc<Transcript>);
@@ -46,6 +49,11 @@ pub struct TranscriptEntryId(u64);
 impl TranscriptEntryId {
     pub fn get(self) -> u64 {
         self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_raw(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -134,6 +142,9 @@ pub struct Transcript {
     process_entries: HashMap<String, TranscriptEntryId>,
     process_order: VecDeque<String>,
     process_index_bytes: usize,
+    pending_detail_sources: HashMap<TranscriptEntryId, usize>,
+    pending_detail_order: VecDeque<TranscriptEntryId>,
+    pending_detail_source_bytes: usize,
     next_tool_sequence: u64,
 }
 
@@ -233,11 +244,14 @@ impl Transcript {
     }
 
     pub fn observe_tool_call(&mut self, input: ToolCallInput) -> TranscriptEntryId {
-        self.ensure_tool_entry(&input, ToolStatus::Requested)
+        let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested);
+        self.update_pending_detail_tracking(entry_id);
+        entry_id
     }
 
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval);
+        self.update_pending_detail_tracking(entry_id);
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             return entry_id;
         };
@@ -295,6 +309,7 @@ impl Transcript {
         if changed {
             self.bump_card(binding.entry_id);
         }
+        self.update_pending_detail_tracking(binding.entry_id);
         if !approved && changed {
             self.mark_tool_binding_resolved(call_id);
         }
@@ -342,6 +357,8 @@ impl Transcript {
                         &ToolResultInput {
                             output: String::new(),
                             output_source_bytes: 0,
+                            output_source_lines: 0,
+                            output_projection_cut_mid_line: false,
                             process_state: None,
                             process_error: Some(
                                 "tool result referenced a different process".into(),
@@ -398,6 +415,13 @@ impl Transcript {
                             } else {
                                 0
                             },
+                            output_source_lines: if preserve_bound_error {
+                                input.output_source_lines
+                            } else {
+                                0
+                            },
+                            output_projection_cut_mid_line: preserve_bound_error
+                                && input.output_projection_cut_mid_line,
                             process_state: None,
                             process_error,
                             recovery_hint: (preserve_bound_error && !promoted_recovery_hint)
@@ -425,6 +449,7 @@ impl Transcript {
         if changed {
             self.bump_card(binding.entry_id);
         }
+        self.update_pending_detail_tracking(binding.entry_id);
         self.mark_tool_binding_resolved(&input.call_id);
         binding.entry_id
     }
@@ -458,6 +483,7 @@ impl Transcript {
             if changed {
                 self.bump_card(binding.entry_id);
             }
+            self.update_pending_detail_tracking(binding.entry_id);
             self.mark_tool_binding_resolved(&call_id);
         }
     }
@@ -592,6 +618,52 @@ impl Transcript {
         let binding = self.new_tool_binding(entry_id, ToolBindingKind::Tool, false);
         self.insert_tool_binding(input.call_id.clone(), binding);
         entry_id
+    }
+
+    fn update_pending_detail_tracking(&mut self, entry_id: TranscriptEntryId) {
+        if let Some(previous) = self.pending_detail_sources.remove(&entry_id) {
+            self.pending_detail_source_bytes =
+                self.pending_detail_source_bytes.saturating_sub(previous);
+            self.pending_detail_order
+                .retain(|candidate| *candidate != entry_id);
+        }
+        let source_bytes = self
+            .entry(entry_id)
+            .and_then(TranscriptEntry::tool_card)
+            .filter(|card| card.detail_source.is_pending_payload())
+            .map_or(0, |card| card.detail_source.retained_bytes());
+        if source_bytes > 0 {
+            self.pending_detail_sources.insert(entry_id, source_bytes);
+            self.pending_detail_order.push_back(entry_id);
+            self.pending_detail_source_bytes = self
+                .pending_detail_source_bytes
+                .saturating_add(source_bytes);
+        }
+
+        while self.pending_detail_sources.len() > MAX_PENDING_DETAIL_SOURCES
+            || self.pending_detail_source_bytes > MAX_PENDING_DETAIL_SOURCE_BYTES
+        {
+            let Some(oldest) = self.pending_detail_order.pop_front() else {
+                break;
+            };
+            let Some(removed_bytes) = self.pending_detail_sources.remove(&oldest) else {
+                continue;
+            };
+            self.pending_detail_source_bytes = self
+                .pending_detail_source_bytes
+                .saturating_sub(removed_bytes);
+            {
+                let entry = self.entry_mut(oldest);
+                let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+                    unreachable!("pending detail source must belong to a tool card")
+                };
+                card.detail_source =
+                    ToolDetailSource::Unavailable(DetailUnavailableReason::RetentionPressure);
+            }
+            self.bump_card(oldest);
+        }
+        debug_assert!(self.pending_detail_sources.len() <= MAX_PENDING_DETAIL_SOURCES);
+        debug_assert!(self.pending_detail_source_bytes <= MAX_PENDING_DETAIL_SOURCE_BYTES);
     }
 
     fn new_tool_binding(
@@ -918,6 +990,19 @@ mod tests {
             call_id: call_id.into(),
             name: name.into(),
             arguments,
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        }
+    }
+
+    fn detailed_call(call_id: &str, name: &str, arguments: Value) -> ToolCallInput {
+        ToolCallInput {
+            call_id: call_id.into(),
+            name: name.into(),
+            detail_source: crate::tool_detail::project_tool_detail_source(
+                name,
+                arguments.as_object().expect("test arguments are objects"),
+            ),
+            arguments: crate::tool_cards::bounded_tool_arguments(name, &arguments),
         }
     }
 
@@ -928,6 +1013,8 @@ mod tests {
             output: output.into(),
             output_tail: None,
             output_source_bytes: output.len() as u64,
+            output_source_lines: crate::tool_cards::logical_line_count(output),
+            output_projection_cut_mid_line: false,
             is_error: false,
             failure_code: None,
             retryable: false,
@@ -1107,6 +1194,174 @@ mod tests {
                 .unwrap()
                 .display_state,
             ProcessDisplayState::Completed
+        );
+    }
+
+    #[test]
+    fn structured_detail_survives_approval_and_releases_source_on_result() {
+        let mut transcript = Transcript::default();
+        let arguments = serde_json::json!({
+            "path": "file.txt",
+            "edits": [{"oldText": "old\n", "newText": "new\n"}]
+        });
+        let request = detailed_call("edit-detail", "edit", arguments);
+        let card_id = transcript.observe_approval_requested(request.clone());
+        assert_eq!(transcript.observe_tool_call(request), card_id);
+
+        let mut completed = result("edit-detail", "Applied 1 edit");
+        completed.name = "edit".into();
+        transcript.observe_tool_result(completed);
+
+        let card = transcript.entry(card_id).unwrap().tool_card().unwrap();
+        assert!(card.has_retained_detail());
+        assert_eq!(card.detail_source, ToolDetailSource::None);
+        let crate::tool_detail::DetailAvailability::LiveRetained(detail) = &card.structured_detail
+        else {
+            panic!("structured detail expected");
+        };
+        assert_eq!((detail.additions, detail.deletions), (1, 1));
+    }
+
+    #[test]
+    fn failed_or_conflicting_tools_never_show_proposed_detail() {
+        let mut failed_transcript = Transcript::default();
+        let failed_id = failed_transcript.observe_tool_call(detailed_call(
+            "failed-edit",
+            "edit",
+            serde_json::json!({
+                "path": "file.txt",
+                "edits": [{"oldText": "old", "newText": "new"}]
+            }),
+        ));
+        let mut failed = result("failed-edit", "edit failed");
+        failed.name = "edit".into();
+        failed.is_error = true;
+        failed_transcript.observe_tool_result(failed);
+        let failed_card = failed_transcript
+            .entry(failed_id)
+            .unwrap()
+            .tool_card()
+            .unwrap();
+        assert_eq!(
+            failed_card.structured_detail,
+            crate::tool_detail::DetailAvailability::None
+        );
+        assert_eq!(failed_card.detail_source, ToolDetailSource::None);
+
+        let mut conflict_transcript = Transcript::default();
+        let first = detailed_call(
+            "conflicting-edit",
+            "edit",
+            serde_json::json!({
+                "path": "file.txt",
+                "edits": [{"oldText": "old", "newText": "first"}]
+            }),
+        );
+        let conflict_id = conflict_transcript.observe_tool_call(first);
+        conflict_transcript.observe_tool_call(detailed_call(
+            "conflicting-edit",
+            "edit",
+            serde_json::json!({
+                "path": "file.txt",
+                "edits": [{"oldText": "old", "newText": "second"}]
+            }),
+        ));
+        let conflict = conflict_transcript
+            .entry(conflict_id)
+            .unwrap()
+            .tool_card()
+            .unwrap();
+        assert_eq!(conflict.status, ToolStatus::Requested);
+        assert_eq!(
+            conflict.structured_detail,
+            crate::tool_detail::DetailAvailability::None
+        );
+        assert_eq!(
+            conflict.detail_source,
+            ToolDetailSource::Unavailable(DetailUnavailableReason::ConflictingLifecycle)
+        );
+
+        let mut mismatched_transcript = Transcript::default();
+        let mismatched_id = mismatched_transcript.observe_tool_call(detailed_call(
+            "write-mismatch",
+            "write",
+            serde_json::json!({"path": "file.txt", "content": "proposed"}),
+        ));
+        let mut mismatched = result("write-mismatch", "done");
+        mismatched.name = "read".into();
+        mismatched.created = true;
+        mismatched_transcript.observe_tool_result(mismatched);
+        let mismatched_card = mismatched_transcript
+            .entry(mismatched_id)
+            .unwrap()
+            .tool_card()
+            .unwrap();
+        assert_eq!(mismatched_card.status, ToolStatus::Done);
+        assert_eq!(
+            mismatched_card.structured_detail,
+            crate::tool_detail::DetailAvailability::Unavailable(
+                DetailUnavailableReason::ConflictingLifecycle
+            )
+        );
+    }
+
+    #[test]
+    fn pending_write_detail_retention_is_hard_bounded() {
+        let mut transcript = Transcript::default();
+        for index in 0..=MAX_PENDING_DETAIL_SOURCES {
+            transcript.observe_tool_call(detailed_call(
+                &format!("write-{index}"),
+                "write",
+                serde_json::json!({
+                    "path": format!("file-{index}.txt"),
+                    "content": "x".repeat(8 * 1024),
+                }),
+            ));
+        }
+
+        let pending = transcript
+            .entries()
+            .iter()
+            .filter_map(TranscriptEntry::tool_card)
+            .filter(|card| card.detail_source.is_pending_payload())
+            .collect::<Vec<_>>();
+        assert!(pending.len() <= MAX_PENDING_DETAIL_SOURCES);
+        assert!(
+            pending
+                .iter()
+                .map(|card| card.detail_source.retained_bytes())
+                .sum::<usize>()
+                <= MAX_PENDING_DETAIL_SOURCE_BYTES
+        );
+        assert_eq!(transcript.pending_detail_sources.len(), pending.len());
+        assert!(transcript.pending_detail_source_bytes <= MAX_PENDING_DETAIL_SOURCE_BYTES);
+        let oldest = transcript.entries()[0].tool_card().unwrap();
+        assert_eq!(
+            oldest.detail_source,
+            ToolDetailSource::Unavailable(DetailUnavailableReason::RetentionPressure)
+        );
+
+        let mut edit_transcript = Transcript::default();
+        for index in 0..10 {
+            edit_transcript.observe_tool_call(detailed_call(
+                &format!("edit-{index}"),
+                "edit",
+                serde_json::json!({
+                    "path": format!("file-{index}.txt"),
+                    "edits": [{
+                        "oldText": "o".repeat(60 * 1024),
+                        "newText": "n".repeat(60 * 1024),
+                    }],
+                }),
+            ));
+        }
+        assert!(edit_transcript.pending_detail_source_bytes <= MAX_PENDING_DETAIL_SOURCE_BYTES);
+        assert_eq!(
+            edit_transcript.entries()[0]
+                .tool_card()
+                .unwrap()
+                .detail_source,
+            ToolDetailSource::Unavailable(DetailUnavailableReason::RetentionPressure)
         );
     }
 

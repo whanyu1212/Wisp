@@ -428,6 +428,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
                 call_id: call_id.clone(),
                 name: "trace-pending-tool".into(),
                 arguments: serde_json::json!({}),
+                detail_source: wisp_tui::reducer::ToolDetailSource::None,
                 safety: "unknown".into(),
             });
         }

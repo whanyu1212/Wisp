@@ -1,8 +1,11 @@
+use std::collections::VecDeque;
+
 use super::{BackendEvent, MessageContentKind, PendingApproval};
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
     bounded_identity, bounded_tool_arguments, bounded_tool_name,
 };
+use crate::tool_detail::{capture_write_before, project_tool_detail_source};
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::events::WispCurrentLiveEventOutput;
@@ -56,7 +59,13 @@ impl BackendEvent {
                 let arguments = object_field(value, &event_type, "arguments")?;
                 Self::ToolCall(ToolCallInput {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                    arguments: bounded_tool_arguments(raw_name, &arguments),
+                    detail_source: project_tool_detail_source(
+                        raw_name,
+                        arguments
+                            .as_object()
+                            .expect("object_field returned an object"),
+                    ),
+                    arguments: bounded_tool_arguments(raw_name, arguments),
                     name: bounded_tool_name(raw_name),
                 })
             }
@@ -65,7 +74,13 @@ impl BackendEvent {
                 let arguments = object_field(value, &event_type, "arguments")?;
                 Self::ToolApprovalRequested(PendingApproval {
                     call_id: string_field(value, &event_type, "call_id")?,
-                    arguments: bounded_tool_arguments(raw_name, &arguments),
+                    detail_source: project_tool_detail_source(
+                        raw_name,
+                        arguments
+                            .as_object()
+                            .expect("object_field returned an object"),
+                    ),
+                    arguments: bounded_tool_arguments(raw_name, arguments),
                     name: bounded_tool_name(raw_name),
                     safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
                 })
@@ -86,23 +101,32 @@ impl BackendEvent {
                     && (is_error
                         || exit_code.is_some_and(|code| code != 0)
                         || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
-                let (output, output_source_bytes) =
-                    bounded_string_field(value, &event_type, "output", failed)?;
-                let output_tail = if failed || cancelled {
-                    None
+                let projected_output = projected_text_field(value, &event_type, "output")?;
+                let output_source_bytes = projected_output.source_bytes;
+                let output_source_lines = projected_output.source_lines;
+                let output_projection_cut_mid_line = !failed && projected_output.head_cut_mid_line;
+                let (output, output_tail) = if failed {
+                    (projected_output.tail, None)
+                } else if cancelled {
+                    (projected_output.head, None)
                 } else {
-                    Some(bounded_string_field(value, &event_type, "output", true)?.0)
+                    (projected_output.head, Some(projected_output.tail))
                 };
                 let (stdout, stdout_source_bytes) =
                     optional_bounded_string_field(value, &event_type, "stdout", true)?;
                 let (stderr, stderr_source_bytes) =
                     optional_bounded_string_field(value, &event_type, "stderr", true)?;
+                let before_text = capture_write_before(raw_name, value.get("before_text"))
+                    .ok()
+                    .flatten();
                 Self::ToolResult(Box::new(ToolResultInput {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                     name: bounded_tool_name(raw_name),
                     output,
                     output_tail,
                     output_source_bytes,
+                    output_source_lines,
+                    output_projection_cut_mid_line,
                     is_error,
                     failure_code: optional_string_field(value, &event_type, "failure_code")?,
                     retryable: bool_field_or(value, &event_type, "retryable", false)?,
@@ -119,8 +143,9 @@ impl BackendEvent {
                         "output_has_exit_status",
                         false,
                     )?,
-                    before_text: None,
-                    created: bool_field_or(value, &event_type, "created", false)?,
+                    before_text,
+                    created: raw_name == "write"
+                        && bool_field_or(value, &event_type, "created", false)?,
                     summary: optional_bounded_display_string_field(
                         value,
                         &event_type,
@@ -202,25 +227,111 @@ fn string_field(
     string_field_ref(value, event_type, field).map(str::to_owned)
 }
 
-fn bounded_string_field(
+struct ProjectedText {
+    head: String,
+    tail: String,
+    source_bytes: u64,
+    source_lines: u64,
+    head_cut_mid_line: bool,
+}
+
+fn projected_text_field(
     value: &Value,
     event_type: &str,
     field: &'static str,
-    retain_tail: bool,
-) -> Result<(String, u64), EventProjectionError> {
+) -> Result<ProjectedText, EventProjectionError> {
     let source = value.get(field).and_then(Value::as_str).ok_or_else(|| {
         EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field,
         }
     })?;
-    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-    let bounded = if retain_tail {
-        BoundedText::tail(&normalized, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+    Ok(project_text(source))
+}
+
+fn project_text(source: &str) -> ProjectedText {
+    let mut head = String::new();
+    let mut head_lines = 0usize;
+    let mut head_at_line_start = true;
+    let mut head_stopped = false;
+    let mut tail_chars = VecDeque::new();
+    let mut tail_bytes = 0usize;
+    let mut source_bytes = 0usize;
+    let mut source_lines = 0u64;
+    let mut source_at_line_start = true;
+    let mut characters = source.chars().peekable();
+
+    while let Some(mut character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            character = '\n';
+        }
+        let character_bytes = character.len_utf8();
+        source_bytes = source_bytes.saturating_add(character_bytes);
+        if source_at_line_start {
+            source_lines = source_lines.saturating_add(1);
+        }
+        source_at_line_start = character == '\n';
+
+        if !head_stopped {
+            let starts_line = head_at_line_start;
+            if head.len().saturating_add(character_bytes) > TOOL_OUTPUT_MAX_BYTES
+                || (starts_line && head_lines >= TOOL_OUTPUT_MAX_LINES)
+            {
+                head_stopped = true;
+            } else {
+                head.push(character);
+                if starts_line {
+                    head_lines = head_lines.saturating_add(1);
+                }
+                head_at_line_start = character == '\n';
+            }
+        }
+
+        tail_chars.push_back(character);
+        tail_bytes = tail_bytes.saturating_add(character_bytes);
+        while tail_bytes > TOOL_OUTPUT_MAX_BYTES {
+            let Some(removed) = tail_chars.pop_front() else {
+                break;
+            };
+            tail_bytes = tail_bytes.saturating_sub(removed.len_utf8());
+        }
+    }
+
+    let tail_candidate = tail_chars.into_iter().collect::<String>();
+    let tail = BoundedText::tail(
+        &tail_candidate,
+        TOOL_OUTPUT_MAX_BYTES,
+        TOOL_OUTPUT_MAX_LINES,
+    )
+    .text;
+    let source_bytes = u64::try_from(source_bytes).unwrap_or(u64::MAX);
+    let head_cut_mid_line =
+        u64::try_from(head.len()).unwrap_or(u64::MAX) < source_bytes && !head.ends_with('\n');
+    ProjectedText {
+        head,
+        tail,
+        source_bytes,
+        source_lines,
+        head_cut_mid_line,
+    }
+}
+
+fn bounded_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    retain_tail: bool,
+) -> Result<(String, u64, u64), EventProjectionError> {
+    let projected = projected_text_field(value, event_type, field)?;
+    let text = if retain_tail {
+        projected.tail
     } else {
-        BoundedText::head(&normalized, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+        projected.head
     };
-    Ok((bounded.text, bounded.source_bytes))
+    Ok((text, projected.source_bytes, projected.source_lines))
 }
 
 fn bounded_display_string_field(
@@ -280,7 +391,7 @@ fn optional_bounded_string_field(
     match value.get(field) {
         None | Some(Value::Null) => Ok((None, 0)),
         Some(Value::String(_)) => bounded_string_field(value, event_type, field, retain_tail)
-            .map(|(text, bytes)| (Some(text), bytes)),
+            .map(|(text, bytes, _)| (Some(text), bytes)),
         _ => Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field,
@@ -318,13 +429,13 @@ fn optional_string_field(
     }
 }
 
-fn object_field(
-    value: &Value,
+fn object_field<'a>(
+    value: &'a Value,
     event_type: &str,
     field: &'static str,
-) -> Result<Value, EventProjectionError> {
+) -> Result<&'a Value, EventProjectionError> {
     match value.get(field) {
-        Some(Value::Object(object)) => Ok(Value::Object(object.clone())),
+        Some(object @ Value::Object(_)) => Ok(object),
         _ => Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field,
