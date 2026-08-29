@@ -765,6 +765,27 @@ def test_out_of_range_integer_metadata_matches_rust_number_rounding() -> None:
     assert card.status == "requested"
 
 
+def test_blank_process_ids_share_canonical_generic_metadata() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="blank-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": ""},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="blank-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": " "},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
 def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

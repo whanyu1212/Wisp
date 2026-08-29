@@ -865,6 +865,8 @@ def _clip_trace_metadata(value: str, max_chars: int) -> str:
 
 
 def _bounded_trace_internal_identity(value: str) -> str:
+    if not value.strip():
+        return "b:"
     encoded = value.encode()
     if len(encoded) <= 4 * 1024:
         return f"r{len(encoded)}:{value}"
