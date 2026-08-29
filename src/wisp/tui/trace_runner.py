@@ -253,6 +253,9 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 # otherwise synthetic or duplicate results become generic cards.
                 super().event(event)
                 return
+            if event.call_id not in self._active_tool_cards:
+                super().event(event)
+                return
             self._set_tool_card(
                 event.call_id,
                 event.name,
