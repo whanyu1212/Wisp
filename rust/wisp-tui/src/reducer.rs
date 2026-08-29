@@ -1100,6 +1100,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_tool_result_projection_retains_diagnostic_tail_before_queueing() {
+        let output = format!(
+            "EARLY PROGRESS\n{}ASSERTION FAILED AT TAIL",
+            "progress\n".repeat(20_000)
+        );
+        let source_bytes = output.len() as u64;
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "call-failed",
+                "name": "bash",
+                "output": output,
+                "is_error": false,
+                "exit_code": 1
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+
+        assert_eq!(result.output_source_bytes, source_bytes);
+        assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert!(result.output.ends_with("ASSERTION FAILED AT TAIL"));
+        assert!(!result.output.contains("EARLY PROGRESS"));
+    }
+
+    #[test]
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",

@@ -77,8 +77,15 @@ impl BackendEvent {
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
             "tool.result" => {
+                let is_error = bool_field(value, &event_type, "is_error")?;
+                let exit_code = optional_i64_field(value, &event_type, "exit_code")?;
+                let process_state = optional_string_field(value, &event_type, "process_state")?;
+                let retain_output_tail = process_state.as_deref() != Some("cancelled")
+                    && (is_error
+                        || exit_code.is_some_and(|code| code != 0)
+                        || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
                 let (output, output_source_bytes) =
-                    bounded_string_field(value, &event_type, "output", false)?;
+                    bounded_string_field(value, &event_type, "output", retain_output_tail)?;
                 let (stdout, stdout_source_bytes) =
                     optional_bounded_string_field(value, &event_type, "stdout", true)?;
                 let (stderr, stderr_source_bytes) =
@@ -88,7 +95,7 @@ impl BackendEvent {
                     name: bounded_display_string_field(value, &event_type, "name", 512)?,
                     output,
                     output_source_bytes,
-                    is_error: bool_field(value, &event_type, "is_error")?,
+                    is_error,
                     failure_code: optional_string_field(value, &event_type, "failure_code")?,
                     retryable: bool_field_or(value, &event_type, "retryable", false)?,
                     recovery_hint: optional_bounded_display_string_field(
@@ -97,7 +104,7 @@ impl BackendEvent {
                         "recovery_hint",
                         512,
                     )?,
-                    exit_code: optional_i64_field(value, &event_type, "exit_code")?,
+                    exit_code,
                     output_has_exit_status: bool_field_or(
                         value,
                         &event_type,
@@ -114,7 +121,7 @@ impl BackendEvent {
                     )?,
                     truncated: bool_field_or(value, &event_type, "truncated", false)?,
                     process_id: optional_identity_field(value, &event_type, "process_id")?,
-                    process_state: optional_string_field(value, &event_type, "process_state")?,
+                    process_state,
                     process_error: optional_bounded_display_string_field(
                         value,
                         &event_type,
