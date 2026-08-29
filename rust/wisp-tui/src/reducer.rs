@@ -1152,6 +1152,31 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_bash_projection_preserves_output_head_before_queueing() {
+        let output = format!(
+            "CANCELLATION CONTEXT AT HEAD\n{}LATE OUTPUT",
+            "running\n".repeat(20_000)
+        );
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "call-cancelled",
+                "name": "bash",
+                "output": output,
+                "is_error": true,
+                "process_state": "cancelled"
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+
+        assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
+        assert!(result.output.starts_with("CANCELLATION CONTEXT AT HEAD"));
+        assert!(!result.output.contains("LATE OUTPUT"));
+    }
+
+    #[test]
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",

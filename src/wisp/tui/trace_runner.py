@@ -195,7 +195,9 @@ class RecordingTraceRenderer(LineTuiRenderer):
             )
         elif isinstance(event, ToolResultReady):
             if event.call_id in self._process_call_ids:
-                self._process_call_ids.discard(event.call_id)
+                # Keep the resolved process binding as a trace tombstone until
+                # command settlement so delayed duplicate results stay ignored,
+                # matching the Rust reducer's resolved call index.
                 super().event(event)
                 return
             index = self._active_tool_cards.get(event.call_id)

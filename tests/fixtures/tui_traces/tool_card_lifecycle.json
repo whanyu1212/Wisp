@@ -137,6 +137,42 @@
     {
       "type": "rpc.event",
       "event": {
+        "type": "tool.call",
+        "call_id": "call-process",
+        "name": "bash",
+        "arguments": {"operation": "poll", "process_id": "process-1"}
+      },
+      "clock_ms": 59
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-process",
+        "name": "bash",
+        "output": "still running",
+        "is_error": false,
+        "process_id": "process-1",
+        "process_state": "running"
+      },
+      "clock_ms": 59
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "call-process",
+        "name": "bash",
+        "output": "delayed duplicate",
+        "is_error": false,
+        "process_id": "process-1",
+        "process_state": "running"
+      },
+      "clock_ms": 59
+    },
+    {
+      "type": "rpc.event",
+      "event": {
         "type": "rpc.command.finished",
         "command_id": "prompt-1",
         "command_type": "prompt",
