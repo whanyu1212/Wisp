@@ -5,6 +5,8 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::tool_detail::{DetailAvailability, DetailResult, ToolDetailSource, build_tool_detail};
+
 pub const TOOL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 pub const TOOL_OUTPUT_MAX_LINES: usize = 500;
 pub const TOOL_PREVIEW_MAX_BYTES: usize = 2_000;
@@ -169,6 +171,7 @@ pub struct ToolCallInput {
     pub call_id: String,
     pub name: String,
     pub arguments: Value,
+    pub detail_source: ToolDetailSource,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,6 +181,8 @@ pub struct ToolResultInput {
     pub output: String,
     pub output_tail: Option<String>,
     pub output_source_bytes: u64,
+    pub output_source_lines: u64,
+    pub output_projection_cut_mid_line: bool,
     pub is_error: bool,
     pub failure_code: Option<String>,
     pub retryable: bool,
@@ -219,6 +224,8 @@ pub struct ToolCardSnapshot {
     pub backend_truncated: bool,
     pub failure_code: Option<String>,
     pub retryable: bool,
+    pub detail_source: ToolDetailSource,
+    pub structured_detail: DetailAvailability,
 }
 
 impl ToolCardSnapshot {
@@ -234,6 +241,8 @@ impl ToolCardSnapshot {
             backend_truncated: false,
             failure_code: None,
             retryable: false,
+            detail_source: input.detail_source.clone(),
+            structured_detail: DetailAvailability::None,
         }
     }
 
@@ -242,6 +251,7 @@ impl ToolCardSnapshot {
             call_id: input.call_id.clone(),
             name: input.name.clone(),
             arguments: Value::Object(Map::new()),
+            detail_source: ToolDetailSource::None,
         };
         let mut card = Self::requested(&call, ToolStatus::Requested);
         card.arguments_available = false;
@@ -254,16 +264,25 @@ impl ToolCardSnapshot {
             return false;
         }
         let name = bounded_tool_name(&input.name);
+        let action_arguments = format_tool_arguments(&input.name, &input.arguments);
         if self.arguments_available
-            && (self.name != name
-                || self.action_arguments != format_tool_arguments(&input.name, &input.arguments))
+            && (self.name != name || self.action_arguments != action_arguments)
         {
             self.status = ToolStatus::Error;
             self.detail = "conflicting tool lifecycle metadata".into();
+            self.detail_source = ToolDetailSource::None;
+            self.structured_detail = DetailAvailability::None;
             return true;
         }
+        if self.arguments_available && self.detail_source != input.detail_source {
+            self.detail_source = ToolDetailSource::Unavailable(
+                crate::tool_detail::DetailUnavailableReason::ConflictingLifecycle,
+            );
+        } else {
+            self.detail_source = input.detail_source.clone();
+        }
         self.name = name;
-        self.action_arguments = format_tool_arguments(&input.name, &input.arguments);
+        self.action_arguments = action_arguments;
         self.arguments_available = true;
         true
     }
@@ -288,6 +307,8 @@ impl ToolCardSnapshot {
         } else {
             self.status = ToolStatus::Denied;
             self.detail = bounded_reason(reason.unwrap_or("denied"));
+            self.detail_source = ToolDetailSource::None;
+            self.structured_detail = DetailAvailability::None;
         }
         true
     }
@@ -338,6 +359,44 @@ impl ToolCardSnapshot {
         self.backend_truncated = input.truncated;
         self.failure_code = input.failure_code.as_deref().map(bounded_reason);
         self.retryable = input.retryable;
+        let result_name_matches = self.name == bounded_tool_name(&input.name);
+        self.structured_detail = if self.status == ToolStatus::Done && result_name_matches {
+            build_tool_detail(
+                &self.detail_source,
+                DetailResult {
+                    output: &normalized_output,
+                    before_text: input.before_text.as_deref(),
+                    created: input.created,
+                    summary: input.summary.as_deref(),
+                    truncated: input.truncated,
+                    projection_omitted_bytes: input
+                        .output_source_bytes
+                        .saturating_sub(u64::try_from(normalized_output.len()).unwrap_or(u64::MAX)),
+                    projection_omitted_rows: input
+                        .output_source_lines
+                        .saturating_sub(logical_line_count(&normalized_output)),
+                    projection_cut_mid_line: input.output_projection_cut_mid_line,
+                },
+            )
+        } else if self.status == ToolStatus::Done
+            && !matches!(&self.detail_source, ToolDetailSource::None)
+        {
+            DetailAvailability::Unavailable(
+                crate::tool_detail::DetailUnavailableReason::ConflictingLifecycle,
+            )
+        } else {
+            DetailAvailability::None
+        };
+        if matches!(&self.structured_detail, DetailAvailability::LiveRetained(_)) {
+            self.retained_output = BoundedText::default();
+        }
+        if let DetailAvailability::Unavailable(reason) = &self.structured_detail {
+            if !self.detail.is_empty() {
+                self.detail.push_str(" · ");
+            }
+            self.detail.push_str(reason.label());
+        }
+        self.detail_source = ToolDetailSource::None;
         true
     }
 
@@ -347,6 +406,8 @@ impl ToolCardSnapshot {
         }
         self.status = ToolStatus::Cancelled;
         self.detail = bounded_reason(reason);
+        self.detail_source = ToolDetailSource::None;
+        self.structured_detail = DetailAvailability::None;
         true
     }
 
@@ -368,6 +429,10 @@ impl ToolCardSnapshot {
 
     pub fn preview(&self) -> &str {
         &self.detail
+    }
+
+    pub fn has_retained_detail(&self) -> bool {
+        matches!(self.structured_detail, DetailAvailability::LiveRetained(_))
     }
 }
 
@@ -1260,7 +1325,7 @@ fn tail_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usiz
     (start, source.len())
 }
 
-fn logical_line_count(source: &str) -> u64 {
+pub(crate) fn logical_line_count(source: &str) -> u64 {
     if source.is_empty() {
         return 0;
     }
@@ -1286,6 +1351,8 @@ mod tests {
             output: output.into(),
             output_tail: None,
             output_source_bytes: output.len() as u64,
+            output_source_lines: logical_line_count(output),
+            output_projection_cut_mid_line: false,
             is_error: false,
             failure_code: None,
             retryable: false,
@@ -1372,6 +1439,7 @@ mod tests {
         let first = ToolCallInput {
             call_id: "large-number".into(),
             name: "extension".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap(),
         };
         let second = ToolCallInput {
@@ -1396,6 +1464,7 @@ mod tests {
             &ToolCallInput {
                 call_id: "omitted".into(),
                 name: "extension".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: bounded,
             },
             ToolStatus::Requested,
@@ -1419,6 +1488,7 @@ mod tests {
             &ToolCallInput {
                 call_id: "collision".into(),
                 name: "extension".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: bounded,
             },
             ToolStatus::Requested,
@@ -1432,6 +1502,7 @@ mod tests {
         let input = ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({"path": "README.md"}),
         };
         let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
@@ -1451,6 +1522,7 @@ mod tests {
         let input = ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({}),
         };
         let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
@@ -1468,6 +1540,7 @@ mod tests {
         let input = ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({}),
         };
         let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
@@ -1484,6 +1557,7 @@ mod tests {
         let input = ToolCallInput {
             call_id: "call-1".into(),
             name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             arguments: serde_json::json!({}),
         };
         let mut card = ToolCardSnapshot::requested(&input, ToolStatus::AwaitingApproval);

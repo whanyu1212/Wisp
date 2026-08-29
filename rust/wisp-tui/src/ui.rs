@@ -1,7 +1,10 @@
+use crate::detail_view::{DetailView, DetailViewRow};
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
+use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
+use crate::transcript::TranscriptEntryId;
 use crate::transcript_view::{
     TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
 };
@@ -31,6 +34,7 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
+#[cfg(test)]
 pub fn render(
     frame: &mut Frame<'_>,
     state: &UiState,
@@ -39,6 +43,23 @@ pub fn render(
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
+) {
+    render_interactive(
+        frame, state, viewport, row_cache, editor, connection, notice, None, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_interactive(
+    frame: &mut Frame<'_>,
+    state: &UiState,
+    viewport: &mut TranscriptViewport,
+    row_cache: &mut TranscriptRowCache,
+    editor: &PromptEditor,
+    connection: &ConnectionInfo,
+    notice: Option<&str>,
+    browse_selected: Option<TranscriptEntryId>,
+    detail_view: Option<&mut DetailView>,
 ) {
     let area = frame.area();
     if !decision_context_visible(area) {
@@ -55,6 +76,14 @@ pub fn render(
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
     );
+    if !decision_pending {
+        if let Some(view) = detail_view {
+            if let Some(presentation) = selected_detail(state, view) {
+                render_detail(frame, area, view, presentation);
+                return;
+            }
+        }
+    }
     if decision_pending && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -89,7 +118,14 @@ pub fn render(
         .split(area);
 
     render_header(frame, chunks[0], state, connection);
-    render_transcript(frame, chunks[1], state, viewport, row_cache);
+    render_transcript(
+        frame,
+        chunks[1],
+        state,
+        viewport,
+        row_cache,
+        browse_selected,
+    );
     render_composer(frame, chunks[2], state, editor);
     render_footer(frame, chunks[3], notice);
 }
@@ -142,11 +178,28 @@ fn render_transcript(
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
+    browse_selected: Option<TranscriptEntryId>,
 ) {
     let content_width = usize::from(area.width.saturating_sub(2)).max(1);
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let rows = viewport.visible_rows(&state.transcript, row_cache);
+    let selected_row = browse_selected.and_then(|selected_entry| {
+        rows.iter()
+            .find(|row| {
+                row.anchor.entry_id == selected_entry && row.kind == TranscriptRowKind::CardAction
+            })
+            .or_else(|| {
+                rows.iter().find(|row| {
+                    row.anchor.entry_id == selected_entry
+                        && matches!(
+                            row.kind,
+                            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
+                        )
+                })
+            })
+            .map(|row| row.anchor)
+    });
     let lines = if rows.is_empty() {
         vec![Line::styled(
             "Type a prompt below to start.",
@@ -155,7 +208,8 @@ fn render_transcript(
     } else {
         rows.into_iter()
             .map(|row| {
-                let style = match row.tone {
+                let selected = selected_row == Some(row.anchor);
+                let mut style = match row.tone {
                     TranscriptRowTone::Default => Style::default(),
                     TranscriptRowTone::User => Style::default()
                         .fg(Color::Green)
@@ -180,6 +234,9 @@ fn render_transcript(
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     }
                 };
+                if selected {
+                    style = style.bg(Color::Blue).fg(Color::White);
+                }
                 if row.spans.len() == 1 {
                     let span = row.spans.into_iter().next().expect("one span exists");
                     Line::styled(span.text, markdown_span_style(style, span.style))
@@ -209,6 +266,91 @@ fn render_transcript(
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(paragraph, area);
+}
+
+fn selected_detail<'a>(
+    state: &'a UiState,
+    view: &DetailView,
+) -> Option<&'a ToolDetailPresentation> {
+    let entry = state.transcript.entry(view.selected_entry()?)?;
+    let card = entry.tool_card()?;
+    let DetailAvailability::LiveRetained(detail) = &card.structured_detail else {
+        return None;
+    };
+    Some(detail)
+}
+
+fn render_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &mut DetailView,
+    presentation: &ToolDetailPresentation,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let heading = if presentation.summary.is_empty() {
+        presentation.title.clone()
+    } else {
+        format!("{}  {}", presentation.title, presentation.summary)
+    };
+    frame.render_widget(
+        Paragraph::new(sanitize_for_terminal(&heading)).block(
+            Block::default()
+                .title(" live retained detail ")
+                .borders(Borders::ALL),
+        ),
+        chunks[0],
+    );
+
+    let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
+    let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
+    view.set_geometry(presentation, width, height);
+    let rows = view.visible_rows(presentation);
+    let lines = if rows.is_empty() {
+        vec![Line::styled(
+            "(no retained detail rows)",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        rows.into_iter().map(detail_line).collect()
+    };
+    let title = if presentation.truncated {
+        " detail • retained content incomplete "
+    } else {
+        " detail "
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc close")
+            .style(Style::default().fg(Color::DarkGray)),
+        chunks[2],
+    );
+}
+
+fn detail_line(row: DetailViewRow) -> Line<'static> {
+    let style = match row.kind {
+        DetailRowKind::Addition => Style::default().fg(Color::Green),
+        DetailRowKind::Deletion => Style::default().fg(Color::Red),
+        DetailRowKind::Hunk | DetailRowKind::Header => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        DetailRowKind::GrepMatch => Style::default().fg(Color::LightMagenta),
+        DetailRowKind::Omission | DetailRowKind::Note => Style::default().fg(Color::Yellow),
+        DetailRowKind::Context | DetailRowKind::ReadLine | DetailRowKind::FindPath => {
+            Style::default()
+        }
+    };
+    Line::styled(row.text, style)
 }
 
 fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
@@ -473,7 +615,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
             Style::default().fg(Color::Yellow),
         ),
         None => (
-            "Enter send • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • Ctrl-C quit".into(),
+            "Enter send • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-C quit".into(),
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -698,6 +840,8 @@ mod tests {
             output: output.into(),
             output_tail: None,
             output_source_bytes: output.len() as u64,
+            output_source_lines: crate::tool_cards::logical_line_count(output),
+            output_projection_cut_mid_line: false,
             is_error: false,
             failure_code: None,
             retryable: false,
@@ -815,6 +959,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "shell".into(),
             arguments: json!({"command": "rm -rf /tmp/example"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
@@ -827,6 +972,7 @@ mod tests {
             call_id: "call-2".into(),
             name: "shell\u{1b}[2J\u{202e}spoof\nnext".into(),
             arguments: json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask\u{2066}safe".into(),
         });
         let adversarial = render_to_string(80, 18, &state, &PromptEditor::default());
@@ -840,6 +986,7 @@ mod tests {
             call_id: "call-3".into(),
             name: "shell".into(),
             arguments: json!({"command": "x".repeat(DECISION_PREVIEW_GRAPHEMES + 20)}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
         });
         let bounded = approval_composer_lines(&state, usize::MAX)
@@ -854,6 +1001,7 @@ mod tests {
             call_id: "call-4".into(),
             name: "very-long-tool-name-".repeat(20),
             arguments: json!({"command": "rm -rf /tmp/example"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
         });
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
@@ -1072,6 +1220,7 @@ mod tests {
             .observe_approval_requested(crate::tool_cards::ToolCallInput {
                 call_id: "call-1".into(),
                 name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: json!({"path": "README.md"}),
             });
         let draw = |state: &UiState| {
@@ -1119,6 +1268,105 @@ mod tests {
             style_at_text(complete.backend(), "Read  README.md").unwrap();
         assert_eq!(success_fg, Color::Green);
         assert!(success_modifiers.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn structured_diff_preview_and_detail_reach_terminal_cells_safely() {
+        let mut state = UiState::unconfigured();
+        let arguments = json!({
+            "path": "file.txt",
+            "edits": [{"oldText": "old\u{1b}[2J\n", "newText": "new value\n"}]
+        });
+        let card_id = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "edit-detail".into(),
+                name: "edit".into(),
+                detail_source: crate::tool_detail::project_tool_detail_source(
+                    "edit",
+                    arguments.as_object().unwrap(),
+                ),
+                arguments: crate::tool_cards::bounded_tool_arguments("edit", &arguments),
+            });
+        let mut completed = tool_result("edit-detail", "Applied 1 edit");
+        completed.name = "edit".into();
+        state.transcript.observe_tool_result(completed);
+
+        let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
+        assert!(collapsed.contains("M file.txt"));
+        assert!(collapsed.contains("+ new value"));
+        assert!(collapsed.contains("F6 browse"));
+        assert!(!collapsed.contains('\u{1b}'));
+
+        let backend = TestBackend::new(60, 10);
+        let mut browse_terminal = Terminal::new(backend).unwrap();
+        let mut browse_viewport = TranscriptViewport::default();
+        let mut browse_cache = TranscriptRowCache::default();
+        browse_terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut browse_viewport,
+                    &mut browse_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    Some(card_id),
+                    None,
+                );
+            })
+            .unwrap();
+        let visible = browse_viewport.visible_rows(&state.transcript, &mut browse_cache);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].anchor.entry_id, card_id);
+        assert!(matches!(
+            visible[0].kind,
+            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
+        ));
+        let visible_text = visible[0].plain_text();
+        let (_, selected_background, _) =
+            style_at_text(browse_terminal.backend(), &visible_text).unwrap();
+        assert_eq!(selected_background, Color::Blue);
+
+        let card = state
+            .transcript
+            .entry(card_id)
+            .unwrap()
+            .tool_card()
+            .unwrap();
+        let DetailAvailability::LiveRetained(presentation) = &card.structured_detail else {
+            panic!("structured detail expected");
+        };
+        let mut detail_view = DetailView::default();
+        detail_view.open(card_id, presentation);
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    Some(card_id),
+                    Some(&mut detail_view),
+                );
+            })
+            .unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("live retained detail"));
+        assert!(rendered.contains("- old�[2J"));
+        assert!(rendered.contains("+ new value"));
+        let (added_fg, _, _) = style_at_text(terminal.backend(), "+ new value").unwrap();
+        let (deleted_fg, _, _) = style_at_text(terminal.backend(), "- old�[2J").unwrap();
+        assert_eq!(added_fg, Color::Green);
+        assert_eq!(deleted_fg, Color::Red);
     }
 
     #[test]

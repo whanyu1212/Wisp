@@ -5,6 +5,7 @@ use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
 
 use crate::tool_cards::{ToolCallInput, ToolResultInput, bounded_identity};
+pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 
@@ -118,6 +119,7 @@ pub struct PendingApproval {
     pub call_id: String,
     pub name: String,
     pub arguments: Value,
+    pub detail_source: ToolDetailSource,
     pub safety: String,
 }
 
@@ -534,6 +536,7 @@ fn handle_backend_event(
                 call_id: bounded_identity(&pending.call_id),
                 name: pending.name.clone(),
                 arguments: pending.arguments.clone(),
+                detail_source: pending.detail_source.clone(),
             });
             if state.cancel_requested {
                 let id = ids.next_id(CommandKind::Approval);
@@ -819,6 +822,7 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "read".into(),
                 arguments: serde_json::json!({}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
             });
             let mut ids = DeterministicIds::default();
@@ -850,6 +854,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             arguments: serde_json::json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         state.current_command = Some(ActiveCommand {
@@ -901,6 +906,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             arguments: serde_json::json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         let before = state.clone();
@@ -980,7 +986,7 @@ mod tests {
                 "arguments": {"path": "README.md"}
             }))
             .unwrap(),
-            BackendEvent::ToolCall(ToolCallInput { call_id, name, arguments })
+            BackendEvent::ToolCall(ToolCallInput { call_id, name, arguments, .. })
                 if call_id == bounded_identity("call-1")
                     && name == "read"
                     && arguments["path"] == "README.md"
@@ -1037,6 +1043,45 @@ mod tests {
             panic!("tool call expected");
         };
         assert_eq!(write.arguments, serde_json::json!({"path": "file.txt"}));
+        assert_eq!(
+            write.detail_source,
+            ToolDetailSource::Unavailable(
+                crate::tool_detail::DetailUnavailableReason::SourceOverBudget
+            )
+        );
+
+        let BackendEvent::ToolCall(edit) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "edit-1",
+                "name": "edit",
+                "arguments": {
+                    "path": "file.txt",
+                    "edits": [{"oldText": "old secret", "newText": "new secret"}]
+                }
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        assert_eq!(edit.arguments, serde_json::json!({"path": "file.txt"}));
+        assert!(matches!(edit.detail_source, ToolDetailSource::Edit(_)));
+        assert!(!edit.arguments.to_string().contains("secret"));
+
+        let BackendEvent::ToolApprovalRequested(approval) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.approval.requested",
+                "call_id": "write-approval",
+                "name": "write",
+                "arguments": {"path": "file.txt", "content": "bounded secret"},
+                "safety": "mutating"
+            }))
+            .unwrap()
+        else {
+            panic!("tool approval expected");
+        };
+        assert_eq!(approval.arguments, serde_json::json!({"path": "file.txt"}));
+        assert!(matches!(approval.detail_source, ToolDetailSource::Write(_)));
 
         let arguments = (0..1_000)
             .map(|index| {
@@ -1136,6 +1181,58 @@ mod tests {
     }
 
     #[test]
+    fn write_before_snapshot_is_bounded_before_reducer_queueing() {
+        let BackendEvent::ToolResult(retained) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "write-1",
+                "name": "write",
+                "output": "Wrote file.txt",
+                "is_error": false,
+                "before_text": "before\n",
+                "created": false
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        assert_eq!(retained.before_text.as_deref(), Some("before\n"));
+
+        let BackendEvent::ToolResult(over_budget) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "write-2",
+                "name": "write",
+                "output": "Wrote file.txt",
+                "is_error": false,
+                "before_text": "x".repeat(crate::tool_detail::DETAIL_SOURCE_MAX_BYTES + 1),
+                "created": false
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        assert!(over_budget.before_text.is_none());
+
+        let BackendEvent::ToolResult(mismatched) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "write-3",
+                "name": "read",
+                "output": "done",
+                "is_error": false,
+                "before_text": "foreign",
+                "created": true
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        assert!(mismatched.before_text.is_none());
+        assert!(!mismatched.created);
+    }
+
+    #[test]
     fn failed_tool_result_projection_retains_diagnostic_tail_before_queueing() {
         let output = format!(
             "EARLY PROGRESS\n{}ASSERTION FAILED AT TAIL",
@@ -1185,6 +1282,7 @@ mod tests {
             call_id: result.call_id.clone(),
             name: "read".into(),
             arguments: serde_json::json!({}),
+            detail_source: ToolDetailSource::None,
         };
         let mut card = crate::tool_cards::ToolCardSnapshot::requested(
             &call,
@@ -1227,6 +1325,7 @@ mod tests {
             call_id: result.call_id.clone(),
             name: "bash".into(),
             arguments: serde_json::json!({"command": "build"}),
+            detail_source: ToolDetailSource::None,
         };
         let mut card = crate::tool_cards::ToolCardSnapshot::requested(
             &call,
@@ -1326,6 +1425,7 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "read".into(),
                 arguments: serde_json::json!({"path": "README.md"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
             })),
             &mut ids,
@@ -1336,6 +1436,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::ToolCall(ToolCallInput {
                 call_id: bounded_identity("call-1"),
                 name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: serde_json::json!({"path": "README.md"}),
             })),
             &mut ids,
@@ -1376,6 +1477,152 @@ mod tests {
     }
 
     #[test]
+    fn built_in_file_results_build_structured_retained_detail() {
+        for (call_id, name, arguments, output, summary) in [
+            (
+                "read-detail",
+                "read",
+                serde_json::json!({"path": "file.txt", "offset": 4}),
+                "alpha\nbeta\n",
+                "read 2 lines from file.txt",
+            ),
+            (
+                "grep-detail",
+                "grep",
+                serde_json::json!({"path": "src", "pattern": "needle"}),
+                "src/main.rs:2:needle\n",
+                "grep: 1 match",
+            ),
+            (
+                "find-detail",
+                "find",
+                serde_json::json!({"path": ".", "pattern": "*.rs"}),
+                "src/lib.rs\nsrc/main.rs\n",
+                "find: 2 files",
+            ),
+        ] {
+            let BackendEvent::ToolCall(call) =
+                BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "tool.call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }))
+                .unwrap()
+            else {
+                panic!("tool call expected");
+            };
+            let mut transcript = crate::transcript::Transcript::default();
+            let card_id = transcript.observe_tool_call(call);
+            let BackendEvent::ToolResult(result) =
+                BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "tool.result",
+                    "call_id": call_id,
+                    "name": name,
+                    "output": output,
+                    "is_error": false,
+                    "summary": summary,
+                }))
+                .unwrap()
+            else {
+                panic!("tool result expected");
+            };
+            transcript.observe_tool_result(*result);
+            assert!(
+                transcript
+                    .entry(card_id)
+                    .unwrap()
+                    .tool_card()
+                    .unwrap()
+                    .has_retained_detail(),
+                "{name} should retain structured detail"
+            );
+        }
+
+        let BackendEvent::ToolCall(call) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "projected-read",
+                "name": "read",
+                "arguments": {"path": "large.txt"},
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        let mut transcript = crate::transcript::Transcript::default();
+        let card_id = transcript.observe_tool_call(call);
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "projected-read",
+                "name": "read",
+                "output": "line\n".repeat(600),
+                "is_error": false,
+                "summary": "read 600 lines from large.txt",
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        transcript.observe_tool_result(*result);
+        let card = transcript.entry(card_id).unwrap().tool_card().unwrap();
+        let crate::tool_detail::DetailAvailability::LiveRetained(detail) = &card.structured_detail
+        else {
+            panic!("structured detail expected");
+        };
+        assert!(detail.truncated);
+        assert!(detail.rows.iter().any(|row| {
+            row.kind == crate::tool_detail::DetailRowKind::Omission
+                && row.hidden_rows > 0
+                && row.hidden_bytes > 0
+        }));
+
+        let BackendEvent::ToolCall(call) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "mid-line-read",
+                "name": "read",
+                "arguments": {"path": "partial.txt"},
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        let mut transcript = crate::transcript::Transcript::default();
+        let card_id = transcript.observe_tool_call(call);
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "mid-line-read",
+                "name": "read",
+                "output": format!("complete\n{}\nlast\n", "x".repeat(70_000)),
+                "is_error": false,
+                "summary": "read 3 lines from partial.txt",
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        assert!(result.output_projection_cut_mid_line);
+        transcript.observe_tool_result(*result);
+        let card = transcript.entry(card_id).unwrap().tool_card().unwrap();
+        let crate::tool_detail::DetailAvailability::LiveRetained(detail) = &card.structured_detail
+        else {
+            panic!("structured detail expected");
+        };
+        assert!(detail.rows.iter().any(|row| {
+            row.kind == crate::tool_detail::DetailRowKind::ReadLine && row.text == "complete"
+        }));
+        assert!(!detail.rows.iter().any(|row| {
+            row.kind == crate::tool_detail::DetailRowKind::ReadLine && row.text.contains('x')
+        }));
+        assert!(detail.rows.iter().any(|row| {
+            row.kind == crate::tool_detail::DetailRowKind::Omission && row.hidden_rows >= 2
+        }));
+    }
+
+    #[test]
     fn long_approval_identity_remains_exact_for_command_and_bounded_for_card_pairing() {
         let long_call_id = "call".repeat(5_000);
         let mut state = UiState::new("fake".into(), None, None);
@@ -1386,6 +1633,7 @@ mod tests {
                 call_id: long_call_id.clone(),
                 name: "read".into(),
                 arguments: serde_json::json!({"path": "README.md"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
             })),
             &mut ids,
@@ -1409,6 +1657,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::ToolCall(ToolCallInput {
                 call_id: hashed.clone(),
                 name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 arguments: serde_json::json!({"path": "README.md"}),
             })),
             &mut ids,
@@ -1588,6 +1837,7 @@ mod tests {
                 call_id: "call-1".into(),
                 name: "shell".into(),
                 arguments: serde_json::json!({"command": "rm -rf /tmp/example"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "ask".into(),
             })),
             &mut ids,
@@ -1618,6 +1868,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             arguments: serde_json::json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
         });
         let mut ids = DeterministicIds::default();

@@ -208,6 +208,23 @@ for line in sys.stdin:
             process_state="completed",
             stdout="safe\\u001b[2Jtail",
         ))
+        emit(ToolCallRequested(
+            call_id="edit-1",
+            name="edit",
+            arguments={
+                "path": "demo.txt",
+                "edits": [{
+                    "oldText": "old\\u001b[2J value\\n",
+                    "newText": "new value\\n",
+                }],
+            },
+        ))
+        emit(ToolResultReady(
+            call_id="edit-1",
+            name="edit",
+            output="Applied 1 edit",
+            is_error=False,
+        ))
         emit(RpcCommandFinished(
             command_id=command_id,
             command_type="prompt",
@@ -250,6 +267,10 @@ for line in sys.stdin:
     output = bytearray()
     status: int | None = None
     prompt_sent = False
+    browse_sent = False
+    detail_seen = False
+    detail_close_output_offset: int | None = None
+    browse_close_sent_at: float | None = None
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -272,9 +293,44 @@ for line in sys.stdin:
                     b"Process completed",
                     b"safe",
                     b"tail",
+                    b"demo.txt",
+                    b"new",
+                    b"value",
+                    b"F6",
+                    b"browse",
                 )
             )
-            if cards_visible and not quit_sent and output.rfind(b"idle") > output.rfind(b"running"):
+            if (
+                cards_visible
+                and not browse_sent
+                and output.rfind(b"idle") > output.rfind(b"running")
+            ):
+                # F6 enters visible-card browse mode; Enter opens retained detail.
+                os.write(terminal_fd, b"\x1b[17~\r")
+                browse_sent = True
+            if browse_sent and not detail_seen and b"live retained detail" in output:
+                detail_seen = True
+                fcntl.ioctl(
+                    terminal_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 30, 120, 0, 0),
+                )
+                # Standalone Escape bytes must be separate terminal events. Adjacent
+                # bytes can be parsed as one escape sequence on Linux.
+                detail_close_output_offset = len(output)
+                os.write(terminal_fd, b"\x1b")
+            if (
+                detail_close_output_offset is not None
+                and browse_close_sent_at is None
+                and b"F6 details" in output[detail_close_output_offset:]
+            ):
+                os.write(terminal_fd, b"\x1b")
+                browse_close_sent_at = time.monotonic()
+            if (
+                browse_close_sent_at is not None
+                and not quit_sent
+                and time.monotonic() - browse_close_sent_at >= 0.5
+            ):
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
@@ -296,11 +352,18 @@ for line in sys.stdin:
             os.waitpid(child_pid, 0)
 
     assert prompt_sent, bytes(output)
+    assert browse_sent, bytes(output)
+    assert detail_seen, bytes(output)
+    assert detail_close_output_offset is not None, bytes(output)
+    assert browse_close_sent_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
     assert b"safe" in output and b"tail" in output
     assert b"safe\xef\xbf\xbd[2Jtail" in output
     assert b"safe\x1b[2Jtail" not in output
+    assert b"old\xef\xbf\xbd[2J" in output
+    assert b"old\x1b[2J" not in output
+    assert b"live retained detail" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal
