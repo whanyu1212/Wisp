@@ -262,7 +262,7 @@ impl ToolCardSnapshot {
     }
 
     pub fn approval_requested(&mut self) -> bool {
-        if self.status.terminal() || self.status == ToolStatus::AwaitingApproval {
+        if self.status != ToolStatus::Requested {
             return false;
         }
         self.status = ToolStatus::AwaitingApproval;
@@ -1263,6 +1263,21 @@ mod tests {
         assert_eq!(card.retained_output.text, "one\ntwo\nthree");
         assert_eq!(card.retained_output.source_bytes, 13);
         assert_eq!(card.retained_output.dropped_bytes, 0);
+    }
+
+    #[test]
+    fn delayed_approval_request_does_not_regress_running_state() {
+        let input = ToolCallInput {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+        assert!(card.approval_requested());
+        assert!(card.approval_resolved(true, None));
+
+        assert!(!card.approval_requested());
+        assert_eq!(card.status, ToolStatus::Running);
     }
 
     #[test]

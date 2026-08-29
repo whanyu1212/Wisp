@@ -1157,6 +1157,41 @@ mod tests {
     }
 
     #[test]
+    fn prebounded_output_counts_normalized_source_bytes() {
+        let output = format!("{}tail\r\n", "line\r\n".repeat(20_000));
+        let normalized = output.replace("\r\n", "\n");
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "call-crlf",
+                "name": "read",
+                "output": output,
+                "is_error": false
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+
+        assert_eq!(result.output_source_bytes, normalized.len() as u64);
+        assert!(!result.output.contains('\r'));
+        let call = crate::tool_cards::ToolCallInput {
+            call_id: result.call_id.clone(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut card = crate::tool_cards::ToolCardSnapshot::requested(
+            &call,
+            crate::tool_cards::ToolStatus::Requested,
+        );
+        assert!(card.apply_result(&result));
+        assert_eq!(
+            card.retained_output.dropped_bytes,
+            normalized.len() as u64 - card.retained_output.text.len() as u64
+        );
+    }
+
+    #[test]
     fn successful_result_preserves_both_directions_for_the_canonical_call_name() {
         let output = format!(
             "STARTING BUILD\n{}BUILD FINISHED SUCCESSFULLY",

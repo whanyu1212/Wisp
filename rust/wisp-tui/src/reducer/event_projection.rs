@@ -214,10 +214,11 @@ fn bounded_string_field(
             field,
         }
     })?;
+    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
     let bounded = if retain_tail {
-        BoundedText::tail(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+        BoundedText::tail(&normalized, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
     } else {
-        BoundedText::head(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
+        BoundedText::head(&normalized, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES)
     };
     Ok((bounded.text, bounded.source_bytes))
 }
