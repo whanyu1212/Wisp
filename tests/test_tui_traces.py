@@ -962,6 +962,49 @@ def test_action_summaries_use_rust_whitespace_semantics() -> None:
     assert card.status == "error"
 
 
+def test_generic_float_metadata_uses_rust_exponent_formatting() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="float-format",
+            name="extension",
+            arguments={"value": 1e-7},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="float-format",
+            name="extension",
+            arguments={"value": "1e-07"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_clipped_generic_key_collisions_count_as_omissions() -> None:
+    renderer = RecordingTraceRenderer()
+    prefix = "k" * 64
+    renderer.event(
+        ToolCallRequested(
+            call_id="key-collision",
+            name="extension",
+            arguments={f"{prefix}a": 1, f"{prefix}b": 2},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="key-collision",
+            name="extension",
+            arguments={f"{prefix}b": 2},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
 def test_generic_argument_omission_count_affects_canonical_metadata() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

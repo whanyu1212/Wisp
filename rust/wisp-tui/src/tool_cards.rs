@@ -703,7 +703,7 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                     bounded_argument_value(value, GENERIC_VALUE_MAX_CHARS),
                 );
             }
-            let omitted = arguments.len().saturating_sub(GENERIC_MAX_ITEMS);
+            let omitted = arguments.len().saturating_sub(bounded.len());
             let mut wrapper = Map::with_capacity(2);
             wrapper.insert(GENERIC_ITEMS_KEY.into(), Value::Object(bounded));
             wrapper.insert(GENERIC_OMITTED_KEY.into(), Value::from(omitted as u64));
@@ -1403,6 +1403,28 @@ mod tests {
 
         assert!(card.action_arguments.ends_with("… +4 fields"));
         assert!(card.action_arguments.chars().count() <= GENERIC_ACTION_MAX_CHARS);
+    }
+
+    #[test]
+    fn clipped_generic_key_collisions_are_reported_as_omissions() {
+        let prefix = "k".repeat(64);
+        let arguments = [
+            (format!("{prefix}a"), Value::from(1)),
+            (format!("{prefix}b"), Value::from(2)),
+        ]
+        .into_iter()
+        .collect::<Map<_, _>>();
+        let bounded = bounded_tool_arguments("extension", &Value::Object(arguments));
+        let card = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "collision".into(),
+                name: "extension".into(),
+                arguments: bounded,
+            },
+            ToolStatus::Requested,
+        );
+
+        assert!(card.action_arguments.ends_with("… +1 fields"));
     }
 
     #[test]

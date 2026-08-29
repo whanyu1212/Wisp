@@ -369,11 +369,13 @@ impl Transcript {
                                 .recovery_hint
                                 .as_deref()
                                 .is_some_and(|hint| !hint.is_empty()));
+                    let promoted_recovery_hint = preserve_bound_error
+                        && input.process_error.is_none()
+                        && input.output.is_empty()
+                        && input.recovery_hint.is_some();
                     let process_error = if preserve_bound_error {
                         input.process_error.clone().or_else(|| {
-                            input
-                                .output
-                                .is_empty()
+                            promoted_recovery_hint
                                 .then(|| input.recovery_hint.clone())
                                 .flatten()
                         })
@@ -395,7 +397,7 @@ impl Transcript {
                             },
                             process_state: None,
                             process_error,
-                            recovery_hint: preserve_bound_error
+                            recovery_hint: (preserve_bound_error && !promoted_recovery_hint)
                                 .then(|| input.recovery_hint.clone())
                                 .flatten(),
                             stdout: None,
@@ -1305,6 +1307,32 @@ mod tests {
                 .contains("start the command again")
         );
         assert!(!card.retained_output.text.contains("did not identify"));
+
+        let mut hint_only_transcript = Transcript::default();
+        let hint_card_id = hint_only_transcript.observe_tool_call(call(
+            "poll-hint",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "expired-process"}),
+        ));
+        let mut hint_only = result("poll-hint", "");
+        hint_only.name = "bash".into();
+        hint_only.is_error = true;
+        hint_only.recovery_hint = Some("start the command again".into());
+        hint_only_transcript.observe_tool_result(hint_only);
+
+        let hint_card = hint_only_transcript
+            .entry(hint_card_id)
+            .unwrap()
+            .process_card()
+            .unwrap();
+        assert_eq!(
+            hint_card
+                .retained_output
+                .text
+                .matches("start the command again")
+                .count(),
+            1
+        );
     }
 
     #[test]

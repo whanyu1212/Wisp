@@ -742,7 +742,7 @@ def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, s
                 bounded_arguments[_clip_trace_metadata(str(key), 64)] = _bounded_trace_argument(
                     arguments[key], 64
                 )
-            generic_omitted = max(0, len(arguments) - 8)
+            generic_omitted = max(0, len(arguments) - len(bounded_arguments))
         else:
             bounded_arguments = {}
             for key in selected:
@@ -868,6 +868,13 @@ def _trace_scalar_value(value: object) -> str:
         return f"[{len(value)} items]"
     if isinstance(value, dict):
         return f"{{{len(value)} fields}}"
+    if isinstance(value, float):
+        rendered = repr(value)
+        mantissa, separator, exponent = rendered.partition("e")
+        if separator:
+            sign = "+" if exponent.startswith("+") else ""
+            return f"{mantissa}e{sign}{int(exponent)}"
+        return rendered
     return str(value)
 
 
