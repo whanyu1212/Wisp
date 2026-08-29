@@ -269,6 +269,8 @@ for line in sys.stdin:
     prompt_sent = False
     browse_sent = False
     detail_seen = False
+    detail_close_output_offset: int | None = None
+    browse_close_sent_at: float | None = None
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -313,8 +315,23 @@ for line in sys.stdin:
                     termios.TIOCSWINSZ,
                     struct.pack("HHHH", 30, 120, 0, 0),
                 )
-                # Close detail, leave card browse, then quit from the idle prompt.
-                os.write(terminal_fd, b"\x1b\x1b\x03")
+                # Standalone Escape bytes must be separate terminal events. Adjacent
+                # bytes can be parsed as one escape sequence on Linux.
+                detail_close_output_offset = len(output)
+                os.write(terminal_fd, b"\x1b")
+            if (
+                detail_close_output_offset is not None
+                and browse_close_sent_at is None
+                and b"F6 details" in output[detail_close_output_offset:]
+            ):
+                os.write(terminal_fd, b"\x1b")
+                browse_close_sent_at = time.monotonic()
+            if (
+                browse_close_sent_at is not None
+                and not quit_sent
+                and time.monotonic() - browse_close_sent_at >= 0.5
+            ):
+                os.write(terminal_fd, b"\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
@@ -337,6 +354,8 @@ for line in sys.stdin:
     assert prompt_sent, bytes(output)
     assert browse_sent, bytes(output)
     assert detail_seen, bytes(output)
+    assert detail_close_output_offset is not None, bytes(output)
+    assert browse_close_sent_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
