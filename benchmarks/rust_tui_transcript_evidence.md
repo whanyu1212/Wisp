@@ -8,7 +8,7 @@ ignored under `profiles/`.
 | Field | Value |
 | --- | --- |
 | Base tree | `origin/main` at `2394cae82ee2c792b1c2f74d3f19c6a2533366a9` |
-| Local benchmark report commit | `047435873860bcc4b9514e1bf84fc108c2a8caba` |
+| Local benchmark report commit | `638eefc1df3efe45895d18efb8f8fda625a756f9` |
 | Worktree | Clean |
 | Host | Mac14,15, Apple M2, arm64 |
 | OS | macOS 26.5.2 / Darwin 25.5.0 |
@@ -33,11 +33,11 @@ largest observed value across the five samples; the other columns are medians.
 
 | Entries | Cold frame ms | Warm p95 ms | Navigation p95 ms | Resize p95 ms | Stream p95 ms | Stream CPU / 100 updates ms | Detail open ms | Detail p95 ms | Max synchronous stall ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 0.170 | 0.090 | 0.101 | 0.102 | 0.130 | 11.013 | 0.194 | 0.081 | 0.555 |
-| 10,000 | 0.184 | 0.090 | 0.102 | 0.102 | 0.130 | 10.989 | 0.184 | 0.084 | 0.203 |
-| 100,000 | 0.164 | 0.090 | 0.102 | 0.102 | 0.128 | 11.003 | 0.186 | 0.082 | 0.207 |
+| 1,000 | 0.171 | 0.089 | 0.101 | 0.102 | 0.130 | 10.976 | 0.186 | 0.106 | 0.586 |
+| 10,000 | 0.161 | 0.089 | 0.101 | 0.101 | 0.129 | 11.005 | 0.193 | 0.107 | 0.202 |
+| 100,000 | 0.157 | 0.091 | 0.100 | 0.103 | 0.128 | 10.932 | 0.187 | 0.104 | 0.195 |
 
-The first syntax-highlight call took 18.101 ms in the standalone fresh-process run. This includes
+The first syntax-highlight call took 15.826 ms in the standalone fresh-process run. This includes
 Syntect initialization, parsing, and highlighting the first fence; it is reported separately from
 warm stream frames and has no portable threshold.
 
@@ -45,13 +45,13 @@ warm stream frames and has no portable threshold.
 
 | Metric | Ratio |
 | --- | ---: |
-| Warm p95 | 0.994 |
-| Navigation p95 | 1.007 |
-| Resize p95 | 1.003 |
-| Stream p95 | 0.989 |
-| Stream process CPU | 0.999 |
-| Detail open | 0.959 |
-| Detail p95 | 1.013 |
+| Warm p95 | 1.019 |
+| Navigation p95 | 0.993 |
+| Resize p95 | 1.001 |
+| Stream p95 | 0.984 |
+| Stream process CPU | 0.996 |
+| Detail open | 1.007 |
+| Detail p95 | 0.985 |
 
 All ratios are below the 1.25 same-machine scaling gate. Warm, navigation, resize, stream, detail
 open, and detail p95 values are below 16 ms; measured maximum synchronous stalls are below 32 ms.
@@ -64,8 +64,9 @@ open, and detail p95 values are below 16 ms; measured maximum synchronous stalls
 - Streaming retained exact source, stayed at the tail without unseen output, reused stable Markdown,
   performed no full reparse, and stayed within the configured parse/highlight work bounds.
 - Visible rows remained viewport-bounded; the structured diff saturated the 400-row retention
-  budget, rendered known old/new rows through its bounded cache, and included eager row formatting
-  plus the first detail draw in both `detail_open_ms` and maximum synchronous stall.
+  budget, rendered known old/new rows through its bounded cache, included eager row formatting plus
+  the first detail draw in both `detail_open_ms` and maximum synchronous stall, and reached the
+  retained tail after 23 measured page-down frames in every sample.
 - A default-suite regression independently compares 1,000 and 100,000-entry transcripts without
   using timing assertions.
 
