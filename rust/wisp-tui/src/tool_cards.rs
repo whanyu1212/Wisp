@@ -468,15 +468,16 @@ impl ProcessCardSnapshot {
             .process_error
             .as_deref()
             .filter(|value| !value.is_empty());
+        let fallback_output = result.output_tail.as_deref().unwrap_or(&result.output);
         let uses_fallback_output = process_error.is_none()
             && stdout.is_empty()
             && stderr.is_empty()
             && result.process_state.is_none()
-            && !result.output.is_empty();
+            && !fallback_output.is_empty();
         if let Some(error) = process_error {
             self.append_unlabelled(&bounded_reason(error));
         } else if uses_fallback_output {
-            self.append_unlabelled(&result.output);
+            self.append_unlabelled(fallback_output);
         }
         if let Some(hint) = result
             .recovery_hint
@@ -494,7 +495,7 @@ impl ProcessCardSnapshot {
             .saturating_add(if uses_fallback_output {
                 result
                     .output_source_bytes
-                    .saturating_sub(u64::try_from(result.output.len()).unwrap_or(u64::MAX))
+                    .saturating_sub(u64::try_from(fallback_output.len()).unwrap_or(u64::MAX))
             } else {
                 0
             })
@@ -668,7 +669,13 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
         let retained = if *key == "process_id" {
             value
                 .as_str()
-                .map(bounded_identity)
+                .map(|source| {
+                    if source.trim().is_empty() {
+                        "b:".to_owned()
+                    } else {
+                        bounded_identity(source)
+                    }
+                })
                 .map(Value::String)
                 .unwrap_or_else(|| bounded_argument_value(value, 64))
         } else {
@@ -729,6 +736,9 @@ fn call_identity_for_display(identity: &str) -> String {
 }
 
 pub(crate) fn identity_for_display(identity: &str) -> &str {
+    if identity == "b:" {
+        return "";
+    }
     let Some(encoded) = identity.strip_prefix('r') else {
         return identity;
     };
@@ -1352,6 +1362,15 @@ mod tests {
         );
         assert!(process_call_identity("bash", &whitespace).is_none());
 
+        let oversized_multibyte_blank = bounded_tool_arguments(
+            "bash",
+            &serde_json::json!({
+                "operation": "poll",
+                "process_id": "\u{3000}".repeat(1_500),
+            }),
+        );
+        assert!(process_call_identity("bash", &oversized_multibyte_blank).is_none());
+
         assert_eq!(
             process_call_identity(
                 "bash",
@@ -1414,13 +1433,14 @@ mod tests {
     fn process_fallback_output_accounts_for_projection_omissions() {
         let mut card = ProcessCardSnapshot::new("process".into());
         assert!(card.begin(ProcessOperation::Poll, 1));
-        let mut input = result("retained fallback");
+        let mut input = result("retained head");
         input.name = "bash".into();
+        input.output_tail = Some("retained tail".into());
         input.output_source_bytes = 100;
 
         assert!(card.observe(ProcessOperation::Poll, &input, 1));
-        assert_eq!(card.backend_dropped_bytes, 83);
-        assert_eq!(card.retained_output.text, "retained fallback");
+        assert_eq!(card.backend_dropped_bytes, 87);
+        assert_eq!(card.retained_output.text, "retained tail");
     }
 
     #[test]
