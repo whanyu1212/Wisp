@@ -238,10 +238,13 @@ impl Transcript {
 
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval);
-        let binding = *self
-            .call_entries
-            .get(&input.call_id)
-            .expect("ensured approval request has a call binding");
+        let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
+            return entry_id;
+        };
+        if binding.resolved {
+            self.touch_resolved_tool_binding(&input.call_id);
+            return entry_id;
+        }
         let changed = match self.entry_mut(entry_id).kind {
             TranscriptEntryKind::Tool(ref mut card) => card.approval_requested(),
             TranscriptEntryKind::Process(ref mut card) => {
@@ -1533,6 +1536,29 @@ mod tests {
     }
 
     #[test]
+    fn changed_process_metadata_on_approval_stays_interrupted() {
+        let mut transcript = Transcript::default();
+        let process = transcript.observe_tool_call(call(
+            "crossed-approval",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process"}),
+        ));
+
+        assert_eq!(
+            transcript.observe_approval_requested(call(
+                "crossed-approval",
+                "bash",
+                serde_json::json!({"operation": "cancel", "process_id": "process"}),
+            )),
+            process
+        );
+
+        let card = transcript.entry(process).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::PollInterrupted);
+        assert!(card.preview().text.contains("metadata changed"));
+    }
+
+    #[test]
     fn stale_process_metadata_conflict_still_resolves_the_older_binding() {
         let mut transcript = Transcript::default();
         let process = transcript.observe_tool_call(call(
@@ -1615,6 +1641,22 @@ mod tests {
         assert_eq!(
             transcript
                 .entry(overflow.unwrap())
+                .unwrap()
+                .tool_card()
+                .unwrap()
+                .status,
+            ToolStatus::Cancelled
+        );
+
+        let approval_overflow = transcript.observe_approval_requested(call(
+            "approval-overflow",
+            "read",
+            serde_json::json!({}),
+        ));
+        assert_eq!(transcript.call_entries.len(), MAX_CALL_INDEX_ENTRIES);
+        assert_eq!(
+            transcript
+                .entry(approval_overflow)
                 .unwrap()
                 .tool_card()
                 .unwrap()
