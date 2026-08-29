@@ -468,13 +468,14 @@ impl ProcessCardSnapshot {
             .process_error
             .as_deref()
             .filter(|value| !value.is_empty());
-        if let Some(error) = process_error {
-            self.append_unlabelled(&bounded_reason(error));
-        } else if stdout.is_empty()
+        let uses_fallback_output = process_error.is_none()
+            && stdout.is_empty()
             && stderr.is_empty()
             && result.process_state.is_none()
-            && !result.output.is_empty()
-        {
+            && !result.output.is_empty();
+        if let Some(error) = process_error {
+            self.append_unlabelled(&bounded_reason(error));
+        } else if uses_fallback_output {
             self.append_unlabelled(&result.output);
         }
         if let Some(hint) = result
@@ -490,6 +491,13 @@ impl ProcessCardSnapshot {
             .backend_dropped_bytes
             .saturating_add(result.stdout_dropped_bytes)
             .saturating_add(result.stderr_dropped_bytes)
+            .saturating_add(if uses_fallback_output {
+                result
+                    .output_source_bytes
+                    .saturating_sub(u64::try_from(result.output.len()).unwrap_or(u64::MAX))
+            } else {
+                0
+            })
             .saturating_add(
                 result
                     .stdout_source_bytes
@@ -720,7 +728,7 @@ fn call_identity_for_display(identity: &str) -> String {
     encoded
 }
 
-fn identity_for_display(identity: &str) -> &str {
+pub(crate) fn identity_for_display(identity: &str) -> &str {
     let Some(encoded) = identity.strip_prefix('r') else {
         return identity;
     };
@@ -1383,6 +1391,19 @@ mod tests {
         assert!(card.retained_output.text.is_empty());
         assert_eq!(card.retained_output.source_bytes, 0);
         assert_eq!(card.retained_output.source_lines, 0);
+    }
+
+    #[test]
+    fn process_fallback_output_accounts_for_projection_omissions() {
+        let mut card = ProcessCardSnapshot::new("process".into());
+        assert!(card.begin(ProcessOperation::Poll, 1));
+        let mut input = result("retained fallback");
+        input.name = "bash".into();
+        input.output_source_bytes = 100;
+
+        assert!(card.observe(ProcessOperation::Poll, &input, 1));
+        assert_eq!(card.backend_dropped_bytes, 83);
+        assert_eq!(card.retained_output.text, "retained fallback");
     }
 
     #[test]

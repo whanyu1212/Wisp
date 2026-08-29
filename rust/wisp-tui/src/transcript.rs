@@ -12,7 +12,8 @@ const MAX_TRACKED_PROCESS_ID_BYTES: usize = 4 * 1024;
 
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
-    ToolCallInput, ToolCardSnapshot, ToolResultInput, ToolStatus, process_call_identity,
+    ToolCallInput, ToolCardSnapshot, ToolResultInput, ToolStatus, identity_for_display,
+    process_call_identity,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -677,7 +678,7 @@ impl Transcript {
             self.process_order.push_back(process_id.to_owned());
             return Some(entry_id);
         }
-        if process_id.len() > MAX_TRACKED_PROCESS_ID_BYTES {
+        if identity_for_display(process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES {
             return None;
         }
         while self.process_entries.len().saturating_add(1) > MAX_PROCESS_INDEX_ENTRIES
@@ -1120,6 +1121,20 @@ mod tests {
                 .display_state,
             ProcessDisplayState::PollInterrupted
         );
+    }
+
+    #[test]
+    fn process_ids_at_the_raw_tracking_limit_remain_process_cards() {
+        let mut transcript = Transcript::default();
+        let raw_process_id = "p".repeat(MAX_TRACKED_PROCESS_ID_BYTES);
+        let arguments = crate::tool_cards::bounded_tool_arguments(
+            "bash",
+            &serde_json::json!({"operation": "poll", "process_id": raw_process_id.clone()}),
+        );
+
+        let entry_id = transcript.observe_tool_call(call("poll-long", "bash", arguments));
+        let card = transcript.entry(entry_id).unwrap().process_card().unwrap();
+        assert_eq!(identity_for_display(&card.process_id), raw_process_id);
     }
 
     #[test]
