@@ -81,13 +81,18 @@ impl BackendEvent {
                 let is_error = bool_field(value, &event_type, "is_error")?;
                 let exit_code = optional_i64_field(value, &event_type, "exit_code")?;
                 let process_state = optional_string_field(value, &event_type, "process_state")?;
-                let retain_output_tail = process_state.as_deref() != Some("cancelled")
-                    && (raw_name == "bash"
-                        || is_error
+                let cancelled = process_state.as_deref() == Some("cancelled");
+                let failed = !cancelled
+                    && (is_error
                         || exit_code.is_some_and(|code| code != 0)
                         || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
                 let (output, output_source_bytes) =
-                    bounded_string_field(value, &event_type, "output", retain_output_tail)?;
+                    bounded_string_field(value, &event_type, "output", failed)?;
+                let output_tail = if failed || cancelled {
+                    None
+                } else {
+                    Some(bounded_string_field(value, &event_type, "output", true)?.0)
+                };
                 let (stdout, stdout_source_bytes) =
                     optional_bounded_string_field(value, &event_type, "stdout", true)?;
                 let (stderr, stderr_source_bytes) =
@@ -96,6 +101,7 @@ impl BackendEvent {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                     name: bounded_tool_name(raw_name),
                     output,
+                    output_tail,
                     output_source_bytes,
                     is_error,
                     failure_code: optional_string_field(value, &event_type, "failure_code")?,

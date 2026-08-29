@@ -168,6 +168,7 @@ pub struct ToolResultInput {
     pub call_id: String,
     pub name: String,
     pub output: String,
+    pub output_tail: Option<String>,
     pub output_source_bytes: u64,
     pub is_error: bool,
     pub failure_code: Option<String>,
@@ -289,8 +290,13 @@ impl ToolCardSnapshot {
         }
         self.status = tool_result_status(input);
         let retain_tail = self.status == ToolStatus::Error
-            || (self.status == ToolStatus::Done && input.name == "bash");
-        let normalized_output = normalize_newlines(&input.output);
+            || (self.status == ToolStatus::Done && self.name == "bash");
+        let selected_output = if retain_tail && self.status == ToolStatus::Done {
+            input.output_tail.as_deref().unwrap_or(&input.output)
+        } else {
+            &input.output
+        };
+        let normalized_output = normalize_newlines(selected_output);
         self.retained_output = if retain_tail {
             BoundedText::tail(
                 &normalized_output,
@@ -304,7 +310,7 @@ impl ToolCardSnapshot {
                 TOOL_OUTPUT_MAX_LINES,
             )
         };
-        let raw_output_bytes = u64::try_from(input.output.len()).unwrap_or(u64::MAX);
+        let raw_output_bytes = u64::try_from(selected_output.len()).unwrap_or(u64::MAX);
         let normalized_output_bytes = u64::try_from(normalized_output.len()).unwrap_or(u64::MAX);
         self.retained_output.source_bytes = normalized_output_bytes
             .saturating_add(input.output_source_bytes.saturating_sub(raw_output_bytes));
@@ -732,8 +738,8 @@ pub fn process_call_identity(name: &str, arguments: &Value) -> Option<ProcessCal
         "cancel" => ProcessOperation::Cancel,
         _ => return None,
     };
-    let process_id = object.get("process_id")?.as_str()?.trim();
-    if process_id.is_empty() {
+    let process_id = object.get("process_id")?.as_str()?;
+    if identity_for_display(process_id).trim().is_empty() {
         return None;
     }
     Some(ProcessCallIdentity {
@@ -1167,6 +1173,7 @@ mod tests {
             call_id: "call-1".into(),
             name: "read".into(),
             output: output.into(),
+            output_tail: None,
             output_source_bytes: output.len() as u64,
             is_error: false,
             failure_code: None,
@@ -1273,6 +1280,12 @@ mod tests {
 
     #[test]
     fn process_calls_are_identified_only_from_poll_or_cancel_arguments() {
+        let whitespace = bounded_tool_arguments(
+            "bash",
+            &serde_json::json!({"operation": "poll", "process_id": "   "}),
+        );
+        assert!(process_call_identity("bash", &whitespace).is_none());
+
         assert_eq!(
             process_call_identity(
                 "bash",

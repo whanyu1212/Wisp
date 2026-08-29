@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_bash_projection_retains_summary_tail_before_queueing() {
+    fn successful_result_preserves_both_directions_for_the_canonical_call_name() {
         let output = format!(
             "STARTING BUILD\n{}BUILD FINISHED SUCCESSFULLY",
             "compiling\n".repeat(20_000)
@@ -1166,7 +1166,7 @@ mod tests {
             BackendEvent::from_projection_value(&serde_json::json!({
                 "type": "tool.result",
                 "call_id": "call-success",
-                "name": "bash",
+                "name": "read",
                 "output": output,
                 "is_error": false,
                 "exit_code": 0
@@ -1177,8 +1177,27 @@ mod tests {
         };
 
         assert!(result.output.len() <= crate::tool_cards::TOOL_OUTPUT_MAX_BYTES);
-        assert!(result.output.ends_with("BUILD FINISHED SUCCESSFULLY"));
-        assert!(!result.output.contains("STARTING BUILD"));
+        assert!(result.output.starts_with("STARTING BUILD"));
+        let output_tail = result.output_tail.as_deref().unwrap();
+        assert!(output_tail.ends_with("BUILD FINISHED SUCCESSFULLY"));
+        assert!(!output_tail.contains("STARTING BUILD"));
+
+        let call = crate::tool_cards::ToolCallInput {
+            call_id: result.call_id.clone(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "build"}),
+        };
+        let mut card = crate::tool_cards::ToolCardSnapshot::requested(
+            &call,
+            crate::tool_cards::ToolStatus::Requested,
+        );
+        assert!(card.apply_result(&result));
+        assert!(
+            card.retained_output
+                .text
+                .ends_with("BUILD FINISHED SUCCESSFULLY")
+        );
+        assert!(!card.retained_output.text.contains("STARTING BUILD"));
     }
 
     #[test]

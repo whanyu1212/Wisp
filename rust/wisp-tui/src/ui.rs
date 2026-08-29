@@ -696,6 +696,7 @@ mod tests {
             call_id: call_id.into(),
             name: "read".into(),
             output: output.into(),
+            output_tail: None,
             output_source_bytes: output.len() as u64,
             is_error: false,
             failure_code: None,
