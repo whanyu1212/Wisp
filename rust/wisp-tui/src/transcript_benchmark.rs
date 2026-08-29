@@ -231,7 +231,7 @@ pub fn run(config: BenchmarkConfig) -> Result<BenchmarkReport, BenchmarkError> {
             samples.push(run_sample(&config, run, index + 1, entry_count)?);
         }
     }
-    let scaling_work_independent = work_is_independent(&samples);
+    let scaling_work_independent = work_is_independent(&samples, config.entry_counts.len());
     let all_correctness_checks_passed =
         samples.iter().all(|sample| sample.correctness.all_passed());
     Ok(BenchmarkReport {
@@ -664,7 +664,10 @@ fn benchmark_connection() -> ConnectionInfo {
     }
 }
 
-fn work_is_independent(samples: &[BenchmarkSample]) -> bool {
+fn work_is_independent(samples: &[BenchmarkSample], condition_count: usize) -> bool {
+    if condition_count < 2 {
+        return false;
+    }
     let mut by_run: BTreeMap<
         usize,
         (
@@ -781,6 +784,26 @@ mod tests {
                 .iter()
                 .all(|sample| sample.correctness.all_passed())
         );
+    }
+
+    #[test]
+    fn single_condition_does_not_claim_scaling_work_independence() {
+        let report = run(BenchmarkConfig {
+            entry_counts: vec![RICH_SUFFIX_ENTRIES],
+            runs: 1,
+            width: 80,
+            height: 16,
+            warm_frames: 1,
+            navigation_cycles: 1,
+            resize_cycles: 1,
+            stream_updates: 1,
+            detail_frames: 1,
+        })
+        .unwrap();
+
+        assert_eq!(report.samples.len(), 1);
+        assert!(!report.scaling_work_independent);
+        assert!(report.all_correctness_checks_passed);
     }
 
     #[test]

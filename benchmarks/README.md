@@ -87,8 +87,9 @@ pid=$!
 wait "$pid"
 ```
 
-Use Linux `perf record -g -- target/release/examples/transcript_benchmark ...` for equivalent
-native sampling. Raw JSON and profiles stay under ignored `profiles/`; commit only compact numeric
+A single-entry profiling run reports `scaling_work_independent: false` because no cross-length
+comparison is available. Use Linux
+`perf record -g -- target/release/examples/transcript_benchmark ...` for equivalent native sampling. Raw JSON and profiles stay under ignored `profiles/`; commit only compact numeric
 evidence and factual profiler conclusions. See `benchmarks/rust_tui_transcript_evidence.md`.
 
 ## TUI Streaming Hotpaths
