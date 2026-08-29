@@ -405,9 +405,7 @@ impl ProcessCardSnapshot {
         result: &ToolResultInput,
         sequence: u64,
     ) -> bool {
-        if !self.accept_sequence(sequence) {
-            return false;
-        }
+        let update_display_state = self.accept_sequence(sequence);
         let stdout = result.stdout.as_deref().unwrap_or("");
         let stderr = result.stderr.as_deref().unwrap_or("");
         if !stdout.is_empty() {
@@ -450,7 +448,9 @@ impl ProcessCardSnapshot {
                     .stderr_source_bytes
                     .saturating_sub(u64::try_from(stderr.len()).unwrap_or(u64::MAX)),
             );
-        self.display_state = process_result_state(operation, result);
+        if update_display_state {
+            self.display_state = process_result_state(operation, result);
+        }
         true
     }
 

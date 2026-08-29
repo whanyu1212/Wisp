@@ -264,8 +264,12 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 "cancelled",
             }
         ):
+            # A result carries no generation beyond call_id, so reopening a
+            # terminal identity would let a delayed duplicate resolve the new
+            # lifecycle. Mirror the Rust TUI's explicit untracked conflict card.
             index = None
             current = None
+            status = "cancelled"
         elif (
             not lifecycle_start
             and current is not None

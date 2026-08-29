@@ -496,7 +496,11 @@ impl Transcript {
     ) -> TranscriptEntryId {
         if let Some(binding) = self.call_entries.get(&input.call_id).copied() {
             if binding.resolved {
-                self.remove_tool_binding(&input.call_id);
+                self.touch_resolved_tool_binding(&input.call_id);
+                self.prepare_non_message_entry();
+                let mut card = ToolCardSnapshot::requested(input, initial_status);
+                card.cancel("call ID was reused; result correlation is ambiguous");
+                return self.push_card(TranscriptEntryKind::Tool(card));
             } else {
                 if binding.kind == ToolBindingKind::Tool {
                     let changed = {
@@ -1236,6 +1240,41 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_process_results_retain_older_output_without_regressing_state() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("process".into());
+        let card_id = transcript.observe_tool_call(call(
+            "poll-1",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.observe_tool_call(call(
+            "poll-2",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        let mut older = result("poll-1", "");
+        older.name = "bash".into();
+        older.process_id = Some("process-1".into());
+        older.process_state = Some("completed".into());
+        older.stdout = Some("unique output from first poll".into());
+        older.stdout_source_bytes = 64;
+        older.stdout_dropped_bytes = 7;
+        older.stdout_truncated = true;
+        transcript.observe_tool_result(older);
+
+        let card = transcript.entry(card_id).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
+        assert!(
+            card.retained_output
+                .text
+                .contains("unique output from first poll")
+        );
+        assert!(card.backend_truncated);
+        assert!(card.backend_dropped_bytes >= 7);
+    }
+
+    #[test]
     fn stale_process_results_and_settlement_cannot_overwrite_newer_operations() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("process".into());
@@ -1307,15 +1346,16 @@ mod tests {
     }
 
     #[test]
-    fn sequential_call_id_reuse_creates_a_new_lifecycle_card() {
+    fn reused_call_id_is_reported_as_ambiguous_and_late_results_are_ignored() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("reuse".into());
         let first = transcript.observe_tool_call(call("reused", "read", serde_json::json!({})));
         transcript.observe_tool_result(result("reused", "first"));
-        let second = transcript.observe_tool_call(call("reused", "read", serde_json::json!({})));
-        transcript.observe_tool_result(result("reused", "second"));
+        let conflict = transcript.observe_tool_call(call("reused", "read", serde_json::json!({})));
+        transcript.observe_tool_result(result("reused", "late duplicate"));
+        transcript.observe_tool_result(result("reused", "second lifecycle"));
 
-        assert_ne!(first, second);
+        assert_ne!(first, conflict);
         assert_eq!(
             transcript
                 .entry(first)
@@ -1325,15 +1365,15 @@ mod tests {
                 .preview(),
             "first"
         );
+        let conflict = transcript.entry(conflict).unwrap().tool_card().unwrap();
         assert_eq!(
-            transcript
-                .entry(second)
-                .unwrap()
-                .tool_card()
-                .unwrap()
-                .preview(),
-            "second"
+            transcript.resolved_call_order.back().map(String::as_str),
+            Some("reused")
         );
+        assert_eq!(conflict.status, ToolStatus::Cancelled);
+        assert!(conflict.detail.contains("correlation is ambiguous"));
+        assert!(!conflict.preview().contains("late duplicate"));
+        assert!(!conflict.preview().contains("second lifecycle"));
     }
 
     #[test]

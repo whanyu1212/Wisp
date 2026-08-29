@@ -200,7 +200,7 @@
       {
         "call_id": "call-a",
         "name": "read",
-        "status": "done",
+        "status": "cancelled",
         "arguments_available": true
       },
       {
