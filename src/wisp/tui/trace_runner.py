@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shlex
 from collections import deque
 from dataclasses import dataclass
@@ -107,8 +109,11 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.retained_text: str | None = None
         self.tool_cards: list[TraceToolCardProjection] = []
         self._active_tool_cards: dict[str, int] = {}
+        self._active_tool_metadata: dict[str, tuple[str, str]] = {}
         self._process_call_ids: set[str] = set()
         self._resolved_process_call_ids: set[str] = set()
+        self._resolved_process_call_order: deque[str] = deque()
+        self._resolved_process_call_bytes = 0
         self._trace_current_command_id: str | None = None
         self._streaming = False
 
@@ -156,13 +161,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 self._process_call_ids.add(event.call_id)
             super().approval_request(event)
             return
-        self._set_tool_card(
-            event.call_id,
-            event.name,
-            "awaiting_approval",
-            arguments_available=True,
-            lifecycle_start=True,
-        )
+        if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
+            self._set_conflicting_tool_card(event.call_id)
+        else:
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                "awaiting_approval",
+                arguments_available=True,
+                lifecycle_start=True,
+            )
         super().approval_request(event)
 
     def event(self, event: KnownWispEvent) -> None:
@@ -195,23 +203,30 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 return
             index = self._active_tool_cards.get(event.call_id)
             current = self.tool_cards[index] if index is not None else None
-            status = (
-                current.status
-                if current is not None
-                and current.status not in {"done", "error", "denied", "cancelled"}
-                else "requested"
-            )
-            self._set_tool_card(
-                event.call_id,
-                event.name,
-                status,
-                arguments_available=True,
-                lifecycle_start=True,
-            )
+            if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
+                self._set_conflicting_tool_card(event.call_id)
+            else:
+                status = (
+                    current.status
+                    if current is not None
+                    and current.status not in {"done", "error", "denied", "cancelled"}
+                    else "requested"
+                )
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    status,
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
         elif isinstance(event, ToolApprovalResolved):
+            if event.call_id in self._resolved_process_call_ids:
+                self._touch_resolved_process_call(event.call_id)
+                super().event(event)
+                return
             if event.call_id in self._process_call_ids:
                 if not event.approved:
-                    self._resolved_process_call_ids.add(event.call_id)
+                    self._mark_resolved_process_call(event.call_id)
                 # Keep denied process calls as tombstones through settlement;
                 # otherwise synthetic or duplicate results become generic cards.
                 super().event(event)
@@ -224,11 +239,14 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 lifecycle_start=False,
             )
         elif isinstance(event, ToolResultReady):
+            if event.call_id in self._resolved_process_call_ids:
+                self._touch_resolved_process_call(event.call_id)
+                super().event(event)
+                return
             if event.call_id in self._process_call_ids:
-                # Keep the resolved process binding as a trace tombstone until
-                # command settlement so delayed duplicate results stay ignored,
-                # matching the Rust reducer's resolved call index.
-                self._resolved_process_call_ids.add(event.call_id)
+                # Keep the resolved process binding as a trace tombstone so
+                # delayed duplicate results stay ignored like Rust call entries.
+                self._mark_resolved_process_call(event.call_id)
                 super().event(event)
                 return
             index = self._active_tool_cards.get(event.call_id)
@@ -263,7 +281,6 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def _settle_tool_cards(self) -> None:
         self._process_call_ids.clear()
-        self._resolved_process_call_ids.clear()
         for index, current in enumerate(self.tool_cards):
             if current.status in {"done", "error", "denied", "cancelled"}:
                 continue
@@ -329,8 +346,55 @@ class RecordingTraceRenderer(LineTuiRenderer):
         else:
             self.tool_cards[index] = projection
 
+    def _tool_lifecycle_conflicts(self, call_id: str, name: str, arguments: object) -> bool:
+        index = self._active_tool_cards.get(call_id)
+        current = self.tool_cards[index] if index is not None else None
+        if current is not None and current.status in {"done", "error", "denied", "cancelled"}:
+            return False
+        metadata = (name, json.dumps(arguments, sort_keys=True, separators=(",", ":")))
+        previous = self._active_tool_metadata.get(call_id)
+        if previous is None:
+            self._active_tool_metadata[call_id] = metadata
+            return False
+        return previous != metadata
+
+    def _set_conflicting_tool_card(self, call_id: str) -> None:
+        index = self._active_tool_cards[call_id]
+        current = self.tool_cards[index]
+        self._set_tool_card(
+            call_id,
+            current.name,
+            "error",
+            arguments_available=current.arguments_available,
+            lifecycle_start=False,
+        )
+
+    def _mark_resolved_process_call(self, call_id: str) -> None:
+        if call_id in self._resolved_process_call_ids:
+            self._touch_resolved_process_call(call_id)
+            return
+        self._resolved_process_call_ids.add(call_id)
+        self._resolved_process_call_order.append(call_id)
+        self._resolved_process_call_bytes += len(call_id.encode())
+        while (
+            len(self._resolved_process_call_ids) > 1_024
+            or self._resolved_process_call_bytes > 1024 * 1024
+        ):
+            oldest = self._resolved_process_call_order.popleft()
+            if oldest not in self._resolved_process_call_ids:
+                continue
+            self._resolved_process_call_ids.remove(oldest)
+            self._resolved_process_call_bytes -= len(oldest.encode())
+
+    def _touch_resolved_process_call(self, call_id: str) -> None:
+        self._resolved_process_call_order = deque(
+            candidate for candidate in self._resolved_process_call_order if candidate != call_id
+        )
+        self._resolved_process_call_order.append(call_id)
+
     def _process_identity_was_resolved(self, call_id: str) -> bool:
         if call_id in self._resolved_process_call_ids:
+            self._touch_resolved_process_call(call_id)
             return True
         index = self._active_tool_cards.get(call_id)
         return index is not None and self.tool_cards[index].status in {
@@ -563,10 +627,13 @@ class TraceRunResult:
     tokens: tuple[str, ...]
 
 
+_TRACE_CARD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+
 def _clip_trace_card_id(value: str) -> str:
-    # Trace IDs have an ASCII-safe schema, so retain its exact 128-character
-    # prefix rather than adding the display ellipsis used for free-form fields.
-    return value[:128]
+    if _TRACE_CARD_ID_RE.fullmatch(value):
+        return value
+    return f"h-{hashlib.sha256(value.encode()).hexdigest()}"
 
 
 def _clip_trace_card_field(value: str) -> str:

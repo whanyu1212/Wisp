@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -635,10 +636,16 @@ def test_trace_tool_card_projection_bounds_display_identities() -> None:
     )
 
     (card,) = renderer.tool_card_projection()
-    assert len(card.call_id) == 128
+    assert len(card.call_id) <= 128
     assert len(card.name) == 128
-    assert card.call_id == "c" * 128
+    assert card.call_id == f"h-{hashlib.sha256(('c' * 256).encode()).hexdigest()}"
     assert card.name == f"{'n' * 127}…"
+
+    for unsafe in ("bad/id", ""):
+        renderer = RecordingTraceRenderer()
+        renderer.event(ToolCallRequested(call_id=unsafe, name="read", arguments={}))
+        (card,) = renderer.tool_card_projection()
+        assert card.call_id == f"h-{hashlib.sha256(unsafe.encode()).hexdigest()}"
 
 
 def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
@@ -659,12 +666,25 @@ def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
             process_state="running",
         )
     )
+    renderer.rpc_stream_ended_unexpectedly()
     renderer.event(process_call)
 
     (card,) = renderer.tool_card_projection()
     assert card.call_id == "poll-reused"
     assert card.name == "bash"
     assert card.status == "cancelled"
+    assert card.arguments_available
+
+
+def test_conflicting_unresolved_tool_calls_project_an_error() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="call-conflict", name="read", arguments={"path": "a"}))
+    renderer.event(ToolCallRequested(call_id="call-conflict", name="grep", arguments={"path": "b"}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "call-conflict"
+    assert card.name == "read"
+    assert card.status == "error"
     assert card.arguments_available
 
 
