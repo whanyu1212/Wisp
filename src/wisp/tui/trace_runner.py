@@ -9,6 +9,7 @@ import re
 import shlex
 from collections import deque
 from dataclasses import dataclass
+from decimal import Decimal
 from itertools import count
 from pathlib import Path
 from typing import Any, Literal
@@ -877,8 +878,11 @@ def _trace_scalar_value(value: object) -> str:
         rendered = repr(value)
         mantissa, separator, exponent = rendered.partition("e")
         if separator:
+            exponent_value = int(exponent)
+            if -5 <= exponent_value < 0:
+                return format(Decimal(rendered), "f")
             sign = "+" if exponent.startswith("+") else ""
-            return f"{mantissa}e{sign}{int(exponent)}"
+            return f"{mantissa}e{sign}{exponent_value}"
         return rendered
     return str(value)
 

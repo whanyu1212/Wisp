@@ -1007,6 +1007,27 @@ def test_generic_float_metadata_uses_rust_exponent_formatting() -> None:
     assert card.status == "error"
 
 
+def test_generic_float_metadata_uses_rust_fixed_decimal_threshold() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="fixed-float-format",
+            name="extension",
+            arguments={"value": 1e-5},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="fixed-float-format",
+            name="extension",
+            arguments={"value": "0.00001"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
 def test_clipped_generic_key_collisions_count_as_omissions() -> None:
     renderer = RecordingTraceRenderer()
     prefix = "k" * 64
