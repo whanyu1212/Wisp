@@ -117,6 +117,31 @@ def test_trace_schema_rejects_coerced_tool_booleans() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+def test_trace_schema_rejects_integers_beyond_the_finite_json_number_range() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "oversized_generic_integer",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.call",
+                    "call_id": "call-1",
+                    "name": "extension",
+                    "arguments": {"value": 10**400},
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="finite JSON number range"):
+        TraceFileAdapter.validate_python(data)
+
+
 def test_trace_model_rejects_integral_float_exit_codes_before_event_coercion() -> None:
     data = _inline_trace(
         "float_exit_code",

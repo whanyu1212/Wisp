@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shlex
 from collections import deque
@@ -888,7 +889,15 @@ def _bounded_trace_argument(value: object, max_chars: int) -> object:
     if isinstance(value, int) and not isinstance(value, bool):
         if -(2**63) <= value <= 2**64 - 1:
             return value
-        return float(value)
+        try:
+            converted = float(value)
+        except OverflowError as exc:
+            raise TraceReplayError(
+                "tool argument integer exceeds the finite JSON number range"
+            ) from exc
+        if not math.isfinite(converted):
+            raise TraceReplayError("tool argument integer exceeds the finite JSON number range")
+        return converted
     if value is None or isinstance(value, bool | float):
         return value
     if isinstance(value, list):

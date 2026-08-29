@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -41,11 +42,20 @@ _TRACE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*$"
 _SlashArgument = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 _JsonString = Annotated[str, StringConstraints(max_length=MAX_TRACE_CONTENT_CHARS)]
 _JsonKey = Annotated[str, StringConstraints(max_length=128)]
+_MAX_FINITE_FLOAT_INTEGER = int(sys.float_info.max)
+_JsonInteger = Annotated[
+    int,
+    Field(ge=-_MAX_FINITE_FLOAT_INTEGER, le=_MAX_FINITE_FLOAT_INTEGER),
+]
+_JsonFloat = Annotated[
+    float,
+    Field(allow_inf_nan=False, ge=-sys.float_info.max, le=sys.float_info.max),
+]
 type JsonValue = (
     None
     | bool
-    | int
-    | float
+    | _JsonInteger
+    | _JsonFloat
     | _JsonString
     | Annotated[list["JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
     | Annotated[dict[_JsonKey, "JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
@@ -73,6 +83,15 @@ def _bound_json_structure(value: Any, *, label: str) -> Any:
             if len(node) > _MAX_JSON_COLLECTION_ITEMS:
                 raise ValueError(f"{label} array exceeds {_MAX_JSON_COLLECTION_ITEMS} items")
             stack.extend((child, depth + 1) for child in node)
+        elif isinstance(node, int) and not isinstance(node, bool):
+            try:
+                finite = math.isfinite(float(node))
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{label} integer exceeds the finite JSON number range")
+        elif isinstance(node, float) and not math.isfinite(node):
+            raise ValueError(f"{label} contains a non-finite JSON number")
     return value
 
 
