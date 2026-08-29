@@ -12,7 +12,12 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JsonSchemaValidationError
 
-from wisp.events import ToolApprovalResolved, ToolCallRequested, ToolResultReady
+from wisp.events import (
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
+)
 from wisp.tui.trace_runner import RecordingTraceRenderer, TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
     DEFAULT_TRACE_SCHEMA_DIRECTORY,
@@ -674,6 +679,62 @@ def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
     assert card.name == "bash"
     assert card.status == "cancelled"
     assert card.arguments_available
+
+
+def test_duplicate_metadata_is_compared_after_presentation_bounds() -> None:
+    renderer = RecordingTraceRenderer()
+    shared_name = "n" * 127
+    renderer.event(
+        ToolCallRequested(
+            call_id="bounded-name",
+            name=f"{shared_name}aa",
+            arguments={"value": "x" * 64 + "a"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="bounded-name",
+            name=f"{shared_name}ab",
+            arguments={"value": "x" * 64 + "b"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+    assert card.name == f"{'n' * 127}…"
+
+
+def test_generic_approval_reusing_resolved_process_id_is_cancelled() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="resolved-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolResultReady(
+            call_id="resolved-process",
+            name="bash",
+            output="running",
+            is_error=False,
+            process_id="process-1",
+            process_state="running",
+        )
+    )
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="resolved-process",
+            name="read",
+            arguments={"path": "README.md"},
+            safety="read",
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+    assert card.name == "read"
 
 
 def test_conflicting_unresolved_tool_calls_project_an_error() -> None:

@@ -215,10 +215,7 @@ pub struct ToolCardSnapshot {
 impl ToolCardSnapshot {
     pub fn requested(input: &ToolCallInput, status: ToolStatus) -> Self {
         Self {
-            call_id: clip_chars(
-                identity_for_display(&input.call_id),
-                CALL_ID_RETAINED_MAX_CHARS,
-            ),
+            call_id: call_identity_for_display(&input.call_id),
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
             status,
@@ -247,7 +244,7 @@ impl ToolCardSnapshot {
         if self.status.terminal() {
             return false;
         }
-        let name = clip_chars(&input.name, TOOL_NAME_MAX_CHARS);
+        let name = bounded_tool_name(&input.name);
         if self.arguments_available
             && (self.name != name
                 || self.action_arguments != format_tool_arguments(&input.name, &input.arguments))
@@ -686,6 +683,23 @@ pub fn bounded_identity(source: &str) -> String {
     }
     let digest = Sha256::digest(source.as_bytes());
     let mut encoded = String::with_capacity(2 + digest.len() * 2);
+    encoded.push_str("h:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn call_identity_for_display(identity: &str) -> String {
+    if identity.starts_with("h:") {
+        return identity.to_owned();
+    }
+    let source = identity_for_display(identity);
+    if source.chars().count() <= CALL_ID_RETAINED_MAX_CHARS {
+        return source.to_owned();
+    }
+    let digest = Sha256::digest(source.as_bytes());
+    let mut encoded = String::with_capacity(66);
     encoded.push_str("h:");
     for byte in digest {
         write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");

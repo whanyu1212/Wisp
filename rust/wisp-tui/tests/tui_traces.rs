@@ -366,6 +366,11 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
 }
 
 fn trace_card_id(value: &str) -> String {
+    if let Some(digest) = value.strip_prefix("h:") {
+        if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return format!("h-{digest}");
+        }
+    }
     let schema_safe = !value.is_empty()
         && value.len() <= 128
         && value.bytes().enumerate().all(|(index, byte)| {

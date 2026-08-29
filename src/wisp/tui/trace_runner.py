@@ -148,6 +148,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
         super().end_token_stream()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
+        if event.call_id in self._resolved_process_call_ids:
+            self._set_tool_card(
+                event.call_id,
+                event.name,
+                "cancelled",
+                arguments_available=True,
+                lifecycle_start=True,
+            )
+            super().approval_request(event)
+            return
         if _trace_process_call(event.name, event.arguments):
             if self._process_identity_was_resolved(event.call_id):
                 self._set_tool_card(
@@ -363,7 +373,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         current = self.tool_cards[index] if index is not None else None
         if current is not None and current.status in {"done", "error", "denied", "cancelled"}:
             return False
-        metadata = (name, json.dumps(arguments, sort_keys=True, separators=(",", ":")))
+        metadata = _canonical_trace_tool_metadata(name, arguments)
         previous = self._active_tool_metadata.get(call_id)
         if previous is None:
             self._active_tool_metadata[call_id] = metadata
@@ -654,6 +664,85 @@ def _clip_trace_card_field(value: str) -> str:
     if len(value) <= 128:
         return value
     return f"{value[:127]}…"
+
+
+def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, str]:
+    bounded_name = _clip_trace_card_field(name)
+    if not isinstance(arguments, dict):
+        bounded_arguments: dict[str, object] = {}
+    else:
+        keys_by_name: dict[str, tuple[str, ...]] = {
+            "read": ("path", "offset", "limit"),
+            "grep": (
+                "pattern",
+                "path",
+                "glob",
+                "ignore_case",
+                "literal",
+                "context",
+                "max_results",
+            ),
+            "find": ("pattern", "path", "max_results"),
+            "ls": ("path", "all"),
+            "bash": (
+                "operation",
+                "command",
+                "process_id",
+                "wait_seconds",
+                "lifetime_seconds",
+                "yield_seconds",
+            ),
+            "edit": ("path",),
+            "write": ("path",),
+        }
+        selected = keys_by_name.get(name)
+        if selected is None:
+            bounded_arguments = {}
+            for key in sorted(arguments)[:8]:
+                bounded_arguments[_clip_trace_metadata(str(key), 64)] = _bounded_trace_argument(
+                    arguments[key], 64
+                )
+        else:
+            bounded_arguments = {}
+            for key in selected:
+                if key not in arguments:
+                    continue
+                if key == "process_id" and isinstance(arguments[key], str):
+                    value: object = _bounded_trace_internal_identity(arguments[key])
+                else:
+                    value = _bounded_trace_argument(
+                        arguments[key], 200 if key == "command" else 256
+                    )
+                bounded_arguments[key] = value
+    return (
+        bounded_name,
+        json.dumps(bounded_arguments, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _bounded_trace_argument(value: object, max_chars: int) -> object:
+    if isinstance(value, str):
+        return _clip_trace_metadata(value, max_chars)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    if isinstance(value, dict):
+        return f"{{{len(value)} fields}}"
+    return _clip_trace_metadata(str(value), max_chars)
+
+
+def _clip_trace_metadata(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[: max_chars - 1]}…"
+
+
+def _bounded_trace_internal_identity(value: str) -> str:
+    encoded = value.encode()
+    if len(encoded) <= 4 * 1024:
+        return f"r{len(encoded)}:{value}"
+    return f"h:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _trace_process_call(name: str, arguments: object) -> bool:
