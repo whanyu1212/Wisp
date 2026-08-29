@@ -47,7 +47,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
-use transcript_view::{TranscriptRowCache, TranscriptViewAction, TranscriptViewport};
+use transcript_view::{
+    TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
+};
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
 use wisp_protocol::events::WispCurrentLiveEventOutput;
@@ -419,6 +421,7 @@ impl LiveUi {
                 &self.state.transcript,
                 &mut self.transcript_row_cache,
             );
+            self.reconcile_browse_selection();
         }
         if automatic_decision_response
             || (blocked_context.is_some()
@@ -547,6 +550,11 @@ impl LiveUi {
         })?;
         self.rendered_decision_context = rendered_decision_context;
         self.render_pending = false;
+        let rendered_browse_selection = self.browse_selected;
+        self.reconcile_browse_selection();
+        if self.browse_selected != rendered_browse_selection {
+            self.render_pending = true;
+        }
         Ok(())
     }
 
@@ -742,7 +750,13 @@ impl LiveUi {
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            if !seen.insert(row.anchor.entry_id) {
+            if !matches!(
+                row.kind,
+                TranscriptRowKind::CardAction
+                    | TranscriptRowKind::CardDetail
+                    | TranscriptRowKind::CardOmission
+            ) || !seen.insert(row.anchor.entry_id)
+            {
                 continue;
             }
             let eligible = self
@@ -809,12 +823,17 @@ impl LiveUi {
     }
 
     fn reconcile_browse_selection(&mut self) {
-        if self.browse_selected.is_none() {
+        if self.browse_selected.is_none() || self.detail_view.is_open() {
             return;
         }
         let entries = self.visible_detail_entries();
         if !entries.contains(&self.browse_selected.expect("checked above")) {
             self.browse_selected = entries.last().copied();
+            self.notice = if self.browse_selected.is_some() {
+                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into())
+            } else {
+                Some("No visible tool card has retained detail; scroll one into view.".into())
+            };
         }
     }
 
@@ -3153,6 +3172,162 @@ mod tests {
         assert!(live_ui.browse_selected.is_none());
         assert_eq!(live_ui.state.view_status, ViewStatus::WaitingForApproval);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn browse_selection_reconciles_after_resize_and_ignores_spacers() {
+        let mut live_ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            ..LiveUi::default()
+        };
+        let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.call",
+            "call_id": "resize-detail",
+            "name": "edit",
+            "arguments": {
+                "path": "file.txt",
+                "edits": [{"oldText": "old\n", "newText": "new\n"}]
+            }
+        }))
+        .unwrap() else {
+            panic!("tool call expected");
+        };
+        let card_id = live_ui.state.transcript.observe_tool_call(call);
+        let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.result",
+            "call_id": "resize-detail",
+            "name": "edit",
+            "output": "Applied 1 edit",
+            "is_error": false
+        }))
+        .unwrap() else {
+            panic!("tool result expected");
+        };
+        live_ui.state.transcript.observe_tool_result(*result);
+        live_ui.state.transcript.append_exchange("later".into());
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            58,
+            10,
+        );
+        live_ui.enter_or_cycle_browse();
+        assert_eq!(live_ui.browse_selected, Some(card_id));
+
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            58,
+            1,
+        );
+        live_ui.transcript_viewport.reduce(
+            TranscriptViewAction::ScrollLines(-100),
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+        );
+        let mut spacer_visible = false;
+        for _ in 0..32 {
+            let visible = live_ui
+                .transcript_viewport
+                .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache);
+            if visible.len() == 1 && visible[0].kind == TranscriptRowKind::Spacer {
+                spacer_visible = true;
+                break;
+            }
+            live_ui.transcript_viewport.reduce(
+                TranscriptViewAction::ScrollLines(1),
+                &live_ui.state.transcript,
+                &mut live_ui.transcript_row_cache,
+            );
+        }
+        assert!(spacer_visible);
+        assert!(live_ui.visible_detail_entries().is_empty());
+        assert_eq!(live_ui.browse_selected, Some(card_id));
+
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+            protocol_version: LIVE_RPC_PROTOCOL_VERSION,
+            event_schema_version: EVENT_SCHEMA_VERSION,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        live_ui.draw(&mut terminal, &connection).unwrap();
+
+        assert!(live_ui.browse_selected.is_none());
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("No visible tool card"))
+        );
+        assert!(live_ui.render_pending);
+    }
+
+    #[tokio::test]
+    async fn browse_selection_reconciles_after_backend_output() {
+        let mut live_ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            ..LiveUi::default()
+        };
+        let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.call",
+            "call_id": "output-detail",
+            "name": "edit",
+            "arguments": {
+                "path": "file.txt",
+                "edits": [{"oldText": "old\n", "newText": "new\n"}]
+            }
+        }))
+        .unwrap() else {
+            panic!("tool call expected");
+        };
+        let card_id = live_ui.state.transcript.observe_tool_call(call);
+        let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+            "type": "tool.result",
+            "call_id": "output-detail",
+            "name": "edit",
+            "output": "Applied 1 edit",
+            "is_error": false
+        }))
+        .unwrap() else {
+            panic!("tool result expected");
+        };
+        live_ui.state.transcript.observe_tool_result(*result);
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            58,
+            1,
+        );
+        live_ui.enter_or_cycle_browse();
+        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.visible_detail_entries(), vec![card_id]);
+
+        let (writer_tx, _writer_rx) = mpsc::channel(4);
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(projected_event(json!({
+                    "type": "message.delta",
+                    "schema_version": 34,
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "role": "assistant",
+                    "content_index": 0,
+                    "content_kind": "text",
+                    "delta": "new output"
+                }))),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.browse_selected.is_none());
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("No visible tool card"))
+        );
     }
 
     #[test]
