@@ -182,6 +182,7 @@ pub struct BenchmarkSample {
     pub stream_update_ms: TimingDistribution,
     pub stream_draw_ms: TimingDistribution,
     pub stream_stall_ms: TimingDistribution,
+    pub detail_open_ms: f64,
     pub detail_frames: TimingDistribution,
     pub stream_process_cpu_ms: f64,
     pub max_synchronous_stall_ms: f64,
@@ -377,9 +378,11 @@ fn run_sample(
         .ok_or_else(|| BenchmarkError::Fixture("structured detail was not retained".into()))?;
     let detail_row_budget_exercised =
         detail.rows.len() == crate::tool_detail::DETAIL_EXPANDED_MAX_ROWS;
+    let detail_open_started = Instant::now();
     ui.detail_view = DetailView::default();
     ui.detail_view.open(detail_entry, &detail);
     ui.draw(&mut terminal, &connection)?;
+    let detail_open_ms = elapsed_ms(detail_open_started);
     let rendered_detail = terminal.backend().to_string();
     let detail_rendered = rendered_detail.contains("live retained detail")
         && rendered_detail.contains("old value 0")
@@ -402,15 +405,15 @@ fn run_sample(
     let stream_draw_ms = TimingDistribution::from_samples(&stream_draw_ms);
     let stream_stall_ms = TimingDistribution::from_samples(&stream_stall_ms);
     let detail_frames = TimingDistribution::from_samples(&detail_ms);
-    let max_synchronous_stall_ms = [
+    let max_synchronous_stall_ms = maximum_synchronous_stall(
+        cold_frame_ms,
         warm_frames.max_ms,
         navigation_frames.max_ms,
         resize_frames.max_ms,
         stream_stall_ms.max_ms,
+        detail_open_ms,
         detail_frames.max_ms,
-    ]
-    .into_iter()
-    .fold(cold_frame_ms, f64::max);
+    );
     let warm_cache_reused = warm_work.rows_built == 0
         && warm_work.bytes_scanned == 0
         && warm_work.markdown_source_bytes_parsed == 0
@@ -431,6 +434,7 @@ fn run_sample(
         stream_update_ms,
         stream_draw_ms,
         stream_stall_ms,
+        detail_open_ms,
         detail_frames,
         stream_process_cpu_ms,
         max_synchronous_stall_ms,
@@ -738,6 +742,27 @@ fn nearest_rank(ordered: &[f64], percentile: f64) -> f64 {
     ordered[index]
 }
 
+fn maximum_synchronous_stall(
+    cold_frame_ms: f64,
+    warm_max_ms: f64,
+    navigation_max_ms: f64,
+    resize_max_ms: f64,
+    stream_max_ms: f64,
+    detail_open_ms: f64,
+    detail_max_ms: f64,
+) -> f64 {
+    [
+        warm_max_ms,
+        navigation_max_ms,
+        resize_max_ms,
+        stream_max_ms,
+        detail_open_ms,
+        detail_max_ms,
+    ]
+    .into_iter()
+    .fold(cold_frame_ms, f64::max)
+}
+
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
@@ -745,6 +770,14 @@ fn elapsed_ms(started: Instant) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_open_contributes_to_maximum_synchronous_stall() {
+        assert_eq!(
+            maximum_synchronous_stall(1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 6.0),
+            7.0
+        );
+    }
 
     #[test]
     fn timing_distribution_uses_nearest_rank() {
@@ -773,6 +806,12 @@ mod tests {
 
         assert_eq!(report.samples.len(), 2);
         assert!(report.scaling_work_independent);
+        assert!(
+            report
+                .samples
+                .iter()
+                .all(|sample| sample.detail_open_ms.is_finite())
+        );
         assert!(
             report.all_correctness_checks_passed,
             "correctness failed: {:#?}",
