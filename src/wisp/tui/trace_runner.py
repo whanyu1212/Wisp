@@ -170,7 +170,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
                     lifecycle_start=True,
                 )
             elif event.call_id in self._active_tool_cards:
-                self._set_conflicting_tool_card(event.call_id)
+                self._set_conflicting_tool_card(event.call_id, unresolved=True)
             elif event.call_id in self._process_call_ids:
                 if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
                     event.name, event.arguments
@@ -227,7 +227,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
                         lifecycle_start=True,
                     )
                 elif event.call_id in self._active_tool_cards:
-                    self._set_conflicting_tool_card(event.call_id)
+                    self._set_conflicting_tool_card(event.call_id, unresolved=True)
                 elif event.call_id in self._process_call_ids:
                     if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
                         event.name, event.arguments
@@ -827,7 +827,18 @@ def _trace_positive_int(value: object) -> int | None:
 
 
 def _trace_one_line(value: str) -> str:
-    return " ".join(value.split())
+    words: list[str] = []
+    current: list[str] = []
+    for character in value:
+        if _rust_whitespace_character(character):
+            if current:
+                words.append("".join(current))
+                current.clear()
+        else:
+            current.append(character)
+    if current:
+        words.append("".join(current))
+    return " ".join(words)
 
 
 def _trace_scalar_value(value: object) -> str:
@@ -889,13 +900,16 @@ def _trace_process_identity(name: str, arguments: object) -> tuple[str, str] | N
     return process_id, operation
 
 
-def _rust_whitespace_only(value: str) -> bool:
-    return all(
+def _rust_whitespace_character(character: str) -> bool:
+    return (
         character in "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680"
         or "\u2000" <= character <= "\u200a"
         or character in "\u2028\u2029\u202f\u205f\u3000"
-        for character in value
     )
+
+
+def _rust_whitespace_only(value: str) -> bool:
+    return all(_rust_whitespace_character(character) for character in value)
 
 
 def _trace_process_call(name: str, arguments: object) -> bool:

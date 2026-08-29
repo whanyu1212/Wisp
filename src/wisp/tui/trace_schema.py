@@ -173,6 +173,23 @@ class TraceRpcEvent(_TraceModel):
     event: JsonObject = Field(
         json_schema_extra={
             "required": ["type"],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.result"}},
+                        "required": ["type"],
+                    },
+                    "then": {
+                        "properties": {
+                            "exit_code": {
+                                "type": ["integer", "null"],
+                                "minimum": -(2**63),
+                                "maximum": 2**63 - 1,
+                            }
+                        }
+                    },
+                }
+            ],
             "x-wisp-max-depth": _MAX_JSON_DEPTH,
             "x-wisp-max-nodes": _MAX_JSON_NODES,
         }
@@ -182,7 +199,16 @@ class TraceRpcEvent(_TraceModel):
     @field_validator("event", mode="before")
     @classmethod
     def _bound_event_structure(cls, value: Any) -> Any:
-        return _bound_json_structure(value, label="RPC event")
+        bounded = _bound_json_structure(value, label="RPC event")
+        if isinstance(bounded, dict) and bounded.get("type") == "tool.result":
+            exit_code = bounded.get("exit_code")
+            if (
+                isinstance(exit_code, int)
+                and not isinstance(exit_code, bool)
+                and not -(2**63) <= exit_code <= 2**63 - 1
+            ):
+                raise ValueError("tool.result exit_code exceeds the signed 64-bit trace range")
+        return bounded
 
 
 class TraceRpcClosed(_TraceModel):

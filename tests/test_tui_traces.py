@@ -64,6 +64,33 @@ def test_initial_view_schema_excludes_derived_state() -> None:
         Draft202012Validator(schema).validate(data)
 
 
+def test_trace_schema_rejects_out_of_range_tool_exit_codes() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "out_of_range_exit_code",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "output": "",
+                    "is_error": False,
+                    "exit_code": 2**63,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        TraceFileAdapter.validate_python(data)
+
+
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
 def test_trace_fixture_validates_against_schema(path: Path) -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -819,6 +846,43 @@ def test_denial_resolves_unresolved_metadata_conflict() -> None:
     conflict, reuse = renderer.tool_card_projection()
     assert conflict.status == "error"
     assert reuse.status == "cancelled"
+
+
+def test_generic_to_process_conflict_remains_unresolved_across_starts() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="cross-kind", name="read", arguments={"path": "a"}))
+    renderer.event(
+        ToolCallRequested(
+            call_id="cross-kind",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="cross-kind", name="read", arguments={"path": "b"}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_action_summaries_use_rust_whitespace_semantics() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="separator",
+            name="extension",
+            arguments={"value": "left\u001cright"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="separator",
+            name="extension",
+            arguments={"value": "left right"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
 
 
 def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
