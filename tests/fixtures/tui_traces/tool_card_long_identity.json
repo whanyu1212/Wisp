@@ -39,6 +39,27 @@
     {
       "type": "rpc.event",
       "event": {
+        "type": "tool.call",
+        "call_id": "h:0000000000000000000000000000000000000000000000000000000000000000",
+        "name": "read",
+        "arguments": {"path": "raw-hash-shape.txt"}
+      },
+      "clock_ms": 21
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "tool.result",
+        "call_id": "h:0000000000000000000000000000000000000000000000000000000000000000",
+        "name": "read",
+        "output": "raw hash shape",
+        "is_error": false
+      },
+      "clock_ms": 22
+    },
+    {
+      "type": "rpc.event",
+      "event": {
         "type": "rpc.command.finished",
         "command_id": "prompt-1",
         "command_type": "prompt",
@@ -83,6 +104,12 @@
     "tool_cards": [
       {
         "call_id": "h-85e62acd750c4eb56b7b6a1d66dca5bfaac5f062608a1a893410d0288936c09a",
+        "name": "read",
+        "status": "done",
+        "arguments_available": true
+      },
+      {
+        "call_id": "h-edfee96e1df0458d8a0340bb3d9cd708a80cc8c4d9c0e2693064bbc4754ec8c2",
         "name": "read",
         "status": "done",
         "arguments_available": true

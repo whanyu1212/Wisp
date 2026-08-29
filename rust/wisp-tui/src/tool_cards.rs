@@ -703,6 +703,11 @@ fn call_identity_for_display(identity: &str) -> String {
         return identity.to_owned();
     }
     let source = identity_for_display(identity);
+    if source.strip_prefix("h:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return identity.to_owned();
+    }
     if source.chars().count() <= CALL_ID_RETAINED_MAX_CHARS {
         return source.to_owned();
     }
