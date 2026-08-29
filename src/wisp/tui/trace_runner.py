@@ -189,13 +189,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
         if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
             self._set_conflicting_tool_card(event.call_id)
         else:
-            self._set_tool_card(
-                event.call_id,
-                event.name,
-                "awaiting_approval",
-                arguments_available=True,
-                lifecycle_start=True,
-            )
+            index = self._active_tool_cards.get(event.call_id)
+            current = self.tool_cards[index] if index is not None else None
+            if current is None or current.status == "requested":
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "awaiting_approval",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
         super().approval_request(event)
 
     def event(self, event: KnownWispEvent) -> None:

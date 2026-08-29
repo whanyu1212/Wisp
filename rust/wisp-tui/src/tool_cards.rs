@@ -1138,6 +1138,9 @@ fn tail_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usiz
     if max_lines == 0 {
         return (source.len(), source.len());
     }
+    if source.len() <= max_bytes && logical_line_count(source) <= max_lines as u64 {
+        return (0, source.len());
+    }
     let mut start = source.len().saturating_sub(max_bytes);
     while start < source.len() && !source.is_char_boundary(start) {
         start += 1;
@@ -1232,6 +1235,14 @@ mod tests {
         assert!(logical_line_count(&head.text) <= 3);
         assert!(logical_line_count(&tail.text) <= 3);
         assert_eq!(tail.base_offset, tail.dropped_bytes);
+
+        let exact_lines = "line\n".repeat(TOOL_PREVIEW_MAX_LINES);
+        let exact_tail =
+            BoundedText::tail(&exact_lines, TOOL_PREVIEW_MAX_BYTES, TOOL_PREVIEW_MAX_LINES);
+        assert_eq!(exact_tail.text, exact_lines);
+        assert_eq!(exact_tail.base_offset, 0);
+        assert_eq!(exact_tail.dropped_bytes, 0);
+        assert_eq!(exact_tail.dropped_lines, 0);
     }
 
     #[test]

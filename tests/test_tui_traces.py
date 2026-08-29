@@ -725,6 +725,22 @@ def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
     assert card.status == "requested"
 
 
+def test_delayed_duplicate_approval_request_does_not_regress_running_card() -> None:
+    renderer = RecordingTraceRenderer()
+    request = ToolApprovalRequested(
+        call_id="approved",
+        name="read",
+        arguments={},
+        safety="read",
+    )
+    renderer.approval_request(request)
+    renderer.event(ToolApprovalResolved(call_id="approved", name="read", approved=True))
+    renderer.approval_request(request)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "running"
+
+
 def test_requestless_approval_resolution_does_not_create_a_card() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(ToolApprovalResolved(call_id="orphan", name="read", approved=True))
