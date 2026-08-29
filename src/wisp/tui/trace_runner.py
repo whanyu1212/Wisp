@@ -111,6 +111,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self._active_tool_cards: dict[str, int] = {}
         self._active_tool_metadata: dict[str, tuple[str, str]] = {}
         self._process_call_ids: set[str] = set()
+        self._active_process_metadata: dict[str, tuple[str, str]] = {}
         self._resolved_process_call_ids: set[str] = set()
         self._resolved_process_call_order: deque[str] = deque()
         self._resolved_process_call_bytes = 0
@@ -169,8 +170,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 )
             elif event.call_id in self._active_tool_cards:
                 self._set_conflicting_tool_card(event.call_id)
+            elif event.call_id in self._process_call_ids:
+                if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
+                    event.name, event.arguments
+                ):
+                    self._mark_resolved_process_call(event.call_id)
             else:
                 self._process_call_ids.add(event.call_id)
+                identity = _trace_process_identity(event.name, event.arguments)
+                assert identity is not None
+                self._active_process_metadata[event.call_id] = identity
             super().approval_request(event)
             return
         if event.call_id in self._process_call_ids:
@@ -215,8 +224,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
                     )
                 elif event.call_id in self._active_tool_cards:
                     self._set_conflicting_tool_card(event.call_id)
+                elif event.call_id in self._process_call_ids:
+                    if self._active_process_metadata.get(event.call_id) != _trace_process_identity(
+                        event.name, event.arguments
+                    ):
+                        self._mark_resolved_process_call(event.call_id)
                 else:
                     self._process_call_ids.add(event.call_id)
+                    identity = _trace_process_identity(event.name, event.arguments)
+                    assert identity is not None
+                    self._active_process_metadata[event.call_id] = identity
                 super().event(event)
                 return
             if event.call_id in self._process_call_ids:
@@ -306,6 +323,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def _settle_tool_cards(self) -> None:
         self._process_call_ids.clear()
+        self._active_process_metadata.clear()
         for index, current in enumerate(self.tool_cards):
             if current.status in {"done", "error", "denied", "cancelled"}:
                 continue
@@ -397,6 +415,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
         )
 
     def _mark_resolved_process_call(self, call_id: str) -> None:
+        self._process_call_ids.discard(call_id)
+        self._active_process_metadata.pop(call_id, None)
         if call_id in self._resolved_process_call_ids:
             self._touch_resolved_process_call(call_id)
             return
@@ -835,14 +855,22 @@ def _bounded_trace_internal_identity(value: str) -> str:
     return f"h:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _trace_process_call(name: str, arguments: object) -> bool:
+def _trace_process_identity(name: str, arguments: object) -> tuple[str, str] | None:
     if name != "bash" or not isinstance(arguments, dict):
-        return False
-    return (
-        arguments.get("operation") in {"poll", "cancel"}
-        and isinstance(arguments.get("process_id"), str)
-        and bool(arguments["process_id"].strip())
-    )
+        return None
+    operation = arguments.get("operation")
+    process_id = arguments.get("process_id")
+    if (
+        operation not in {"poll", "cancel"}
+        or not isinstance(process_id, str)
+        or not process_id.strip()
+    ):
+        return None
+    return process_id, operation
+
+
+def _trace_process_call(name: str, arguments: object) -> bool:
+    return _trace_process_identity(name, arguments) is not None
 
 
 def _reset_submission_ids() -> None:

@@ -819,6 +819,28 @@ def test_unresolved_generic_to_process_crossing_projects_an_error() -> None:
     assert card.arguments_available
 
 
+def test_changed_process_metadata_resolves_the_ambiguous_binding() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="changed-process",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="changed-process",
+            name="bash",
+            arguments={"operation": "cancel", "process_id": "process-2"},
+        )
+    )
+    renderer.event(ToolCallRequested(call_id="changed-process", name="read", arguments={}))
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+
+
 def test_unresolved_process_to_generic_crossing_does_not_rebind_the_call() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

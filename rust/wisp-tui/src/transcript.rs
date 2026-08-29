@@ -513,21 +513,26 @@ impl Transcript {
                     if changed {
                         self.bump_card(binding.entry_id);
                     }
-                } else if process_call_identity(&input.name, &input.arguments).is_none() {
+                } else {
                     let ToolBindingKind::Process(operation) = binding.kind else {
                         unreachable!("non-tool binding must target a process operation")
                     };
+                    let incoming = process_call_identity(&input.name, &input.arguments);
                     let changed = {
                         let entry = self.entry_mut(binding.entry_id);
                         let TranscriptEntryKind::Process(card) = &mut entry.kind else {
                             unreachable!("process binding must target a process card")
                         };
-                        card.conflict(operation, binding.sequence)
+                        let conflicts = incoming.as_ref().is_none_or(|identity| {
+                            identity.operation != operation
+                                || identity.process_id != card.process_id
+                        });
+                        conflicts && card.conflict(operation, binding.sequence)
                     };
                     if changed {
                         self.bump_card(binding.entry_id);
+                        self.mark_tool_binding_resolved(&input.call_id);
                     }
-                    self.mark_tool_binding_resolved(&input.call_id);
                 }
                 return binding.entry_id;
             }
@@ -1381,6 +1386,32 @@ mod tests {
         assert_eq!(card.display_state, ProcessDisplayState::PollInterrupted);
         assert!(card.preview().text.contains("metadata changed"));
         assert!(!card.preview().text.contains("must be ignored"));
+    }
+
+    #[test]
+    fn changed_process_metadata_on_an_unresolved_call_is_explicit() {
+        for conflicting_arguments in [
+            serde_json::json!({"operation": "poll", "process_id": "other"}),
+            serde_json::json!({"operation": "cancel", "process_id": "process"}),
+        ] {
+            let mut transcript = Transcript::default();
+            let process = transcript.observe_tool_call(call(
+                "crossed",
+                "bash",
+                serde_json::json!({"operation": "poll", "process_id": "process"}),
+            ));
+
+            assert_eq!(
+                transcript.observe_tool_call(call("crossed", "bash", conflicting_arguments)),
+                process
+            );
+            transcript.observe_tool_result(result("crossed", "must be ignored"));
+
+            let card = transcript.entry(process).unwrap().process_card().unwrap();
+            assert_eq!(card.display_state, ProcessDisplayState::PollInterrupted);
+            assert!(card.preview().text.contains("metadata changed"));
+            assert!(!card.preview().text.contains("must be ignored"));
+        }
     }
 
     #[test]
