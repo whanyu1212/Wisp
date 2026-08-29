@@ -1535,6 +1535,36 @@ mod tests {
     }
 
     #[test]
+    fn process_index_evicts_resolved_observed_states() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("observed process operations".into());
+        for index in 0..MAX_PROCESS_INDEX_ENTRIES {
+            let process_id = format!("process-{index}");
+            let call_id = format!("poll-{index}");
+            transcript.observe_tool_call(call(
+                &call_id,
+                "bash",
+                serde_json::json!({"operation": "poll", "process_id": process_id}),
+            ));
+            let mut observed = result(&call_id, "observed");
+            observed.name = "bash".into();
+            observed.process_id = Some(process_id);
+            transcript.observe_tool_result(observed);
+        }
+
+        let overflow = transcript.observe_tool_call(call(
+            "poll-overflow",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-overflow"}),
+        ));
+
+        assert!(transcript.entry(overflow).unwrap().process_card().is_some());
+        assert!(transcript.process_entries.contains_key("process-overflow"));
+        assert!(!transcript.process_entries.contains_key("process-0"));
+        assert_eq!(transcript.process_entries.len(), MAX_PROCESS_INDEX_ENTRIES);
+    }
+
+    #[test]
     fn process_index_never_evicts_running_lifecycles() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("running processes".into());

@@ -92,7 +92,8 @@ impl ProcessDisplayState {
         self.terminal()
             || matches!(
                 self,
-                Self::PollDenied
+                Self::Observed
+                    | Self::PollDenied
                     | Self::CancelDenied
                     | Self::PollInterrupted
                     | Self::CancelInterrupted
