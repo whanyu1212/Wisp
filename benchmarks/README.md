@@ -62,9 +62,10 @@ cargo +1.85.0 run --release -p wisp-tui \
 The benchmark feature is disabled in production builds and adds no benchmark framework. Each
 condition uses the same rich 512-entry suffix at 100x24, then measures cold and warm frames,
 PageUp/PageDown, resize, 100 growing Markdown updates with closed Rust fences, and cold opening plus
-paging through a row-budget-saturating structured diff. JSON contains only timings, bounded work counters, environment
-metadata, and correctness flags—never transcript text, paths, tool payloads, identifiers, or terminal
-cells.
+paging through the full row-budget-saturating structured diff. JSON contains only timings, bounded
+work counters, environment metadata, and correctness flags—never transcript text, paths, tool
+payloads, identifiers, or terminal cells. Linux CPU and machine-model metadata use `/proc` and
+sysfs fallbacks when the macOS `sysctl` keys are unavailable.
 
 `stream_process_cpu_ms` uses `getrusage` across the fixed update-and-draw region. `stream_stall_ms`
 is synchronous mutation-plus-`Terminal::draw` wall time. `detail_open_ms` includes eagerly formatting

@@ -4,7 +4,9 @@ use crate::LiveUi;
 use crate::detail_view::DetailView;
 use crate::reducer::{UiState, ViewStatus};
 use crate::tool_cards::{ToolCallInput, ToolResultInput, bounded_tool_arguments};
-use crate::tool_detail::{DetailAvailability, project_tool_detail_source};
+use crate::tool_detail::{
+    DETAIL_EXPANDED_MAX_ROWS, DetailAvailability, project_tool_detail_source,
+};
 use crate::transcript::{Transcript, TranscriptEntryId};
 use crate::transcript_view::{LayoutWork, TranscriptViewAction};
 use crate::ui::ConnectionInfo;
@@ -50,7 +52,7 @@ impl Default for BenchmarkConfig {
             navigation_cycles: 20,
             resize_cycles: 10,
             stream_updates: 100,
-            detail_frames: 20,
+            detail_frames: DETAIL_EXPANDED_MAX_ROWS,
         }
     }
 }
@@ -151,6 +153,7 @@ pub struct Correctness {
     pub screen_rendered: bool,
     pub detail_rendered: bool,
     pub detail_row_budget_exercised: bool,
+    pub detail_tail_rendered: bool,
     pub warm_cache_reused: bool,
     pub stream_work_bounded: bool,
 }
@@ -165,6 +168,7 @@ impl Correctness {
             && self.screen_rendered
             && self.detail_rendered
             && self.detail_row_budget_exercised
+            && self.detail_tail_rendered
             && self.warm_cache_reused
             && self.stream_work_bounded
     }
@@ -387,16 +391,22 @@ fn run_sample(
     let detail_rendered = rendered_detail.contains("live retained detail")
         && rendered_detail.contains("old value 0")
         && rendered_detail.contains("new value 0");
+    let last_detail_row_key = detail.rows.last().map(|row| row.key);
+    let mut detail_tail_rendered = false;
     let mut detail_ms = Vec::with_capacity(config.detail_frames);
-    for frame in 0..config.detail_frames {
+    for _ in 0..config.detail_frames {
         let started = Instant::now();
-        if frame % 2 == 0 {
-            ui.detail_view.page_down(&detail);
-        } else {
-            ui.detail_view.page_up(&detail);
-        }
+        ui.detail_view.page_down(&detail);
         ui.draw(&mut terminal, &connection)?;
         detail_ms.push(elapsed_ms(started));
+        detail_tail_rendered = ui
+            .detail_view
+            .visible_rows(&detail)
+            .iter()
+            .any(|row| Some(row.anchor.row_key) == last_detail_row_key);
+        if detail_tail_rendered {
+            break;
+        }
     }
     let warm_frames = TimingDistribution::from_samples(&warm_ms);
     let navigation_frames = TimingDistribution::from_samples(&navigation_ms);
@@ -453,6 +463,7 @@ fn run_sample(
             screen_rendered,
             detail_rendered,
             detail_row_budget_exercised,
+            detail_tail_rendered,
             warm_cache_reused,
             stream_work_bounded,
         },
@@ -716,15 +727,61 @@ fn environment() -> BenchmarkEnvironment {
         os: std::env::consts::OS.into(),
         architecture: std::env::consts::ARCH.into(),
         kernel: command_output("uname", &["-sr"]).unwrap_or_else(|| "unknown".into()),
-        cpu: command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
-            .unwrap_or_else(|| "unknown".into()),
-        machine_model: command_output("sysctl", &["-n", "hw.model"])
-            .unwrap_or_else(|| "unknown".into()),
+        cpu: cpu_name(),
+        machine_model: machine_model(),
         crate_version: env!("CARGO_PKG_VERSION").into(),
         rustc: command_output("rustc", &["--version"]).unwrap_or_else(|| "unknown".into()),
         commit: command_output("git", &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into()),
-        worktree_dirty: status.is_none_or(|output| !output.is_empty()),
+        worktree_dirty: worktree_is_dirty(status.as_deref()),
     }
+}
+
+fn cpu_name() -> String {
+    command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
+        .and_then(|value| normalized_metadata(&value))
+        .or_else(|| {
+            std::fs::read_to_string("/proc/cpuinfo")
+                .ok()
+                .and_then(|cpuinfo| cpu_name_from_proc(&cpuinfo))
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn machine_model() -> String {
+    command_output("sysctl", &["-n", "hw.model"])
+        .and_then(|value| normalized_metadata(&value))
+        .or_else(|| {
+            [
+                "/sys/devices/virtual/dmi/id/product_name",
+                "/proc/device-tree/model",
+            ]
+            .into_iter()
+            .find_map(|path| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|value| normalized_metadata(&value))
+            })
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn cpu_name_from_proc(cpuinfo: &str) -> Option<String> {
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        matches!(key.trim(), "model name" | "Hardware" | "Processor")
+            .then(|| normalized_metadata(value))
+            .flatten()
+    })
+}
+
+fn normalized_metadata(value: &str) -> Option<String> {
+    let value =
+        value.trim_matches(|character: char| character.is_whitespace() || character == '\0');
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn worktree_is_dirty(status: Option<&str>) -> bool {
+    status.is_none_or(|output| !output.is_empty())
 }
 
 fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
@@ -772,6 +829,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linux_metadata_fallbacks_are_nonempty_and_normalized() {
+        assert_eq!(
+            cpu_name_from_proc("processor: 0\nmodel name: Unit Test CPU\n"),
+            Some("Unit Test CPU".into())
+        );
+        assert_eq!(
+            normalized_metadata(" Unit Test Model\0\n"),
+            Some("Unit Test Model".into())
+        );
+        assert_eq!(cpu_name_from_proc("processor: 0\n"), None);
+        assert_eq!(normalized_metadata("\0\n"), None);
+        assert!(!worktree_is_dirty(Some("")));
+        assert!(worktree_is_dirty(Some("M tracked-file")));
+        assert!(worktree_is_dirty(None));
+    }
+
+    #[test]
     fn detail_open_contributes_to_maximum_synchronous_stall() {
         assert_eq!(
             maximum_synchronous_stall(1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 6.0),
@@ -800,18 +874,15 @@ mod tests {
             navigation_cycles: 1,
             resize_cycles: 1,
             stream_updates: 5,
-            detail_frames: 2,
+            detail_frames: DETAIL_EXPANDED_MAX_ROWS,
         })
         .unwrap();
 
         assert_eq!(report.samples.len(), 2);
         assert!(report.scaling_work_independent);
-        assert!(
-            report
-                .samples
-                .iter()
-                .all(|sample| sample.detail_open_ms.is_finite())
-        );
+        assert!(report.samples.iter().all(|sample| {
+            sample.detail_open_ms.is_finite() && sample.correctness.detail_tail_rendered
+        }));
         assert!(
             report.all_correctness_checks_passed,
             "correctness failed: {:#?}",
@@ -836,7 +907,7 @@ mod tests {
             navigation_cycles: 1,
             resize_cycles: 1,
             stream_updates: 1,
-            detail_frames: 1,
+            detail_frames: DETAIL_EXPANDED_MAX_ROWS,
         })
         .unwrap();
 
