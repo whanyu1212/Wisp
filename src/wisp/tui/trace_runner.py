@@ -327,8 +327,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
         super().rpc_stream_ended_unexpectedly()
 
     def _settle_tool_cards(self) -> None:
-        self._process_call_ids.clear()
-        self._active_process_metadata.clear()
+        ordered_process_calls = tuple(self._active_process_metadata)
+        remaining_process_calls = sorted(self._process_call_ids.difference(ordered_process_calls))
+        for call_id in (*ordered_process_calls, *remaining_process_calls):
+            self._mark_resolved_process_call(call_id)
         self._unresolved_tool_conflicts.clear()
         for index, current in enumerate(self.tool_cards):
             if current.status in {"done", "error", "denied", "cancelled"}:

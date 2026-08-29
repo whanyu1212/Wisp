@@ -653,6 +653,22 @@ def test_trace_tool_card_projection_bounds_display_identities() -> None:
         assert card.call_id == f"h-{hashlib.sha256(unsafe.encode()).hexdigest()}"
 
 
+def test_settlement_tombstones_unresolved_process_call_ids() -> None:
+    renderer = RecordingTraceRenderer()
+    process_call = ToolCallRequested(
+        call_id="settled-process",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "process-1"},
+    )
+    renderer.event(process_call)
+    renderer._settle_tool_cards()
+    renderer.event(process_call)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "cancelled"
+    assert card.arguments_available
+
+
 def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
     renderer = RecordingTraceRenderer()
     process_call = ToolCallRequested(

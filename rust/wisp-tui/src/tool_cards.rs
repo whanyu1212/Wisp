@@ -1159,6 +1159,9 @@ fn tail_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usiz
     let mut lines = 1_usize;
     for index in (start..source.len()).rev() {
         if source.as_bytes()[index] == b'\n' {
+            if index + 1 == source.len() {
+                continue;
+            }
             if lines == max_lines {
                 start = index + 1;
                 break;
@@ -1260,6 +1263,20 @@ mod tests {
         assert_eq!(exact_head.text, exact_lines);
         assert_eq!(exact_head.dropped_bytes, 0);
         assert_eq!(exact_head.dropped_lines, 0);
+
+        let oversized_lines =
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n";
+        let oversized_tail = BoundedText::tail(
+            oversized_lines,
+            TOOL_PREVIEW_MAX_BYTES,
+            TOOL_PREVIEW_MAX_LINES,
+        );
+        assert_eq!(
+            oversized_tail.text,
+            "line 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n"
+        );
+        assert_eq!(oversized_tail.dropped_lines, 1);
+        assert_eq!(oversized_tail.dropped_bytes, "line 1\n".len() as u64);
     }
 
     #[test]
