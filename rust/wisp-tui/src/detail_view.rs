@@ -386,7 +386,7 @@ fn normalize_anchor(
     let mut current = 0usize;
     loop {
         let (_, next) = wrap_one_row(&source, current, width);
-        if target <= next || next <= current || next >= source.len() {
+        if target < next || next <= current || next >= source.len() {
             return Some(DetailAnchor {
                 row_key: anchor.row_key,
                 byte_offset: current,
@@ -474,6 +474,26 @@ mod tests {
         let resized = view.visible_rows(&detail);
         assert_eq!(resized[0].anchor.row_key, 0);
         assert!(resized[0].anchor.byte_offset <= anchored.byte_offset);
+    }
+
+    #[test]
+    fn anchor_exactly_on_a_new_wrap_boundary_keeps_that_segment() {
+        let detail = presentation();
+        let source = format_structured_detail_row(&detail.rows[0]);
+        let (_, boundary) = wrap_one_row(&source, 0, 6);
+        assert!(boundary > 0 && boundary < source.len());
+
+        let normalized = normalize_anchor(
+            &detail,
+            DetailAnchor {
+                row_key: detail.rows[0].key,
+                byte_offset: boundary,
+            },
+            6,
+        )
+        .unwrap();
+
+        assert_eq!(normalized.byte_offset, boundary);
     }
 
     #[test]
