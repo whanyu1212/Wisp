@@ -276,8 +276,10 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        let retain_tail = self.status == ToolStatus::Error
+            || (self.status == ToolStatus::Done && input.name == "bash");
         let normalized_output = normalize_newlines(&input.output);
-        self.retained_output = if self.status == ToolStatus::Error {
+        self.retained_output = if retain_tail {
             BoundedText::tail(
                 &normalized_output,
                 TOOL_OUTPUT_MAX_BYTES,
@@ -297,10 +299,10 @@ impl ToolCardSnapshot {
             .retained_output
             .source_bytes
             .saturating_sub(u64::try_from(self.retained_output.text.len()).unwrap_or(u64::MAX));
-        if self.status == ToolStatus::Error {
+        if retain_tail {
             self.retained_output.base_offset = self.retained_output.dropped_bytes;
         }
-        let preview = if self.status == ToolStatus::Error {
+        let preview = if retain_tail {
             self.retained_output.preview_tail()
         } else {
             self.retained_output.preview_head()

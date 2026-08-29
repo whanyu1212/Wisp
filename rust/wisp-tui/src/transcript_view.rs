@@ -1502,7 +1502,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
-            let tail_preview = card.status == ToolStatus::Error;
+            let tail_preview = card.status == ToolStatus::Error
+                || (card.status == ToolStatus::Done && card.name == "bash");
             let retained_preview = if tail_preview {
                 card.retained_output.preview_tail()
             } else {
@@ -2295,6 +2296,45 @@ mod tests {
                 .contains("ASSERTION FAILED AT DIAGNOSTIC TAIL")
         );
         assert!(!projection.detail.contains("EARLY PROGRESS MARKER"));
+        assert!(projection.omission_before_detail);
+        assert!(
+            projection
+                .omission
+                .as_deref()
+                .unwrap()
+                .contains("omitted before this preview")
+        );
+    }
+
+    #[test]
+    fn successful_bash_cards_retain_and_preview_the_summary_tail() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("build".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-success".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "cargo build"}),
+        });
+        let output = format!(
+            "EARLY BUILD MARKER\n{}BUILD FINISHED SUCCESSFULLY",
+            "compiling\n".repeat(10_000)
+        );
+        let mut completed = tool_result("call-success", &output);
+        completed.name = "bash".into();
+        completed.exit_code = Some(0);
+        transcript.observe_tool_result(completed);
+
+        let entry = transcript.entry(card_id).unwrap();
+        let card = entry.tool_card().unwrap();
+        assert!(
+            card.retained_output
+                .text
+                .ends_with("BUILD FINISHED SUCCESSFULLY")
+        );
+        assert!(!card.retained_output.text.contains("EARLY BUILD MARKER"));
+        let projection = card_projection(entry).unwrap();
+        assert!(projection.detail.contains("BUILD FINISHED SUCCESSFULLY"));
+        assert!(!projection.detail.contains("EARLY BUILD MARKER"));
         assert!(projection.omission_before_detail);
         assert!(
             projection
