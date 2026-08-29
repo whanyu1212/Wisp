@@ -8,7 +8,7 @@ ignored under `profiles/`.
 | Field | Value |
 | --- | --- |
 | Base tree | `origin/main` at `2394cae82ee2c792b1c2f74d3f19c6a2533366a9` |
-| Local benchmark report commit | `8a96eeddc28acff9c3583003dddeadbe1ab8cc7b` |
+| Local benchmark report commit | `047435873860bcc4b9514e1bf84fc108c2a8caba` |
 | Worktree | Clean |
 | Host | Mac14,15, Apple M2, arm64 |
 | OS | macOS 26.5.2 / Darwin 25.5.0 |
@@ -27,16 +27,17 @@ cargo +1.85.0 run --release -p wisp-tui \
 
 ## Results
 
-Values are medians across the five per-condition samples. Timing columns other than cold frame and
-stream maximum are medians of each sample's p95 distribution.
+Values are medians across the five per-condition samples. Warm, navigation, resize, stream, and
+paged-detail values are medians of each sample's p95 distribution. Maximum synchronous stall is the
+largest observed value across the five samples; the other columns are medians.
 
-| Entries | Cold frame ms | Warm p95 ms | Navigation p95 ms | Resize p95 ms | Stream p95 ms | Stream max ms | Stream CPU / 100 updates ms | Detail p95 ms |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 0.188 | 0.091 | 0.101 | 0.102 | 0.130 | 0.293 | 10.958 | 0.081 |
-| 10,000 | 0.181 | 0.090 | 0.101 | 0.101 | 0.130 | 0.191 | 11.053 | 0.087 |
-| 100,000 | 0.200 | 0.092 | 0.101 | 0.102 | 0.130 | 0.156 | 11.023 | 0.084 |
+| Entries | Cold frame ms | Warm p95 ms | Navigation p95 ms | Resize p95 ms | Stream p95 ms | Stream CPU / 100 updates ms | Detail open ms | Detail p95 ms | Max synchronous stall ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0.170 | 0.090 | 0.101 | 0.102 | 0.130 | 11.013 | 0.194 | 0.081 | 0.555 |
+| 10,000 | 0.184 | 0.090 | 0.102 | 0.102 | 0.130 | 10.989 | 0.184 | 0.084 | 0.203 |
+| 100,000 | 0.164 | 0.090 | 0.102 | 0.102 | 0.128 | 11.003 | 0.186 | 0.082 | 0.207 |
 
-The first syntax-highlight call took 15.869 ms in the standalone fresh-process run. This includes
+The first syntax-highlight call took 18.101 ms in the standalone fresh-process run. This includes
 Syntect initialization, parsing, and highlighting the first fence; it is reported separately from
 warm stream frames and has no portable threshold.
 
@@ -44,15 +45,16 @@ warm stream frames and has no portable threshold.
 
 | Metric | Ratio |
 | --- | ---: |
-| Warm p95 | 1.018 |
-| Navigation p95 | 1.002 |
-| Resize p95 | 1.002 |
-| Stream p95 | 0.996 |
-| Stream process CPU | 1.006 |
-| Detail p95 | 1.031 |
+| Warm p95 | 0.994 |
+| Navigation p95 | 1.007 |
+| Resize p95 | 1.003 |
+| Stream p95 | 0.989 |
+| Stream process CPU | 0.999 |
+| Detail open | 0.959 |
+| Detail p95 | 1.013 |
 
-All ratios are below the 1.25 same-machine scaling gate. Warm, navigation, resize, stream, and detail
-p95 values are below 16 ms; measured stream maxima are below 32 ms.
+All ratios are below the 1.25 same-machine scaling gate. Warm, navigation, resize, stream, detail
+open, and detail p95 values are below 16 ms; measured maximum synchronous stalls are below 32 ms.
 
 ## Deterministic evidence
 
@@ -62,7 +64,8 @@ p95 values are below 16 ms; measured stream maxima are below 32 ms.
 - Streaming retained exact source, stayed at the tail without unseen output, reused stable Markdown,
   performed no full reparse, and stayed within the configured parse/highlight work bounds.
 - Visible rows remained viewport-bounded; the structured diff saturated the 400-row retention
-  budget and rendered known old/new rows through its bounded cache.
+  budget, rendered known old/new rows through its bounded cache, and included eager row formatting
+  plus the first detail draw in both `detail_open_ms` and maximum synchronous stall.
 - A default-suite regression independently compares 1,000 and 100,000-entry transcripts without
   using timing assertions.
 
