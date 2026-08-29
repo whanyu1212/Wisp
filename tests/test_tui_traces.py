@@ -704,6 +704,30 @@ def test_duplicate_metadata_is_compared_after_presentation_bounds() -> None:
     assert card.name == f"{'n' * 127}…"
 
 
+def test_unresolved_metadata_conflict_survives_lifecycle_starts() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "first"}))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "second"}))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "second"}))
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="conflict",
+            name="read",
+            arguments={"path": "second"},
+            safety="read",
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+    renderer.event(ToolResultReady(call_id="conflict", name="read", output="late", is_error=True))
+    renderer.event(ToolCallRequested(call_id="conflict", name="read", arguments={"path": "third"}))
+    original, reuse = renderer.tool_card_projection()
+    assert original.status == "error"
+    assert reuse.status == "cancelled"
+
+
 def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(

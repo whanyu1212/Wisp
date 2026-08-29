@@ -110,6 +110,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.tool_cards: list[TraceToolCardProjection] = []
         self._active_tool_cards: dict[str, int] = {}
         self._active_tool_metadata: dict[str, tuple[str, str]] = {}
+        self._unresolved_tool_conflicts: set[str] = set()
         self._process_call_ids: set[str] = set()
         self._active_process_metadata: dict[str, tuple[str, str]] = {}
         self._resolved_process_call_ids: set[str] = set()
@@ -187,7 +188,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
             super().approval_request(event)
             return
         if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
-            self._set_conflicting_tool_card(event.call_id)
+            self._set_conflicting_tool_card(event.call_id, unresolved=True)
         else:
             index = self._active_tool_cards.get(event.call_id)
             current = self.tool_cards[index] if index is not None else None
@@ -246,7 +247,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
             index = self._active_tool_cards.get(event.call_id)
             current = self.tool_cards[index] if index is not None else None
             if self._tool_lifecycle_conflicts(event.call_id, event.name, event.arguments):
-                self._set_conflicting_tool_card(event.call_id)
+                self._set_conflicting_tool_card(event.call_id, unresolved=True)
             else:
                 status = (
                     current.status
@@ -301,6 +302,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 event.exit_code,
                 process_state=event.process_state,
             )
+            self._unresolved_tool_conflicts.discard(event.call_id)
             self._set_tool_card(
                 event.call_id,
                 event.name,
@@ -327,6 +329,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
     def _settle_tool_cards(self) -> None:
         self._process_call_ids.clear()
         self._active_process_metadata.clear()
+        self._unresolved_tool_conflicts.clear()
         for index, current in enumerate(self.tool_cards):
             if current.status in {"done", "error", "denied", "cancelled"}:
                 continue
@@ -351,6 +354,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
     ) -> None:
         index = self._active_tool_cards.get(call_id)
         current = self.tool_cards[index] if index is not None else None
+        if lifecycle_start and call_id in self._unresolved_tool_conflicts:
+            return
         if (
             lifecycle_start
             and current is not None
@@ -406,7 +411,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
             return False
         return previous != metadata
 
-    def _set_conflicting_tool_card(self, call_id: str) -> None:
+    def _set_conflicting_tool_card(self, call_id: str, *, unresolved: bool = False) -> None:
         index = self._active_tool_cards[call_id]
         current = self.tool_cards[index]
         self._set_tool_card(
@@ -416,6 +421,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
             arguments_available=current.arguments_available,
             lifecycle_start=False,
         )
+        if unresolved:
+            self._unresolved_tool_conflicts.add(call_id)
 
     def _mark_resolved_process_call(self, call_id: str) -> None:
         self._process_call_ids.discard(call_id)
