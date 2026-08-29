@@ -46,6 +46,51 @@ the cold-mount timing.
 The CPU worker runs until it is cancelled immediately after the scroll measurement,
 with a 60-second safety timeout. Streaming metrics therefore run without its load.
 
+## Rust TUI Transcript
+
+Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,
+and Ratatui draw paths without terminal I/O:
+
+```bash
+mkdir -p profiles
+cargo +1.85.0 run --release -p wisp-tui \
+  --features transcript-benchmark --example transcript_benchmark -- \
+  --entries 1000,10000,100000 --runs 5 \
+  --output profiles/rust-tui-transcript.json
+```
+
+The benchmark feature is disabled in production builds and adds no benchmark framework. Each
+condition uses the same rich 512-entry suffix at 100x24, then measures cold and warm frames,
+PageUp/PageDown, resize, 100 growing Markdown updates with closed Rust fences, and paging through a
+row-budget-saturating structured diff. JSON contains only timings, bounded work counters, environment
+metadata, and correctness flags—never transcript text, paths, tool payloads, identifiers, or terminal
+cells.
+
+`stream_process_cpu_ms` uses `getrusage` across the fixed update-and-draw region. `stream_stall_ms`
+is synchronous mutation-plus-`Terminal::draw` wall time; it is not event-loop, PTY, terminal-write,
+or perceptual latency. Compare absolute timings only from release builds on the same machine.
+Machine-independent checks assert source completeness, anchor/follow state, cache reuse, bounded
+incremental parsing/highlighting, and identical visible work across transcript lengths; CI must not
+assert machine-specific timing thresholds.
+
+For a macOS sampling profile, build once and repeat the unchanged 100k workload long enough for
+`sample` to observe it:
+
+```bash
+cargo +1.85.0 build --release -p wisp-tui \
+  --features transcript-benchmark --example transcript_benchmark
+target/release/examples/transcript_benchmark \
+  --entries 100000 --runs 500 --output /tmp/rust-tui-profile.json >/dev/null &
+pid=$!
+/usr/bin/sample "$pid" 2 1 -mayDie \
+  -file profiles/rust-tui-transcript.sample.txt
+wait "$pid"
+```
+
+Use Linux `perf record -g -- target/release/examples/transcript_benchmark ...` for equivalent
+native sampling. Raw JSON and profiles stay under ignored `profiles/`; commit only compact numeric
+evidence and factual profiler conclusions. See `benchmarks/rust_tui_transcript_evidence.md`.
+
 ## TUI Streaming Hotpaths
 
 Measure the real Rich Markdown stream path at the production first-page size, the production

@@ -14,6 +14,8 @@ mod terminal;
 mod tool_cards;
 mod tool_detail;
 mod transcript;
+#[cfg(feature = "transcript-benchmark")]
+pub mod transcript_benchmark;
 mod transcript_view;
 mod ui;
 
