@@ -191,7 +191,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         else:
             index = self._active_tool_cards.get(event.call_id)
             current = self.tool_cards[index] if index is not None else None
-            if current is None or current.status == "requested":
+            if current is None or current.status != "running":
                 self._set_tool_card(
                     event.call_id,
                     event.name,

@@ -741,6 +741,24 @@ def test_delayed_duplicate_approval_request_does_not_regress_running_card() -> N
     assert card.status == "running"
 
 
+def test_approval_request_reusing_terminal_call_id_is_a_conflict() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(ToolCallRequested(call_id="reused", name="read", arguments={}))
+    renderer.event(ToolResultReady(call_id="reused", name="read", output="done", is_error=False))
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="reused",
+            name="read",
+            arguments={},
+            safety="read",
+        )
+    )
+
+    first, conflict = renderer.tool_card_projection()
+    assert first.status == "done"
+    assert conflict.status == "cancelled"
+
+
 def test_requestless_approval_resolution_does_not_create_a_card() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(ToolApprovalResolved(call_id="orphan", name="read", approved=True))

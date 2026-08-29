@@ -1114,12 +1114,15 @@ fn bounded_text(
 }
 
 fn head_bounds(source: &str, max_bytes: usize, max_lines: usize) -> (usize, usize) {
+    if max_lines == 0 {
+        return (0, 0);
+    }
+    if source.len() <= max_bytes && logical_line_count(source) <= max_lines as u64 {
+        return (0, source.len());
+    }
     let mut end = source.len().min(max_bytes);
     while end > 0 && !source.is_char_boundary(end) {
         end -= 1;
-    }
-    if max_lines == 0 {
-        return (0, 0);
     }
     let mut lines = 1_usize;
     for (index, byte) in source.as_bytes()[..end].iter().enumerate() {
@@ -1243,6 +1246,12 @@ mod tests {
         assert_eq!(exact_tail.base_offset, 0);
         assert_eq!(exact_tail.dropped_bytes, 0);
         assert_eq!(exact_tail.dropped_lines, 0);
+
+        let exact_head =
+            BoundedText::head(&exact_lines, TOOL_PREVIEW_MAX_BYTES, TOOL_PREVIEW_MAX_LINES);
+        assert_eq!(exact_head.text, exact_lines);
+        assert_eq!(exact_head.dropped_bytes, 0);
+        assert_eq!(exact_head.dropped_lines, 0);
     }
 
     #[test]
