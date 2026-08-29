@@ -238,9 +238,18 @@ impl Transcript {
 
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval);
+        let binding = *self
+            .call_entries
+            .get(&input.call_id)
+            .expect("ensured approval request has a call binding");
         let changed = match self.entry_mut(entry_id).kind {
             TranscriptEntryKind::Tool(ref mut card) => card.approval_requested(),
-            TranscriptEntryKind::Process(_) => false,
+            TranscriptEntryKind::Process(ref mut card) => {
+                let ToolBindingKind::Process(operation) = binding.kind else {
+                    unreachable!("process card binding must target a process operation")
+                };
+                card.approval_requested(operation, binding.sequence)
+            }
             TranscriptEntryKind::Message => unreachable!("tool binding must target a card"),
         };
         if changed {
@@ -269,13 +278,13 @@ impl Transcript {
                 card.approval_resolved(approved, reason)
             }
             ToolBindingKind::Process(operation) => {
+                let entry = self.entry_mut(binding.entry_id);
+                let TranscriptEntryKind::Process(card) = &mut entry.kind else {
+                    unreachable!("process binding must target a process card")
+                };
                 if approved {
-                    false
+                    card.approve(operation, binding.sequence)
                 } else {
-                    let entry = self.entry_mut(binding.entry_id);
-                    let TranscriptEntryKind::Process(card) = &mut entry.kind else {
-                        unreachable!("process binding must target a process card")
-                    };
                     card.deny(operation, reason, binding.sequence)
                 }
             }
@@ -1032,6 +1041,44 @@ mod tests {
         let card = transcript.entry(card_id).unwrap().tool_card().unwrap();
         assert_eq!(card.status, ToolStatus::Done);
         assert_eq!(card.action_arguments, "README.md");
+    }
+
+    #[test]
+    fn process_approval_state_is_explicit_and_monotonic() {
+        let mut transcript = Transcript::default();
+        let request = call(
+            "poll-approved",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process"}),
+        );
+        let card_id = transcript.observe_approval_requested(request.clone());
+        let card = transcript.entry(card_id).unwrap().process_card().unwrap();
+        assert_eq!(
+            card.display_state,
+            ProcessDisplayState::PollAwaitingApproval
+        );
+        assert_eq!(card.display_state.status(), ToolStatus::AwaitingApproval);
+
+        transcript.observe_approval_resolved("poll-approved", true, None);
+        assert_eq!(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::Polling
+        );
+        transcript.observe_approval_requested(request);
+        assert_eq!(
+            transcript
+                .entry(card_id)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::Polling
+        );
     }
 
     #[test]

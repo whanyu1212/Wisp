@@ -185,7 +185,17 @@ class TraceRpcEvent(_TraceModel):
                                 "type": ["integer", "null"],
                                 "minimum": -(2**63),
                                 "maximum": 2**63 - 1,
-                            }
+                            },
+                            "stdout_dropped_bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 2**64 - 1,
+                            },
+                            "stderr_dropped_bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 2**64 - 1,
+                            },
                         }
                     },
                 },
@@ -236,6 +246,14 @@ class TraceRpcEvent(_TraceModel):
                 and not -(2**63) <= exit_code <= 2**63 - 1
             ):
                 raise ValueError("tool.result exit_code exceeds the signed 64-bit trace range")
+            for field in ("stdout_dropped_bytes", "stderr_dropped_bytes"):
+                count = bounded.get(field)
+                if count is not None and (
+                    not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or not 0 <= count <= 2**64 - 1
+                ):
+                    raise ValueError(f"tool.result {field} exceeds the unsigned 64-bit trace range")
             boolean_fields = (
                 "is_error",
                 "retryable",

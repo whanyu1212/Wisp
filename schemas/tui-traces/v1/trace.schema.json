@@ -606,6 +606,16 @@
                       "integer",
                       "null"
                     ]
+                  },
+                  "stderr_dropped_bytes": {
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "stdout_dropped_bytes": {
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer"
                   }
                 }
               }

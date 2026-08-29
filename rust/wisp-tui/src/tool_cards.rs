@@ -64,6 +64,8 @@ pub enum ProcessOperation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessDisplayState {
+    PollAwaitingApproval,
+    CancelAwaitingApproval,
     Polling,
     Cancelling,
     Running,
@@ -106,6 +108,9 @@ impl ProcessDisplayState {
 
     pub fn status(self) -> ToolStatus {
         match self {
+            Self::PollAwaitingApproval | Self::CancelAwaitingApproval => {
+                ToolStatus::AwaitingApproval
+            }
             Self::Polling | Self::Cancelling | Self::Running | Self::Observed => {
                 ToolStatus::Running
             }
@@ -377,6 +382,8 @@ pub struct ProcessCardSnapshot {
     pub backend_dropped_bytes: u64,
     last_stream_label: Option<&'static str>,
     last_sequence: Option<u64>,
+    approval_sequence: Option<u64>,
+    approval_resolved: bool,
 }
 
 impl ProcessCardSnapshot {
@@ -391,6 +398,8 @@ impl ProcessCardSnapshot {
             backend_dropped_bytes: 0,
             last_stream_label: None,
             last_sequence: None,
+            approval_sequence: None,
+            approval_resolved: false,
         }
     }
 
@@ -409,6 +418,34 @@ impl ProcessCardSnapshot {
         true
     }
 
+    pub fn approval_requested(&mut self, operation: ProcessOperation, sequence: u64) -> bool {
+        if self.approval_sequence == Some(sequence) || !self.accept_sequence(sequence) {
+            return false;
+        }
+        self.approval_sequence = Some(sequence);
+        self.approval_resolved = false;
+        self.display_state = match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollAwaitingApproval,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelAwaitingApproval,
+        };
+        true
+    }
+
+    pub fn approve(&mut self, operation: ProcessOperation, sequence: u64) -> bool {
+        if (self.approval_sequence == Some(sequence) && self.approval_resolved)
+            || !self.accept_sequence(sequence)
+        {
+            return false;
+        }
+        self.approval_sequence = Some(sequence);
+        self.approval_resolved = true;
+        self.display_state = match operation {
+            ProcessOperation::Poll => ProcessDisplayState::Polling,
+            ProcessOperation::Cancel => ProcessDisplayState::Cancelling,
+        };
+        true
+    }
+
     pub fn deny(
         &mut self,
         operation: ProcessOperation,
@@ -418,6 +455,8 @@ impl ProcessCardSnapshot {
         if !self.accept_sequence(sequence) {
             return false;
         }
+        self.approval_sequence = Some(sequence);
+        self.approval_resolved = true;
         if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
             self.append_unlabelled(&bounded_reason(reason));
         }
@@ -527,6 +566,8 @@ impl ProcessCardSnapshot {
 
     pub fn action(&self) -> String {
         let state = match self.display_state {
+            ProcessDisplayState::PollAwaitingApproval => "Process poll awaiting approval",
+            ProcessDisplayState::CancelAwaitingApproval => "Process cancellation awaiting approval",
             ProcessDisplayState::Polling => "Polling process",
             ProcessDisplayState::Cancelling => "Cancelling process",
             ProcessDisplayState::Running => "Running process",

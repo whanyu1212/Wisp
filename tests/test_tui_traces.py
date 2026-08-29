@@ -117,6 +117,33 @@ def test_trace_schema_rejects_coerced_tool_booleans() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+def test_trace_schema_rejects_out_of_range_dropped_byte_counts() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "out_of_range_dropped_bytes",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "output": "",
+                    "is_error": False,
+                    "stdout_dropped_bytes": 2**64,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        TraceFileAdapter.validate_python(data)
+
+
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
 def test_trace_fixture_validates_against_schema(path: Path) -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
