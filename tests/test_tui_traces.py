@@ -624,6 +624,50 @@ def test_denied_process_result_does_not_create_a_generic_trace_card() -> None:
     assert renderer.tool_card_projection() == ()
 
 
+def test_trace_tool_card_projection_bounds_display_identities() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="c" * 256,
+            name="n" * 256,
+            arguments={},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert len(card.call_id) == 128
+    assert len(card.name) == 128
+    assert card.call_id == "c" * 128
+    assert card.name == f"{'n' * 127}…"
+
+
+def test_reused_process_call_id_projects_an_ambiguity_card() -> None:
+    renderer = RecordingTraceRenderer()
+    process_call = ToolCallRequested(
+        call_id="poll-reused",
+        name="bash",
+        arguments={"operation": "poll", "process_id": "process-1"},
+    )
+    renderer.event(process_call)
+    renderer.event(
+        ToolResultReady(
+            call_id="poll-reused",
+            name="bash",
+            output="running",
+            is_error=False,
+            process_id="process-1",
+            process_state="running",
+        )
+    )
+    renderer.event(process_call)
+
+    (card,) = renderer.tool_card_projection()
+    assert card.call_id == "poll-reused"
+    assert card.name == "bash"
+    assert card.status == "cancelled"
+    assert card.arguments_available
+
+
 def test_rpc_event_payloads_are_bounded() -> None:
     oversized = _inline_trace(
         "oversized_rpc_event",

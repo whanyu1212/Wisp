@@ -108,6 +108,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self.tool_cards: list[TraceToolCardProjection] = []
         self._active_tool_cards: dict[str, int] = {}
         self._process_call_ids: set[str] = set()
+        self._resolved_process_call_ids: set[str] = set()
         self._trace_current_command_id: str | None = None
         self._streaming = False
 
@@ -143,7 +144,16 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
         if _trace_process_call(event.name, event.arguments):
-            self._process_call_ids.add(event.call_id)
+            if self._process_identity_was_resolved(event.call_id):
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "cancelled",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+            else:
+                self._process_call_ids.add(event.call_id)
             super().approval_request(event)
             return
         self._set_tool_card(
@@ -160,8 +170,27 @@ class RecordingTraceRenderer(LineTuiRenderer):
             self.retained_text = event.content
             self._streaming = False
         elif isinstance(event, ToolCallRequested):
+            if event.call_id in self._resolved_process_call_ids:
+                self._set_tool_card(
+                    event.call_id,
+                    event.name,
+                    "cancelled",
+                    arguments_available=True,
+                    lifecycle_start=True,
+                )
+                super().event(event)
+                return
             if _trace_process_call(event.name, event.arguments):
-                self._process_call_ids.add(event.call_id)
+                if self._process_identity_was_resolved(event.call_id):
+                    self._set_tool_card(
+                        event.call_id,
+                        event.name,
+                        "cancelled",
+                        arguments_available=True,
+                        lifecycle_start=True,
+                    )
+                else:
+                    self._process_call_ids.add(event.call_id)
                 super().event(event)
                 return
             index = self._active_tool_cards.get(event.call_id)
@@ -181,9 +210,10 @@ class RecordingTraceRenderer(LineTuiRenderer):
             )
         elif isinstance(event, ToolApprovalResolved):
             if event.call_id in self._process_call_ids:
-                # Keep denied process calls as tombstones until their synthetic
-                # terminal result arrives; otherwise it is misprojected as a
-                # generic tool card instead of being ignored like the Rust TUI.
+                if not event.approved:
+                    self._resolved_process_call_ids.add(event.call_id)
+                # Keep denied process calls as tombstones through settlement;
+                # otherwise synthetic or duplicate results become generic cards.
                 super().event(event)
                 return
             self._set_tool_card(
@@ -198,6 +228,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
                 # Keep the resolved process binding as a trace tombstone until
                 # command settlement so delayed duplicate results stay ignored,
                 # matching the Rust reducer's resolved call index.
+                self._resolved_process_call_ids.add(event.call_id)
                 super().event(event)
                 return
             index = self._active_tool_cards.get(event.call_id)
@@ -232,6 +263,7 @@ class RecordingTraceRenderer(LineTuiRenderer):
 
     def _settle_tool_cards(self) -> None:
         self._process_call_ids.clear()
+        self._resolved_process_call_ids.clear()
         for index, current in enumerate(self.tool_cards):
             if current.status in {"done", "error", "denied", "cancelled"}:
                 continue
@@ -286,8 +318,8 @@ class RecordingTraceRenderer(LineTuiRenderer):
         ):
             return
         projection = TraceToolCardProjection(
-            call_id=call_id,
-            name=name,
+            call_id=_clip_trace_card_id(call_id),
+            name=_clip_trace_card_field(name),
             status=status,
             arguments_available=arguments_available,
         )
@@ -296,6 +328,17 @@ class RecordingTraceRenderer(LineTuiRenderer):
             self._active_tool_cards[call_id] = len(self.tool_cards) - 1
         else:
             self.tool_cards[index] = projection
+
+    def _process_identity_was_resolved(self, call_id: str) -> bool:
+        if call_id in self._resolved_process_call_ids:
+            return True
+        index = self._active_tool_cards.get(call_id)
+        return index is not None and self.tool_cards[index].status in {
+            "done",
+            "error",
+            "denied",
+            "cancelled",
+        }
 
     def tool_card_projection(self) -> tuple[TraceToolCardProjection, ...]:
         return tuple(self.tool_cards)
@@ -518,6 +561,18 @@ class TraceRunResult:
     notices: tuple[str, ...]
     errors: tuple[str, ...]
     tokens: tuple[str, ...]
+
+
+def _clip_trace_card_id(value: str) -> str:
+    # Trace IDs have an ASCII-safe schema, so retain its exact 128-character
+    # prefix rather than adding the display ellipsis used for free-form fields.
+    return value[:128]
+
+
+def _clip_trace_card_field(value: str) -> str:
+    if len(value) <= 128:
+        return value
+    return f"{value[:127]}…"
 
 
 def _trace_process_call(name: str, arguments: object) -> bool:

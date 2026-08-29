@@ -173,6 +173,16 @@
     {
       "type": "rpc.event",
       "event": {
+        "type": "tool.call",
+        "call_id": "call-process",
+        "name": "bash",
+        "arguments": {"operation": "poll", "process_id": "process-1"}
+      },
+      "clock_ms": 59
+    },
+    {
+      "type": "rpc.event",
+      "event": {
         "type": "rpc.command.finished",
         "command_id": "prompt-1",
         "command_type": "prompt",
@@ -248,6 +258,12 @@
       {
         "call_id": "call-missing",
         "name": "read",
+        "status": "cancelled",
+        "arguments_available": true
+      },
+      {
+        "call_id": "call-process",
+        "name": "bash",
         "status": "cancelled",
         "arguments_available": true
       }
