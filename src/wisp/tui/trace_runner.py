@@ -845,7 +845,11 @@ def _trace_scalar_value(value: object) -> str:
 def _bounded_trace_argument(value: object, max_chars: int) -> object:
     if isinstance(value, str):
         return _clip_trace_metadata(value, max_chars)
-    if value is None or isinstance(value, bool | int | float):
+    if isinstance(value, int) and not isinstance(value, bool):
+        if -(2**63) <= value <= 2**64 - 1:
+            return value
+        return float(value)
+    if value is None or isinstance(value, bool | float):
         return value
     if isinstance(value, list):
         return f"[{len(value)} items]"

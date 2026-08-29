@@ -1290,6 +1290,25 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_integer_metadata_uses_consistent_number_rounding() {
+        let first = ToolCallInput {
+            call_id: "large-number".into(),
+            name: "extension".into(),
+            arguments: serde_json::from_str(r#"{"value":18446744073709551616}"#).unwrap(),
+        };
+        let second = ToolCallInput {
+            arguments: serde_json::from_str(r#"{"value":18446744073709551617}"#).unwrap(),
+            ..first.clone()
+        };
+        let mut card = ToolCardSnapshot::requested(&first, ToolStatus::Requested);
+        let original_action = card.action_arguments.clone();
+
+        assert!(card.enrich_call(&second));
+        assert_eq!(card.status, ToolStatus::Requested);
+        assert_eq!(card.action_arguments, original_action);
+    }
+
+    #[test]
     fn tool_cards_are_monotonic_and_results_are_bounded() {
         let input = ToolCallInput {
             call_id: "call-1".into(),

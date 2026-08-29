@@ -744,6 +744,27 @@ def test_unresolved_metadata_conflict_survives_lifecycle_starts() -> None:
     assert reuse.status == "cancelled"
 
 
+def test_out_of_range_integer_metadata_matches_rust_number_rounding() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="large-number",
+            name="extension",
+            arguments={"value": 2**64},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="large-number",
+            name="extension",
+            arguments={"value": 2**64 + 1},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "requested"
+
+
 def test_duplicate_metadata_uses_the_rendered_action_summary() -> None:
     renderer = RecordingTraceRenderer()
     renderer.event(
