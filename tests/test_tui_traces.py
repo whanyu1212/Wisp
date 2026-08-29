@@ -91,6 +91,32 @@ def test_trace_schema_rejects_out_of_range_tool_exit_codes() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+def test_trace_schema_rejects_coerced_tool_booleans() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "coerced_tool_boolean",
+        [
+            {
+                "type": "rpc.event",
+                "event": {
+                    "type": "tool.result",
+                    "call_id": "call-1",
+                    "name": "read",
+                    "output": "",
+                    "is_error": 0,
+                },
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="trace boolean"):
+        TraceFileAdapter.validate_python(data)
+
+
 @pytest.mark.parametrize("path", _all_trace_paths(), ids=lambda p: p.name)
 def test_trace_fixture_validates_against_schema(path: Path) -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -878,6 +904,27 @@ def test_action_summaries_use_rust_whitespace_semantics() -> None:
             call_id="separator",
             name="extension",
             arguments={"value": "left right"},
+        )
+    )
+
+    (card,) = renderer.tool_card_projection()
+    assert card.status == "error"
+
+
+def test_generic_argument_omission_count_affects_canonical_metadata() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="omitted-fields",
+            name="extension",
+            arguments={f"key-{index}": index for index in range(9)},
+        )
+    )
+    renderer.event(
+        ToolCallRequested(
+            call_id="omitted-fields",
+            name="extension",
+            arguments={f"key-{index}": index for index in range(10)},
         )
     )
 

@@ -15,6 +15,8 @@ const BUILTIN_ACTION_MAX_CHARS: usize = 200;
 const GENERIC_ACTION_MAX_CHARS: usize = 160;
 const GENERIC_VALUE_MAX_CHARS: usize = 64;
 const GENERIC_MAX_ITEMS: usize = 8;
+const GENERIC_ITEMS_KEY: &str = "\0wisp.items";
+const GENERIC_OMITTED_KEY: &str = "\0wisp.omitted";
 const PATH_MAX_CHARS: usize = 80;
 const REASON_MAX_BYTES: usize = 512;
 const TOOL_NAME_MAX_CHARS: usize = 128;
@@ -658,7 +660,11 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                     bounded_argument_value(value, GENERIC_VALUE_MAX_CHARS),
                 );
             }
-            return Value::Object(bounded);
+            let omitted = arguments.len().saturating_sub(GENERIC_MAX_ITEMS);
+            let mut wrapper = Map::with_capacity(2);
+            wrapper.insert(GENERIC_ITEMS_KEY.into(), Value::Object(bounded));
+            wrapper.insert(GENERIC_OMITTED_KEY.into(), Value::from(omitted as u64));
+            return Value::Object(wrapper);
         }
     };
     let mut bounded = Map::new();
@@ -922,6 +928,9 @@ fn known_tool(name: &str) -> bool {
 }
 
 fn format_tool_arguments(name: &str, arguments: &Value) -> String {
+    if !known_tool(name) {
+        return format_generic_value(arguments);
+    }
     let Some(arguments) = arguments.as_object() else {
         return clip_chars(&scalar_value(arguments), GENERIC_VALUE_MAX_CHARS);
     };
@@ -932,7 +941,7 @@ fn format_tool_arguments(name: &str, arguments: &Value) -> String {
         "ls" => path_value(arguments, "path", "."),
         "bash" => format_bash(arguments),
         "edit" | "write" => path_value(arguments, "path", "<path>"),
-        _ => return format_generic(arguments),
+        _ => unreachable!("unknown tools return before built-in formatting"),
     };
     clip_chars(&formatted, BUILTIN_ACTION_MAX_CHARS)
 }
@@ -988,7 +997,26 @@ fn format_bash(arguments: &Map<String, Value>) -> String {
     }
 }
 
-fn format_generic(arguments: &Map<String, Value>) -> String {
+fn format_generic_value(arguments: &Value) -> String {
+    let Some(object) = arguments.as_object() else {
+        return clip_chars(&scalar_value(arguments), GENERIC_VALUE_MAX_CHARS);
+    };
+    let wrapped = object.len() == 2
+        && object.get(GENERIC_ITEMS_KEY).is_some_and(Value::is_object)
+        && object.get(GENERIC_OMITTED_KEY).is_some_and(Value::is_u64);
+    if wrapped {
+        let items = object[GENERIC_ITEMS_KEY]
+            .as_object()
+            .expect("validated generic items wrapper");
+        let omitted = object[GENERIC_OMITTED_KEY]
+            .as_u64()
+            .expect("validated generic omission wrapper");
+        return format_generic(items, usize::try_from(omitted).unwrap_or(usize::MAX));
+    }
+    format_generic(object, object.len().saturating_sub(GENERIC_MAX_ITEMS))
+}
+
+fn format_generic(arguments: &Map<String, Value>, omitted: usize) -> String {
     let mut keys: Vec<&String> = Vec::with_capacity(GENERIC_MAX_ITEMS);
     for key in arguments.keys() {
         let position = keys
@@ -1010,8 +1038,15 @@ fn format_generic(arguments: &Map<String, Value>) -> String {
             clip_chars(&scalar_value(value), GENERIC_VALUE_MAX_CHARS)
         ));
     }
-    if arguments.len() > GENERIC_MAX_ITEMS {
-        parts.push(format!("… +{} fields", arguments.len() - GENERIC_MAX_ITEMS));
+    if omitted > 0 {
+        let marker = format!("… +{omitted} fields");
+        while !parts.is_empty()
+            && parts.join(" ").chars().count() + 1 + marker.chars().count()
+                > GENERIC_ACTION_MAX_CHARS
+        {
+            parts.pop();
+        }
+        parts.push(marker);
     }
     clip_chars(&parts.join(" "), GENERIC_ACTION_MAX_CHARS)
 }
@@ -1306,6 +1341,25 @@ mod tests {
         assert!(card.enrich_call(&second));
         assert_eq!(card.status, ToolStatus::Requested);
         assert_eq!(card.action_arguments, original_action);
+    }
+
+    #[test]
+    fn generic_action_reserves_a_truthful_omission_marker() {
+        let arguments = (0..12)
+            .map(|index| (format!("key-{index:02}"), Value::String("x".repeat(64))))
+            .collect::<Map<_, _>>();
+        let bounded = bounded_tool_arguments("extension", &Value::Object(arguments));
+        let card = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "omitted".into(),
+                name: "extension".into(),
+                arguments: bounded,
+            },
+            ToolStatus::Requested,
+        );
+
+        assert!(card.action_arguments.ends_with("… +4 fields"));
+        assert!(card.action_arguments.chars().count() <= GENERIC_ACTION_MAX_CHARS);
     }
 
     #[test]

@@ -1057,7 +1057,13 @@ mod tests {
         else {
             panic!("tool call expected");
         };
-        assert_eq!(generic.arguments.as_object().unwrap().len(), 8);
+        let generic_wrapper = generic.arguments.as_object().unwrap();
+        assert_eq!(generic_wrapper.len(), 2);
+        assert_eq!(
+            generic_wrapper["\0wisp.items"].as_object().unwrap().len(),
+            8
+        );
+        assert_eq!(generic_wrapper["\0wisp.omitted"], 992);
         assert!(generic.arguments.to_string().len() < 1_000);
     }
 

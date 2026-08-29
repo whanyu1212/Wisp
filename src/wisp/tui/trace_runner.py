@@ -707,6 +707,7 @@ def _clip_trace_card_field(value: str) -> str:
 
 def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, str]:
     bounded_name = _clip_trace_card_field(name)
+    generic_omitted = 0
     if not isinstance(arguments, dict):
         bounded_arguments: dict[str, object] = {}
     else:
@@ -741,6 +742,7 @@ def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, s
                 bounded_arguments[_clip_trace_metadata(str(key), 64)] = _bounded_trace_argument(
                     arguments[key], 64
                 )
+            generic_omitted = max(0, len(arguments) - 8)
         else:
             bounded_arguments = {}
             for key in selected:
@@ -753,10 +755,19 @@ def _canonical_trace_tool_metadata(name: str, arguments: object) -> tuple[str, s
                         arguments[key], 200 if key == "command" else 256
                     )
                 bounded_arguments[key] = value
-    return (bounded_name, _trace_action_arguments(name, bounded_arguments))
+            generic_omitted = 0
+    return (
+        bounded_name,
+        _trace_action_arguments(name, bounded_arguments, generic_omitted=generic_omitted),
+    )
 
 
-def _trace_action_arguments(name: str, arguments: dict[str, object]) -> str:
+def _trace_action_arguments(
+    name: str,
+    arguments: dict[str, object],
+    *,
+    generic_omitted: int = 0,
+) -> str:
     if name == "read":
         output = _trace_path_value(arguments, "path", "<path>")
         offset = _trace_positive_int(arguments.get("offset"))
@@ -801,6 +812,11 @@ def _trace_action_arguments(name: str, arguments: dict[str, object]) -> str:
         f"{_clip_trace_metadata(_trace_scalar_value(arguments[key]), 64)}"
         for key in sorted(arguments)[:8]
     ]
+    if generic_omitted > 0:
+        marker = f"… +{generic_omitted} fields"
+        while parts and len(" ".join(parts)) + 1 + len(marker) > 160:
+            parts.pop()
+        parts.append(marker)
     return _clip_trace_metadata(" ".join(parts), 160)
 
 

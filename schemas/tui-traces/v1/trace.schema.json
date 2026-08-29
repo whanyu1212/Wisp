@@ -609,6 +609,62 @@
                   }
                 }
               }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tool.result"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "created": {
+                    "type": "boolean"
+                  },
+                  "is_error": {
+                    "type": "boolean"
+                  },
+                  "output_has_exit_status": {
+                    "type": "boolean"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "stderr_truncated": {
+                    "type": "boolean"
+                  },
+                  "stdout_truncated": {
+                    "type": "boolean"
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tool.approval.resolved"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  }
+                }
+              }
             }
           ],
           "required": [

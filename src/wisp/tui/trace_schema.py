@@ -188,7 +188,34 @@ class TraceRpcEvent(_TraceModel):
                             }
                         }
                     },
-                }
+                },
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.result"}},
+                        "required": ["type"],
+                    },
+                    "then": {
+                        "properties": {
+                            field: {"type": "boolean"}
+                            for field in (
+                                "is_error",
+                                "retryable",
+                                "output_has_exit_status",
+                                "created",
+                                "truncated",
+                                "stdout_truncated",
+                                "stderr_truncated",
+                            )
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"type": {"const": "tool.approval.resolved"}},
+                        "required": ["type"],
+                    },
+                    "then": {"properties": {"approved": {"type": "boolean"}}},
+                },
             ],
             "x-wisp-max-depth": _MAX_JSON_DEPTH,
             "x-wisp-max-nodes": _MAX_JSON_NODES,
@@ -200,6 +227,7 @@ class TraceRpcEvent(_TraceModel):
     @classmethod
     def _bound_event_structure(cls, value: Any) -> Any:
         bounded = _bound_json_structure(value, label="RPC event")
+        boolean_fields: tuple[str, ...]
         if isinstance(bounded, dict) and bounded.get("type") == "tool.result":
             exit_code = bounded.get("exit_code")
             if (
@@ -208,6 +236,22 @@ class TraceRpcEvent(_TraceModel):
                 and not -(2**63) <= exit_code <= 2**63 - 1
             ):
                 raise ValueError("tool.result exit_code exceeds the signed 64-bit trace range")
+            boolean_fields = (
+                "is_error",
+                "retryable",
+                "output_has_exit_status",
+                "created",
+                "truncated",
+                "stdout_truncated",
+                "stderr_truncated",
+            )
+        elif isinstance(bounded, dict) and bounded.get("type") == "tool.approval.resolved":
+            boolean_fields = ("approved",)
+        else:
+            boolean_fields = ()
+        for field in boolean_fields:
+            if field in bounded and not isinstance(bounded[field], bool):
+                raise ValueError(f"{bounded['type']} {field} must be a trace boolean")
         return bounded
 
 
