@@ -276,11 +276,20 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
-        self.retained_output = BoundedText::head(
-            &normalize_newlines(&input.output),
-            TOOL_OUTPUT_MAX_BYTES,
-            TOOL_OUTPUT_MAX_LINES,
-        );
+        let normalized_output = normalize_newlines(&input.output);
+        self.retained_output = if self.status == ToolStatus::Error {
+            BoundedText::tail(
+                &normalized_output,
+                TOOL_OUTPUT_MAX_BYTES,
+                TOOL_OUTPUT_MAX_LINES,
+            )
+        } else {
+            BoundedText::head(
+                &normalized_output,
+                TOOL_OUTPUT_MAX_BYTES,
+                TOOL_OUTPUT_MAX_LINES,
+            )
+        };
         self.retained_output.source_bytes = input
             .output_source_bytes
             .max(u64::try_from(input.output.len()).unwrap_or(u64::MAX));
@@ -288,7 +297,14 @@ impl ToolCardSnapshot {
             .retained_output
             .source_bytes
             .saturating_sub(u64::try_from(self.retained_output.text.len()).unwrap_or(u64::MAX));
-        let preview = self.retained_output.preview_head();
+        if self.status == ToolStatus::Error {
+            self.retained_output.base_offset = self.retained_output.dropped_bytes;
+        }
+        let preview = if self.status == ToolStatus::Error {
+            self.retained_output.preview_tail()
+        } else {
+            self.retained_output.preview_head()
+        };
         self.detail = preferred_result_detail(input, &preview.text, self.status);
         self.backend_truncated = input.truncated;
         self.failure_code = input.failure_code.as_deref().map(bounded_reason);

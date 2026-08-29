@@ -11,6 +11,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JsonSchemaValidationError
 
+from wisp.events import ToolApprovalResolved, ToolCallRequested, ToolResultReady
 from wisp.tui.trace_runner import RecordingTraceRenderer, TraceReplayError, load_trace, run_trace
 from wisp.tui.trace_schema import (
     DEFAULT_TRACE_SCHEMA_DIRECTORY,
@@ -592,6 +593,35 @@ def test_partial_response_retention_is_bounded_across_deltas() -> None:
     renderer.token_delta("x" * 3000)
     with pytest.raises(TraceReplayError, match="retained characters"):
         renderer.token_delta("y" * 1001)
+
+
+def test_denied_process_result_does_not_create_a_generic_trace_card() -> None:
+    renderer = RecordingTraceRenderer()
+    renderer.event(
+        ToolCallRequested(
+            call_id="poll-denied",
+            name="bash",
+            arguments={"operation": "poll", "process_id": "process-1"},
+        )
+    )
+    renderer.event(
+        ToolApprovalResolved(
+            call_id="poll-denied",
+            name="bash",
+            approved=False,
+            reason="denied",
+        )
+    )
+    renderer.event(
+        ToolResultReady(
+            call_id="poll-denied",
+            name="bash",
+            output="Denied by user",
+            is_error=True,
+        )
+    )
+
+    assert renderer.tool_card_projection() == ()
 
 
 def test_rpc_event_payloads_are_bounded() -> None:

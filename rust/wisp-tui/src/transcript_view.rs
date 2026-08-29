@@ -1502,7 +1502,12 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
-            let retained_preview = card.retained_output.preview_head();
+            let tail_preview = card.status == ToolStatus::Error;
+            let retained_preview = if tail_preview {
+                card.retained_output.preview_tail()
+            } else {
+                card.retained_output.preview_head()
+            };
             let detail = if card.detail.is_empty() {
                 retained_preview.text.clone()
             } else if retained_preview.text.is_empty() || retained_preview.text == card.detail {
@@ -1515,13 +1520,17 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .retained_output
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
-            let omission = card_omission(omitted, card.backend_truncated, false);
+            let omission = card_omission(omitted, card.backend_truncated, tail_preview);
             Some(CardProjection {
                 action: format!("• {}", card.action()),
                 detail,
-                detail_base: 0,
+                detail_base: if tail_preview {
+                    usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
+                } else {
+                    0
+                },
                 omission,
-                omission_before_detail: false,
+                omission_before_detail: tail_preview,
                 action_tone: tool_status_tone(card.status),
             })
         }
@@ -2258,6 +2267,42 @@ mod tests {
         assert!(omission.contains("omitted after this preview"));
         assert!(!omission.contains("omitted before this preview"));
         assert!(!projection.omission_before_detail);
+    }
+
+    #[test]
+    fn failed_generic_tool_cards_retain_and_label_the_diagnostic_tail() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("test".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-failed".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "pytest"}),
+        });
+        let output = format!(
+            "EARLY PROGRESS MARKER\n{}ASSERTION FAILED AT DIAGNOSTIC TAIL",
+            "progress\n".repeat(10_000)
+        );
+        let mut failed = tool_result("call-failed", &output);
+        failed.name = "bash".into();
+        failed.is_error = true;
+        failed.exit_code = Some(1);
+        transcript.observe_tool_result(failed);
+
+        let projection = card_projection(transcript.entry(card_id).unwrap()).unwrap();
+        assert!(
+            projection
+                .detail
+                .contains("ASSERTION FAILED AT DIAGNOSTIC TAIL")
+        );
+        assert!(!projection.detail.contains("EARLY PROGRESS MARKER"));
+        assert!(projection.omission_before_detail);
+        assert!(
+            projection
+                .omission
+                .as_deref()
+                .unwrap()
+                .contains("omitted before this preview")
+        );
     }
 
     #[test]

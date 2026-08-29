@@ -181,8 +181,9 @@ class RecordingTraceRenderer(LineTuiRenderer):
             )
         elif isinstance(event, ToolApprovalResolved):
             if event.call_id in self._process_call_ids:
-                if not event.approved:
-                    self._process_call_ids.discard(event.call_id)
+                # Keep denied process calls as tombstones until their synthetic
+                # terminal result arrives; otherwise it is misprojected as a
+                # generic tool card instead of being ignored like the Rust TUI.
                 super().event(event)
                 return
             self._set_tool_card(
