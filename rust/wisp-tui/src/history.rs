@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::tool_cards::{
     BoundedText, INTERRUPTED_TOOL_RESULT_TEXT, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
     ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
-    process_call_identity,
+    identity_for_display, process_call_identity,
 };
 use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
 use crate::transcript::SharedTranscript;
@@ -198,6 +198,9 @@ fn project_tool_result(
                 .remove(position)
                 .map(|(_, process_id)| process_id)
         });
+    if let Some(process_id) = result.process_id.clone() {
+        project_historical_process_result(&mut result, &process_id);
+    }
     if tool_result_status(message) == Some("denied") {
         if !transcript.has_unresolved_tool_call(&result.call_id) {
             transcript.observe_tool_call(ToolCallInput {
@@ -302,6 +305,75 @@ fn tool_result_status(message: &Value) -> Option<&str> {
         .and_then(Value::as_object)
         .and_then(|result| result.get("status"))
         .and_then(Value::as_str)
+}
+
+fn project_historical_process_result(result: &mut ToolResultInput, process_id: &str) {
+    if result.process_state.as_deref() == Some("cancelled")
+        && result.output != INTERRUPTED_TOOL_RESULT_TEXT
+    {
+        result.process_state = None;
+    }
+    let normalized = result.output.replace("\r\n", "\n").replace('\r', "\n");
+    let (header, remainder) = normalized
+        .split_once('\n')
+        .map_or((normalized.as_str(), ""), |(header, remainder)| {
+            (header, remainder)
+        });
+    let prefix = format!("Process {}", identity_for_display(process_id));
+    let (state, exit_code, process_error) = if header == format!("{prefix} is still running") {
+        ("running", None, None)
+    } else if let Some(exit_code) =
+        header.strip_prefix(&format!("{prefix} completed with exit code "))
+    {
+        let Ok(parsed) = exit_code.parse::<i64>() else {
+            return;
+        };
+        if parsed.to_string() != exit_code {
+            return;
+        }
+        ("completed", Some(parsed), None)
+    } else if header == format!("{prefix} timed out") {
+        ("timed_out", None, None)
+    } else if header == format!("{prefix} cancelled") {
+        ("cancelled", None, None)
+    } else if header == format!("{prefix} failed") {
+        ("failed", None, None)
+    } else if let Some(error) = header.strip_prefix(&format!("{prefix} failed: ")) {
+        ("failed", None, Some(error.to_owned()))
+    } else {
+        return;
+    };
+    let Some((stdout, stderr)) = historical_process_streams(remainder) else {
+        return;
+    };
+    result.process_state = Some(state.into());
+    if let Some(exit_code) = exit_code {
+        result.exit_code = Some(exit_code);
+    }
+    result.process_error = process_error;
+    result.stdout = stdout.map(str::to_owned);
+    result.stdout_source_bytes = stdout
+        .map(|output| u64::try_from(output.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    result.stderr = stderr.map(str::to_owned);
+    result.stderr_source_bytes = stderr
+        .map(|output| u64::try_from(output.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+}
+
+fn historical_process_streams(output: &str) -> Option<(Option<&str>, Option<&str>)> {
+    if output.is_empty() {
+        return Some((None, None));
+    }
+    if let Some(stdout_and_stderr) = output.strip_prefix("stdout:\n") {
+        if let Some((stdout, stderr)) = stdout_and_stderr.split_once("\nstderr:\n") {
+            return Some((Some(stdout), Some(stderr)));
+        }
+        return Some((Some(stdout_and_stderr), None));
+    }
+    output
+        .strip_prefix("stderr:\n")
+        .map(|stderr| (None, Some(stderr)))
 }
 
 fn content_for_history(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
@@ -602,7 +674,7 @@ mod tests {
         cancel["tool_calls"] = json!([
             {"call_id": "cancel", "name": "bash", "arguments": {"operation": "cancel", "process_id": "process-1"}}
         ]);
-        let mut cancel_result = message("tool", "cancelled");
+        let mut cancel_result = message("tool", "Process process-1 cancelled");
         cancel_result["tool_call_id"] = json!("cancel");
         cancel_result["tool_name"] = json!("bash");
         cancel_result["tool_result"] = json!({"status": "cancelled"});
@@ -617,6 +689,118 @@ mod tests {
         assert_eq!(card.call_count, 2);
         assert_eq!(card.poll_count, 1);
         assert_eq!(card.display_state.status().as_str(), "cancelled");
+    }
+
+    #[test]
+    fn successful_process_envelopes_restore_state_and_streams() {
+        let mut first_poll = message("assistant", "");
+        first_poll["tool_calls"] = json!([{
+            "call_id": "poll-running",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-success"},
+        }]);
+        let mut running = message(
+            "tool",
+            "Process process-success is still running\nstdout:\nfirst chunk",
+        );
+        running["tool_call_id"] = json!("poll-running");
+        running["tool_name"] = json!("bash");
+        running["tool_result"] = json!({"status": "done"});
+        let mut second_poll = message("assistant", "");
+        second_poll["tool_calls"] = json!([{
+            "call_id": "poll-completed",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-success"},
+        }]);
+        let mut completed = message(
+            "tool",
+            "Process process-success completed with exit code 0\nstdout:\nlast chunk\nstderr:\nwarning",
+        );
+        completed["tool_call_id"] = json!("poll-completed");
+        completed["tool_name"] = json!("bash");
+        completed["tool_result"] = json!({"status": "done"});
+
+        let transcript =
+            project_rpc_messages(&[first_poll, running, second_poll, completed]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Completed
+        );
+        assert!(card.retained_output.text.contains("stdout:\nfirst chunk"));
+        assert!(card.retained_output.text.contains("last chunk"));
+        assert!(card.retained_output.text.contains("stderr:\nwarning"));
+    }
+
+    #[test]
+    fn cancelled_process_envelopes_restore_streams() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "cancel-result",
+            "name": "bash",
+            "arguments": {"operation": "cancel", "process_id": "process-cancelled"},
+        }]);
+        let mut result = message(
+            "tool",
+            "Process process-cancelled cancelled\nstderr:\nterminated cleanly",
+        );
+        result["tool_call_id"] = json!("cancel-result");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "cancelled"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Cancelled
+        );
+        assert!(
+            card.retained_output
+                .text
+                .contains("stderr:\nterminated cleanly")
+        );
+    }
+
+    #[test]
+    fn mismatched_cancelled_envelopes_fall_back_without_guessing_state() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "cancel-mismatch",
+            "name": "bash",
+            "arguments": {"operation": "cancel", "process_id": "process-expected"},
+        }]);
+        let mut result = message(
+            "tool",
+            "Process process-foreign cancelled\nstderr:\nforeign diagnostic",
+        );
+        result["tool_call_id"] = json!("cancel-mismatch");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "cancelled"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Observed
+        );
+        assert!(
+            card.retained_output
+                .text
+                .contains("Process process-foreign cancelled")
+        );
+        assert!(card.retained_output.text.contains("foreign diagnostic"));
     }
 
     #[test]

@@ -279,8 +279,8 @@ for line in sys.stdin:
     prompt_sent = False
     browse_sent = False
     detail_seen = False
-    detail_close_output_offset: int | None = None
-    detail_closed_at: float | None = None
+    detail_resize_output_offset: int | None = None
+    resized_detail_at: float | None = None
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -318,27 +318,29 @@ for line in sys.stdin:
                 # F6 enters visible-card browse mode; Enter opens retained detail.
                 os.write(terminal_fd, b"\x1b[17~\r")
                 browse_sent = True
-            if browse_sent and not detail_seen and b"live retained detail" in output:
+            if (
+                browse_sent
+                and not detail_seen
+                and b"live retained detail" in output
+                and b"Esc close" in output
+            ):
                 detail_seen = True
+                detail_resize_output_offset = len(output)
                 fcntl.ioctl(
                     terminal_fd,
                     termios.TIOCSWINSZ,
                     struct.pack("HHHH", 30, 120, 0, 0),
                 )
-                # Enter closes detail too and is unambiguous after a resize on Linux;
-                # a standalone Escape can remain buffered as a sequence prefix.
-                detail_close_output_offset = len(output)
-                os.write(terminal_fd, b"\r")
             if (
-                detail_close_output_offset is not None
-                and detail_closed_at is None
-                and b"F6 details" in output[detail_close_output_offset:]
+                detail_resize_output_offset is not None
+                and resized_detail_at is None
+                and b"Esc close" in output[detail_resize_output_offset:]
             ):
-                detail_closed_at = time.monotonic()
+                resized_detail_at = time.monotonic()
             if (
-                detail_closed_at is not None
+                resized_detail_at is not None
                 and not quit_sent
-                and time.monotonic() - detail_closed_at >= 0.5
+                and time.monotonic() - resized_detail_at >= 0.5
             ):
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
@@ -363,8 +365,8 @@ for line in sys.stdin:
     assert prompt_sent, bytes(output)
     assert browse_sent, bytes(output)
     assert detail_seen, bytes(output)
-    assert detail_close_output_offset is not None, bytes(output)
-    assert detail_closed_at is not None, bytes(output)
+    assert detail_resize_output_offset is not None, bytes(output)
+    assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
