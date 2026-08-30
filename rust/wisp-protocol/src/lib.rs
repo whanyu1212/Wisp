@@ -562,6 +562,52 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_session_stats", "id": id}))
         }
 
+        /// Construct a bounded persisted-session catalog request.
+        pub fn get_sessions(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_sessions", "id": id, "limit": 50}))
+        }
+
+        /// Construct a request to deselect the active session.
+        pub fn new_session(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "new_session", "id": id}))
+        }
+
+        /// Construct a request to select one persisted session.
+        pub fn select_session(
+            id: &str,
+            session_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "select_session",
+                "id": id,
+                "session_id": session_id,
+            }))
+        }
+
+        /// Construct one bounded latest-page history request.
+        pub fn get_messages(
+            id: &str,
+            session_id: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_messages",
+                "id": id,
+                "limit": 200,
+                "complete_structure": true,
+                "full_content": false,
+            });
+            if let Some(session_id) = session_id {
+                value
+                    .as_object_mut()
+                    .expect("command constructors create JSON objects")
+                    .insert(
+                        "session_id".into(),
+                        serde_json::Value::String(session_id.into()),
+                    );
+            }
+            deserialize(value)
+        }
+
         /// Construct a request to cancel a running or queued command.
         pub fn cancel(id: &str, target_id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))

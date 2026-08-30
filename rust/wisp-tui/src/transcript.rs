@@ -243,6 +243,12 @@ impl Transcript {
         Some(entry_id)
     }
 
+    pub(crate) fn has_unresolved_tool_call(&self, call_id: &str) -> bool {
+        self.call_entries
+            .get(call_id)
+            .is_some_and(|binding| !binding.resolved)
+    }
+
     pub fn observe_tool_call(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested);
         self.update_pending_detail_tracking(entry_id);

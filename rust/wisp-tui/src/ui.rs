@@ -151,6 +151,16 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
             details.push_str(model);
         }
     }
+    if let Some(session) = state.selected_session.as_ref() {
+        details.push_str("  •  ");
+        details.push_str(
+            session
+                .session_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&session.session_path),
+        );
+    }
     let title = Line::from(vec![
         Span::styled(
             " WISP ",
@@ -201,10 +211,12 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let lines = if rows.is_empty() {
-        vec![Line::styled(
-            "Type a prompt below to start.",
-            Style::default().fg(Color::DarkGray),
-        )]
+        let message = if editable(state) {
+            "Type a prompt below to start."
+        } else {
+            ""
+        };
+        vec![Line::styled(message, Style::default().fg(Color::DarkGray))]
     } else {
         rows.into_iter()
             .map(|row| {
@@ -401,12 +413,16 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &PromptEditor) {
-    let title = match state.view_status {
-        ViewStatus::Idle => " prompt ",
-        ViewStatus::Running => " running ",
-        ViewStatus::WaitingForApproval => " approval required ",
-        ViewStatus::WaitingForTrust => " trust required ",
-        ViewStatus::Error => " prompt failed ",
+    let title = if state.session_operation.is_some() {
+        " session "
+    } else {
+        match state.view_status {
+            ViewStatus::Idle => " prompt ",
+            ViewStatus::Running => " running ",
+            ViewStatus::WaitingForApproval => " approval required ",
+            ViewStatus::WaitingForTrust => " trust required ",
+            ViewStatus::Error => " prompt failed ",
+        }
     };
     let border_style = match state.view_status {
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
@@ -464,14 +480,18 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         return;
     }
 
-    let message = match state.view_status {
-        ViewStatus::Running if state.cancel_requested => "Cancelling current prompt…".into(),
-        ViewStatus::Running => {
-            "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
-        }
-        ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
-        ViewStatus::Idle | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
-            String::new()
+    let message = if let Some(operation) = state.session_operation.as_ref() {
+        operation.label().into()
+    } else {
+        match state.view_status {
+            ViewStatus::Running if state.cancel_requested => "Cancelling current prompt…".into(),
+            ViewStatus::Running => {
+                "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
+            }
+            ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
+            ViewStatus::Idle | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
+                String::new()
+            }
         }
     };
     frame.render_widget(
@@ -628,7 +648,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
 }
 
 fn editable(state: &UiState) -> bool {
-    state.input_ready && state.current_command.is_none() && state.view_status == ViewStatus::Idle
+    state.input_ready
+        && state.session_operation.is_none()
+        && state.current_command.is_none()
+        && state.view_status == ViewStatus::Idle
 }
 
 fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
@@ -776,7 +799,7 @@ impl std::io::Write for DecisionPreviewWriter {
     }
 }
 
-fn sanitize_for_terminal(content: &str) -> String {
+pub(crate) fn sanitize_for_terminal(content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut safe = String::with_capacity(normalized.len());
     let mut column = 0_usize;
@@ -928,6 +951,14 @@ mod tests {
         assert!(rendered.contains("rpc v2 / events v34"));
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
+    }
+
+    #[test]
+    fn busy_empty_screen_does_not_invite_early_prompt_input() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(!rendered.contains("Type a prompt below to start."));
     }
 
     #[test]

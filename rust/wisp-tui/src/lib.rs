@@ -5,10 +5,12 @@
 mod cli;
 mod detail_view;
 mod framing;
+pub mod history;
 mod markdown;
 mod process;
 mod prompt_editor;
 pub mod reducer;
+mod session_picker;
 mod syntax;
 mod terminal;
 mod tool_cards;
@@ -34,6 +36,7 @@ use reducer::{
     BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
     ViewStatus,
 };
+use session_picker::{SessionPicker, SessionPickerAction};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::pending;
@@ -324,6 +327,7 @@ struct LiveUi {
     render_pending: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
     unsendable_response_context: Option<UnsendableResponseContext>,
+    session_picker: Option<SessionPicker>,
 }
 
 impl Default for LiveUi {
@@ -340,11 +344,19 @@ impl Default for LiveUi {
             render_pending: true,
             rendered_decision_context: None,
             unsendable_response_context: None,
+            session_picker: None,
         }
     }
 }
 
 impl LiveUi {
+    fn reset_transcript_presentation(&mut self) {
+        self.transcript_viewport = TranscriptViewport::default();
+        self.transcript_row_cache = TranscriptRowCache::default();
+        self.detail_view = DetailView::default();
+        self.browse_selected = None;
+    }
+
     async fn apply_effects(
         &mut self,
         effects: Vec<UiEffect>,
@@ -367,10 +379,46 @@ impl LiveUi {
                     }
                     send_payload(writer, payload, limit).await?;
                 }
+                UiEffect::ShowSessionPicker {
+                    sessions,
+                    selected_session_id,
+                } => {
+                    self.session_picker =
+                        Some(SessionPicker::new(sessions, selected_session_id.as_deref()));
+                    self.render_pending = true;
+                }
+                UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
+                UiEffect::Notice(notice) => {
+                    self.notice = Some(notice);
+                    self.render_pending = true;
+                }
                 UiEffect::RequestRender => self.render_pending = true,
                 UiEffect::Exit => control = LoopControl::Exit,
             }
         }
+        Ok(control)
+    }
+
+    async fn dispatch_session_action(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let startup = matches!(&action, UiAction::StartupHydration);
+        if let Some(notice) =
+            self.reduced_action_frame_limit_notice(&action, "session command", limit)?
+        {
+            if startup {
+                return Err(Error::FrameTooLarge { limit });
+            }
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let control = self.dispatch(action, writer, limit).await?;
+        self.editor.clear();
+        self.notice = None;
         Ok(control)
     }
 
@@ -391,6 +439,9 @@ impl LiveUi {
         let follow_after_update = matches!(&action, UiAction::Submit(_));
         let transcript_generation = self.state.transcript.generation();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        let transcript_replaced = effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
         if matches!(
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -412,7 +463,7 @@ impl LiveUi {
                 self.browse_selected = None;
             }
         }
-        if self.state.transcript.generation() != transcript_generation {
+        if !transcript_replaced && self.state.transcript.generation() != transcript_generation {
             let action = if follow_after_update {
                 TranscriptViewAction::FollowTail
             } else {
@@ -483,6 +534,20 @@ impl LiveUi {
         label: &str,
         limit: usize,
     ) -> Result<Option<String>, Error> {
+        if let UiAction::SelectSession { session_id } = action {
+            if reducer::valid_session_id(session_id) {
+                let id = self
+                    .ids
+                    .peek_following_prefixed_id(CommandKind::GetMessages.prefix());
+                let command = WispTypedClientRpcCommands::get_messages(&id, Some(session_id))?;
+                let encoded_len = serde_json::to_vec(&command)?.len();
+                if encoded_len > limit {
+                    return Ok(Some(format!(
+                        "Skipped session selection: its {encoded_len}-byte get_messages frame exceeds the negotiated {limit}-byte limit; selection was not sent."
+                    )));
+                }
+            }
+        }
         let mut state = self.state.clone();
         let mut ids = self.ids.clone();
         let effects = reducer::reduce(&mut state, action.clone(), &mut ids)?;
@@ -538,17 +603,21 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            ui::render_interactive(
-                frame,
-                &self.state,
-                &mut self.transcript_viewport,
-                &mut self.transcript_row_cache,
-                &self.editor,
-                connection,
-                self.notice.as_deref(),
-                self.browse_selected,
-                Some(&mut self.detail_view),
-            );
+            if let Some(picker) = &self.session_picker {
+                session_picker::render(frame, frame.area(), picker);
+            } else {
+                ui::render_interactive(
+                    frame,
+                    &self.state,
+                    &mut self.transcript_viewport,
+                    &mut self.transcript_row_cache,
+                    &self.editor,
+                    connection,
+                    self.notice.as_deref(),
+                    self.browse_selected,
+                    Some(&mut self.detail_view),
+                );
+            }
         })?;
         self.rendered_decision_context = rendered_decision_context;
         self.render_pending = false;
@@ -676,6 +745,13 @@ impl LiveUi {
         if self.unsendable_current_response() {
             return Ok(LoopControl::Exit);
         }
+        if self.state.session_operation.is_some() {
+            return Ok(if quit_if_idle {
+                LoopControl::Exit
+            } else {
+                LoopControl::Continue
+            });
+        }
         if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
             if quit_if_idle {
                 return Ok(LoopControl::Exit);
@@ -693,6 +769,7 @@ impl LiveUi {
 
     fn prompt_editable(&self) -> bool {
         self.state.input_ready
+            && self.state.session_operation.is_none()
             && self.state.current_command.is_none()
             && self.state.view_status == ViewStatus::Idle
     }
@@ -852,6 +929,51 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    async fn handle_session_picker_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return Ok(LoopControl::Continue);
+        };
+        match picker.handle_key(key) {
+            SessionPickerAction::None => {
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionPickerAction::Cancelled => {
+                self.session_picker = None;
+                self.notice = Some("Session selection cancelled.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionPickerAction::Selected(session_id) => {
+                if !reducer::valid_session_id(&session_id) {
+                    self.notice =
+                        Some("Session ID is empty or exceeds the 4096-byte limit.".into());
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                if let Some(notice) = self.reduced_action_frame_limit_notice(
+                    &UiAction::SelectSession {
+                        session_id: session_id.clone(),
+                    },
+                    "session command",
+                    limit,
+                )? {
+                    self.notice = Some(notice);
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                self.session_picker = None;
+                self.dispatch(UiAction::SelectSession { session_id }, writer, limit)
+                    .await
+            }
+        }
+    }
+
     fn handle_detail_key(&mut self, key: KeyEvent) -> LoopControl {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
             self.detail_view.close();
@@ -913,6 +1035,10 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         match input {
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) if self.session_picker.is_some() => {
+                self.handle_session_picker_key(key, writer, limit).await
+            }
+            Input::Paste(_) if self.session_picker.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.detail_view.is_open() => Ok(self.handle_detail_key(key)),
             Input::Paste(_) if self.detail_view.is_open() => Ok(LoopControl::Continue),
             Input::Key(key) if self.browse_selected.is_some() => Ok(self.handle_browse_key(key)),
@@ -972,22 +1098,59 @@ impl LiveUi {
             Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
                     let prompt = self.editor.text().to_owned();
-                    if prompt.trim().is_empty() {
-                        self.notice = Some("Enter a non-empty prompt before sending.".into());
-                        self.render_pending = true;
-                        return Ok(LoopControl::Continue);
+                    match session_command(&prompt) {
+                        SessionCommand::ResumeCatalog => {
+                            self.dispatch_session_action(
+                                UiAction::LoadSessionCatalog,
+                                writer,
+                                limit,
+                            )
+                            .await
+                        }
+                        SessionCommand::ResumeSession(session_id) => {
+                            if !reducer::valid_session_id(&session_id) {
+                                self.notice = Some(
+                                    "Session ID is empty or exceeds the 4096-byte limit.".into(),
+                                );
+                                self.render_pending = true;
+                                return Ok(LoopControl::Continue);
+                            }
+                            self.dispatch_session_action(
+                                UiAction::SelectSession { session_id },
+                                writer,
+                                limit,
+                            )
+                            .await
+                        }
+                        SessionCommand::New => {
+                            self.dispatch_session_action(UiAction::NewSession, writer, limit)
+                                .await
+                        }
+                        SessionCommand::Invalid(usage) => {
+                            self.notice = Some(usage.into());
+                            self.render_pending = true;
+                            Ok(LoopControl::Continue)
+                        }
+                        SessionCommand::Prompt => {
+                            if prompt.trim().is_empty() {
+                                self.notice =
+                                    Some("Enter a non-empty prompt before sending.".into());
+                                self.render_pending = true;
+                                return Ok(LoopControl::Continue);
+                            }
+                            if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
+                                self.notice = Some(notice);
+                                self.render_pending = true;
+                                return Ok(LoopControl::Continue);
+                            }
+                            let control = self
+                                .dispatch(UiAction::Submit(prompt), writer, limit)
+                                .await?;
+                            self.editor.clear();
+                            self.notice = None;
+                            Ok(control)
+                        }
                     }
-                    if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
-                        self.notice = Some(notice);
-                        self.render_pending = true;
-                        return Ok(LoopControl::Continue);
-                    }
-                    let control = self
-                        .dispatch(UiAction::Submit(prompt), writer, limit)
-                        .await?;
-                    self.editor.clear();
-                    self.notice = None;
-                    Ok(control)
                 }
                 EditorAction::Edit(outcome) => {
                     let notice_changed = self.update_edit_notice(outcome);
@@ -1198,6 +1361,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
             event_schema_version: events,
         };
         let mut live_ui = LiveUi::default();
+        live_ui
+            .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
+            .await?;
         let mut transport_closed_diagnostic = None;
         let mut redraw = interval(FRAME_INTERVAL);
         redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1691,6 +1857,31 @@ fn is_bidi_control(character: char) -> bool {
             | '\u{2068}'
             | '\u{2069}'
     )
+}
+
+enum SessionCommand {
+    Prompt,
+    ResumeCatalog,
+    ResumeSession(String),
+    New,
+    Invalid(&'static str),
+}
+
+fn session_command(prompt: &str) -> SessionCommand {
+    let trimmed = prompt.trim();
+    if trimmed == "/resume" {
+        return SessionCommand::ResumeCatalog;
+    }
+    if trimmed == "/new" {
+        return SessionCommand::New;
+    }
+    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["/resume", session_id] => SessionCommand::ResumeSession((*session_id).into()),
+        ["/resume", ..] => SessionCommand::Invalid("Usage: /resume [session-id]"),
+        ["/new", ..] => SessionCommand::Invalid("Usage: /new"),
+        _ => SessionCommand::Prompt,
+    }
 }
 
 enum Input {
@@ -2231,6 +2422,76 @@ mod tests {
             classify_backend_exit(exit_status(9)),
             Error::BackendExitFailure(status) if status.code() == Some(9)
         ));
+    }
+
+    #[test]
+    fn session_slash_parser_keeps_unrelated_slashes_as_prompts() {
+        assert!(matches!(
+            session_command(" /resume "),
+            SessionCommand::ResumeCatalog
+        ));
+        assert!(matches!(
+            session_command("/resume session-1"),
+            SessionCommand::ResumeSession(session_id) if session_id == "session-1"
+        ));
+        assert!(matches!(session_command("/new"), SessionCommand::New));
+        assert!(matches!(
+            session_command("/resume one two"),
+            SessionCommand::Invalid("Usage: /resume [session-id]")
+        ));
+        assert!(matches!(
+            session_command("/new extra"),
+            SessionCommand::Invalid("Usage: /new")
+        ));
+        assert!(matches!(
+            session_command("/unrelated"),
+            SessionCommand::Prompt
+        ));
+    }
+
+    #[tokio::test]
+    async fn transcript_replacement_effect_resets_live_presentation_state() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        for prompt in ["one", "two", "three"] {
+            live_ui.state.transcript.append_prompt(prompt.into());
+        }
+        live_ui
+            .transcript_viewport
+            .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache);
+        live_ui.transcript_viewport.reduce(
+            TranscriptViewAction::PageUp,
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+        );
+        live_ui.transcript_viewport.reduce(
+            TranscriptViewAction::OutputChanged,
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+        );
+        live_ui.browse_selected = live_ui
+            .state
+            .transcript
+            .entries()
+            .first()
+            .map(|entry| entry.id);
+        assert!(!live_ui.transcript_viewport.follows_tail());
+        assert!(live_ui.transcript_viewport.has_unseen_output());
+        assert!(live_ui.browse_selected.is_some());
+
+        live_ui
+            .apply_effects(
+                vec![UiEffect::ReplaceTranscript],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.transcript_viewport.follows_tail());
+        assert!(!live_ui.transcript_viewport.has_unseen_output());
+        assert!(live_ui.browse_selected.is_none());
+        assert!(!live_ui.detail_view.is_open());
     }
 
     #[tokio::test]
@@ -2994,6 +3255,93 @@ mod tests {
                 .as_deref()
                 .is_some_and(|notice| notice.contains("cancellation"))
         );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn selection_preflight_keeps_direct_and_picker_selection_retryable() {
+        let session_id = "x".repeat(reducer::SESSION_ID_MAX_BYTES);
+        let select =
+            WispTypedClientRpcCommands::select_session("select_session-1", &session_id).unwrap();
+        let hydration =
+            WispTypedClientRpcCommands::get_messages("get_messages-2", Some(&session_id)).unwrap();
+        let limit = serde_json::to_vec(&select).unwrap().len();
+        assert!(serde_json::to_vec(&hydration).unwrap().len() > limit);
+
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut direct = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        direct.state.transcript.append_prompt("old content".into());
+        let prompt = format!("/resume {session_id}");
+        direct.editor.insert_paste(&prompt);
+        direct
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                limit,
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct.editor.text(), prompt);
+        assert!(direct.state.selected_session.is_none());
+        assert!(direct.state.session_operation.is_none());
+        assert_eq!(
+            direct.state.transcript.latest_user_text(),
+            Some("old content")
+        );
+        assert!(
+            direct
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("get_messages"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let mut picker = LiveUi {
+            render_pending: false,
+            session_picker: Some(SessionPicker::new(
+                vec![reducer::SessionSummary {
+                    session_id,
+                    session_path: "/sessions/large.jsonl".into(),
+                    name: None,
+                    updated_at: "now".into(),
+                    entry_count: 0,
+                }],
+                None,
+            )),
+            ..LiveUi::default()
+        };
+        picker
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                limit,
+            )
+            .await
+            .unwrap();
+        assert!(picker.session_picker.is_some());
+        assert!(picker.state.selected_session.is_none());
+        assert!(picker.state.session_operation.is_none());
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn startup_hydration_preflight_is_terminal() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        let command = WispTypedClientRpcCommands::get_messages("get_messages-1", None).unwrap();
+        let limit = serde_json::to_vec(&command).unwrap().len() - 1;
+
+        assert!(matches!(
+            live_ui
+                .dispatch_session_action(UiAction::StartupHydration, &writer_tx, limit)
+                .await,
+            Err(Error::FrameTooLarge { limit: actual }) if actual == limit
+        ));
+        assert!(live_ui.state.session_operation.is_none());
+        assert!(live_ui.state.input_ready);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

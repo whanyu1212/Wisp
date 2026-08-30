@@ -1,0 +1,898 @@
+//! Bounded, renderer-neutral projection of one validated RPC history page.
+
+use std::collections::VecDeque;
+
+use serde_json::{Map, Value};
+use thiserror::Error;
+
+use crate::tool_cards::{
+    BoundedText, INTERRUPTED_TOOL_RESULT_TEXT, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
+    ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
+    identity_for_display, process_call_identity,
+};
+use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
+use crate::transcript::SharedTranscript;
+
+pub const HISTORY_MESSAGE_LIMIT: usize = 200;
+const HISTORY_TOOL_CALL_LIMIT: usize = 128;
+const HISTORY_PROCESS_CALL_LIMIT: usize = 1024;
+const CONTENT_TRUNCATED_MARKER: &str = "[content truncated]";
+const HISTORY_TRUNCATED_MARKER: &str = "[earlier session history omitted]";
+const EMPTY_ASSISTANT_MESSAGE: &str = "(empty assistant message)";
+const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
+
+#[derive(Debug, Error)]
+pub enum HistoryProjectionError {
+    #[error("history page has more than {HISTORY_MESSAGE_LIMIT} messages")]
+    TooManyMessages,
+    #[error("history message {index} has more than {HISTORY_TOOL_CALL_LIMIT} tool calls")]
+    TooManyToolCalls { index: usize },
+    #[error("history message {index} has an invalid {field} field")]
+    InvalidField { index: usize, field: &'static str },
+}
+
+/// Project exactly one latest-first RPC page, already validated by the protocol layer.
+///
+/// The RPC backend returns message snapshots in chronological order. This function deliberately
+/// owns no cursor, durable-entry map, or paging state: a caller installs the returned transcript
+/// atomically once its matching command succeeds.
+pub fn project_rpc_messages(
+    messages: &[Value],
+) -> Result<SharedTranscript, HistoryProjectionError> {
+    project_rpc_message_page(messages, false)
+}
+
+pub fn project_rpc_message_page(
+    messages: &[Value],
+    truncated: bool,
+) -> Result<SharedTranscript, HistoryProjectionError> {
+    if messages.len() > HISTORY_MESSAGE_LIMIT {
+        return Err(HistoryProjectionError::TooManyMessages);
+    }
+
+    let mut transcript = SharedTranscript::default();
+    if truncated {
+        transcript.complete_message(0, HISTORY_TRUNCATED_MARKER.into());
+    }
+    let mut process_ids = VecDeque::new();
+    for (index, message) in messages.iter().enumerate() {
+        match string(message, index, "role")? {
+            "system" => {}
+            "user" => {
+                transcript.append_prompt(user_content(message, index)?);
+            }
+            "assistant" => project_assistant(&mut transcript, &mut process_ids, message, index)?,
+            "tool" => project_tool_result(&mut transcript, &mut process_ids, message, index)?,
+            _ => {
+                return Err(HistoryProjectionError::InvalidField {
+                    index,
+                    field: "role",
+                });
+            }
+        };
+    }
+    transcript.settle_unresolved_tools(MISSING_TOOL_RESULT);
+    Ok(transcript)
+}
+
+fn project_assistant(
+    transcript: &mut SharedTranscript,
+    process_ids: &mut VecDeque<(String, String)>,
+    message: &Value,
+    index: usize,
+) -> Result<(), HistoryProjectionError> {
+    let content = content_for_history(message, index)?;
+    let tool_calls = array(message, index, "tool_calls")?;
+    let original_count = message
+        .get("tool_calls_original_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| u64::try_from(tool_calls.len()).unwrap_or(u64::MAX));
+    let tool_calls_truncated = message
+        .get("tool_calls_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if tool_calls.len() > HISTORY_TOOL_CALL_LIMIT
+        || tool_calls_truncated
+        || original_count > u64::try_from(tool_calls.len()).unwrap_or(u64::MAX)
+    {
+        return Err(HistoryProjectionError::TooManyToolCalls { index });
+    }
+    if !content.is_empty() {
+        transcript.complete_message(turn(index), content);
+    } else if tool_calls.is_empty() {
+        transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
+    }
+    for tool_call in tool_calls {
+        let tool_call = tool_call_input(tool_call, index)?;
+        if let Some(process) = process_call_identity(&tool_call.name, &tool_call.arguments) {
+            process_ids.retain(|(call_id, _)| call_id != &tool_call.call_id);
+            if process_ids.len() == HISTORY_PROCESS_CALL_LIMIT {
+                process_ids.pop_front();
+            }
+            process_ids.push_back((tool_call.call_id.clone(), process.process_id));
+        }
+        transcript.observe_tool_call(tool_call);
+    }
+    Ok(())
+}
+
+fn user_content(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
+    let Some(invocation) = message
+        .get("skill_invocation")
+        .filter(|value| !value.is_null())
+    else {
+        return content_for_history(message, index);
+    };
+    let Some(invocation) = invocation.as_object() else {
+        return Err(HistoryProjectionError::InvalidField {
+            index,
+            field: "skill_invocation",
+        });
+    };
+    let name = BoundedText::head(
+        object_string(invocation, index, "skill_invocation.name")?,
+        128,
+        1,
+    )
+    .text;
+    let bounded_request = BoundedText::head(
+        object_string(invocation, index, "skill_invocation.request")?,
+        TOOL_OUTPUT_MAX_BYTES,
+        TOOL_OUTPUT_MAX_LINES,
+    );
+    let request = bounded_request.text;
+    let request_truncated = object_bool(invocation, index, "skill_invocation.request_truncated")?
+        || bounded_request.dropped_bytes > 0
+        || bounded_request.dropped_lines > 0;
+    let instructions_truncated =
+        object_bool(invocation, index, "skill_invocation.instructions_truncated")?;
+    let request = request.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut content = format!("skill /skill:{name}");
+    if !request.is_empty() {
+        content.push(' ');
+        content.push_str(&request);
+    }
+    if request_truncated {
+        content.push_str(" [request truncated]");
+    }
+    if instructions_truncated {
+        content.push_str(" [instructions truncated]");
+    }
+    Ok(bounded_content(&content, false))
+}
+
+fn tool_call_input(value: &Value, index: usize) -> Result<ToolCallInput, HistoryProjectionError> {
+    let name = string(value, index, "name")?;
+    let arguments = value
+        .get("arguments")
+        .ok_or(HistoryProjectionError::InvalidField {
+            index,
+            field: "tool_call.arguments",
+        })?;
+    let object = arguments
+        .as_object()
+        .ok_or(HistoryProjectionError::InvalidField {
+            index,
+            field: "tool_call.arguments",
+        })?;
+    let arguments_incomplete = value
+        .get("arguments_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("parse_error")
+            .is_some_and(|error| !error.is_null());
+    Ok(ToolCallInput {
+        call_id: bounded_identity(string(value, index, "call_id")?),
+        detail_source: if arguments_incomplete {
+            ToolDetailSource::Unavailable(DetailUnavailableReason::MalformedSource)
+        } else {
+            project_tool_detail_source(name, object)
+        },
+        arguments: bounded_tool_arguments(name, arguments),
+        name: bounded_tool_name(name),
+    })
+}
+
+fn project_tool_result(
+    transcript: &mut SharedTranscript,
+    process_ids: &mut VecDeque<(String, String)>,
+    message: &Value,
+    index: usize,
+) -> Result<(), HistoryProjectionError> {
+    let mut result = tool_result(message, index)?;
+    result.process_id = process_ids
+        .iter()
+        .position(|(call_id, _)| call_id == &result.call_id)
+        .and_then(|position| {
+            process_ids
+                .remove(position)
+                .map(|(_, process_id)| process_id)
+        });
+    if let Some(process_id) = result.process_id.clone() {
+        project_historical_process_result(&mut result, &process_id);
+    }
+    if tool_result_status(message) == Some("denied") {
+        if !transcript.has_unresolved_tool_call(&result.call_id) {
+            transcript.observe_tool_call(ToolCallInput {
+                call_id: result.call_id.clone(),
+                name: result.name.clone(),
+                arguments: Value::Object(Map::new()),
+                detail_source: ToolDetailSource::None,
+            });
+        }
+        transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
+    }
+    transcript.observe_tool_result(result);
+    Ok(())
+}
+
+fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, HistoryProjectionError> {
+    let name = optional_string(message, index, "tool_name")?.unwrap_or("unknown");
+    let result = message
+        .get("tool_result")
+        .filter(|value| !value.is_null())
+        .and_then(Value::as_object);
+    let status = result
+        .and_then(|result| result.get("status"))
+        .and_then(Value::as_str);
+    let persisted_is_error = optional_bool(message, index, "is_error")?.unwrap_or(false);
+    let legacy_interrupted = status.is_none()
+        && persisted_is_error
+        && string(message, index, "content")? == INTERRUPTED_TOOL_RESULT_TEXT;
+    let is_error = persisted_is_error || matches!(status, Some("error" | "denied"));
+    let output = content_for_history(message, index)?;
+    let before_text = result
+        .and_then(|result| result.get("before_text"))
+        .map(|value| optional_value_string(value, index, "tool_result.before_text"))
+        .transpose()?
+        .flatten()
+        .map(|value| bounded_content(value, false));
+    let summary = result
+        .and_then(|result| result.get("summary"))
+        .map(|value| optional_value_string(value, index, "tool_result.summary"))
+        .transpose()?
+        .flatten()
+        .map(|value| BoundedText::head(value, 512, 8).text);
+    let exit_code = result
+        .and_then(|result| result.get("exit_code"))
+        .map(|value| optional_i64(value, index, "tool_result.exit_code"))
+        .transpose()?
+        .flatten();
+    let call_id = optional_string(message, index, "tool_call_id")?
+        .map(bounded_identity)
+        .unwrap_or_else(|| format!("s:history-result-boundary-{index}"));
+    Ok(ToolResultInput {
+        call_id,
+        name: bounded_tool_name(name),
+        output_source_bytes: source_count(message, "content_original_bytes", output.len()),
+        output_source_lines: BoundedText::head(
+            &output,
+            TOOL_OUTPUT_MAX_BYTES,
+            TOOL_OUTPUT_MAX_LINES,
+        )
+        .source_lines,
+        output_projection_cut_mid_line: false,
+        output,
+        output_tail: None,
+        is_error,
+        failure_code: None,
+        retryable: false,
+        recovery_hint: None,
+        exit_code,
+        output_has_exit_status: result
+            .and_then(|result| result.get("output_has_exit_status"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        before_text,
+        created: result
+            .and_then(|result| result.get("created"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        summary,
+        truncated: result
+            .and_then(|result| result.get("truncated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || bool(message, index, "content_truncated")?,
+        process_id: None,
+        process_state: (status == Some("cancelled") || legacy_interrupted)
+            .then(|| "cancelled".into()),
+        process_error: None,
+        stdout: None,
+        stdout_source_bytes: 0,
+        stderr: None,
+        stderr_source_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        stdout_dropped_bytes: 0,
+        stderr_dropped_bytes: 0,
+    })
+}
+
+fn tool_result_status(message: &Value) -> Option<&str> {
+    message
+        .get("tool_result")
+        .and_then(Value::as_object)
+        .and_then(|result| result.get("status"))
+        .and_then(Value::as_str)
+}
+
+fn project_historical_process_result(result: &mut ToolResultInput, process_id: &str) {
+    if result.process_state.as_deref() == Some("cancelled")
+        && result.output != INTERRUPTED_TOOL_RESULT_TEXT
+    {
+        result.process_state = None;
+    }
+    let normalized = result.output.replace("\r\n", "\n").replace('\r', "\n");
+    let (header, remainder) = normalized
+        .split_once('\n')
+        .map_or((normalized.as_str(), ""), |(header, remainder)| {
+            (header, remainder)
+        });
+    let prefix = format!("Process {}", identity_for_display(process_id));
+    let (state, exit_code, process_error) = if header == format!("{prefix} is still running") {
+        ("running", None, None)
+    } else if let Some(exit_code) =
+        header.strip_prefix(&format!("{prefix} completed with exit code "))
+    {
+        let Ok(parsed) = exit_code.parse::<i64>() else {
+            return;
+        };
+        if parsed.to_string() != exit_code {
+            return;
+        }
+        ("completed", Some(parsed), None)
+    } else if header == format!("{prefix} timed out") {
+        ("timed_out", None, None)
+    } else if header == format!("{prefix} cancelled") {
+        ("cancelled", None, None)
+    } else if header == format!("{prefix} failed") {
+        ("failed", None, None)
+    } else if let Some(error) = header.strip_prefix(&format!("{prefix} failed: ")) {
+        ("failed", None, Some(error.to_owned()))
+    } else {
+        return;
+    };
+    let Some((stdout, stderr)) = historical_process_streams(remainder) else {
+        return;
+    };
+    result.process_state = Some(state.into());
+    if let Some(exit_code) = exit_code {
+        result.exit_code = Some(exit_code);
+    }
+    result.process_error = process_error;
+    result.stdout = stdout.map(str::to_owned);
+    result.stdout_source_bytes = stdout
+        .map(|output| u64::try_from(output.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    result.stderr = stderr.map(str::to_owned);
+    result.stderr_source_bytes = stderr
+        .map(|output| u64::try_from(output.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+}
+
+fn historical_process_streams(output: &str) -> Option<(Option<&str>, Option<&str>)> {
+    if output.is_empty() {
+        return Some((None, None));
+    }
+    if let Some(stdout_and_stderr) = output.strip_prefix("stdout:\n") {
+        if let Some((stdout, stderr)) = stdout_and_stderr.split_once("\nstderr:\n") {
+            return Some((Some(stdout), Some(stderr)));
+        }
+        return Some((Some(stdout_and_stderr), None));
+    }
+    output
+        .strip_prefix("stderr:\n")
+        .map(|stderr| (None, Some(stderr)))
+}
+
+fn content_for_history(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
+    Ok(bounded_content(
+        string(message, index, "content")?,
+        bool(message, index, "content_truncated")?,
+    ))
+}
+
+fn bounded_content(source: &str, backend_truncated: bool) -> String {
+    let retained = BoundedText::head(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
+    let truncated = backend_truncated || retained.dropped_bytes > 0 || retained.dropped_lines > 0;
+    if !truncated {
+        return retained.text;
+    }
+    let separator = if retained.text.is_empty() || retained.text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let suffix = format!("{separator}{CONTENT_TRUNCATED_MARKER}");
+    let mut output = retained.text;
+    while output.len().saturating_add(suffix.len()) > TOOL_OUTPUT_MAX_BYTES {
+        output.pop();
+    }
+    output.push_str(&suffix);
+    output
+}
+
+fn source_count(message: &Value, field: &'static str, fallback: usize) -> u64 {
+    message
+        .get(field)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| u64::try_from(fallback).unwrap_or(u64::MAX))
+}
+
+fn turn(index: usize) -> u64 {
+    u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+}
+
+fn array<'a>(
+    value: &'a Value,
+    index: usize,
+    field: &'static str,
+) -> Result<&'a [Value], HistoryProjectionError> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn string<'a>(
+    value: &'a Value,
+    index: usize,
+    field: &'static str,
+) -> Result<&'a str, HistoryProjectionError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn optional_string<'a>(
+    value: &'a Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<&'a str>, HistoryProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        _ => Err(HistoryProjectionError::InvalidField { index, field }),
+    }
+}
+
+fn optional_value_string<'a>(
+    value: &'a Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<&'a str>, HistoryProjectionError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value)),
+        _ => Err(HistoryProjectionError::InvalidField { index, field }),
+    }
+}
+
+fn bool(value: &Value, index: usize, field: &'static str) -> Result<bool, HistoryProjectionError> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn optional_bool(
+    value: &Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<bool>, HistoryProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        _ => Err(HistoryProjectionError::InvalidField { index, field }),
+    }
+}
+
+fn object_string<'a>(
+    object: &'a Map<String, Value>,
+    index: usize,
+    field: &'static str,
+) -> Result<&'a str, HistoryProjectionError> {
+    object
+        .get(field.rsplit('.').next().expect("field has a member"))
+        .and_then(Value::as_str)
+        .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn object_bool(
+    object: &Map<String, Value>,
+    index: usize,
+    field: &'static str,
+) -> Result<bool, HistoryProjectionError> {
+    object
+        .get(field.rsplit('.').next().expect("field has a member"))
+        .and_then(Value::as_bool)
+        .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn optional_i64(
+    value: &Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<i64>, HistoryProjectionError> {
+    match value {
+        Value::Null => Ok(None),
+        value => value
+            .as_i64()
+            .map(Some)
+            .ok_or(HistoryProjectionError::InvalidField { index, field }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{TranscriptEntryKind, TranscriptRole};
+    use serde_json::json;
+
+    fn message(role: &str, content: &str) -> Value {
+        json!({
+            "role": role,
+            "content": content,
+            "content_truncated": false,
+            "tool_calls": [],
+            "is_error": null,
+            "tool_name": null,
+            "tool_call_id": null,
+            "tool_result": null,
+        })
+    }
+
+    #[test]
+    fn omits_system_marks_truncation_and_keeps_empty_assistant() {
+        let mut system = message("system", "hidden");
+        let mut assistant = message("assistant", "");
+        assistant["content_truncated"] = json!(true);
+        let empty = message("assistant", "");
+        let transcript =
+            project_rpc_messages(&[system.take(), message("user", "hello"), assistant, empty])
+                .unwrap();
+        assert_eq!(transcript.entries().len(), 3);
+        assert_eq!(transcript.entries()[0].role, TranscriptRole::User);
+        assert!(
+            transcript.entries()[1]
+                .content
+                .contains(CONTENT_TRUNCATED_MARKER)
+        );
+        assert_eq!(transcript.entries()[2].content, EMPTY_ASSISTANT_MESSAGE);
+    }
+
+    #[test]
+    fn prepends_marker_when_earlier_history_is_omitted() {
+        let transcript = project_rpc_message_page(&[message("user", "retained")], true).unwrap();
+
+        assert_eq!(transcript.entries().len(), 2);
+        assert_eq!(transcript.entries()[0].role, TranscriptRole::Assistant);
+        assert_eq!(transcript.entries()[0].content, HISTORY_TRUNCATED_MARKER);
+        assert_eq!(transcript.entries()[1].role, TranscriptRole::User);
+        assert_eq!(transcript.entries()[1].content, "retained");
+    }
+
+    #[test]
+    fn pairs_multiple_calls_and_settles_call_only_boundaries() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([
+            {"call_id": "one", "name": "read", "arguments": {"path": "a"}},
+            {"call_id": "two", "name": "read", "arguments": {"path": "b"}}
+        ]);
+        let mut result = message("tool", "contents");
+        result["tool_call_id"] = json!("two");
+        result["tool_name"] = json!("read");
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let cards = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.tool_card())
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[1].status.as_str(), "done");
+        assert_eq!(cards[0].status.as_str(), "cancelled");
+    }
+
+    #[test]
+    fn keeps_result_only_boundaries_and_skill_fallbacks() {
+        let mut user = message("user", "expanded provider prompt");
+        user["skill_invocation"] = json!({
+            "name": "dsa", "request": "  explain   heap ",
+            "request_truncated": true, "instructions_truncated": true
+        });
+        let mut result = message("tool", "late result");
+        result["tool_call_id"] = json!("missing");
+        result["tool_name"] = json!("read");
+        let transcript = project_rpc_messages(&[user, result]).unwrap();
+        assert!(
+            transcript.entries()[0]
+                .content
+                .contains("skill /skill:dsa explain heap")
+        );
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                TranscriptEntryKind::Tool(card) => Some(card),
+                TranscriptEntryKind::Message | TranscriptEntryKind::Process(_) => None,
+            })
+            .unwrap();
+        assert!(!card.arguments_available);
+        assert_eq!(card.status.as_str(), "done");
+    }
+
+    #[test]
+    fn incomplete_arguments_disable_structured_history_detail() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "write-1",
+            "name": "write",
+            "arguments": {"path": "file.txt", "content": "partial"},
+            "arguments_truncated": true,
+            "parse_error": null,
+        }]);
+        let mut result = message("tool", "ok");
+        result["tool_call_id"] = json!("write-1");
+        result["tool_name"] = json!("write");
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.tool_card())
+            .unwrap();
+        assert!(matches!(
+            card.structured_detail,
+            crate::tool_detail::DetailAvailability::Unavailable(
+                DetailUnavailableReason::MalformedSource
+            )
+        ));
+    }
+
+    #[test]
+    fn result_only_boundaries_cannot_collide_and_preserve_denial_and_source_counts() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "history-result-boundary-1",
+            "name": "read",
+            "arguments": {"path": "real.txt"},
+        }]);
+        let mut result = message("tool", "denied");
+        result["tool_name"] = json!("read");
+        result["tool_result"] = json!({"status": "denied"});
+        let mut large_result = message("tool", "retained head");
+        large_result["tool_name"] = json!("read");
+        large_result["tool_result"] = json!({"status": "done"});
+        large_result["content_original_bytes"] = json!(u64::MAX);
+
+        let transcript = project_rpc_messages(&[assistant, result, large_result]).unwrap();
+        let cards = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.tool_card())
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 3);
+        assert_eq!(cards[0].status.as_str(), "cancelled");
+        assert_eq!(cards[1].status.as_str(), "denied");
+        assert_eq!(cards[2].status.as_str(), "done");
+        assert_eq!(cards[2].retained_output.source_bytes, u64::MAX);
+    }
+
+    #[test]
+    fn retains_process_identity_for_historical_poll_and_cancel_results() {
+        let mut poll = message("assistant", "");
+        poll["tool_calls"] = json!([
+            {"call_id": "poll", "name": "bash", "arguments": {"operation": "poll", "process_id": "process-1"}}
+        ]);
+        let mut poll_result = message("tool", "still running");
+        poll_result["tool_call_id"] = json!("poll");
+        poll_result["tool_name"] = json!("bash");
+        poll_result["tool_result"] = json!({"status": "running"});
+        let mut cancel = message("assistant", "");
+        cancel["tool_calls"] = json!([
+            {"call_id": "cancel", "name": "bash", "arguments": {"operation": "cancel", "process_id": "process-1"}}
+        ]);
+        let mut cancel_result = message("tool", "Process process-1 cancelled");
+        cancel_result["tool_call_id"] = json!("cancel");
+        cancel_result["tool_name"] = json!("bash");
+        cancel_result["tool_result"] = json!({"status": "cancelled"});
+
+        let transcript = project_rpc_messages(&[poll, poll_result, cancel, cancel_result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(card.process_id, bounded_identity("process-1"));
+        assert_eq!(card.call_count, 2);
+        assert_eq!(card.poll_count, 1);
+        assert_eq!(card.display_state.status().as_str(), "cancelled");
+    }
+
+    #[test]
+    fn successful_process_envelopes_restore_state_and_streams() {
+        let mut first_poll = message("assistant", "");
+        first_poll["tool_calls"] = json!([{
+            "call_id": "poll-running",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-success"},
+        }]);
+        let mut running = message(
+            "tool",
+            "Process process-success is still running\nstdout:\nfirst chunk",
+        );
+        running["tool_call_id"] = json!("poll-running");
+        running["tool_name"] = json!("bash");
+        running["tool_result"] = json!({"status": "done"});
+        let mut second_poll = message("assistant", "");
+        second_poll["tool_calls"] = json!([{
+            "call_id": "poll-completed",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-success"},
+        }]);
+        let mut completed = message(
+            "tool",
+            "Process process-success completed with exit code 0\nstdout:\nlast chunk\nstderr:\nwarning",
+        );
+        completed["tool_call_id"] = json!("poll-completed");
+        completed["tool_name"] = json!("bash");
+        completed["tool_result"] = json!({"status": "done"});
+
+        let transcript =
+            project_rpc_messages(&[first_poll, running, second_poll, completed]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Completed
+        );
+        assert!(card.retained_output.text.contains("stdout:\nfirst chunk"));
+        assert!(card.retained_output.text.contains("last chunk"));
+        assert!(card.retained_output.text.contains("stderr:\nwarning"));
+    }
+
+    #[test]
+    fn cancelled_process_envelopes_restore_streams() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "cancel-result",
+            "name": "bash",
+            "arguments": {"operation": "cancel", "process_id": "process-cancelled"},
+        }]);
+        let mut result = message(
+            "tool",
+            "Process process-cancelled cancelled\nstderr:\nterminated cleanly",
+        );
+        result["tool_call_id"] = json!("cancel-result");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "cancelled"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Cancelled
+        );
+        assert!(
+            card.retained_output
+                .text
+                .contains("stderr:\nterminated cleanly")
+        );
+    }
+
+    #[test]
+    fn mismatched_cancelled_envelopes_fall_back_without_guessing_state() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "cancel-mismatch",
+            "name": "bash",
+            "arguments": {"operation": "cancel", "process_id": "process-expected"},
+        }]);
+        let mut result = message(
+            "tool",
+            "Process process-foreign cancelled\nstderr:\nforeign diagnostic",
+        );
+        result["tool_call_id"] = json!("cancel-mismatch");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "cancelled"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::Observed
+        );
+        assert!(
+            card.retained_output
+                .text
+                .contains("Process process-foreign cancelled")
+        );
+        assert!(card.retained_output.text.contains("foreign diagnostic"));
+    }
+
+    #[test]
+    fn denied_process_results_preserve_the_matching_call_identity() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "poll-denied",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-denied"},
+        }]);
+        let mut result = message("tool", "denied");
+        result["tool_call_id"] = json!("poll-denied");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "denied"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(card.process_id, bounded_identity("process-denied"));
+        assert_eq!(card.call_count, 1);
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::PollDenied
+        );
+    }
+
+    #[test]
+    fn legacy_interrupted_process_results_project_as_cancelled() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "poll-interrupted",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-interrupted"},
+        }]);
+        let mut result = message("tool", INTERRUPTED_TOOL_RESULT_TEXT);
+        result["tool_call_id"] = json!("poll-interrupted");
+        result["tool_name"] = json!("bash");
+        result["is_error"] = json!(true);
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(card.process_id, bounded_identity("process-interrupted"));
+        assert_eq!(card.display_state.status().as_str(), "cancelled");
+    }
+
+    #[test]
+    fn rejects_schema_valid_tool_call_overflow_truthfully() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = Value::Array(
+            (0..=HISTORY_TOOL_CALL_LIMIT)
+                .map(|index| {
+                    json!({
+                        "call_id": format!("call-{index}"),
+                        "name": "read",
+                        "arguments": {"path": format!("file-{index}")},
+                    })
+                })
+                .collect(),
+        );
+
+        assert!(matches!(
+            project_rpc_messages(&[assistant]),
+            Err(HistoryProjectionError::TooManyToolCalls { index: 0 })
+        ));
+    }
+}

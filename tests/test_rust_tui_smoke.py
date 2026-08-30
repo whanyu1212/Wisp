@@ -141,7 +141,7 @@ def test_rust_tui_renders_bounded_tool_and_process_cards(tmp_path: Path) -> None
 import json
 import sys
 
-from wisp.events import RpcCommandFinished, ToolCallRequested, ToolResultReady
+from wisp.events import RpcCommandFinished, RpcMessagesReported, ToolCallRequested, ToolResultReady
 
 
 def emit(event):
@@ -167,7 +167,17 @@ for line in sys.stdin:
     command = json.loads(line)
     command_type = command["type"]
     command_id = command["id"]
-    if command_type == "prompt":
+    if command_type == "get_messages":
+        emit(RpcMessagesReported(
+            command_id=command_id,
+            session_id=command.get("session_id"),
+        ))
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type="get_messages",
+            ok=True,
+        ))
+    elif command_type == "prompt":
         emit(ToolCallRequested(
             call_id="read-1",
             name="read",
@@ -269,8 +279,8 @@ for line in sys.stdin:
     prompt_sent = False
     browse_sent = False
     detail_seen = False
-    detail_close_output_offset: int | None = None
-    browse_close_sent_at: float | None = None
+    detail_resize_output_offset: int | None = None
+    resized_detail_at: float | None = None
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -308,28 +318,29 @@ for line in sys.stdin:
                 # F6 enters visible-card browse mode; Enter opens retained detail.
                 os.write(terminal_fd, b"\x1b[17~\r")
                 browse_sent = True
-            if browse_sent and not detail_seen and b"live retained detail" in output:
+            if (
+                browse_sent
+                and not detail_seen
+                and b"live retained detail" in output
+                and b"Esc close" in output
+            ):
                 detail_seen = True
+                detail_resize_output_offset = len(output)
                 fcntl.ioctl(
                     terminal_fd,
                     termios.TIOCSWINSZ,
                     struct.pack("HHHH", 30, 120, 0, 0),
                 )
-                # Standalone Escape bytes must be separate terminal events. Adjacent
-                # bytes can be parsed as one escape sequence on Linux.
-                detail_close_output_offset = len(output)
-                os.write(terminal_fd, b"\x1b")
             if (
-                detail_close_output_offset is not None
-                and browse_close_sent_at is None
-                and b"F6 details" in output[detail_close_output_offset:]
+                detail_resize_output_offset is not None
+                and resized_detail_at is None
+                and b"Esc close" in output[detail_resize_output_offset:]
             ):
-                os.write(terminal_fd, b"\x1b")
-                browse_close_sent_at = time.monotonic()
+                resized_detail_at = time.monotonic()
             if (
-                browse_close_sent_at is not None
+                resized_detail_at is not None
                 and not quit_sent
-                and time.monotonic() - browse_close_sent_at >= 0.5
+                and time.monotonic() - resized_detail_at >= 0.5
             ):
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
@@ -354,8 +365,8 @@ for line in sys.stdin:
     assert prompt_sent, bytes(output)
     assert browse_sent, bytes(output)
     assert detail_seen, bytes(output)
-    assert detail_close_output_offset is not None, bytes(output)
-    assert browse_close_sent_at is not None, bytes(output)
+    assert detail_resize_output_offset is not None, bytes(output)
+    assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
