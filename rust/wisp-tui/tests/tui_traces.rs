@@ -335,7 +335,10 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                     normalize_trace_command(&mut value);
                     commands.push(value);
                 }
-                UiEffect::RequestRender => {}
+                UiEffect::ShowSessionPicker { .. }
+                | UiEffect::ReplaceTranscript
+                | UiEffect::Notice(_)
+                | UiEffect::RequestRender => {}
                 UiEffect::Exit => exited = true,
             }
         }

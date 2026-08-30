@@ -4,7 +4,7 @@ use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
 
-use crate::tool_cards::{ToolCallInput, ToolResultInput, bounded_identity};
+use crate::tool_cards::{BoundedText, ToolCallInput, ToolResultInput, bounded_identity};
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
@@ -18,6 +18,91 @@ const CANCELLED_APPROVAL_REASON: &str = "Denied from TUI: cancelled";
 const CANCELLING_APPROVAL_REASON: &str = "Denied from TUI: cancelling";
 const CANCELLED_TRUST_REASON: &str = "Trust prompt cancelled";
 const RPC_CANCELLED_PREFIX: &str = "RPC command cancelled:";
+pub const SESSION_CATALOG_LIMIT: usize = 50;
+pub const SESSION_ID_MAX_BYTES: usize = 4 * 1024;
+const SESSION_PATH_MAX_BYTES: usize = 4 * 1024;
+const SESSION_LABEL_MAX_BYTES: usize = 512;
+const SESSION_UPDATED_AT_MAX_BYTES: usize = 128;
+const SESSION_ENTRY_COUNT_MAX: u32 = 1_000_000_000;
+const SESSION_NOTICE_MAX_BYTES: usize = 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionIdentity {
+    pub session_id: String,
+    pub session_path: String,
+    pub session_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub session_path: String,
+    pub name: Option<String>,
+    pub updated_at: String,
+    pub entry_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionMessages {
+    pub session: Option<SessionIdentity>,
+    pub transcript: SharedTranscript,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCompletion {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionOperation {
+    StartupHydration {
+        command_id: String,
+        report: Option<SessionMessages>,
+        completion: Option<SessionCompletion>,
+    },
+    LoadingCatalog {
+        command_id: String,
+        sessions: Option<Vec<SessionSummary>>,
+        selected_session_id: Option<Option<String>>,
+        completion: Option<SessionCompletion>,
+    },
+    SelectingSession {
+        command_id: String,
+        requested_session_id: String,
+        selected: Option<SessionIdentity>,
+        completion: Option<SessionCompletion>,
+    },
+    HydratingSelection {
+        command_id: String,
+        selected: SessionIdentity,
+        report: Option<SessionMessages>,
+        completion: Option<SessionCompletion>,
+    },
+    CreatingSession {
+        command_id: String,
+    },
+}
+
+impl SessionOperation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::StartupHydration { .. } => "Loading latest session history…",
+            Self::LoadingCatalog { .. } => "Loading sessions…",
+            Self::SelectingSession { .. } => "Selecting session…",
+            Self::HydratingSelection { .. } => "Loading session history…",
+            Self::CreatingSession { .. } => "Creating new session…",
+        }
+    }
+}
+
+pub fn valid_session_id(session_id: &str) -> bool {
+    !session_id.is_empty() && session_id.len() <= SESSION_ID_MAX_BYTES
+}
+
+fn bounded_session_text(value: &str, max_bytes: usize) -> String {
+    BoundedText::head(value, max_bytes, 8).text
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AgentMode {
@@ -133,6 +218,8 @@ pub struct UiState {
     pub effort: Option<String>,
     pub mode: AgentMode,
     pub last_session: Option<String>,
+    pub selected_session: Option<SessionIdentity>,
+    pub session_operation: Option<SessionOperation>,
     pub queued_steering: usize,
     pub queued_follow_ups: usize,
     pub current_command: Option<ActiveCommand>,
@@ -167,6 +254,8 @@ impl UiState {
             effort,
             mode: AgentMode::Build,
             last_session: None,
+            selected_session: None,
+            session_operation: None,
             queued_steering: 0,
             queued_follow_ups: 0,
             current_command: None,
@@ -199,6 +288,10 @@ pub enum CommandKind {
     Cancel,
     Trust,
     GetSessionStats,
+    GetSessions,
+    NewSession,
+    SelectSession,
+    GetMessages,
 }
 
 impl CommandKind {
@@ -209,6 +302,10 @@ impl CommandKind {
             Self::Cancel => "cancel",
             Self::Trust => "trust",
             Self::GetSessionStats => "get_session_stats",
+            Self::GetSessions => "get_sessions",
+            Self::NewSession => "new_session",
+            Self::SelectSession => "select_session",
+            Self::GetMessages => "get_messages",
         }
     }
 }
@@ -256,6 +353,23 @@ pub enum BackendEvent {
         model: Option<String>,
         effort: Option<String>,
     },
+    SessionsReported {
+        command_id: String,
+        sessions: Vec<SessionSummary>,
+        selected_session: Option<SessionIdentity>,
+    },
+    SessionSelected {
+        command_id: String,
+        session: SessionIdentity,
+    },
+    MessagesReported {
+        command_id: String,
+        messages: SessionMessages,
+    },
+    MessagesProjectionFailed {
+        command_id: String,
+        error: String,
+    },
     CommandFinished {
         command_id: String,
         command_type: String,
@@ -270,6 +384,12 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
+    StartupHydration,
+    LoadSessionCatalog,
+    SelectSession {
+        session_id: String,
+    },
+    NewSession,
     ApprovalDecision {
         call_id: String,
         approved: bool,
@@ -292,6 +412,12 @@ pub enum UiAction {
 #[derive(Debug)]
 pub enum UiEffect {
     SendCommand(WispTypedClientRpcCommands),
+    ShowSessionPicker {
+        sessions: Vec<SessionSummary>,
+        selected_session_id: Option<String>,
+    },
+    ReplaceTranscript,
+    Notice(String),
     RequestRender,
     Exit,
 }
@@ -306,6 +432,8 @@ pub enum ReduceError {
     NoMatchingTrust(String),
     #[error("invalid generated RPC command: {0}")]
     Protocol(#[from] ProtocolDecodeError),
+    #[error("session operation is active")]
+    SessionOperationActive,
 }
 
 pub fn reduce(
@@ -315,6 +443,10 @@ pub fn reduce(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     match action {
         UiAction::Submit(content) => submit(state, content, ids),
+        UiAction::StartupHydration => start_startup_hydration(state, ids),
+        UiAction::LoadSessionCatalog => load_session_catalog(state, ids),
+        UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
+        UiAction::NewSession => new_session(state, ids),
         UiAction::ApprovalDecision {
             call_id,
             approved,
@@ -348,6 +480,9 @@ fn submit(
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
+    if state.session_operation.is_some() {
+        return Err(ReduceError::SessionOperationActive);
+    }
     if let Some(current) = &state.current_command {
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
@@ -362,6 +497,97 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.transcript.append_prompt(content);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn begin_session_operation(state: &UiState) -> Result<(), ReduceError> {
+    if state.session_operation.is_some() {
+        return Err(ReduceError::SessionOperationActive);
+    }
+    if let Some(current) = &state.current_command {
+        return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
+    }
+    Ok(())
+}
+
+fn start_startup_hydration(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    begin_session_operation(state)?;
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command = WispTypedClientRpcCommands::get_messages(&id, None)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::StartupHydration {
+        command_id: id,
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn load_session_catalog(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    begin_session_operation(state)?;
+    let id = ids.next_id(CommandKind::GetSessions);
+    let command = WispTypedClientRpcCommands::get_sessions(&id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::LoadingCatalog {
+        command_id: id,
+        sessions: None,
+        selected_session_id: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn select_session(
+    state: &mut UiState,
+    session_id: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !valid_session_id(&session_id) {
+        return Ok(vec![
+            UiEffect::Notice("Session ID is empty or exceeds the 4096-byte limit.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    begin_session_operation(state)?;
+    let id = ids.next_id(CommandKind::SelectSession);
+    let command = WispTypedClientRpcCommands::select_session(&id, &session_id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::SelectingSession {
+        command_id: id,
+        requested_session_id: session_id,
+        selected: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn new_session(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    begin_session_operation(state)?;
+    let id = ids.next_id(CommandKind::NewSession);
+    let command = WispTypedClientRpcCommands::new_session(&id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::CreatingSession { command_id: id });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -504,11 +730,342 @@ fn restore_active_or_idle(state: &mut UiState) {
     }
 }
 
+fn handle_session_backend_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Option<Vec<UiEffect>>, ProtocolDecodeError> {
+    let Some(mut operation) = state.session_operation.take() else {
+        return Ok(None);
+    };
+
+    let projection_failure = match (&operation, event) {
+        (
+            SessionOperation::StartupHydration { command_id, .. },
+            BackendEvent::MessagesProjectionFailed {
+                command_id: received,
+                error,
+            },
+        ) if received == command_id => Some(("startup history", error.clone())),
+        (
+            SessionOperation::HydratingSelection { command_id, .. },
+            BackendEvent::MessagesProjectionFailed {
+                command_id: received,
+                error,
+            },
+        ) if received == command_id => Some(("session history", error.clone())),
+        _ => None,
+    };
+    if let Some((operation, error)) = projection_failure {
+        return Ok(Some(session_failure(state, operation, Some(error))));
+    }
+
+    let handled = match &mut operation {
+        SessionOperation::StartupHydration {
+            command_id,
+            report,
+            completion,
+        } => match event {
+            BackendEvent::MessagesReported {
+                command_id: received,
+                messages,
+            } if received == command_id => {
+                if report.is_none() {
+                    *report = Some(messages.clone());
+                }
+                true
+            }
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ok,
+                error,
+            } if received == command_id && command_type == "get_messages" => {
+                if completion.is_none() {
+                    *completion = Some(SessionCompletion {
+                        ok: *ok,
+                        error: error
+                            .as_deref()
+                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+                    });
+                }
+                true
+            }
+            _ => false,
+        },
+        SessionOperation::LoadingCatalog {
+            command_id,
+            sessions,
+            selected_session_id,
+            completion,
+        } => match event {
+            BackendEvent::SessionsReported {
+                command_id: received,
+                sessions: received_sessions,
+                selected_session,
+            } if received == command_id => {
+                if sessions.is_none() {
+                    *sessions = Some(received_sessions.clone());
+                    *selected_session_id = Some(
+                        selected_session
+                            .as_ref()
+                            .map(|session| session.session_id.clone()),
+                    );
+                }
+                true
+            }
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ok,
+                error,
+            } if received == command_id && command_type == "get_sessions" => {
+                if completion.is_none() {
+                    *completion = Some(SessionCompletion {
+                        ok: *ok,
+                        error: error
+                            .as_deref()
+                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+                    });
+                }
+                true
+            }
+            _ => false,
+        },
+        SessionOperation::SelectingSession {
+            command_id,
+            requested_session_id,
+            selected,
+            completion,
+        } => match event {
+            BackendEvent::SessionSelected {
+                command_id: received,
+                session,
+            } if received == command_id => {
+                if selected.is_none() && session.session_id == *requested_session_id {
+                    *selected = Some(session.clone());
+                }
+                true
+            }
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ok,
+                error,
+            } if received == command_id && command_type == "select_session" => {
+                if completion.is_none() {
+                    *completion = Some(SessionCompletion {
+                        ok: *ok,
+                        error: error
+                            .as_deref()
+                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+                    });
+                }
+                true
+            }
+            _ => false,
+        },
+        SessionOperation::HydratingSelection {
+            command_id,
+            selected,
+            report,
+            completion,
+        } => match event {
+            BackendEvent::MessagesReported {
+                command_id: received,
+                messages,
+            } if received == command_id => {
+                if report.is_none()
+                    && messages
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| same_session(session, selected))
+                {
+                    *report = Some(messages.clone());
+                }
+                true
+            }
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ok,
+                error,
+            } if received == command_id && command_type == "get_messages" => {
+                if completion.is_none() {
+                    *completion = Some(SessionCompletion {
+                        ok: *ok,
+                        error: error
+                            .as_deref()
+                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+                    });
+                }
+                true
+            }
+            _ => false,
+        },
+        SessionOperation::CreatingSession { command_id } => matches!(
+            event,
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ..
+            } if received == command_id && command_type == "new_session"
+        ),
+    };
+    if !handled {
+        state.session_operation = Some(operation);
+        return Ok(None);
+    }
+
+    let effects = match operation {
+        SessionOperation::StartupHydration {
+            report: _,
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "startup history", completion.error),
+        SessionOperation::StartupHydration {
+            report: Some(report),
+            completion: Some(_),
+            ..
+        } => {
+            state.transcript = report.transcript;
+            state.selected_session = report.session;
+            state.last_session = state
+                .selected_session
+                .as_ref()
+                .map(|session| session.session_id.clone());
+            state.input_ready = true;
+            vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+        }
+        SessionOperation::StartupHydration { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::LoadingCatalog {
+            sessions: _,
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session catalog", completion.error),
+        SessionOperation::LoadingCatalog {
+            sessions: Some(sessions),
+            selected_session_id,
+            completion: Some(_),
+            ..
+        } => {
+            state.input_ready = true;
+            vec![
+                UiEffect::ShowSessionPicker {
+                    sessions,
+                    selected_session_id: selected_session_id.flatten().or_else(|| {
+                        state
+                            .selected_session
+                            .as_ref()
+                            .map(|session| session.session_id.clone())
+                    }),
+                },
+                UiEffect::RequestRender,
+            ]
+        }
+        SessionOperation::LoadingCatalog { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::SelectingSession {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session selection", completion.error),
+        SessionOperation::SelectingSession {
+            selected: Some(selected),
+            completion: Some(_),
+            ..
+        } => {
+            let id = ids.next_id(CommandKind::GetMessages);
+            let command =
+                WispTypedClientRpcCommands::get_messages(&id, Some(&selected.session_id))?;
+            state.selected_session = Some(selected.clone());
+            state.last_session = Some(selected.session_id.clone());
+            state.transcript = SharedTranscript::default();
+            state.session_operation = Some(SessionOperation::HydratingSelection {
+                command_id: id,
+                selected,
+                report: None,
+                completion: None,
+            });
+            vec![
+                UiEffect::ReplaceTranscript,
+                UiEffect::SendCommand(command),
+                UiEffect::RequestRender,
+            ]
+        }
+        SessionOperation::SelectingSession { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::HydratingSelection {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session history", completion.error),
+        SessionOperation::HydratingSelection {
+            report: Some(report),
+            completion: Some(_),
+            ..
+        } => {
+            state.transcript = report.transcript;
+            state.input_ready = true;
+            vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+        }
+        SessionOperation::HydratingSelection { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::CreatingSession { command_id } => match event {
+            BackendEvent::CommandFinished { ok: true, .. } => {
+                state.transcript = SharedTranscript::default();
+                state.selected_session = None;
+                state.last_session = None;
+                state.input_ready = true;
+                vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+            }
+            BackendEvent::CommandFinished { error, .. } => session_failure(
+                state,
+                "new session",
+                error
+                    .as_deref()
+                    .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+            ),
+            _ => {
+                state.session_operation = Some(SessionOperation::CreatingSession { command_id });
+                return Ok(Some(Vec::new()));
+            }
+        },
+    };
+    Ok(Some(effects))
+}
+
+fn same_session(left: &SessionIdentity, right: &SessionIdentity) -> bool {
+    left.session_id == right.session_id && left.session_path == right.session_path
+}
+
+fn session_failure(state: &mut UiState, operation: &str, error: Option<String>) -> Vec<UiEffect> {
+    state.input_ready = true;
+    let detail = error.unwrap_or_else(|| "backend reported failure".into());
+    vec![
+        UiEffect::Notice(bounded_session_text(
+            &format!("{operation} failed: {detail}"),
+            SESSION_NOTICE_MAX_BYTES,
+        )),
+        UiEffect::RequestRender,
+    ]
+}
+
 fn handle_backend_event(
     state: &mut UiState,
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
+        return Ok(effects);
+    }
     match event {
         BackendEvent::MessageStarted { turn } => {
             state.transcript.begin_message(turn);
@@ -609,6 +1166,10 @@ fn handle_backend_event(
             state.effort = effort;
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::SessionsReported { .. }
+        | BackendEvent::SessionSelected { .. }
+        | BackendEvent::MessagesReported { .. }
+        | BackendEvent::MessagesProjectionFailed { .. } => Ok(Vec::new()),
         BackendEvent::CommandFinished {
             command_id,
             command_type,
@@ -673,7 +1234,11 @@ mod tests {
     fn command_value(effect: &UiEffect) -> Option<Value> {
         match effect {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
-            UiEffect::RequestRender | UiEffect::Exit => None,
+            UiEffect::ShowSessionPicker { .. }
+            | UiEffect::ReplaceTranscript
+            | UiEffect::Notice(_)
+            | UiEffect::RequestRender
+            | UiEffect::Exit => None,
         }
     }
 
@@ -973,6 +1538,36 @@ mod tests {
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
             }
+        );
+    }
+
+    #[test]
+    fn session_event_projection_is_bounded_and_keeps_backend_order() {
+        let event = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.sessions",
+            "command_id": "sessions-1",
+            "sessions": [
+                {"session_id": "second", "session_path": "/sessions/second.jsonl", "name": null, "updated_at": "later", "entry_count": 2},
+                {"session_id": "first", "session_path": "/sessions/first.jsonl", "name": "first name", "updated_at": "earlier", "entry_count": 1}
+            ],
+            "selected_session_id": "first",
+            "selected_session_path": "/sessions/first.jsonl",
+            "selected_session_name": "first name"
+        }))
+        .unwrap();
+        assert!(matches!(
+            event,
+            BackendEvent::SessionsReported { sessions, selected_session: Some(selected), .. }
+                if sessions.iter().map(|session| session.session_id.as_str()).collect::<Vec<_>>() == ["second", "first"]
+                    && selected.session_id == "first"
+        ));
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.session.selected", "command_id": "select-1",
+                "session_id": "x".repeat(SESSION_ID_MAX_BYTES + 1),
+                "session_path": "/sessions/x.jsonl", "session_name": null
+            }))
+            .is_err()
         );
     }
 
@@ -1937,5 +2532,324 @@ mod tests {
         assert!(state.pending_trust_request_id.is_none());
         assert!(!state.cancel_requested);
         assert_eq!(state.view_status, ViewStatus::Running);
+    }
+
+    fn session(id: &str) -> SessionIdentity {
+        SessionIdentity {
+            session_id: id.into(),
+            session_path: format!("/sessions/{id}.jsonl"),
+            session_name: Some(format!("{id} name")),
+        }
+    }
+
+    fn history(command_id: &str, selected: Option<SessionIdentity>, text: &str) -> BackendEvent {
+        let mut transcript = SharedTranscript::default();
+        if !text.is_empty() {
+            transcript.append_prompt(text.into());
+        }
+        BackendEvent::MessagesReported {
+            command_id: command_id.into(),
+            messages: SessionMessages {
+                session: selected,
+                transcript,
+            },
+        }
+    }
+
+    fn finished(id: &str, command_type: &str, ok: bool) -> BackendEvent {
+        BackendEvent::CommandFinished {
+            command_id: id.into(),
+            command_type: command_type.into(),
+            ok,
+            error: (!ok).then(|| "backend refused".into()),
+        }
+    }
+
+    #[test]
+    fn startup_hydration_commits_only_after_a_matching_report_and_finish_in_any_order() {
+        for report_first in [true, false] {
+            let mut state = UiState::unconfigured();
+            let mut ids = DeterministicIds::default();
+            let effects = reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["type"], "get_messages");
+            assert!(!state.input_ready);
+            let report = history("get_messages-1", None, "startup history");
+            let finish = finished("get_messages-1", "get_messages", true);
+            for event in if report_first {
+                [report, finish]
+            } else {
+                [finish, report]
+            } {
+                reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+            }
+            assert!(state.session_operation.is_none());
+            assert!(state.input_ready);
+            assert_eq!(state.transcript.latest_user_text(), Some("startup history"));
+            assert!(state.selected_session.is_none());
+        }
+    }
+
+    #[test]
+    fn startup_failure_is_recoverable_and_wrong_or_duplicate_reports_are_ignored() {
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+        let before = state.clone();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(history("late", None, "wrong")),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(state, before);
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.session_operation.is_none());
+        assert!(state.input_ready);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+        let after_failure = state.clone();
+        assert!(
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(history("get_messages-1", None, "late")),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(state, after_failure);
+    }
+
+    #[test]
+    fn history_projection_failure_is_a_correlated_hydration_failure() {
+        let event = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.messages",
+            "command_id": "get_messages-1",
+            "session_id": null,
+            "session_path": null,
+            "messages": [{
+                "role": "assistant",
+                "content": "",
+                "content_truncated": false,
+                "tool_calls": [{"call_id": "call", "name": "read", "arguments": []}],
+            }],
+        }))
+        .unwrap();
+        assert!(matches!(
+            event,
+            BackendEvent::MessagesProjectionFailed { ref command_id, .. }
+                if command_id == "get_messages-1"
+        ));
+
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+        let effects = reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        assert!(state.session_operation.is_none());
+        assert!(state.input_ready);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(notice) if notice.contains("startup history failed")))
+        );
+    }
+
+    #[test]
+    fn catalog_preserves_backend_order_and_opens_after_both_correlated_events() {
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::LoadSessionCatalog, &mut ids).unwrap();
+        let sessions = vec![
+            SessionSummary {
+                session_id: "second".into(),
+                session_path: "/sessions/second.jsonl".into(),
+                name: None,
+                updated_at: "later".into(),
+                entry_count: 2,
+            },
+            SessionSummary {
+                session_id: "first".into(),
+                session_path: "/sessions/first.jsonl".into(),
+                name: None,
+                updated_at: "earlier".into(),
+                entry_count: 1,
+            },
+        ];
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionsReported {
+                command_id: "get_sessions-1".into(),
+                sessions: sessions.clone(),
+                selected_session: Some(session("first")),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_sessions-1", "get_sessions", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::ShowSessionPicker { sessions: shown, selected_session_id: Some(selected) }, ..]
+                if shown == &sessions && selected == "first"
+        ));
+        assert!(state.input_ready);
+    }
+
+    #[test]
+    fn selection_failure_preserves_old_content_but_committed_hydration_failure_clears_it() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("old"));
+        state.transcript.append_prompt("old content".into());
+        let before = state.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::SelectSession {
+                session_id: "new".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionSelected {
+                command_id: "select_session-1".into(),
+                session: session("new"),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("select_session-1", "select_session", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.selected_session, before.selected_session);
+        assert_eq!(state.transcript, before.transcript);
+
+        reduce(
+            &mut state,
+            UiAction::SelectSession {
+                session_id: "new".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionSelected {
+                command_id: "select_session-2".into(),
+                session: session("new"),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("select_session-2", "select_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::ReplaceTranscript))
+        );
+        assert_eq!(state.selected_session, Some(session("new")));
+        assert!(state.transcript.entries().is_empty());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.selected_session, Some(session("new")));
+        assert!(state.transcript.entries().is_empty());
+        assert!(state.input_ready);
+    }
+
+    #[test]
+    fn new_session_is_transactional_and_never_hydrates() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("old"));
+        state.transcript.append_prompt("old content".into());
+        let before = state.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::NewSession, &mut ids).unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("new_session-1", "new_session", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.selected_session, before.selected_session);
+        assert_eq!(state.transcript, before.transcript);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+
+        reduce(&mut state, UiAction::NewSession, &mut ids).unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("new_session-2", "new_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.selected_session.is_none());
+        assert!(state.transcript.entries().is_empty());
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
+        );
+    }
+
+    #[test]
+    fn oversized_session_ids_do_not_mutate_state_and_a_later_request_is_recoverable() {
+        let mut state = UiState::unconfigured();
+        let before = state.clone();
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::SelectSession {
+                session_id: "x".repeat(SESSION_ID_MAX_BYTES + 1),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state, before);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+        let effects = reduce(
+            &mut state,
+            UiAction::SelectSession {
+                session_id: "valid".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            command_value(&effects[0]).unwrap()["type"],
+            "select_session"
+        );
     }
 }

@@ -1,6 +1,11 @@
 use std::collections::VecDeque;
 
-use super::{BackendEvent, MessageContentKind, PendingApproval};
+use super::{
+    BackendEvent, MessageContentKind, PendingApproval, SESSION_CATALOG_LIMIT,
+    SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
+    SESSION_UPDATED_AT_MAX_BYTES, SessionIdentity, SessionMessages, SessionSummary,
+};
+use crate::history::project_rpc_messages;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
     bounded_identity, bounded_tool_arguments, bounded_tool_name,
@@ -19,6 +24,14 @@ pub enum EventProjectionError {
         event_type: String,
         field: &'static str,
     },
+    #[error("event {event_type:?} {field:?} exceeds its {limit}-byte retention limit")]
+    OversizedField {
+        event_type: String,
+        field: &'static str,
+        limit: usize,
+    },
+    #[error("session report has more than {SESSION_CATALOG_LIMIT} sessions")]
+    TooManySessions,
 }
 
 impl BackendEvent {
@@ -190,19 +203,178 @@ impl BackendEvent {
                 model: nullable_string_field(value, &event_type, "model")?,
                 effort: nullable_string_field(value, &event_type, "effort")?,
             },
+            "rpc.sessions" => Self::SessionsReported {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                sessions: session_summaries(value, &event_type)?,
+                selected_session: optional_session_identity(
+                    value,
+                    &event_type,
+                    "selected_session_id",
+                    "selected_session_path",
+                    Some("selected_session_name"),
+                )?,
+            },
+            "rpc.session.selected" => Self::SessionSelected {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                session: required_session_identity(
+                    value,
+                    &event_type,
+                    "session_id",
+                    "session_path",
+                    Some("session_name"),
+                )?,
+            },
+            "rpc.messages" => {
+                let command_id = exact_string_field(value, &event_type, "command_id", 256)?;
+                let session = optional_session_identity(
+                    value,
+                    &event_type,
+                    "session_id",
+                    "session_path",
+                    None,
+                )?;
+                match project_rpc_messages(array_field(value, &event_type, "messages")?) {
+                    Ok(transcript) => Self::MessagesReported {
+                        command_id,
+                        messages: SessionMessages {
+                            session,
+                            transcript,
+                        },
+                    },
+                    Err(error) => Self::MessagesProjectionFailed {
+                        command_id,
+                        error: BoundedText::head(&error.to_string(), 1024, 8).text,
+                    },
+                }
+            }
             "rpc.command.finished" => Self::CommandFinished {
-                command_id: string_field(value, &event_type, "command_id")?,
-                command_type: string_field(value, &event_type, "command_type")?,
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                command_type: bounded_display_string_field(
+                    value,
+                    &event_type,
+                    "command_type",
+                    128,
+                )?,
                 ok: bool_field(value, &event_type, "ok")?,
-                error: value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                error: optional_bounded_display_string_field(value, &event_type, "error", 1024)?,
             },
             _ => Self::Other { event_type },
         };
         Ok(projected)
     }
+}
+
+fn session_summaries(
+    value: &Value,
+    event_type: &str,
+) -> Result<Vec<SessionSummary>, EventProjectionError> {
+    let sessions = array_field(value, event_type, "sessions")?;
+    if sessions.len() > SESSION_CATALOG_LIMIT {
+        return Err(EventProjectionError::TooManySessions);
+    }
+    sessions
+        .iter()
+        .map(|session| {
+            let session_id =
+                exact_string_field(session, event_type, "session_id", SESSION_ID_MAX_BYTES)?;
+            let session_path =
+                exact_string_field(session, event_type, "session_path", SESSION_PATH_MAX_BYTES)?;
+            let name = optional_bounded_display_string_field(
+                session,
+                event_type,
+                "name",
+                SESSION_LABEL_MAX_BYTES,
+            )?;
+            let updated_at = bounded_display_string_field(
+                session,
+                event_type,
+                "updated_at",
+                SESSION_UPDATED_AT_MAX_BYTES,
+            )?;
+            let entry_count = u64_field(session, event_type, "entry_count")?
+                .min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32;
+            Ok(SessionSummary {
+                session_id,
+                session_path,
+                name,
+                updated_at,
+                entry_count,
+            })
+        })
+        .collect()
+}
+
+fn optional_session_identity(
+    value: &Value,
+    event_type: &str,
+    id_field: &'static str,
+    path_field: &'static str,
+    name_field: Option<&'static str>,
+) -> Result<Option<SessionIdentity>, EventProjectionError> {
+    match (value.get(id_field), value.get(path_field)) {
+        (None | Some(Value::Null), None | Some(Value::Null)) => Ok(None),
+        (Some(Value::String(_)), Some(Value::String(_))) => {
+            required_session_identity(value, event_type, id_field, path_field, name_field).map(Some)
+        }
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: id_field,
+        }),
+    }
+}
+
+fn required_session_identity(
+    value: &Value,
+    event_type: &str,
+    id_field: &'static str,
+    path_field: &'static str,
+    name_field: Option<&'static str>,
+) -> Result<SessionIdentity, EventProjectionError> {
+    let session_id = exact_string_field(value, event_type, id_field, SESSION_ID_MAX_BYTES)?;
+    let session_path = exact_string_field(value, event_type, path_field, SESSION_PATH_MAX_BYTES)?;
+    let session_name = name_field
+        .map(|field| {
+            optional_bounded_display_string_field(value, event_type, field, SESSION_LABEL_MAX_BYTES)
+        })
+        .transpose()?
+        .flatten();
+    Ok(SessionIdentity {
+        session_id,
+        session_path,
+        session_name,
+    })
+}
+
+fn exact_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    limit: usize,
+) -> Result<String, EventProjectionError> {
+    let source = string_field_ref(value, event_type, field)?;
+    if source.len() > limit {
+        return Err(EventProjectionError::OversizedField {
+            event_type: event_type.to_owned(),
+            field,
+            limit,
+        });
+    }
+    Ok(source.to_owned())
+}
+
+fn array_field<'a>(
+    value: &'a Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<&'a [Value], EventProjectionError> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        })
 }
 
 fn string_field_ref<'a>(

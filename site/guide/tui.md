@@ -25,7 +25,7 @@ compact billing and context fields.
   `session unpriced` when no request can be priced. This keeps earlier usage honest after switching
   providers. Estimates are not invoices.
 
-## Experimental Rust transport scaffold
+## Experimental Rust TUI
 
 Textual remains Wisp's default and full-featured TUI. An experimental Rust frontend is available as
 an explicit opt-in on macOS and Linux:
@@ -36,17 +36,19 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The Rust frontend currently provides a diagnostic transport screen only. It negotiates live RPC v2
-and event schema v34, validates incoming current-version events, and shows the backend version, event
-count, and latest event type. Press `q` or `Ctrl+C` to request shutdown. It does not yet accept
-prompts or provide the commands, transcript, approvals, pickers, or other product behavior documented
-for Textual below.
+The Rust TUI negotiates and validates live RPC v2/event schema v34, supports prompts, approvals,
+project trust, cancellation, a virtual Markdown/tool/diff transcript, and bounded session hydration.
+`/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
+one exact session ID); `/new` deselects the current session and clears the local transcript after the
+backend confirms it. Startup and resumed history load only the newest 200-message page, atomically.
 
-Selecting Rust never falls back to Textual. A missing or non-executable binary, unsupported platform,
-package-version mismatch, negotiation failure, or non-zero Rust exit is reported as an error. Current
-Python distributions do not include a Rust binary; source builds require the setup documented in
-[Development setup](../contributing/development#rust-tui-scaffold). Select Textual explicitly with
-`wisp tui --renderer textual` if needed.
+This is still experimental and source-build only: current Python distributions do not include the Rust
+binary, and it intentionally omits Textual features such as older/newer history paging, transcript
+search, mouse controls, session tree operations, and steering/follow-up queues. Selecting Rust never
+falls back to Textual. A missing/non-executable binary, unsupported platform, package-version mismatch,
+negotiation failure, or non-zero Rust exit is reported as an error. See
+[Development setup](../contributing/development#rust-tui-scaffold), or select Textual explicitly with
+`wisp tui --renderer textual`.
 
 Unlike print mode, **the Textual TUI exposes the full tool registry by default** — otherwise it would
 be a chatbot that can't read files or run commands. Mutating and command tools still pause for
@@ -150,11 +152,11 @@ stays anchored; select the `↓ new` indicator or press `End` to return to the l
 
 ### Resuming long sessions
 
-Selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the complete
-active-path transcript before revealing the replacement. A `Loading session history…` overlay keeps
-the old transcript from being mistaken for the selected session and reports progress for longer
-loads. The switch is atomic: a failed page or mount leaves an explicit error instead of exposing a
-partially loaded history.
+In Textual, selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the complete
+active-path transcript before revealing the replacement. The experimental Rust TUI instead loads one bounded latest
+page (up to 200 messages) and does not page older or newer history. It reports loading progress and,
+once backend selection commits, clears the old transcript before installing the selected session's
+page. A failed page leaves an explicit error instead of mislabeling old or partially loaded history.
 
 Every persisted message row is represented, but representation is logical rather than one widget per
 JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel, and
@@ -206,7 +208,7 @@ wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
-wisp tui --renderer rust                 # experimental transport diagnostics only
+wisp tui --renderer rust                 # experimental source-build Rust TUI
 wisp tui --no-synchronized-output        # disable atomic Textual frame presentation
 ```
 

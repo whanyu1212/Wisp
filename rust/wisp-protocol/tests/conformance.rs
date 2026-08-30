@@ -101,6 +101,58 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         serde_json::json!({"type": "get_session_stats", "id": "stats-1"})
     );
 
+    let sessions = commands::WispTypedClientRpcCommands::get_sessions("sessions-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        sessions,
+        serde_json::json!({"type": "get_sessions", "id": "sessions-1", "limit": 50})
+    );
+
+    let new_session = commands::WispTypedClientRpcCommands::new_session("new-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        new_session,
+        serde_json::json!({"type": "new_session", "id": "new-1"})
+    );
+
+    let selected = commands::WispTypedClientRpcCommands::select_session("select-1", "session-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        selected,
+        serde_json::json!({"type": "select_session", "id": "select-1", "session_id": "session-1"})
+    );
+
+    let current_messages = commands::WispTypedClientRpcCommands::get_messages("messages-1", None)
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        current_messages,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-1", "limit": 200,
+            "complete_structure": true, "full_content": false
+        })
+    );
+
+    let selected_messages =
+        commands::WispTypedClientRpcCommands::get_messages("messages-2", Some("session-1"))
+            .unwrap()
+            .into_value()
+            .unwrap();
+    assert_eq!(
+        selected_messages,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-2", "session_id": "session-1",
+            "limit": 200, "complete_structure": true, "full_content": false
+        })
+    );
+
     let cancel = commands::WispTypedClientRpcCommands::cancel("cancel-1", "prompt-1")
         .unwrap()
         .into_value()
@@ -167,6 +219,9 @@ fn approval_builder_rejects_denied_scopes_and_invalid_ids() {
         .is_err()
     );
     assert!(commands::WispTypedClientRpcCommands::prompt("", "hello").is_err());
+    assert!(commands::WispTypedClientRpcCommands::get_sessions(&"x".repeat(257)).is_err());
+    assert!(commands::WispTypedClientRpcCommands::select_session("select-1", "").is_err());
+    assert!(commands::WispTypedClientRpcCommands::get_messages("messages-1", Some("")).is_err());
     assert!(
         commands::WispTypedClientRpcCommands::approval(
             "approval-1",

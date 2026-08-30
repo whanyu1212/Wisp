@@ -141,7 +141,7 @@ def test_rust_tui_renders_bounded_tool_and_process_cards(tmp_path: Path) -> None
 import json
 import sys
 
-from wisp.events import RpcCommandFinished, ToolCallRequested, ToolResultReady
+from wisp.events import RpcCommandFinished, RpcMessagesReported, ToolCallRequested, ToolResultReady
 
 
 def emit(event):
@@ -167,7 +167,17 @@ for line in sys.stdin:
     command = json.loads(line)
     command_type = command["type"]
     command_id = command["id"]
-    if command_type == "prompt":
+    if command_type == "get_messages":
+        emit(RpcMessagesReported(
+            command_id=command_id,
+            session_id=command.get("session_id"),
+        ))
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type="get_messages",
+            ok=True,
+        ))
+    elif command_type == "prompt":
         emit(ToolCallRequested(
             call_id="read-1",
             name="read",
