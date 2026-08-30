@@ -17,6 +17,7 @@ pub const HISTORY_MESSAGE_LIMIT: usize = 200;
 const HISTORY_TOOL_CALL_LIMIT: usize = 128;
 const HISTORY_PROCESS_CALL_LIMIT: usize = 1024;
 const CONTENT_TRUNCATED_MARKER: &str = "[content truncated]";
+const HISTORY_TRUNCATED_MARKER: &str = "[earlier session history omitted]";
 const EMPTY_ASSISTANT_MESSAGE: &str = "(empty assistant message)";
 const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
 
@@ -38,11 +39,21 @@ pub enum HistoryProjectionError {
 pub fn project_rpc_messages(
     messages: &[Value],
 ) -> Result<SharedTranscript, HistoryProjectionError> {
+    project_rpc_message_page(messages, false)
+}
+
+pub fn project_rpc_message_page(
+    messages: &[Value],
+    truncated: bool,
+) -> Result<SharedTranscript, HistoryProjectionError> {
     if messages.len() > HISTORY_MESSAGE_LIMIT {
         return Err(HistoryProjectionError::TooManyMessages);
     }
 
     let mut transcript = SharedTranscript::default();
+    if truncated {
+        transcript.complete_message(0, HISTORY_TRUNCATED_MARKER.into());
+    }
     let mut process_ids = VecDeque::new();
     for (index, message) in messages.iter().enumerate() {
         match string(message, index, "role")? {
@@ -552,6 +563,17 @@ mod tests {
                 .contains(CONTENT_TRUNCATED_MARKER)
         );
         assert_eq!(transcript.entries()[2].content, EMPTY_ASSISTANT_MESSAGE);
+    }
+
+    #[test]
+    fn prepends_marker_when_earlier_history_is_omitted() {
+        let transcript = project_rpc_message_page(&[message("user", "retained")], true).unwrap();
+
+        assert_eq!(transcript.entries().len(), 2);
+        assert_eq!(transcript.entries()[0].role, TranscriptRole::Assistant);
+        assert_eq!(transcript.entries()[0].content, HISTORY_TRUNCATED_MARKER);
+        assert_eq!(transcript.entries()[1].role, TranscriptRole::User);
+        assert_eq!(transcript.entries()[1].content, "retained");
     }
 
     #[test]

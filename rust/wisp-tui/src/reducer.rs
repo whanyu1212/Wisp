@@ -2636,6 +2636,7 @@ mod tests {
             "command_id": "get_messages-1",
             "session_id": null,
             "session_path": null,
+            "truncated": false,
             "messages": [{
                 "role": "assistant",
                 "content": "",
@@ -2661,6 +2662,33 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, UiEffect::Notice(notice) if notice.contains("startup history failed")))
         );
+    }
+
+    #[test]
+    fn truncated_history_pages_surface_an_omission_marker() {
+        let event = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.messages",
+            "command_id": "get_messages-1",
+            "session_id": null,
+            "session_path": null,
+            "truncated": true,
+            "messages": [{
+                "role": "user",
+                "content": "retained",
+                "content_truncated": false,
+            }],
+        }))
+        .unwrap();
+
+        let BackendEvent::MessagesReported { messages, .. } = event else {
+            panic!("expected projected history");
+        };
+        assert_eq!(messages.transcript.entries().len(), 2);
+        assert_eq!(
+            messages.transcript.entries()[0].content,
+            "[earlier session history omitted]"
+        );
+        assert_eq!(messages.transcript.entries()[1].content, "retained");
     }
 
     #[test]

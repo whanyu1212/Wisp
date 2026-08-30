@@ -5,7 +5,7 @@ use super::{
     SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
     SESSION_UPDATED_AT_MAX_BYTES, SessionIdentity, SessionMessages, SessionSummary,
 };
-use crate::history::project_rpc_messages;
+use crate::history::project_rpc_message_page;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
     bounded_identity, bounded_tool_arguments, bounded_tool_name,
@@ -233,7 +233,10 @@ impl BackendEvent {
                     "session_path",
                     None,
                 )?;
-                match project_rpc_messages(array_field(value, &event_type, "messages")?) {
+                match project_rpc_message_page(
+                    array_field(value, &event_type, "messages")?,
+                    bool_field(value, &event_type, "truncated")?,
+                ) {
                     Ok(transcript) => Self::MessagesReported {
                         command_id,
                         messages: SessionMessages {
