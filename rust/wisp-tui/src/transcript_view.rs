@@ -159,6 +159,7 @@ fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> Transcript
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "transcript-benchmark", derive(serde::Serialize))]
 pub struct LayoutWork {
     pub bytes_scanned: usize,
     pub graphemes_scanned: usize,
@@ -487,12 +488,12 @@ pub struct TranscriptRowCache {
 }
 
 impl TranscriptRowCache {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "transcript-benchmark"))]
     pub fn work(&self) -> LayoutWork {
         self.work
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "transcript-benchmark"))]
     pub fn reset_work(&mut self) {
         self.work = LayoutWork::default();
     }
@@ -2777,6 +2778,33 @@ mod tests {
         assert!(!rows.is_empty());
         assert!(rows.iter().any(|row| row.plain_text() == "ééé final"));
         assert!(viewport.has_unseen_output());
+    }
+
+    #[test]
+    fn visible_work_is_independent_of_transcript_entry_count() {
+        fn measured_work(entry_count: usize) -> (LayoutWork, LayoutWork) {
+            let mut transcript = Transcript::default();
+            for turn in 0..entry_count / 2 {
+                transcript.append_exchange("same prompt".into());
+                transcript.complete_message(turn as u64, "**same response**".into());
+            }
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, 100, 15);
+            let _ = viewport.visible_rows(&transcript, &mut cache);
+            let cold = cache.work();
+            cache.reset_work();
+            let _ = viewport.visible_rows(&transcript, &mut cache);
+            (cold, cache.work())
+        }
+
+        let small = measured_work(1_000);
+        let large = measured_work(100_000);
+
+        assert_eq!(large, small);
+        assert_eq!(large.1.rows_built, 0);
+        assert_eq!(large.1.markdown_source_bytes_parsed, 0);
+        assert_eq!(large.1.syntax_source_bytes, 0);
     }
 
     #[test]

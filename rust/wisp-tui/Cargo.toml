@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+transcript-benchmark = ["nix/resource"]
+
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
@@ -26,3 +29,7 @@ wisp-protocol = { path = "../wisp-protocol" }
 
 [dev-dependencies]
 jsonschema.workspace = true
+
+[[example]]
+name = "transcript_benchmark"
+required-features = ["transcript-benchmark"]
