@@ -280,7 +280,7 @@ for line in sys.stdin:
     browse_sent = False
     detail_seen = False
     detail_close_output_offset: int | None = None
-    browse_close_sent_at: float | None = None
+    detail_closed_at: float | None = None
     quit_sent = False
     deadline = time.monotonic() + 20
     try:
@@ -325,21 +325,20 @@ for line in sys.stdin:
                     termios.TIOCSWINSZ,
                     struct.pack("HHHH", 30, 120, 0, 0),
                 )
-                # Standalone Escape bytes must be separate terminal events. Adjacent
-                # bytes can be parsed as one escape sequence on Linux.
+                # Enter closes detail too and is unambiguous after a resize on Linux;
+                # a standalone Escape can remain buffered as a sequence prefix.
                 detail_close_output_offset = len(output)
-                os.write(terminal_fd, b"\x1b")
+                os.write(terminal_fd, b"\r")
             if (
                 detail_close_output_offset is not None
-                and browse_close_sent_at is None
+                and detail_closed_at is None
                 and b"F6 details" in output[detail_close_output_offset:]
             ):
-                os.write(terminal_fd, b"\x1b")
-                browse_close_sent_at = time.monotonic()
+                detail_closed_at = time.monotonic()
             if (
-                browse_close_sent_at is not None
+                detail_closed_at is not None
                 and not quit_sent
-                and time.monotonic() - browse_close_sent_at >= 0.5
+                and time.monotonic() - detail_closed_at >= 0.5
             ):
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
@@ -365,7 +364,7 @@ for line in sys.stdin:
     assert browse_sent, bytes(output)
     assert detail_seen, bytes(output)
     assert detail_close_output_offset is not None, bytes(output)
-    assert browse_close_sent_at is not None, bytes(output)
+    assert detail_closed_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output

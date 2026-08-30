@@ -6,8 +6,9 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::tool_cards::{
-    BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
-    bounded_identity, bounded_tool_arguments, bounded_tool_name, process_call_identity,
+    BoundedText, INTERRUPTED_TOOL_RESULT_TEXT, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
+    ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
+    process_call_identity,
 };
 use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
 use crate::transcript::SharedTranscript;
@@ -198,12 +199,14 @@ fn project_tool_result(
                 .map(|(_, process_id)| process_id)
         });
     if tool_result_status(message) == Some("denied") {
-        transcript.observe_tool_call(ToolCallInput {
-            call_id: result.call_id.clone(),
-            name: result.name.clone(),
-            arguments: Value::Object(Map::new()),
-            detail_source: ToolDetailSource::None,
-        });
+        if !transcript.has_unresolved_tool_call(&result.call_id) {
+            transcript.observe_tool_call(ToolCallInput {
+                call_id: result.call_id.clone(),
+                name: result.name.clone(),
+                arguments: Value::Object(Map::new()),
+                detail_source: ToolDetailSource::None,
+            });
+        }
         transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
     }
     transcript.observe_tool_result(result);
@@ -219,8 +222,11 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
     let status = result
         .and_then(|result| result.get("status"))
         .and_then(Value::as_str);
-    let is_error = optional_bool(message, index, "is_error")?.unwrap_or(false)
-        || matches!(status, Some("error" | "denied"));
+    let persisted_is_error = optional_bool(message, index, "is_error")?.unwrap_or(false);
+    let legacy_interrupted = status.is_none()
+        && persisted_is_error
+        && string(message, index, "content")? == INTERRUPTED_TOOL_RESULT_TEXT;
+    let is_error = persisted_is_error || matches!(status, Some("error" | "denied"));
     let output = content_for_history(message, index)?;
     let before_text = result
         .and_then(|result| result.get("before_text"))
@@ -276,7 +282,8 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
             .unwrap_or(false)
             || bool(message, index, "content_truncated")?,
         process_id: None,
-        process_state: (status == Some("cancelled")).then(|| "cancelled".into()),
+        process_state: (status == Some("cancelled") || legacy_interrupted)
+            .then(|| "cancelled".into()),
         process_error: None,
         stdout: None,
         stdout_source_bytes: 0,
@@ -609,6 +616,56 @@ mod tests {
         assert_eq!(card.process_id, bounded_identity("process-1"));
         assert_eq!(card.call_count, 2);
         assert_eq!(card.poll_count, 1);
+        assert_eq!(card.display_state.status().as_str(), "cancelled");
+    }
+
+    #[test]
+    fn denied_process_results_preserve_the_matching_call_identity() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "poll-denied",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-denied"},
+        }]);
+        let mut result = message("tool", "denied");
+        result["tool_call_id"] = json!("poll-denied");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "denied"});
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(card.process_id, bounded_identity("process-denied"));
+        assert_eq!(card.call_count, 1);
+        assert_eq!(
+            card.display_state,
+            crate::tool_cards::ProcessDisplayState::PollDenied
+        );
+    }
+
+    #[test]
+    fn legacy_interrupted_process_results_project_as_cancelled() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "poll-interrupted",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-interrupted"},
+        }]);
+        let mut result = message("tool", INTERRUPTED_TOOL_RESULT_TEXT);
+        result["tool_call_id"] = json!("poll-interrupted");
+        result["tool_name"] = json!("bash");
+        result["is_error"] = json!(true);
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.process_card())
+            .unwrap();
+        assert_eq!(card.process_id, bounded_identity("process-interrupted"));
         assert_eq!(card.display_state.status().as_str(), "cancelled");
     }
 
