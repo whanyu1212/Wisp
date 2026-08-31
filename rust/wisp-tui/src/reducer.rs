@@ -1299,7 +1299,7 @@ fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
         )
         .unwrap_or_default()
         .is_empty();
-    let represented_durable_entry_ids = state.transcript.historical_durable_entry_ids();
+    let represented_durable_entry_ids = state.transcript.represented_durable_entry_ids();
     let represented_durable_entry_order = report
         .durable_entry_ids
         .into_iter()
@@ -1342,7 +1342,7 @@ fn same_history_scope(
 }
 
 fn sync_represented_history(state: &mut UiState) {
-    let retained = state.transcript.historical_durable_entry_ids();
+    let retained = state.transcript.represented_durable_entry_ids();
     state
         .history
         .represented_durable_entry_order
@@ -3769,7 +3769,7 @@ mod tests {
         state.transcript.mark_history_entries(start, "tail-entry");
         order.push("tail-entry".into());
         state.history.represented_durable_entry_ids =
-            state.transcript.historical_durable_entry_ids();
+            state.transcript.represented_durable_entry_ids();
         state.history.represented_durable_entry_order = order;
         state.history.oldest_cursor = Some("entry-0".into());
         let mut ids = DeterministicIds::default();

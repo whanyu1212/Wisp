@@ -1009,10 +1009,18 @@ impl Transcript {
             .then_some(entry_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn historical_durable_entry_ids(&self) -> std::collections::BTreeSet<String> {
         self.entries
             .iter()
             .filter(|entry| entry.history_group.is_some())
+            .flat_map(|entry| entry.durable_entry_ids.iter().cloned())
+            .collect()
+    }
+
+    pub(crate) fn represented_durable_entry_ids(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
             .flat_map(|entry| entry.durable_entry_ids.iter().cloned())
             .collect()
     }
@@ -1447,8 +1455,17 @@ impl Transcript {
                     .checked_add(sequence_offset)
                     .expect("tool lifecycle sequence exhausted");
             }
-            // Do not transfer durable origins into the live owner: repeated older-page loads
-            // must not grow metadata outside the bounded historical window.
+            let live_durable_entry_ids = std::mem::take(&mut live.durable_entry_ids);
+            live.durable_entry_ids = older.durable_entry_ids;
+            for durable_entry_id in live_durable_entry_ids {
+                if !live
+                    .durable_entry_ids
+                    .iter()
+                    .any(|candidate| candidate == &durable_entry_id)
+                {
+                    live.durable_entry_ids.push(durable_entry_id);
+                }
+            }
             live.history_result_projection_truncated |= older.history_result_projection_truncated;
             live.layout_epoch = live
                 .layout_epoch
@@ -1470,7 +1487,6 @@ impl Transcript {
         let durable_entry_order = self
             .entries
             .iter()
-            .filter(|entry| entry.history_group.is_some())
             .flat_map(|entry| entry.durable_entry_ids.iter())
             .filter(|entry_id| seen.insert((*entry_id).clone()))
             .cloned()
@@ -1496,12 +1512,45 @@ impl Transcript {
                 .iter()
                 .filter(|entry| entry.history_group.is_some());
             historical_entries.clone().count() > limit
-                || historical_entries
-                    .flat_map(|entry| entry.durable_entry_ids.iter())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-                    > limit
+                || self.represented_durable_entry_ids().len() > limit
         } {
+            if self.represented_durable_entry_ids().len() > limit {
+                let mut edge = None::<(usize, String, bool)>;
+                for entry in &self.entries {
+                    for durable_entry_id in &entry.durable_entry_ids {
+                        let position = *positions.get(durable_entry_id.as_str())?;
+                        let candidate = (
+                            position,
+                            durable_entry_id.clone(),
+                            entry.history_group.is_none(),
+                        );
+                        let replace = edge.as_ref().is_none_or(|current| {
+                            if evict_newest {
+                                candidate.0 > current.0
+                            } else {
+                                candidate.0 < current.0
+                            }
+                        });
+                        if replace {
+                            edge = Some(candidate);
+                        }
+                    }
+                }
+                if let Some((_, durable_entry_id, true)) = edge {
+                    for entry in &mut self.entries {
+                        entry
+                            .durable_entry_ids
+                            .retain(|candidate| candidate != &durable_entry_id);
+                    }
+                    if !removed
+                        .iter()
+                        .any(|candidate| candidate == &durable_entry_id)
+                    {
+                        removed.push(durable_entry_id);
+                    }
+                    continue;
+                }
+            }
             let mut ranges = std::collections::BTreeMap::<u64, (usize, usize)>::new();
             for entry in self
                 .entries
@@ -2109,6 +2158,11 @@ mod tests {
                 .historical_durable_entry_ids()
                 .contains("process-history")
         );
+        assert!(
+            transcript
+                .represented_durable_entry_ids()
+                .contains("process-history")
+        );
 
         let removed = transcript
             .retain_historical_entries_in_order(
@@ -2121,7 +2175,12 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
             .unwrap();
-        assert_eq!(removed, vec!["entry-1200"]);
+        assert_eq!(removed, vec!["entry-1200", "process-history"]);
+        assert!(
+            !transcript
+                .represented_durable_entry_ids()
+                .contains("process-history")
+        );
         assert!(transcript.entry(survivor).is_some());
 
         let mut live_result = result("poll-live", "live output");

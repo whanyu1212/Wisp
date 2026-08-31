@@ -1057,7 +1057,9 @@ mod tests {
         older_result["tool_name"] = json!("bash");
         older_result["tool_result"] = json!({"status": "done"});
         let older = project_rpc_messages(&[older_call, older_result]).unwrap();
+        let older_origins = older.represented_durable_entry_ids();
         assert!(transcript.prepend_history_page(&older));
+        assert!(older_origins.is_subset(&transcript.represented_durable_entry_ids()));
         assert!(transcript.has_unresolved_tool_call("poll-live-promoted"));
 
         assert_eq!(transcript.entries().len(), 1);
