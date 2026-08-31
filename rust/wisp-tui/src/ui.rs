@@ -268,7 +268,9 @@ fn render_transcript(
             })
             .collect()
     };
-    let title = if viewport.has_unseen_output() {
+    let title = if state.history.tail_evicted && viewport.follows_tail() {
+        " conversation • more history ↓ "
+    } else if viewport.has_unseen_output() {
         " conversation • new ↓ "
     } else if viewport.follows_tail() {
         " conversation "
@@ -1240,6 +1242,33 @@ mod tests {
             .unwrap();
 
         assert!(terminal.backend().to_string().contains("new ↓"));
+    }
+
+    #[test]
+    fn transcript_title_reports_an_evicted_newer_tail() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("retained".into());
+        state.history.tail_evicted = true;
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+
+        assert!(terminal.backend().to_string().contains("more history ↓"));
     }
 
     #[test]

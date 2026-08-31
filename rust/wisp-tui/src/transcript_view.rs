@@ -1691,8 +1691,11 @@ pub enum TranscriptViewAction {
     ScrollLines(i32),
     PageUp,
     PageDown,
+    Home,
     FollowTail,
     OutputChanged,
+    /// A persisted page changed around existing semantic anchors, never live output.
+    HistoryChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1762,6 +1765,26 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) {
         match action {
+            TranscriptViewAction::HistoryChanged => {
+                if !self.follow_tail {
+                    self.top = self.top.and_then(|anchor| {
+                        normalize_anchor(
+                            transcript,
+                            cache,
+                            anchor,
+                            self.width,
+                            AnchorNormalization::Content,
+                        )
+                    });
+                    if self.top.is_none() {
+                        self.top = transcript.entries().first().map(|entry| RowAnchor {
+                            entry_id: entry.id,
+                            position: RowPosition::Header,
+                        });
+                        self.follow_tail = self.top.is_none();
+                    }
+                }
+            }
             TranscriptViewAction::OutputChanged => {
                 if !self.follow_tail {
                     self.top = self.top.and_then(|anchor| {
@@ -1793,6 +1816,7 @@ impl TranscriptViewport {
                 let amount = self.height.saturating_sub(1).max(1);
                 self.scroll_down(transcript, cache, amount);
             }
+            TranscriptViewAction::Home => self.scroll_up(transcript, cache, usize::MAX),
             TranscriptViewAction::ScrollLines(lines) if lines < 0 => {
                 self.scroll_up(transcript, cache, lines.unsigned_abs() as usize);
             }
@@ -1825,6 +1849,12 @@ impl TranscriptViewport {
         let rows = collect_rows(transcript, cache, top, self.width, self.height);
         self.populate_overscan(transcript, cache, top, rows.last().map(|row| row.anchor));
         rows
+    }
+
+    pub fn at_oldest(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) -> bool {
+        let _ = self.visible_rows(transcript, cache);
+        self.top
+            .is_some_and(|top| cache.previous_anchor(transcript, top, self.width).is_none())
     }
 
     fn scroll_up(
@@ -2757,6 +2787,48 @@ mod tests {
             }
             _ => assert_eq!(after.position, before.position),
         }
+    }
+
+    #[test]
+    fn history_changes_preserve_surviving_anchors_and_fall_back_after_eviction() {
+        let mut transcript = Transcript::default();
+        let current = transcript.append_prompt("current".into());
+        transcript.mark_history_entries(0, "current-entry");
+        let live = transcript.append_prompt("live".into());
+        let mut viewport = TranscriptViewport {
+            top: Some(RowAnchor {
+                entry_id: current,
+                position: RowPosition::Header,
+            }),
+            follow_tail: false,
+            ..TranscriptViewport::default()
+        };
+        let mut cache = TranscriptRowCache::default();
+        let mut older = Transcript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+
+        assert!(transcript.prepend_history_page(&older));
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(viewport.top.unwrap().entry_id, current);
+
+        viewport.top = Some(RowAnchor {
+            entry_id: transcript.entries()[0].id,
+            position: RowPosition::Header,
+        });
+        transcript.retain_historical_entries(0, false).unwrap();
+        cache = TranscriptRowCache::default();
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(viewport.top.unwrap().entry_id, live);
+        assert!(!viewport.follow_tail);
     }
 
     #[test]

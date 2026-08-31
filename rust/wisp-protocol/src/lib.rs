@@ -608,6 +608,87 @@ pub mod commands {
             deserialize(value)
         }
 
+        /// Construct one bounded older-page history request.
+        pub fn get_messages_older(
+            id: &str,
+            session_id: Option<&str>,
+            before_entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_messages",
+                "id": id,
+                "limit": 75,
+                "before_entry_id": before_entry_id,
+                "complete_structure": true,
+                "full_content": false,
+                "allow_during_prompt": true,
+            });
+            if let Some(session_id) = session_id {
+                value
+                    .as_object_mut()
+                    .expect("command constructors create JSON objects")
+                    .insert(
+                        "session_id".into(),
+                        serde_json::Value::String(session_id.into()),
+                    );
+            }
+            deserialize(value)
+        }
+
+        /// Construct one bounded newer-page history request.
+        pub fn get_messages_newer(
+            id: &str,
+            session_id: Option<&str>,
+            after_entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_messages",
+                "id": id,
+                "limit": 75,
+                "after_entry_id": after_entry_id,
+                "complete_structure": true,
+                "full_content": false,
+                "allow_during_prompt": true,
+            });
+            if let Some(session_id) = session_id {
+                value
+                    .as_object_mut()
+                    .expect("command constructors create JSON objects")
+                    .insert(
+                        "session_id".into(),
+                        serde_json::Value::String(session_id.into()),
+                    );
+            }
+            deserialize(value)
+        }
+
+        /// Construct one exact persisted-message fetch for an on-demand detail view.
+        pub fn get_message_detail(
+            id: &str,
+            session_id: Option<&str>,
+            entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_messages",
+                "id": id,
+                "limit": 1,
+                "entry_ids": [entry_id],
+                "complete_structure": true,
+                "full_content": true,
+                "allow_during_prompt": true,
+            });
+            if let Some(session_id) = session_id {
+                value
+                    .as_object_mut()
+                    .expect("command constructors create JSON objects")
+                    .insert(
+                        "session_id".into(),
+                        serde_json::Value::String(session_id.into()),
+                    );
+            }
+            deserialize(value)
+        }
+
         /// Construct a request to cancel a running or queued command.
         pub fn cancel(id: &str, target_id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))

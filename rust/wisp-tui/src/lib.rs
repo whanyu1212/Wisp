@@ -388,6 +388,25 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
+                UiEffect::HistoryWindowChanged => self.render_pending = true,
+                UiEffect::OpenExactDetail(entry_id) => {
+                    if self.browse_selected != Some(entry_id) {
+                        self.state.history.active_exact_detail = None;
+                        continue;
+                    }
+                    if let Some(presentation) = self
+                        .state
+                        .history
+                        .active_exact_detail
+                        .as_ref()
+                        .filter(|detail| detail.target == entry_id)
+                        .map(|detail| detail.presentation.clone())
+                    {
+                        self.detail_view.open(entry_id, &presentation);
+                        self.browse_selected = None;
+                        self.render_pending = true;
+                    }
+                }
                 UiEffect::Notice(notice) => {
                     self.notice = Some(notice);
                     self.render_pending = true;
@@ -442,11 +461,15 @@ impl LiveUi {
         let transcript_replaced = effects
             .iter()
             .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
+        let history_window_changed = effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged));
         if matches!(
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
         ) {
             self.detail_view.close();
+            self.state.history.active_exact_detail = None;
             self.browse_selected = None;
         } else {
             if self
@@ -455,6 +478,7 @@ impl LiveUi {
                 .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
             {
                 self.detail_view.close();
+                self.state.history.active_exact_detail = None;
             }
             if self
                 .browse_selected
@@ -464,7 +488,10 @@ impl LiveUi {
             }
         }
         if !transcript_replaced && self.state.transcript.generation() != transcript_generation {
-            let action = if follow_after_update {
+            let action = if history_window_changed {
+                self.transcript_row_cache = TranscriptRowCache::default();
+                TranscriptViewAction::HistoryChanged
+            } else if follow_after_update {
                 TranscriptViewAction::FollowTail
             } else {
                 TranscriptViewAction::OutputChanged
@@ -843,7 +870,12 @@ impl LiveUi {
                 .transcript
                 .entry(row.anchor.entry_id)
                 .and_then(|entry| entry.tool_card())
-                .is_some_and(|card| card.has_retained_detail());
+                .is_some_and(|card| card.has_retained_detail())
+                || self
+                    .state
+                    .transcript
+                    .exact_historical_detail_target(row.anchor.entry_id)
+                    .is_some();
             if eligible {
                 entries.push(row.anchor.entry_id);
             }
@@ -929,6 +961,34 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    async fn request_selected_detail(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(entry_id) = self.browse_selected else {
+            return Ok(LoopControl::Continue);
+        };
+        if self
+            .state
+            .transcript
+            .exact_historical_detail_target(entry_id)
+            .is_none()
+        {
+            self.open_selected_detail();
+            return Ok(LoopControl::Continue);
+        }
+        let action = UiAction::LoadExactDetail { target: entry_id };
+        if let Some(notice) =
+            self.reduced_action_frame_limit_notice(&action, "exact detail request", limit)?
+        {
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        self.dispatch(action, writer, limit).await
+    }
+
     async fn handle_session_picker_key(
         &mut self,
         key: KeyEvent,
@@ -977,6 +1037,7 @@ impl LiveUi {
     fn handle_detail_key(&mut self, key: KeyEvent) -> LoopControl {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
             self.detail_view.close();
+            self.state.history.active_exact_detail = None;
             self.render_pending = true;
             return LoopControl::Continue;
         }
@@ -1003,7 +1064,12 @@ impl LiveUi {
         LoopControl::Continue
     }
 
-    fn handle_browse_key(&mut self, key: KeyEvent) -> LoopControl {
+    async fn handle_browse_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         match key.code {
             KeyCode::Esc => {
                 self.browse_selected = None;
@@ -1011,20 +1077,59 @@ impl LiveUi {
             }
             KeyCode::F(6) | KeyCode::Tab => self.cycle_browse(false),
             KeyCode::BackTab => self.cycle_browse(true),
-            KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_detail(),
-            _ => {
-                if let Some(action) = transcript_view_action(key) {
-                    self.transcript_viewport.reduce(
-                        action,
-                        &self.state.transcript,
-                        &mut self.transcript_row_cache,
-                    );
-                    self.reconcile_browse_selection();
-                }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return self.request_selected_detail(writer, limit).await;
             }
+            _ if transcript_view_action(key).is_some() => {
+                let control = self.navigate_transcript(key, writer, limit).await?;
+                self.reconcile_browse_selection();
+                return Ok(control);
+            }
+            _ => {}
         }
         self.render_pending = true;
-        LoopControl::Continue
+        Ok(LoopControl::Continue)
+    }
+
+    async fn navigate_transcript(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let action = transcript_view_action(key).expect("navigation key is prefiltered");
+        self.transcript_viewport.reduce(
+            action,
+            &self.state.transcript,
+            &mut self.transcript_row_cache,
+        );
+        let history_action = match action {
+            TranscriptViewAction::PageUp | TranscriptViewAction::Home
+                if self
+                    .transcript_viewport
+                    .at_oldest(&self.state.transcript, &mut self.transcript_row_cache) =>
+            {
+                Some(UiAction::LoadOlderHistory)
+            }
+            TranscriptViewAction::PageDown | TranscriptViewAction::FollowTail
+                if self.transcript_viewport.follows_tail() && self.state.history.tail_evicted =>
+            {
+                Some(UiAction::LoadNewerHistory)
+            }
+            _ => None,
+        };
+        if let Some(history_action) = history_action {
+            if let Some(notice) =
+                self.reduced_action_frame_limit_notice(&history_action, "history request", limit)?
+            {
+                self.notice = Some(notice);
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
+            return self.dispatch(history_action, writer, limit).await;
+        }
+        self.render_pending = true;
+        Ok(LoopControl::Continue)
     }
 
     async fn handle_input(
@@ -1041,21 +1146,23 @@ impl LiveUi {
             Input::Paste(_) if self.session_picker.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.detail_view.is_open() => Ok(self.handle_detail_key(key)),
             Input::Paste(_) if self.detail_view.is_open() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.browse_selected.is_some() => Ok(self.handle_browse_key(key)),
+            Input::Key(key) if self.browse_selected.is_some() => {
+                self.handle_browse_key(key, writer, limit).await
+            }
             Input::Paste(_) if self.browse_selected.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if is_browse_key(key) => {
                 self.enter_or_cycle_browse();
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
-            Input::Key(key) if transcript_view_action(key).is_some() => {
-                self.transcript_viewport.reduce(
-                    transcript_view_action(key).expect("guard requires a transcript action"),
-                    &self.state.transcript,
-                    &mut self.transcript_row_cache,
-                );
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
+            Input::Key(key)
+                if transcript_view_action(key).is_some()
+                    && !matches!(
+                        self.state.view_status,
+                        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+                    ) =>
+            {
+                self.navigate_transcript(key, writer, limit).await
             }
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
                 let context_visible =
@@ -1198,6 +1305,14 @@ fn retained_detail(
     state: &UiState,
     entry_id: TranscriptEntryId,
 ) -> Option<&ToolDetailPresentation> {
+    if let Some(detail) = state
+        .history
+        .active_exact_detail
+        .as_ref()
+        .filter(|detail| detail.target == entry_id)
+    {
+        return Some(&detail.presentation);
+    }
     let card = state.transcript.entry(entry_id)?.tool_card()?;
     let DetailAvailability::LiveRetained(presentation) = &card.structured_detail else {
         return None;
@@ -1221,6 +1336,9 @@ fn transcript_view_action(key: KeyEvent) -> Option<TranscriptViewAction> {
     match (key.code, key.modifiers) {
         (KeyCode::PageUp, KeyModifiers::NONE) => Some(TranscriptViewAction::PageUp),
         (KeyCode::PageDown, KeyModifiers::NONE) => Some(TranscriptViewAction::PageDown),
+        (KeyCode::Home, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TranscriptViewAction::Home)
+        }
         (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TranscriptViewAction::ScrollLines(-1))
         }
@@ -3501,6 +3619,22 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(after, before);
 
+        let stale_presentation = retained_detail(&live_ui.state, card_id).unwrap().clone();
+        live_ui.state.history.active_exact_detail = Some(reducer::ActiveExactDetail {
+            target: card_id,
+            presentation: stale_presentation,
+        });
+        live_ui
+            .apply_effects(
+                vec![UiEffect::OpenExactDetail(card_id)],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(!live_ui.detail_view.is_open());
+        assert!(live_ui.state.history.active_exact_detail.is_none());
+
         live_ui.enter_or_cycle_browse();
         live_ui.open_selected_detail();
         assert!(live_ui.detail_view.is_open());
@@ -3703,7 +3837,15 @@ mod tests {
             Some(TranscriptViewAction::FollowTail)
         );
         assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)),
+            Some(TranscriptViewAction::Home)
+        );
+        assert_eq!(
             transcript_view_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            transcript_view_action(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
             None
         );
     }

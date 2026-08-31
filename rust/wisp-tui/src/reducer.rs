@@ -45,7 +45,57 @@ pub struct SessionSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionMessages {
     pub session: Option<SessionIdentity>,
+    pub active_leaf_id: Option<String>,
+    pub truncated: bool,
+    pub next_before_entry_id: Option<String>,
+    pub next_after_entry_id: Option<String>,
+    pub durable_entry_ids: Vec<String>,
+    pub exact_tool_result: Option<Box<ToolResultInput>>,
     pub transcript: SharedTranscript,
+}
+
+pub const TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT: usize = 1_200;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveExactDetail {
+    pub target: crate::transcript::TranscriptEntryId,
+    pub presentation: crate::tool_detail::ToolDetailPresentation,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HistoryWindow {
+    pub session: Option<SessionIdentity>,
+    pub active_leaf_id: Option<String>,
+    pub oldest_cursor: Option<String>,
+    pub newest_cursor: Option<String>,
+    pub represented_durable_entry_ids: std::collections::BTreeSet<String>,
+    pub represented_durable_entry_order: Vec<String>,
+    pub tail_evicted: bool,
+    pub active_exact_detail: Option<ActiveExactDetail>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HistoryRequest {
+    command_id: String,
+    kind: HistoryRequestKind,
+    active_leaf_may_advance: bool,
+    report: Option<SessionMessages>,
+    completion: Option<SessionCompletion>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum HistoryRequestKind {
+    Older {
+        cursor: String,
+    },
+    Newer {
+        cursor: String,
+    },
+    Latest,
+    ExactDetail {
+        target: crate::transcript::TranscriptEntryId,
+        entry_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +279,8 @@ pub struct UiState {
     pub cancel_requested: bool,
     pub exit_requested: bool,
     pub transcript: SharedTranscript,
+    pub history: HistoryWindow,
+    history_request: Option<HistoryRequest>,
 }
 
 impl UiState {
@@ -265,6 +317,8 @@ impl UiState {
             cancel_requested: false,
             exit_requested: false,
             transcript: SharedTranscript::default(),
+            history: HistoryWindow::default(),
+            history_request: None,
         }
     }
 
@@ -390,6 +444,13 @@ pub enum UiAction {
         session_id: String,
     },
     NewSession,
+    LoadOlderHistory,
+    LoadNewerHistory,
+    ReloadLatestHistory,
+    LoadExactDetail {
+        target: crate::transcript::TranscriptEntryId,
+    },
+    ReleaseExactDetail,
     ApprovalDecision {
         call_id: String,
         approved: bool,
@@ -417,6 +478,8 @@ pub enum UiEffect {
         selected_session_id: Option<String>,
     },
     ReplaceTranscript,
+    HistoryWindowChanged,
+    OpenExactDetail(crate::transcript::TranscriptEntryId),
     Notice(String),
     RequestRender,
     Exit,
@@ -447,6 +510,14 @@ pub fn reduce(
         UiAction::LoadSessionCatalog => load_session_catalog(state, ids),
         UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
         UiAction::NewSession => new_session(state, ids),
+        UiAction::LoadOlderHistory => load_older_history(state, ids),
+        UiAction::LoadNewerHistory => load_newer_history(state, ids),
+        UiAction::ReloadLatestHistory => reload_latest_history(state, ids),
+        UiAction::LoadExactDetail { target } => load_exact_detail(state, target, ids),
+        UiAction::ReleaseExactDetail => {
+            state.history.active_exact_detail = None;
+            Ok(vec![UiEffect::RequestRender])
+        }
         UiAction::ApprovalDecision {
             call_id,
             approved,
@@ -504,7 +575,7 @@ fn submit(
 }
 
 fn begin_session_operation(state: &UiState) -> Result<(), ReduceError> {
-    if state.session_operation.is_some() {
+    if state.session_operation.is_some() || state.history_request.is_some() {
         return Err(ReduceError::SessionOperationActive);
     }
     if let Some(current) = &state.current_command {
@@ -592,6 +663,142 @@ fn new_session(
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
     ])
+}
+
+fn history_session_id(state: &UiState) -> Option<&str> {
+    state
+        .history
+        .session
+        .as_ref()
+        .or(state.selected_session.as_ref())
+        .map(|session| session.session_id.as_str())
+}
+
+fn can_request_history(state: &UiState, allow_during_prompt: bool) -> bool {
+    state.history_request.is_none()
+        && state.session_operation.is_none()
+        && match state.current_command.as_ref() {
+            None => true,
+            Some(ActiveCommand {
+                command_type: ActiveCommandType::Prompt,
+                ..
+            }) => allow_during_prompt,
+            Some(_) => false,
+        }
+}
+
+fn begin_history_request(
+    state: &mut UiState,
+    command_id: String,
+    kind: HistoryRequestKind,
+    command: WispTypedClientRpcCommands,
+) -> Vec<UiEffect> {
+    let active_leaf_may_advance = matches!(
+        state.current_command,
+        Some(ActiveCommand {
+            command_type: ActiveCommandType::Prompt,
+            ..
+        })
+    ) || matches!(kind, HistoryRequestKind::Latest)
+        && state.transcript.has_live_entries();
+    state.history_request = Some(HistoryRequest {
+        command_id,
+        kind,
+        active_leaf_may_advance,
+        report: None,
+        completion: None,
+    });
+    vec![UiEffect::SendCommand(command), UiEffect::RequestRender]
+}
+
+fn load_older_history(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !can_request_history(state, true) {
+        return Ok(Vec::new());
+    }
+    let Some(cursor) = state.history.oldest_cursor.clone() else {
+        return Ok(Vec::new());
+    };
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command =
+        WispTypedClientRpcCommands::get_messages_older(&id, history_session_id(state), &cursor)?;
+    Ok(begin_history_request(
+        state,
+        id,
+        HistoryRequestKind::Older { cursor },
+        command,
+    ))
+}
+
+fn load_newer_history(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !state.history.tail_evicted {
+        return Ok(Vec::new());
+    }
+    if !can_request_history(state, false) {
+        return Ok(Vec::new());
+    }
+    if state.transcript.has_live_entries() {
+        return reload_latest_history(state, ids);
+    }
+    let Some(cursor) = state.history.newest_cursor.clone() else {
+        return reload_latest_history(state, ids);
+    };
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command =
+        WispTypedClientRpcCommands::get_messages_newer(&id, history_session_id(state), &cursor)?;
+    Ok(begin_history_request(
+        state,
+        id,
+        HistoryRequestKind::Newer { cursor },
+        command,
+    ))
+}
+
+fn reload_latest_history(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !can_request_history(state, false) {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command = WispTypedClientRpcCommands::get_messages(&id, history_session_id(state))?;
+    Ok(begin_history_request(
+        state,
+        id,
+        HistoryRequestKind::Latest,
+        command,
+    ))
+}
+
+fn load_exact_detail(
+    state: &mut UiState,
+    target: crate::transcript::TranscriptEntryId,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !can_request_history(state, true) {
+        return Ok(Vec::new());
+    }
+    let Some(target) = state.transcript.exact_historical_detail_target(target) else {
+        return Ok(Vec::new());
+    };
+    let Some(entry_id) = state.transcript.durable_entry_id(target).map(str::to_owned) else {
+        return Ok(Vec::new());
+    };
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command =
+        WispTypedClientRpcCommands::get_message_detail(&id, history_session_id(state), &entry_id)?;
+    Ok(begin_history_request(
+        state,
+        id,
+        HistoryRequestKind::ExactDetail { target, entry_id },
+        command,
+    ))
 }
 
 fn answer_approval(
@@ -875,12 +1082,18 @@ fn handle_session_backend_event(
                 command_id: received,
                 messages,
             } if received == command_id => {
-                if report.is_none()
-                    && messages
+                if report.is_none() {
+                    if !messages
                         .session
                         .as_ref()
                         .is_some_and(|session| same_session(session, selected))
-                {
+                    {
+                        return Ok(Some(session_failure(
+                            state,
+                            "session history hydration",
+                            Some("backend returned another session".into()),
+                        )));
+                    }
                     *report = Some(messages.clone());
                 }
                 true
@@ -928,12 +1141,12 @@ fn handle_session_backend_event(
             completion: Some(_),
             ..
         } => {
-            state.transcript = report.transcript;
-            state.selected_session = report.session;
+            state.selected_session = report.session.clone();
             state.last_session = state
                 .selected_session
                 .as_ref()
                 .map(|session| session.session_id.clone());
+            install_history_snapshot(state, report);
             state.input_ready = true;
             vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
         }
@@ -985,6 +1198,8 @@ fn handle_session_backend_event(
             state.selected_session = Some(selected.clone());
             state.last_session = Some(selected.session_id.clone());
             state.transcript = SharedTranscript::default();
+            state.history = HistoryWindow::default();
+            state.history_request = None;
             state.session_operation = Some(SessionOperation::HydratingSelection {
                 command_id: id,
                 selected,
@@ -1010,7 +1225,7 @@ fn handle_session_backend_event(
             completion: Some(_),
             ..
         } => {
-            state.transcript = report.transcript;
+            install_history_snapshot(state, report);
             state.input_ready = true;
             vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
         }
@@ -1023,6 +1238,8 @@ fn handle_session_backend_event(
                 state.transcript = SharedTranscript::default();
                 state.selected_session = None;
                 state.last_session = None;
+                state.history = HistoryWindow::default();
+                state.history_request = None;
                 state.input_ready = true;
                 vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
             }
@@ -1058,11 +1275,280 @@ fn session_failure(state: &mut UiState, operation: &str, error: Option<String>) 
     ]
 }
 
+fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
+    state.transcript = report.transcript;
+    let prefix_evicted = !state
+        .transcript
+        .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, false)
+        .unwrap_or_default()
+        .is_empty();
+    let represented_durable_entry_ids = state.transcript.historical_durable_entry_ids();
+    let represented_durable_entry_order = report
+        .durable_entry_ids
+        .into_iter()
+        .filter(|entry_id| represented_durable_entry_ids.contains(entry_id))
+        .collect::<Vec<_>>();
+    let oldest_cursor = prefix_evicted
+        .then(|| represented_durable_entry_order.first().cloned())
+        .flatten()
+        .or(report.next_before_entry_id);
+    state.history = HistoryWindow {
+        session: report.session,
+        active_leaf_id: report.active_leaf_id,
+        oldest_cursor,
+        newest_cursor: report.next_after_entry_id,
+        represented_durable_entry_ids,
+        represented_durable_entry_order,
+        tail_evicted: false,
+        active_exact_detail: None,
+    };
+    state
+        .transcript
+        .replace_history_omission_marker(state.history.oldest_cursor.is_some());
+}
+
+fn same_optional_session(left: &Option<SessionIdentity>, right: &Option<SessionIdentity>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_session(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_history_scope(
+    history: &HistoryWindow,
+    report: &SessionMessages,
+    active_leaf_may_advance: bool,
+) -> bool {
+    same_optional_session(&history.session, &report.session)
+        && (active_leaf_may_advance || history.active_leaf_id == report.active_leaf_id)
+}
+
+fn sync_represented_history(state: &mut UiState) {
+    let retained = state.transcript.historical_durable_entry_ids();
+    state
+        .history
+        .represented_durable_entry_order
+        .retain(|entry_id| retained.contains(entry_id));
+    state.history.represented_durable_entry_ids = retained;
+}
+
+fn clear_evicted_exact_detail(state: &mut UiState) {
+    if state
+        .history
+        .active_exact_detail
+        .as_ref()
+        .is_some_and(|detail| state.transcript.entry(detail.target).is_none())
+    {
+        state.history.active_exact_detail = None;
+    }
+}
+
+fn history_request_failure(error: String) -> Vec<UiEffect> {
+    vec![
+        UiEffect::Notice(bounded_session_text(
+            &format!("Session history request failed: {error}"),
+            SESSION_NOTICE_MAX_BYTES,
+        )),
+        UiEffect::RequestRender,
+    ]
+}
+
+fn handle_history_backend_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+) -> Option<Vec<UiEffect>> {
+    let mut request = state.history_request.take()?;
+    let handled = match event {
+        BackendEvent::MessagesReported {
+            command_id,
+            messages,
+        } if command_id == &request.command_id => {
+            if request.report.is_some() {
+                return Some(history_request_failure("duplicate history report".into()));
+            }
+            request.report = Some(messages.clone());
+            true
+        }
+        BackendEvent::MessagesProjectionFailed { command_id, error }
+            if command_id == &request.command_id =>
+        {
+            return Some(history_request_failure(error.clone()));
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } if command_id == &request.command_id && command_type == "get_messages" => {
+            if !ok {
+                return Some(history_request_failure(
+                    error
+                        .as_deref()
+                        .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES))
+                        .unwrap_or_else(|| "backend reported failure".into()),
+                ));
+            }
+            if request.completion.is_none() {
+                request.completion = Some(SessionCompletion {
+                    ok: true,
+                    error: None,
+                });
+            }
+            true
+        }
+        _ => false,
+    };
+    if !handled {
+        state.history_request = Some(request);
+        return None;
+    }
+    if request.completion.is_none() || request.report.is_none() {
+        state.history_request = Some(request);
+        return Some(Vec::new());
+    }
+    let report = request.report.take().expect("checked above");
+    match request.kind {
+        HistoryRequestKind::Older { cursor } | HistoryRequestKind::Newer { cursor }
+            if !same_history_scope(&state.history, &report, request.active_leaf_may_advance)
+                || report.durable_entry_ids.is_empty()
+                || report.durable_entry_ids.iter().any(|entry_id| {
+                    entry_id == &cursor
+                        || state
+                            .history
+                            .represented_durable_entry_ids
+                            .contains(entry_id)
+                }) =>
+        {
+            Some(history_request_failure(
+                "stale, duplicate, or malformed history page".into(),
+            ))
+        }
+        HistoryRequestKind::Older { .. } => {
+            if !state.transcript.prepend_history_page(&report.transcript) {
+                return Some(history_request_failure(
+                    "history page cannot be merged safely".into(),
+                ));
+            }
+            state.history.active_leaf_id = report.active_leaf_id;
+            state
+                .history
+                .represented_durable_entry_order
+                .splice(0..0, report.durable_entry_ids);
+            state.history.oldest_cursor = report.next_before_entry_id;
+            let tail_evicted = !state
+                .transcript
+                .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, true)
+                .unwrap_or_default()
+                .is_empty();
+            sync_represented_history(state);
+            if tail_evicted {
+                state.history.tail_evicted = true;
+                state.history.newest_cursor = state
+                    .history
+                    .represented_durable_entry_order
+                    .last()
+                    .cloned();
+            }
+            state
+                .transcript
+                .replace_history_omission_marker(state.history.oldest_cursor.is_some());
+            clear_evicted_exact_detail(state);
+            Some(vec![
+                UiEffect::HistoryWindowChanged,
+                UiEffect::RequestRender,
+            ])
+        }
+        HistoryRequestKind::Newer { .. } => {
+            if !state.transcript.append_history_page(&report.transcript) {
+                return Some(history_request_failure(
+                    "history page cannot be merged safely".into(),
+                ));
+            }
+            state.history.active_leaf_id = report.active_leaf_id;
+            state
+                .history
+                .represented_durable_entry_order
+                .extend(report.durable_entry_ids);
+            state.history.newest_cursor = report.next_after_entry_id;
+            state.history.tail_evicted = state.history.newest_cursor.is_some();
+            let prefix_evicted = !state
+                .transcript
+                .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, false)
+                .unwrap_or_default()
+                .is_empty();
+            sync_represented_history(state);
+            if prefix_evicted {
+                state.history.oldest_cursor = state
+                    .history
+                    .represented_durable_entry_order
+                    .first()
+                    .cloned();
+            }
+            state
+                .transcript
+                .replace_history_omission_marker(state.history.oldest_cursor.is_some());
+            clear_evicted_exact_detail(state);
+            Some(vec![
+                UiEffect::HistoryWindowChanged,
+                UiEffect::RequestRender,
+            ])
+        }
+        HistoryRequestKind::Latest => {
+            if !same_history_scope(&state.history, &report, request.active_leaf_may_advance) {
+                return Some(history_request_failure(
+                    "latest history belongs to another session or branch".into(),
+                ));
+            }
+            install_history_snapshot(state, report);
+            Some(vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender])
+        }
+        HistoryRequestKind::ExactDetail { target, entry_id } => {
+            if !same_history_scope(&state.history, &report, request.active_leaf_may_advance)
+                || report.durable_entry_ids.len() != 1
+                || report.durable_entry_ids.first() != Some(&entry_id)
+                || state.transcript.durable_entry_id(target) != Some(entry_id.as_str())
+                || state
+                    .transcript
+                    .exact_historical_detail_target(target)
+                    .is_none()
+            {
+                return Some(history_request_failure(
+                    "exact detail did not match the selected row".into(),
+                ));
+            }
+            let Some(result) = report.exact_tool_result.as_ref() else {
+                return Some(history_request_failure(
+                    "selected persisted row has no tool detail".into(),
+                ));
+            };
+            let Some(presentation) = state.transcript.exact_historical_detail(target, result)
+            else {
+                return Some(history_request_failure(
+                    "selected tool detail is unavailable".into(),
+                ));
+            };
+            state.history.active_leaf_id = report.active_leaf_id;
+            state.history.active_exact_detail = Some(ActiveExactDetail {
+                target,
+                presentation,
+            });
+            Some(vec![
+                UiEffect::OpenExactDetail(target),
+                UiEffect::RequestRender,
+            ])
+        }
+    }
+}
+
 fn handle_backend_event(
     state: &mut UiState,
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = handle_history_backend_event(state, &event) {
+        return Ok(effects);
+    }
     if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
         return Ok(effects);
     }
@@ -1236,6 +1722,8 @@ mod tests {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
             UiEffect::ShowSessionPicker { .. }
             | UiEffect::ReplaceTranscript
+            | UiEffect::HistoryWindowChanged
+            | UiEffect::OpenExactDetail(_)
             | UiEffect::Notice(_)
             | UiEffect::RequestRender
             | UiEffect::Exit => None,
@@ -2551,6 +3039,12 @@ mod tests {
             command_id: command_id.into(),
             messages: SessionMessages {
                 session: selected,
+                active_leaf_id: None,
+                truncated: false,
+                next_before_entry_id: None,
+                next_after_entry_id: None,
+                durable_entry_ids: Vec::new(),
+                exact_tool_result: None,
                 transcript,
             },
         }
@@ -2665,14 +3159,47 @@ mod tests {
     }
 
     #[test]
-    fn truncated_history_pages_surface_an_omission_marker() {
+    fn invisible_system_entries_are_not_retained_as_window_members() {
+        let mut transcript = SharedTranscript::default();
+        transcript.append_prompt("visible".into());
+        transcript.mark_history_entries(0, "user-entry");
+        let mut state = UiState::unconfigured();
+
+        install_history_snapshot(
+            &mut state,
+            SessionMessages {
+                session: Some(session("active")),
+                active_leaf_id: Some("leaf".into()),
+                truncated: true,
+                next_before_entry_id: Some("system-entry".into()),
+                next_after_entry_id: None,
+                durable_entry_ids: vec!["system-entry".into(), "user-entry".into()],
+                exact_tool_result: None,
+                transcript,
+            },
+        );
+
+        assert_eq!(
+            state.history.represented_durable_entry_order,
+            vec!["user-entry"]
+        );
+        assert_eq!(
+            state.history.represented_durable_entry_ids,
+            ["user-entry".to_owned()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn startup_history_with_an_older_cursor_installs_one_omission_marker() {
         let event = BackendEvent::from_projection_value(&serde_json::json!({
             "type": "rpc.messages",
             "command_id": "get_messages-1",
             "session_id": null,
             "session_path": null,
             "truncated": true,
+            "next_before_entry_id": "entry-1",
             "messages": [{
+                "entry_id": "entry-1",
                 "role": "user",
                 "content": "retained",
                 "content_truncated": false,
@@ -2680,15 +3207,24 @@ mod tests {
         }))
         .unwrap();
 
-        let BackendEvent::MessagesReported { messages, .. } = event else {
-            panic!("expected projected history");
-        };
-        assert_eq!(messages.transcript.entries().len(), 2);
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.transcript.history_omission_count(), 1);
+        assert_eq!(state.transcript.entries().len(), 2);
         assert_eq!(
-            messages.transcript.entries()[0].content,
+            state.transcript.entries()[0].content,
             "[earlier session history omitted]"
         );
-        assert_eq!(messages.transcript.entries()[1].content, "retained");
+        assert_eq!(state.transcript.entries()[1].content, "retained");
     }
 
     #[test]
@@ -2811,6 +3347,55 @@ mod tests {
     }
 
     #[test]
+    fn selection_hydration_rejects_a_correlated_wrong_session_report() {
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::SelectSession {
+                session_id: "new".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionSelected {
+                command_id: "select_session-1".into(),
+                session: session("new"),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("select_session-1", "select_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(history(
+                "get_messages-1",
+                Some(session("wrong")),
+                "wrong content",
+            )),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+        assert!(state.session_operation.is_none());
+        assert!(state.input_ready);
+        assert!(state.transcript.entries().is_empty());
+    }
+
+    #[test]
     fn new_session_is_transactional_and_never_hydrates() {
         let mut state = UiState::unconfigured();
         state.selected_session = Some(session("old"));
@@ -2878,6 +3463,417 @@ mod tests {
         assert_eq!(
             command_value(&effects[0]).unwrap()["type"],
             "select_session"
+        );
+    }
+
+    #[test]
+    fn older_history_waits_for_both_events_and_allows_the_active_leaf_to_advance() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.selected_session = Some(selected.clone());
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("old-leaf".into());
+        state.history.oldest_cursor = Some("current-entry".into());
+        state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        state.transcript.append_prompt("current".into());
+        state.transcript.mark_history_entries(0, "current-entry");
+        state.transcript.replace_history_omission_marker(true);
+        let marker_id = state.transcript.entries()[0].id;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(&mut state, UiAction::LoadOlderHistory, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["before_entry_id"], "current-entry");
+        assert_eq!(command["allow_during_prompt"], true);
+
+        assert!(
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(state.history_request.is_some());
+
+        let mut older = SharedTranscript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(selected),
+                    active_leaf_id: Some("new-leaf".into()),
+                    truncated: true,
+                    next_before_entry_id: Some("older-entry".into()),
+                    next_after_entry_id: None,
+                    durable_entry_ids: vec!["older-entry".into()],
+                    exact_tool_result: None,
+                    transcript: older,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+        );
+        assert!(state.history_request.is_none());
+        assert_eq!(state.history.active_leaf_id.as_deref(), Some("new-leaf"));
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("older-entry"));
+        assert_eq!(state.transcript.entries()[0].id, marker_id);
+        assert_eq!(state.transcript.entries()[1].content, "older");
+        assert_eq!(state.transcript.entries()[2].content, "current");
+        assert_eq!(
+            state
+                .transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.content == "[earlier session history omitted]")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn newer_history_uses_the_retained_tail_cursor_and_clears_eviction_state() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("leaf".into());
+        state.history.newest_cursor = Some("current-entry".into());
+        state.history.tail_evicted = true;
+        state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        state.transcript.append_prompt("current".into());
+        state.transcript.mark_history_entries(0, "current-entry");
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(&mut state, UiAction::LoadNewerHistory, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["after_entry_id"], "current-entry");
+        let mut newer = SharedTranscript::default();
+        newer.append_prompt("newer".into());
+        newer.mark_history_entries(0, "newer-entry");
+        assert!(
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::MessagesReported {
+                    command_id: "get_messages-1".into(),
+                    messages: SessionMessages {
+                        session: Some(selected),
+                        active_leaf_id: Some("leaf".into()),
+                        truncated: false,
+                        next_before_entry_id: None,
+                        next_after_entry_id: None,
+                        durable_entry_ids: vec!["newer-entry".into()],
+                        exact_tool_result: None,
+                        transcript: newer,
+                    },
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+        );
+        assert!(!state.history.tail_evicted);
+        assert!(state.history.newest_cursor.is_none());
+        assert_eq!(state.transcript.entries()[0].content, "current");
+        assert_eq!(state.transcript.entries()[1].content, "newer");
+    }
+
+    #[test]
+    fn tail_eviction_uses_persisted_order_for_parallel_tool_results() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("leaf".into());
+        let mut order = Vec::new();
+        for index in 0..1_197 {
+            let start = state.transcript.entries().len();
+            let entry_id = format!("entry-{index}");
+            state.transcript.append_prompt(format!("message-{index}"));
+            state.transcript.mark_history_entries(start, &entry_id);
+            order.push(entry_id);
+        }
+        let start = state.transcript.entries().len();
+        let first = state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "first".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "first.txt"}),
+            detail_source: ToolDetailSource::None,
+        });
+        let second = state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "second".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "second.txt"}),
+            detail_source: ToolDetailSource::None,
+        });
+        state
+            .transcript
+            .mark_history_entries(start, "assistant-entry");
+        state.transcript.add_history_origin(second, "result-second");
+        state.transcript.add_history_origin(first, "result-first");
+        order.extend([
+            "assistant-entry".into(),
+            "result-second".into(),
+            "result-first".into(),
+        ]);
+        let start = state.transcript.entries().len();
+        state.transcript.append_prompt("tail".into());
+        state.transcript.mark_history_entries(start, "tail-entry");
+        order.push("tail-entry".into());
+        state.history.represented_durable_entry_ids =
+            state.transcript.historical_durable_entry_ids();
+        state.history.represented_durable_entry_order = order;
+        state.history.oldest_cursor = Some("entry-0".into());
+        let mut ids = DeterministicIds::default();
+
+        reduce(&mut state, UiAction::LoadOlderHistory, &mut ids).unwrap();
+        let mut older = SharedTranscript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(selected),
+                    active_leaf_id: Some("leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: vec!["older-entry".into()],
+                    exact_tool_result: None,
+                    transcript: older,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(state.history.tail_evicted);
+        assert_eq!(state.history.newest_cursor.as_deref(), Some("result-first"));
+        assert_eq!(state.transcript.entries().len(), 1_200);
+    }
+
+    #[test]
+    fn evicted_history_with_a_live_suffix_reloads_latest_instead_of_duplicating_rows() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(session("active"));
+        state.history.active_leaf_id = Some("old-leaf".into());
+        state.history.newest_cursor = Some("historical-tail".into());
+        state.history.tail_evicted = true;
+        state.transcript.append_prompt("live prompt".into());
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(&mut state, UiAction::LoadNewerHistory, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["type"], "get_messages");
+        assert!(command.get("after_entry_id").is_none());
+        assert!(matches!(
+            state.history_request.as_ref().map(|request| &request.kind),
+            Some(HistoryRequestKind::Latest)
+        ));
+        assert!(
+            state
+                .history_request
+                .as_ref()
+                .is_some_and(|request| request.active_leaf_may_advance)
+        );
+    }
+
+    #[test]
+    fn stale_history_branch_is_rejected_without_mutating_the_window() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("expected-leaf".into());
+        state.history.oldest_cursor = Some("current-entry".into());
+        state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        state.transcript.append_prompt("current".into());
+        state.transcript.mark_history_entries(0, "current-entry");
+        let before = state.transcript.clone();
+        let mut ids = DeterministicIds::default();
+
+        reduce(&mut state, UiAction::LoadOlderHistory, &mut ids).unwrap();
+        let mut older = SharedTranscript::default();
+        older.append_prompt("wrong branch".into());
+        older.mark_history_entries(0, "older-entry");
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(selected),
+                    active_leaf_id: Some("other-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: vec!["older-entry".into()],
+                    exact_tool_result: None,
+                    transcript: older,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.transcript, before);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+    }
+
+    #[test]
+    fn exact_history_detail_fetches_only_backend_projected_file_results() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("leaf".into());
+        let BackendEvent::ToolCall(call) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call",
+                "call_id": "read-1",
+                "name": "read",
+                "arguments": {"path": "large.txt"},
+            }))
+            .unwrap()
+        else {
+            panic!("tool call expected");
+        };
+        let target = state.transcript.observe_tool_call(call);
+        state.transcript.mark_history_entries(0, "call-entry");
+        let BackendEvent::ToolResult(result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "read-1",
+                "name": "read",
+                "output": "partial",
+                "is_error": false,
+                "truncated": true,
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        state.transcript.observe_tool_result(*result);
+        state.transcript.add_history_origin(target, "result-entry");
+        state
+            .history
+            .represented_durable_entry_ids
+            .extend(["call-entry".into(), "result-entry".into()]);
+        let mut ids = DeterministicIds::default();
+
+        assert!(
+            reduce(&mut state, UiAction::LoadExactDetail { target }, &mut ids,)
+                .unwrap()
+                .is_empty()
+        );
+        state
+            .transcript
+            .mark_history_result_projection(target, true);
+        let effects = reduce(&mut state, UiAction::LoadExactDetail { target }, &mut ids).unwrap();
+        let command = command_value(&effects[0]).unwrap();
+        assert_eq!(command["entry_ids"], serde_json::json!(["result-entry"]));
+        assert_eq!(command["full_content"], true);
+
+        let BackendEvent::ToolResult(full_result) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result",
+                "call_id": "read-1",
+                "name": "read",
+                "output": "alpha\nbeta\n",
+                "is_error": false,
+                "summary": "read 2 lines from large.txt",
+                "truncated": false,
+            }))
+            .unwrap()
+        else {
+            panic!("tool result expected");
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(selected),
+                    active_leaf_id: Some("leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: vec!["result-entry".into()],
+                    exact_tool_result: Some(full_result),
+                    transcript: SharedTranscript::default(),
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::OpenExactDetail(id) if *id == target)),
+            "{effects:?}"
+        );
+        assert_eq!(
+            state
+                .history
+                .active_exact_detail
+                .as_ref()
+                .map(|detail| detail.target),
+            Some(target)
         );
     }
 }

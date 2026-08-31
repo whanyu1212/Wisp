@@ -1,6 +1,6 @@
 //! Bounded, renderer-neutral projection of one validated RPC history page.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -14,10 +14,11 @@ use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool
 use crate::transcript::SharedTranscript;
 
 pub const HISTORY_MESSAGE_LIMIT: usize = 200;
+pub const HISTORY_PAGE_LIMIT: usize = 75;
 const HISTORY_TOOL_CALL_LIMIT: usize = 128;
+const HISTORY_ENTRY_ID_MAX_BYTES: usize = 4 * 1024;
 const HISTORY_PROCESS_CALL_LIMIT: usize = 1024;
 const CONTENT_TRUNCATED_MARKER: &str = "[content truncated]";
-const HISTORY_TRUNCATED_MARKER: &str = "[earlier session history omitted]";
 const EMPTY_ASSISTANT_MESSAGE: &str = "(empty assistant message)";
 const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
 
@@ -29,6 +30,16 @@ pub enum HistoryProjectionError {
     TooManyToolCalls { index: usize },
     #[error("history message {index} has an invalid {field} field")]
     InvalidField { index: usize, field: &'static str },
+    #[error("history page repeats persisted entry {entry_id:?}")]
+    DuplicateEntryId { entry_id: String },
+    #[error("history exact-detail response did not contain {entry_id:?}")]
+    ExactEntryMismatch { entry_id: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedHistoryPage {
+    pub transcript: SharedTranscript,
+    pub durable_entry_ids: Vec<String>,
 }
 
 /// Project exactly one latest-first RPC page, already validated by the protocol layer.
@@ -46,23 +57,51 @@ pub fn project_rpc_message_page(
     messages: &[Value],
     truncated: bool,
 ) -> Result<SharedTranscript, HistoryProjectionError> {
+    Ok(project_rpc_message_page_with_origins(messages, truncated)?.transcript)
+}
+
+pub fn project_rpc_message_page_with_origins(
+    messages: &[Value],
+    _truncated: bool,
+) -> Result<ProjectedHistoryPage, HistoryProjectionError> {
     if messages.len() > HISTORY_MESSAGE_LIMIT {
         return Err(HistoryProjectionError::TooManyMessages);
     }
 
     let mut transcript = SharedTranscript::default();
-    if truncated {
-        transcript.complete_message(0, HISTORY_TRUNCATED_MARKER.into());
-    }
+    let mut durable_entry_ids = Vec::with_capacity(messages.len());
+    let mut seen = BTreeSet::new();
     let mut process_ids = VecDeque::new();
     for (index, message) in messages.iter().enumerate() {
-        match string(message, index, "role")? {
-            "system" => {}
+        let durable_entry_id = string(message, index, "entry_id")?;
+        if durable_entry_id.is_empty() || durable_entry_id.len() > HISTORY_ENTRY_ID_MAX_BYTES {
+            return Err(HistoryProjectionError::InvalidField {
+                index,
+                field: "entry_id",
+            });
+        }
+        if !seen.insert(durable_entry_id) {
+            return Err(HistoryProjectionError::DuplicateEntryId {
+                entry_id: durable_entry_id.to_owned(),
+            });
+        }
+        let start = transcript.entries().len();
+        let tool_result_entry = match string(message, index, "role")? {
+            "system" => None,
             "user" => {
                 transcript.append_prompt(user_content(message, index)?);
+                None
             }
-            "assistant" => project_assistant(&mut transcript, &mut process_ids, message, index)?,
-            "tool" => project_tool_result(&mut transcript, &mut process_ids, message, index)?,
+            "assistant" => {
+                project_assistant(&mut transcript, &mut process_ids, message, index)?;
+                None
+            }
+            "tool" => Some(project_tool_result(
+                &mut transcript,
+                &mut process_ids,
+                message,
+                index,
+            )?),
             _ => {
                 return Err(HistoryProjectionError::InvalidField {
                     index,
@@ -70,9 +109,39 @@ pub fn project_rpc_message_page(
                 });
             }
         };
+        transcript.mark_history_entries(start, durable_entry_id);
+        if let Some(entry_id) = tool_result_entry {
+            transcript.add_history_origin(entry_id, durable_entry_id);
+            transcript.mark_history_result_projection(
+                entry_id,
+                bool(message, index, "content_truncated")?,
+            );
+        }
+        durable_entry_ids.push(durable_entry_id.to_owned());
     }
     transcript.settle_unresolved_tools(MISSING_TOOL_RESULT);
-    Ok(transcript)
+    Ok(ProjectedHistoryPage {
+        transcript,
+        durable_entry_ids,
+    })
+}
+
+pub fn project_rpc_exact_tool_result(
+    messages: &[Value],
+    expected_entry_id: &str,
+) -> Result<ToolResultInput, HistoryProjectionError> {
+    let [message] = messages else {
+        return Err(HistoryProjectionError::ExactEntryMismatch {
+            entry_id: expected_entry_id.to_owned(),
+        });
+    };
+    if string(message, 0, "entry_id")? != expected_entry_id || string(message, 0, "role")? != "tool"
+    {
+        return Err(HistoryProjectionError::ExactEntryMismatch {
+            entry_id: expected_entry_id.to_owned(),
+        });
+    }
+    tool_result(message, 0)
 }
 
 fn project_assistant(
@@ -199,7 +268,7 @@ fn project_tool_result(
     process_ids: &mut VecDeque<(String, String)>,
     message: &Value,
     index: usize,
-) -> Result<(), HistoryProjectionError> {
+) -> Result<crate::transcript::TranscriptEntryId, HistoryProjectionError> {
     let mut result = tool_result(message, index)?;
     result.process_id = process_ids
         .iter()
@@ -223,8 +292,7 @@ fn project_tool_result(
         }
         transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
     }
-    transcript.observe_tool_result(result);
-    Ok(())
+    Ok(transcript.observe_tool_result(result))
 }
 
 fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, HistoryProjectionError> {
@@ -532,9 +600,13 @@ mod tests {
     use super::*;
     use crate::transcript::{TranscriptEntryKind, TranscriptRole};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn message(role: &str, content: &str) -> Value {
+        static NEXT_ENTRY_ID: AtomicUsize = AtomicUsize::new(0);
+        let entry_id = NEXT_ENTRY_ID.fetch_add(1, Ordering::Relaxed);
         json!({
+            "entry_id": format!("entry-{entry_id}"),
             "role": role,
             "content": content,
             "content_truncated": false,
@@ -544,6 +616,15 @@ mod tests {
             "tool_call_id": null,
             "tool_result": null,
         })
+    }
+
+    #[test]
+    fn exact_tool_projection_rejects_the_wrong_persisted_entry() {
+        let result = message("tool", "result");
+        assert!(matches!(
+            project_rpc_exact_tool_result(&[result], "other-entry"),
+            Err(HistoryProjectionError::ExactEntryMismatch { .. })
+        ));
     }
 
     #[test]
@@ -566,14 +647,12 @@ mod tests {
     }
 
     #[test]
-    fn prepends_marker_when_earlier_history_is_omitted() {
+    fn page_truncation_does_not_create_an_omission_marker() {
         let transcript = project_rpc_message_page(&[message("user", "retained")], true).unwrap();
 
-        assert_eq!(transcript.entries().len(), 2);
-        assert_eq!(transcript.entries()[0].role, TranscriptRole::Assistant);
-        assert_eq!(transcript.entries()[0].content, HISTORY_TRUNCATED_MARKER);
-        assert_eq!(transcript.entries()[1].role, TranscriptRole::User);
-        assert_eq!(transcript.entries()[1].content, "retained");
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(transcript.entries()[0].role, TranscriptRole::User);
+        assert_eq!(transcript.entries()[0].content, "retained");
     }
 
     #[test]
@@ -651,6 +730,45 @@ mod tests {
                 DetailUnavailableReason::MalformedSource
             )
         ));
+    }
+
+    #[test]
+    fn exact_detail_requires_backend_projection_truncation() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "read-1",
+            "name": "read",
+            "arguments": {"path": "large.txt"},
+        }]);
+        let mut tool_truncated = message("tool", "partial");
+        tool_truncated["tool_call_id"] = json!("read-1");
+        tool_truncated["tool_name"] = json!("read");
+        tool_truncated["tool_result"] = json!({"truncated": true});
+
+        let transcript = project_rpc_messages(&[assistant.clone(), tool_truncated]).unwrap();
+        let target = transcript
+            .entries()
+            .iter()
+            .find(|entry| entry.tool_card().is_some())
+            .unwrap()
+            .id;
+        assert_eq!(transcript.exact_historical_detail_target(target), None);
+
+        let mut projection_truncated = message("tool", "partial");
+        projection_truncated["tool_call_id"] = json!("read-1");
+        projection_truncated["tool_name"] = json!("read");
+        projection_truncated["content_truncated"] = json!(true);
+        let transcript = project_rpc_messages(&[assistant, projection_truncated]).unwrap();
+        let target = transcript
+            .entries()
+            .iter()
+            .find(|entry| entry.tool_card().is_some())
+            .unwrap()
+            .id;
+        assert_eq!(
+            transcript.exact_historical_detail_target(target),
+            Some(target)
+        );
     }
 
     #[test]
