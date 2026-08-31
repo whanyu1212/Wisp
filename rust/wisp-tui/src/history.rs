@@ -994,19 +994,33 @@ mod tests {
         );
 
         let mut newer_call = message("assistant", "");
-        newer_call["tool_calls"] = json!([{
-            "call_id": "poll-newer-live",
-            "name": "bash",
-            "arguments": {"operation": "poll", "process_id": "process-live"},
-        }]);
+        newer_call["tool_calls"] = json!([
+            {
+                "call_id": "poll-newer-live-1",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-live"},
+            },
+            {
+                "call_id": "poll-newer-live-2",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-live"},
+            }
+        ]);
         let mut newer_result = message(
             "tool",
-            "Process process-live completed with exit code 0\nstdout:\nnewer output",
+            "Process process-live is still running\nstdout:\nnewer output",
         );
-        newer_result["tool_call_id"] = json!("poll-newer-live");
+        newer_result["tool_call_id"] = json!("poll-newer-live-1");
         newer_result["tool_name"] = json!("bash");
         newer_result["tool_result"] = json!({"status": "done"});
-        let newer = project_rpc_messages(&[newer_call, newer_result]).unwrap();
+        let mut newest_result = message(
+            "tool",
+            "Process process-live completed with exit code 0\nstdout:\nnewest output",
+        );
+        newest_result["tool_call_id"] = json!("poll-newer-live-2");
+        newest_result["tool_name"] = json!("bash");
+        newest_result["tool_result"] = json!({"status": "done"});
+        let newer = project_rpc_messages(&[newer_call, newer_result, newest_result]).unwrap();
         assert!(transcript.append_history_page(&newer));
         assert_eq!(transcript.entries()[0].id, survivor);
 
@@ -1020,10 +1034,9 @@ mod tests {
 
         assert_eq!(live, survivor);
         assert_eq!(transcript.entries().len(), 1);
-        assert_eq!(
-            transcript.entries()[0].process_card().unwrap().call_count,
-            3
-        );
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.call_count, 4);
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
     }
 
     #[test]

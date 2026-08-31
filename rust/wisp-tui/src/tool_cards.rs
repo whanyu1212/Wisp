@@ -721,6 +721,12 @@ impl ProcessCardSnapshot {
         self.approval_resolved = false;
     }
 
+    pub(crate) fn release_historical_sequence(&mut self) {
+        self.last_sequence = None;
+        self.approval_sequence = None;
+        self.approval_resolved = false;
+    }
+
     fn accept_sequence(&mut self, sequence: u64) -> bool {
         if self.last_sequence.is_some_and(|current| sequence < current) {
             return false;

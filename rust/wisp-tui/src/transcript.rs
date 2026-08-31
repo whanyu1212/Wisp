@@ -619,6 +619,16 @@ impl Transcript {
         }) = process_call_identity(&input.name, &input.arguments)
         {
             if let Some(entry_id) = self.process_entry_for(&process_id) {
+                let release_historical_sequence = self.entry(entry_id).is_some_and(|entry| {
+                    entry.history_group.is_some() && entry.history_calls.is_empty()
+                });
+                if release_historical_sequence {
+                    let entry = self.entry_mut(entry_id);
+                    let TranscriptEntryKind::Process(card) = &mut entry.kind else {
+                        unreachable!("process index must target a process card")
+                    };
+                    card.release_historical_sequence();
+                }
                 let binding =
                     self.new_tool_binding(entry_id, ToolBindingKind::Process(operation), false);
                 let changed = {
@@ -1247,6 +1257,11 @@ impl Transcript {
                 entry
                     .history_calls
                     .retain(|candidate| candidate.call_id != call.call_id);
+                if entry.history_calls.is_empty() {
+                    if let TranscriptEntryKind::Process(card) = &mut entry.kind {
+                        card.release_historical_sequence();
+                    }
+                }
                 Self::bump_revision(entry);
             }
             self.entries.remove(result_index);
@@ -1307,6 +1322,11 @@ impl Transcript {
                     .any(|candidate| candidate.call_id == call.call_id)
                 {
                     merged.history_calls.push(call);
+                }
+            }
+            if merged.history_calls.is_empty() {
+                if let TranscriptEntryKind::Process(card) = &mut merged.kind {
+                    card.release_historical_sequence();
                 }
             }
             merged.history_pending_result = older
