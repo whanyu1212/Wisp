@@ -963,7 +963,7 @@ def test_queue_updated_event_is_versioned_and_round_trips() -> None:
         steering_mode="all",
     )
 
-    assert event.schema_version == 34
+    assert event.schema_version == 35
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 13"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 12}).model_dump_json())
@@ -1596,7 +1596,7 @@ def test_harness_drains_steering_before_first_provider_request() -> None:
 def test_queue_message_injected_event_requires_schema_14_and_round_trips() -> None:
     event = QueueMessageInjected(kind="follow_up", content="continue")
 
-    assert event.schema_version == 34
+    assert event.schema_version == 35
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 14"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 13}).model_dump_json())

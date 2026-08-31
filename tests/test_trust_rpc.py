@@ -313,9 +313,8 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
     # model is unknown to the catalog -- handle_rpc_configure_command already
     # accepts an explicit configure for an unknown model permissively (a
     # brand-new model ahead of a catalog update, or a custom provider), and
-    # the rebuild must not silently re-drop it via startup_effort's
-    # catalog-validation filter, which is meant only for the persisted/default
-    # effort, not an explicit override the command layer already accepted.
+    # the rebuild must not silently drop it via startup_effort's validation,
+    # which stays permissive for catalog-unknown models.
     from wisp.cli import rpc
     from wisp.config import WispConfig
 

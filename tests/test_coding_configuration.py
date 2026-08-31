@@ -31,7 +31,7 @@ def _models() -> ModelRegistry:
     return ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home")))
 
 
-def test_resolver_validates_default_effort_but_preserves_explicit_override(tmp_path: Path) -> None:
+def test_resolver_filters_known_effort_but_preserves_unknown_model_effort(tmp_path: Path) -> None:
     providers = ProviderRegistry()
     providers.register(_OpenAIProvider())
     config = WispConfig(
@@ -55,9 +55,20 @@ def test_resolver_validates_default_effort_but_preserves_explicit_override(tmp_p
         effort="custom-tier",
         has_effort=True,
     )
+    custom_configuration = resolve_coding_session_configuration(
+        config,
+        providers=providers,
+        models=_models(),
+        trusted=True,
+        model="custom-model",
+        has_model=True,
+        effort="custom-tier",
+        has_effort=True,
+    )
 
     assert default_configuration.effort is None
-    assert explicit_configuration.effort == "custom-tier"
+    assert explicit_configuration.effort is None
+    assert custom_configuration.effort == "custom-tier"
     assert explicit_configuration.trusted is True
     assert (
         config.auth_path.resolve().as_posix() in explicit_configuration.tool_context.protected_paths

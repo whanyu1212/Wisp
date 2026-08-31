@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 
+import pytest
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
@@ -3037,6 +3038,111 @@ def test_tui_shell_hydrates_rpc_command_catalog_before_accepting_input() -> None
     anyio.run(run)
 
 
+@pytest.mark.parametrize("finish_first", [False, True])
+def test_tui_shell_hydrates_authoritative_model_catalog_in_either_event_order(
+    finish_first: bool,
+) -> None:
+    async def run() -> None:
+        catalog = rpc_builtin_model_catalog(
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="high",
+        )
+        report = RpcModelCatalogReported(command_id="model-catalog-1", catalog=catalog)
+        finished = RpcCommandFinished(
+            command_id="model-catalog-1",
+            command_type="get_model_catalog",
+            ok=True,
+        )
+        controller = ScriptedController(
+            model_catalog_events=[[finished, report] if finish_first else [report, finished]]
+        )
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert shell.model_catalog == catalog
+        assert shell.current_provider == "anthropic"
+        assert shell.current_model == "claude-opus-4-8"
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_ignores_stale_and_duplicate_model_catalog_events() -> None:
+    async def run() -> None:
+        catalog = rpc_builtin_model_catalog(provider="anthropic")
+        controller = ScriptedController(
+            model_catalog_events=[
+                [
+                    RpcModelCatalogReported(
+                        command_id="stale-command",
+                        catalog=rpc_builtin_model_catalog(provider="openai"),
+                    ),
+                    RpcModelCatalogReported(command_id="model-catalog-1", catalog=catalog),
+                    RpcModelCatalogReported(
+                        command_id="model-catalog-1",
+                        catalog=rpc_builtin_model_catalog(provider="openai"),
+                    ),
+                    RpcCommandFinished(
+                        command_id="model-catalog-1",
+                        command_type="get_model_catalog",
+                        ok=True,
+                    ),
+                    RpcCommandFinished(
+                        command_id="model-catalog-1",
+                        command_type="get_model_catalog",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert shell.model_catalog == catalog
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_catalog_failure_keeps_typed_model_available() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            model_catalog_events=[
+                [
+                    RpcCommandFinished(
+                        command_id="model-catalog-1",
+                        command_type="get_model_catalog",
+                        ok=False,
+                        error="catalog failed",
+                    )
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/model brand-new-model high", "/quit"]),
+        )
+
+        await shell.run()
+
+        assert "Model catalog is unavailable; use /model <model>." in output.getvalue()
+        assert controller.configurations == [(None, "brand-new-model", "high", False)]
+
+    anyio.run(run)
+
+
 def test_tui_shell_hydrates_and_inspects_cached_skill_catalog() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -3469,54 +3575,56 @@ def test_tui_shell_notifies_the_renderer_of_the_adopted_auth_path(tmp_path: Path
 
 
 def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
-    # Regression test (Codex review on #125): TuiShell resolves its own
-    # config.effort independently, via its own WispConfig.from_env() call in
-    # the same process launch as the separate RPC subprocess -- so it must
-    # apply the same provider/model effort-scoping as the shared RPC executor's
-    # startup_effort() call performs on the CodingSession side, or the picker
-    # would seed a stale/incompatible tier into its "current" row (see
-    # ModelPicker.show) even after the RPC side had already filtered it out.
-    controller = ScriptedController()
-    shell = TuiShell(
-        controller,
-        renderer=LineTuiRenderer(_console()[0]),
-        provider="openai",
-        model="gpt-5.5",
-        effort="HIGH",  # Google-style, not one of gpt-5.5's real catalog tiers
-    )
+    # Startup adopts the backend-filtered catalog selection, not the shell's
+    # independently loaded config value.
+    async def run() -> None:
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5")
+        )
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            prompt_reader=await _reader_from(["/quit"]),
+            provider="openai",
+            model="gpt-5.5",
+            effort="HIGH",
+        )
 
-    assert shell.current_effort is None
+        await shell.run()
+
+        assert shell.current_effort is None
+
+    anyio.run(run)
 
 
 def test_tui_shell_init_keeps_effort_valid_for_the_startup_provider() -> None:
-    controller = ScriptedController()
-    shell = TuiShell(
-        controller,
-        renderer=LineTuiRenderer(_console()[0]),
-        provider="anthropic",
-        model="claude-opus-4-8",
-        effort="high",
-    )
+    async def run() -> None:
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(
+                provider="anthropic", model="claude-opus-4-8", effort="high"
+            )
+        )
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            prompt_reader=await _reader_from(["/quit"]),
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="high",
+        )
 
-    assert shell.current_effort == "high"
+        await shell.run()
+
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
 
 
 def test_tui_shell_project_config_applied_adopts_the_events_own_effort(
     tmp_path: Path,
 ) -> None:
-    # Regression test (Codex review on #125): ProjectConfigApplied.effort
-    # carries the RPC agent's already-filtered, authoritative post-rebuild
-    # value -- the TUI must adopt it directly rather than re-deriving effort
-    # from its own local current_effort. That local copy was itself already
-    # filtered once, against the untrusted-startup provider/model, in
-    # __init__; a tier invalid there but valid for the trusted project's
-    # provider/model would already be gone from it and unrecoverable, so
-    # re-deriving from it (instead of trusting the event) can never recover a
-    # tier that's only valid on the trusted side. Here the startup tier
-    # ("HIGH", invalid for anthropic/claude-opus-4-8's lowercase vocabulary)
-    # is correctly dropped at __init__, and the *event* carries a different,
-    # freshly-valid tier the RPC side determined for the trusted provider --
-    # proving the TUI takes the event's value, not its own stale local one.
+    # ProjectConfigApplied carries the backend's post-rebuild selection while
+    # the follow-up catalog request refreshes picker metadata.
     async def run() -> None:
         controller = ScriptedController()
         shell = TuiShell(
@@ -3527,7 +3635,7 @@ def test_tui_shell_project_config_applied_adopts_the_events_own_effort(
             effort="HIGH",
             auth_path=tmp_path / "startup-auth.json",
         )
-        assert shell.current_effort is None
+        assert shell.current_effort == "HIGH"
 
         await shell._handle_rpc_event(
             ProjectConfigApplied(
@@ -3541,6 +3649,8 @@ def test_tui_shell_project_config_applied_adopts_the_events_own_effort(
         assert shell.current_provider == "google"
         assert shell.current_model == "gemini-flash-latest"
         assert shell.current_effort == "HIGH"
+        assert shell.model_catalog is None
+        assert controller.model_catalog_requests == ["model-catalog-1"]
 
     anyio.run(run)
 
@@ -3577,7 +3687,9 @@ def test_tui_shell_project_config_applied_drops_effort_invalid_for_new_provider(
 
 def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai-codex")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3601,7 +3713,9 @@ def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
     auth_path.chmod(0o600)
 
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3627,7 +3741,7 @@ def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
     auth_path.chmod(0o600)
 
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(model_catalog=rpc_builtin_model_catalog(provider="openai"))
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3666,7 +3780,11 @@ def test_tui_shell_connect_reports_storage_errors(
     auth_path.chmod(0o600)
 
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(
+                provider="openai", model="gpt-5.5", effort="high"
+            )
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3702,7 +3820,9 @@ def test_tui_shell_connect_and_disconnect_openai_codex(
     monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
 
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3772,7 +3892,9 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
                 raise TuiCancelRequested
             return "/quit"
 
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3876,7 +3998,9 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
 
 def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider() -> None:
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3908,7 +4032,9 @@ def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> 
     # must mark (current) only on the entry under the active provider, not on
     # every provider's copy of the shared model id.
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3936,7 +4062,7 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
     # provider default" line below already communicates this fallback; the
     # listing itself must be consistent with it).
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(model_catalog=rpc_builtin_model_catalog(provider="openai"))
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3958,7 +4084,11 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
 
 def test_tui_shell_bare_model_command_lists_current_effort() -> None:
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(
+                provider="openai", model="gpt-5.5", effort="high"
+            )
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3979,7 +4109,9 @@ def test_tui_shell_bare_model_command_lists_current_effort() -> None:
 
 def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
     async def run(tmp_path: Path) -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4016,7 +4148,9 @@ def test_tui_shell_typed_model_command_rejects_effort_the_model_does_not_support
     # effort_levels, so an unvalidated typed effort would otherwise reach the
     # RPC agent (and eventually the provider's API) unsupported.
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4027,18 +4161,20 @@ def test_tui_shell_typed_model_command_rejects_effort_the_model_does_not_support
 
         await shell.run()
 
-        assert controller.configurations == [(None, "claude-haiku-4-5", None, False)]
+        assert controller.configurations == [(None, "claude-haiku-4-5", "high", False)]
         assert shell.current_model == "claude-haiku-4-5"
         assert shell.current_effort is None
         rendered = output.getvalue()
-        assert "not supported by claude-haiku-4-5 on anthropic" in rendered
+        assert "Effort 'high' is not supported by claude-haiku-4-5" in rendered
 
     anyio.run(run)
 
 
 def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic", effort="high")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4057,7 +4193,9 @@ def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
 
 def test_tui_shell_typed_model_command_keeps_new_default_model_efforts() -> None:
     async def run() -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic", effort="high")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4144,7 +4282,9 @@ def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -
     # the backend no longer uses) after a plain "/model <id>" with no effort
     # argument at all.
     async def run(tmp_path: Path) -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic", effort="high")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4272,7 +4412,9 @@ def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() ->
     # agent.effort unconditionally whenever a configure carries `model` and no
     # explicit `effort` -- there is no client-only "leave it untouched" case.
     async def run(tmp_path: Path) -> None:
-        controller = ScriptedController()
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic", effort="high")
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -4307,14 +4449,19 @@ def test_tui_shell_adopts_server_side_auto_switched_provider(tmp_path: Path) -> 
     # keep showing the old provider even though the RPC agent had moved on.
     async def run() -> None:
         controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="fake"),
             configure_events=[
                 [
                     ModelProviderAutoSwitched(
                         command_id="configure-1", provider="openai", model="gpt-5.5-pro"
                     ),
+                    RpcModelCatalogReported(
+                        command_id="configure-1",
+                        catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5-pro"),
+                    ),
                     RpcCommandFinished(command_id="configure-1", command_type="configure", ok=True),
                 ]
-            ]
+            ],
         )
         console, output = _console()
         shell = TuiShell(

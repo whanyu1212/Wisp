@@ -31,7 +31,7 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
         "session.saved",
         "agent.completed",
     ]
-    assert all(record["schema_version"] == 34 for record in records)
+    assert all(record["schema_version"] == 35 for record in records)
     assert "timestamp" in records[0]
     assert "session_id" in records[0]
     assert "fake response to: hello" == "".join(

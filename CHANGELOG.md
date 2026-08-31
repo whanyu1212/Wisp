@@ -12,8 +12,10 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
-- Added the enforced live JSONL-RPC v2 handshake, bounded strict framing, immutable generated schemas,
+- Added the enforced live JSONL-RPC v3 handshake, bounded strict framing, immutable generated schemas,
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
+- Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,
+  model, availability, lifecycle, and effort discovery. Protocol v1 and v2 artifacts remain immutable.
 
 ## 0.1.0 — 2026-08-23
 
@@ -205,7 +207,14 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v34 — current
+## Schema v35 — current
+
+Adds `rpc.model_catalog`, a correlated snapshot of the current model selection and the ordered,
+runtime-available provider/model catalog. Successful provider, model, and effort configuration emits
+this authoritative result before command completion; discovery commands emit the same result without
+constructing deferred providers.
+
+## Schema v34
 
 Adds `next_after_entry_id` to `rpc.messages` results so clients can paginate forward from a known
 transcript entry. Consumers using forward pagination must accept the cursor; older pagination logic
@@ -392,7 +401,7 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v34 remain readable.
+Events at schema v5 through v35 remain readable.
 
 ---
 

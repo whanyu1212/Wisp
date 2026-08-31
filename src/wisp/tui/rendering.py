@@ -24,6 +24,7 @@ from wisp.events import (
     MessageCompleted,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcModelCatalogSnapshot,
     RpcSessionSummary,
     RpcSkillCatalogSnapshot,
     SessionCostSummary,
@@ -36,7 +37,6 @@ from wisp.events import (
     ToolResultReady,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.context_widget import format_prompt_cache_usage
@@ -162,11 +162,7 @@ class TuiRenderer(Protocol):
 
     def model_picker_request(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None: ...
 
     def session_picker_request(
@@ -399,23 +395,12 @@ class LineTuiRenderer:
 
     def model_picker_request(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None:
         # No interactive picker outside the Textual renderer -- falls back to
         # the same grouped listing bare `/model` already printed before the
         # picker existed. Use `/model <id> [effort]` to switch.
-        self.console.print(
-            _render_model_listing_text(
-                entries,
-                current_provider=current_provider,
-                current_model=current_model,
-                current_effort=current_effort,
-            )
-        )
+        self.console.print(_render_model_listing_text(catalog))
 
     def session_picker_request(
         self,
@@ -882,22 +867,13 @@ class FullscreenTuiRenderer:
 
     def model_picker_request(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None:
         # No interactive picker outside the Textual renderer -- see
         # LineTuiRenderer.model_picker_request for the same fallback text.
         self._append(
             "system",
-            _render_model_listing_text(
-                entries,
-                current_provider=current_provider,
-                current_model=current_model,
-                current_effort=current_effort,
-            ),
+            _render_model_listing_text(catalog),
             style="cyan",
         )
         self._refresh()
@@ -1734,11 +1710,7 @@ def _compaction_completed_text(event: CompactionCompleted) -> str:
 
 
 def _render_model_listing_text(
-    entries: tuple[ModelCatalogProviderEntry, ...],
-    *,
-    current_provider: str,
-    current_model: str | None,
-    current_effort: str | None,
+    catalog: RpcModelCatalogSnapshot,
 ) -> str:
     """Render every catalog model grouped by provider, current one marked.
 
@@ -1751,25 +1723,24 @@ def _render_model_listing_text(
     what's passed here.
     """
 
+    selection = catalog.selection
     lines = ["Available models:"]
-    for entry in entries:
-        is_current_provider = entry.name == current_provider
-        effective_model = (
-            entry.canonical_model(current_model)
-            if current_model is not None
-            else entry.default_model
-        )
+    for entry in catalog.providers:
+        is_current_provider = entry.name == selection.provider
         names: list[str] = []
         for model_id in entry.models:
-            lifecycle = entry.model_lifecycle.get(model_id)
+            lifecycle = model_id.lifecycle
             lifecycle_label = f" ({lifecycle})" if lifecycle not in (None, "stable") else ""
             current_label = (
-                " (current)" if is_current_provider and model_id == effective_model else ""
+                " (current)"
+                if is_current_provider and model_id.id == selection.catalog_model
+                else ""
             )
-            names.append(f"{model_id}{lifecycle_label}{current_label}")
-        lines.append(f"  {entry.display_name}: {', '.join(names)}")
-    lines.append(f"Current model: {current_model or 'provider default'}")
-    lines.append(f"Current provider: {current_provider}")
-    lines.append(f"Current effort: {current_effort or 'provider default'}")
+            names.append(f"{model_id.id}{lifecycle_label}{current_label}")
+        availability = "" if entry.available else " (unavailable)"
+        lines.append(f"  {entry.display_name}{availability}: {', '.join(names)}")
+    lines.append(f"Current model: {selection.model or 'provider default'}")
+    lines.append(f"Current provider: {selection.provider}")
+    lines.append(f"Current effort: {selection.effort or 'provider default'}")
     lines.append("Use /model <id> [effort] to switch.")
     return "\n".join(lines)

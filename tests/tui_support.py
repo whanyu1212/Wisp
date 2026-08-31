@@ -41,6 +41,11 @@ from wisp.events import (
     RpcMcpStatusSnapshot,
     RpcMessageSnapshot,
     RpcMessagesReported,
+    RpcModelCatalogEntry,
+    RpcModelCatalogReported,
+    RpcModelCatalogSnapshot,
+    RpcModelProviderSnapshot,
+    RpcModelSelectionSnapshot,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSkillCatalogEntry,
@@ -53,6 +58,7 @@ from wisp.events import (
     ToolResultReady,
     TrustRequested,
 )
+from wisp.providers.catalog import ModelRegistry, builtin_catalog, startup_effort
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tui import (
@@ -126,6 +132,44 @@ def rpc_builtin_command_descriptors() -> tuple[RpcCommandDescriptor, ...]:
     )
 
 
+def rpc_builtin_model_catalog(
+    *,
+    provider: str = "fake",
+    model: str | None = None,
+    effort: str | None = None,
+) -> RpcModelCatalogSnapshot:
+    catalog = builtin_catalog()
+    entry = next((item for item in catalog.providers if item.name == provider), None)
+    effective_model = model or (entry.default_model if entry is not None else f"{provider}-default")
+    registry = ModelRegistry(catalog)
+    return RpcModelCatalogSnapshot(
+        selection=RpcModelSelectionSnapshot(
+            provider=provider,
+            model=model,
+            effective_model=effective_model,
+            catalog_model=registry.canonical_model(provider, effective_model),
+            effort=effort,
+        ),
+        providers=tuple(
+            RpcModelProviderSnapshot(
+                name=item.name,
+                display_name=item.display_name,
+                default_model=item.default_model,
+                available=True,
+                models=tuple(
+                    RpcModelCatalogEntry(
+                        id=model_id,
+                        lifecycle=item.model_lifecycle.get(model_id),
+                        effort_levels=item.effort_levels.get(model_id, ()),
+                    )
+                    for model_id in item.models
+                ),
+            )
+            for item in catalog.providers
+        ),
+    )
+
+
 def completed_message(*, content: str) -> MessageCompleted:
     """Build a completed assistant message event for renderer tests."""
 
@@ -147,6 +191,8 @@ class ScriptedController:
         cancel_events: list[ScriptedBatch] | None = None,
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
+        model_catalog_events: list[ScriptedBatch] | None = None,
+        model_catalog: RpcModelCatalogSnapshot | None = None,
         commands_events: list[ScriptedBatch] | None = None,
         skills_events: list[ScriptedBatch] | None = None,
         mcp_events: list[ScriptedBatch] | None = None,
@@ -162,6 +208,8 @@ class ScriptedController:
         self.cancel_events = deque(cancel_events or [])
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
+        self.model_catalog_events = deque(model_catalog_events or [])
+        self.model_catalog = model_catalog or rpc_builtin_model_catalog()
         self.commands_events = deque(commands_events or [])
         self.skills_events = deque(skills_events or [])
         self.mcp_events = deque(mcp_events or [])
@@ -182,6 +230,7 @@ class ScriptedController:
         self.auto_compaction_settings: list[bool | None] = []
         self.agent_modes: list[AgentMode | None] = []
         self.commands_requests: list[str] = []
+        self.model_catalog_requests: list[str] = []
         self.skills_requests: list[str] = []
         self.mcp_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
@@ -252,6 +301,22 @@ class ScriptedController:
                 RpcCommandFinished(
                     command_id=selected_id,
                     command_type="get_commands",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def get_model_catalog(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"model-catalog-{len(self.model_catalog_requests) + 1}"
+        self.model_catalog_requests.append(selected_id)
+        await self._emit_scripted(
+            self.model_catalog_events,
+            default=[
+                RpcModelCatalogReported(command_id=selected_id, catalog=self.model_catalog),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_model_catalog",
                     ok=True,
                 ),
             ],
@@ -499,16 +564,55 @@ class ScriptedController:
         self.auto_compaction_settings.append(auto_compaction_enabled)
         self.agent_modes.append(mode)
         selected_id = command_id or f"configure-{len(self.configurations)}"
-        await self._emit_scripted(
-            self.configure_events,
-            default=[
+        if self.configure_events:
+            await self._emit_scripted(self.configure_events, default=[])
+        else:
+            events: EventBatch = []
+            if provider is not None or model is not None or effort is not None or clear_effort:
+                selection = self.model_catalog.selection
+                selected_provider = provider or selection.provider
+                selected_model = (
+                    model
+                    if model is not None
+                    else (None if provider is not None else selection.model)
+                )
+                entry = next(
+                    (
+                        item
+                        for item in builtin_catalog().providers
+                        if item.name == selected_provider
+                    ),
+                    None,
+                )
+                selected_effort = effort
+                if effort is not None:
+                    selected_effort = startup_effort(
+                        ModelRegistry(builtin_catalog()),
+                        provider_name=selected_provider,
+                        model=selected_model,
+                        default_model=(
+                            entry.default_model
+                            if entry is not None
+                            else f"{selected_provider}-default"
+                        ),
+                        effort=effort,
+                    )
+                self.model_catalog = rpc_builtin_model_catalog(
+                    provider=selected_provider,
+                    model=selected_model,
+                    effort=selected_effort,
+                )
+                events.append(
+                    RpcModelCatalogReported(command_id=selected_id, catalog=self.model_catalog)
+                )
+            events.append(
                 RpcCommandFinished(
                     command_id=selected_id,
                     command_type="configure",
                     ok=True,
                 )
-            ],
-        )
+            )
+            await self._emit(events)
         return selected_id
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
@@ -586,6 +690,8 @@ __all__ = [
     "RpcCommandsReported",
     "RpcMessageSnapshot",
     "RpcMessagesReported",
+    "RpcModelCatalogReported",
+    "RpcModelCatalogSnapshot",
     "RpcSkillCatalogEntry",
     "RpcSkillCatalogSnapshot",
     "RpcSkillsReported",
@@ -620,6 +726,7 @@ __all__ = [
     "deque",
     "format_tui_footer_lines",
     "format_tui_footer_text",
+    "rpc_builtin_model_catalog",
     "io",
     "completed_message",
     "message_delta",

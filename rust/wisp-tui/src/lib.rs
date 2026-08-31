@@ -2681,10 +2681,10 @@ mod tests {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 2,
-            "event_schema_version": 34,
-            "min_protocol_version": 2,
-            "max_protocol_version": 2,
+            "protocol_version": 3,
+            "event_schema_version": 35,
+            "min_protocol_version": 3,
+            "max_protocol_version": 3,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })
@@ -2710,7 +2710,7 @@ mod tests {
     fn shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -2722,7 +2722,7 @@ mod tests {
     fn shutdown_started_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.started",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown"
@@ -2732,7 +2732,7 @@ mod tests {
     fn failed_shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -2810,7 +2810,7 @@ mod tests {
         ));
         let event = json!({
             "type": "tool.result",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-large",
             "name": "bash",
@@ -3383,7 +3383,7 @@ mod tests {
             .send(QueuedEvent {
                 event: BackendEvent::from_live(&parsed_event(json!({
                     "type": "message.delta",
-                    "schema_version": 34,
+                    "schema_version": 35,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",
@@ -3413,8 +3413,8 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 2,
-                    event_schema_version: 34,
+                    protocol_version: 3,
+                    event_schema_version: 35,
                 },
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -4361,8 +4361,8 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 2,
-                    event_schema_version: 34,
+                    protocol_version: 3,
+                    event_schema_version: 35,
                 },
             )
             .unwrap();
@@ -4396,8 +4396,8 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 2,
-                    event_schema_version: 34,
+                    protocol_version: 3,
+                    event_schema_version: 35,
                 },
             )
             .unwrap();
@@ -4449,8 +4449,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
-            protocol_version: 2,
-            event_schema_version: 34,
+            protocol_version: 3,
+            event_schema_version: 35,
         };
         live_ui.draw(&mut terminal, &connection).unwrap();
         live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-2".into();
@@ -5470,7 +5470,7 @@ mod tests {
             .dispatch(
                 UiAction::BackendEvent(projected_event(json!({
                     "type": "message.delta",
-                    "schema_version": 34,
+                    "schema_version": 35,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",

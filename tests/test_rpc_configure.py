@@ -35,12 +35,25 @@ def test_configure_model_auto_switches_provider_when_unambiguous(tmp_path: Path)
     assert auto_switched[0]["command_id"] == "configure-1"
     assert auto_switched[0]["provider"] == "openai"
     assert auto_switched[0]["model"] == "gpt-5.5-pro"
+    catalog_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.model_catalog" and record["command_id"] == "configure-1"
+    )
     configure_finished = next(
         r
         for r in records
         if r["type"] == "rpc.command.finished" and r["command_id"] == "configure-1"
     )
     assert configure_finished["ok"] is True
+    assert records[catalog_index]["catalog"]["selection"] == {
+        "provider": "openai",
+        "model": "gpt-5.5-pro",
+        "effective_model": "gpt-5.5-pro",
+        "catalog_model": "gpt-5.5-pro",
+        "effort": None,
+    }
+    assert catalog_index < records.index(configure_finished)
     assert any(
         record.get("message")
         == "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
@@ -136,7 +149,14 @@ def test_configure_model_leaves_provider_alone_when_model_belongs_to_current_pro
     # event, error, or otherwise behave any differently than configuring model
     # on an already-matching provider did before this feature existed.
     assert not any(r["type"] == "model.provider_auto_switched" for r in records)
-    assert records[1]["ok"] is True
+    assert (
+        next(
+            record
+            for record in records
+            if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
+        )["ok"]
+        is True
+    )
     assert any(
         record.get("message")
         == "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
@@ -163,7 +183,14 @@ def test_configure_unknown_model_falls_through_without_error(tmp_path: Path) -> 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assert not any(r["type"] == "model.provider_auto_switched" for r in records)
-    assert records[1]["ok"] is True
+    assert (
+        next(
+            record
+            for record in records
+            if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
+        )["ok"]
+        is True
+    )
     # The prompt still runs against the unchanged (fake) provider -- proves no
     # provider switch was attempted despite the unresolvable model string.
     assert any(record.get("content") == "fake response to: hello" for record in records)
@@ -209,6 +236,10 @@ def test_configure_ambiguous_model_rejects_without_mutating_configuration(
     )
     assert configure_finished["ok"] is False
     assert configure_finished["error"] == message
+    assert not any(
+        record["type"] == "rpc.model_catalog" and record.get("command_id") == "configure-1"
+        for record in records
+    )
     state = next(record["state"] for record in records if record["type"] == "rpc.state")
     assert state["provider"] == "fake"
     assert state["model"] == "fake"
@@ -266,5 +297,12 @@ def test_configure_explicit_provider_and_model_together_is_unaffected_by_auto_sw
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert records[1]["ok"] is True
+    assert (
+        next(
+            record
+            for record in records
+            if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
+        )["ok"]
+        is True
+    )
     assert any(record.get("content") == "fake response to: hello" for record in records)

@@ -484,7 +484,7 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
     assert overrides.provider == "openai"
 
 
-def test_configure_model_only_auto_switch_with_explicit_effort_keeps_the_new_value(
+def test_configure_model_only_auto_switch_filters_unsupported_explicit_effort(
     tmp_path: Path,
 ) -> None:
     fake_provider = _FakeNamedProvider()
@@ -512,4 +512,4 @@ def test_configure_model_only_auto_switch_with_explicit_effort_keeps_the_new_val
     )
 
     assert agent.provider is openai_provider
-    assert agent.effort == "medium"
+    assert agent.effort is None

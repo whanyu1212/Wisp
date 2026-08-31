@@ -28,6 +28,7 @@ from wisp.events import (
     MessageStarted,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcModelCatalogSnapshot,
     RpcSessionSummary,
     RpcSkillCatalogSnapshot,
     SessionStats,
@@ -40,7 +41,6 @@ from wisp.events import (
     TrustResolved,
     TurnStarted,
 )
-from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.connections import ConnectionProviderStatus
@@ -652,18 +652,9 @@ class TextualTuiRenderer:
 
     def model_picker_request(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None:
-        self.app.show_model_picker(
-            entries,
-            current_provider=current_provider,
-            current_model=current_model,
-            current_effort=current_effort,
-        )
+        self.app.show_model_picker(catalog)
 
     def session_picker_request(
         self,

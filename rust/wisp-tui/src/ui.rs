@@ -984,8 +984,8 @@ mod tests {
     fn connection() -> ConnectionInfo {
         ConnectionInfo {
             backend_version: "0.9.0".into(),
-            protocol_version: 2,
-            event_schema_version: 34,
+            protocol_version: 3,
+            event_schema_version: 35,
         }
     }
 
@@ -1111,7 +1111,7 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("rpc v2 / events v34"));
+        assert!(rendered.contains("rpc v3 / events v35"));
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
     }

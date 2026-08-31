@@ -38,6 +38,7 @@ from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 
 from wisp.config import WispConfig
 from wisp.events import (
+    RpcModelCatalogSnapshot,
     RpcSessionSummary,
     RpcSkillCatalogSnapshot,
     SessionStats,
@@ -45,7 +46,6 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tools.context import ToolContext
 from wisp.tui.commands import (
     DEFAULT_TUI_COMMAND_CATALOG,
@@ -3282,23 +3282,14 @@ class TextualTui(App[None]):
 
     def show_model_picker(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None:
         picker = self._model_picker
         overlays = self._overlay_controller
         if picker is None or overlays is None:
             return
         overlays.open(OverlayKind.model_picker)
-        picker.show(
-            entries,
-            current_provider=current_provider,
-            current_model=current_model,
-            current_effort=current_effort,
-        )
+        picker.show(catalog)
 
     def hide_model_picker(self) -> None:
         overlays = self._overlay_controller

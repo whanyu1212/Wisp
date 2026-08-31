@@ -56,12 +56,13 @@ from textual.widgets.option_list import Option
 
 from wisp.coding.costs import format_cost_summary
 from wisp.events import (
+    RpcModelCatalogSnapshot,
+    RpcModelProviderSnapshot,
     RpcSessionSummary,
     RpcSkillCatalogSnapshot,
     ToolApprovalRequested,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import (
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
     SLASH_COMMAND_SPECS,
@@ -1082,7 +1083,7 @@ class ModelPicker(Vertical):
         # every highlight change, so this list is the single source of truth
         # for "what does the currently highlighted row mean."
         self._rows: list[tuple[str, str] | None] = []
-        self._entries_by_provider: dict[str, ModelCatalogProviderEntry] = {}
+        self._entries_by_provider: dict[str, RpcModelProviderSnapshot] = {}
         # Selected effort tier per (provider, model) touched this session --
         # preserved across highlight moves so arrowing away and back doesn't
         # forget a choice, matching how the composer never discards a draft.
@@ -1112,15 +1113,11 @@ class ModelPicker(Vertical):
 
     def show(
         self,
-        entries: tuple[ModelCatalogProviderEntry, ...],
-        *,
-        current_provider: str,
-        current_model: str | None,
-        current_effort: str | None,
+        catalog: RpcModelCatalogSnapshot,
     ) -> None:
         self._submitted = False
         self._opened_at = time.monotonic()
-        self._entries_by_provider = {entry.name: entry for entry in entries}
+        self._entries_by_provider = {entry.name: entry for entry in catalog.providers}
         self._effort_choice = {}
         self._effort_touched = set()
         self._options.clear_options()
@@ -1128,21 +1125,18 @@ class ModelPicker(Vertical):
         default_index: int | None = None
         first_selectable_index: int | None = None
         row_index = 0
-        for entry in entries:
-            self._options.add_option(Option(entry.display_name, disabled=True))
+        selection = catalog.selection
+        for entry in catalog.providers:
+            availability = "" if entry.available else " (unavailable)"
+            self._options.add_option(Option(f"{entry.display_name}{availability}", disabled=True))
             self._rows.append(None)
             row_index += 1
-            is_current_provider = entry.name == current_provider
-            effective_model = (
-                entry.canonical_model(current_model)
-                if current_model is not None
-                else entry.default_model
-            )
-            for model_id in entry.models:
-                if first_selectable_index is None:
+            is_current_provider = entry.name == selection.provider
+            for model in entry.models:
+                if entry.available and first_selectable_index is None:
                     first_selectable_index = row_index
-                is_current = is_current_provider and model_id == effective_model
-                if is_current:
+                is_current = is_current_provider and model.id == selection.catalog_model
+                if is_current and entry.available:
                     default_index = row_index
                     # Defense in depth: current_effort is a caller-supplied
                     # value, not guaranteed valid for this exact model's
@@ -1150,18 +1144,22 @@ class ModelPicker(Vertical):
                     # non-normalized -- see ModelCatalogProviderEntry). Seeding
                     # a tier this row doesn't list would let an untouched
                     # Enter resubmit it verbatim (see submit_current_selection).
-                    seeded_effort = current_effort
-                    if seeded_effort is not None and seeded_effort not in entry.effort_levels.get(
-                        model_id, ()
-                    ):
+                    seeded_effort = selection.effort
+                    if seeded_effort is not None and seeded_effort not in model.effort_levels:
                         seeded_effort = None
-                    self._effort_choice[(entry.name, model_id)] = seeded_effort
-                lifecycle = entry.model_lifecycle.get(model_id)
+                    self._effort_choice[(entry.name, model.id)] = seeded_effort
+                lifecycle = model.lifecycle
                 lifecycle_label = f" ({lifecycle})" if lifecycle not in (None, "stable") else ""
                 current_label = " (current)" if is_current else ""
-                label = f"  {model_id}{lifecycle_label}{current_label}"
-                self._options.add_option(Option(label, id=f"{entry.name}::{model_id}"))
-                self._rows.append((entry.name, model_id))
+                label = f"  {model.id}{lifecycle_label}{current_label}"
+                self._options.add_option(
+                    Option(
+                        label,
+                        id=f"{entry.name}::{model.id}",
+                        disabled=not entry.available,
+                    )
+                )
+                self._rows.append((entry.name, model.id) if entry.available else None)
                 row_index += 1
         # A current_provider/current_model not present in the catalog (e.g.
         # after a permissive /model <unknown-model>) leaves no row matching
@@ -1191,7 +1189,8 @@ class ModelPicker(Vertical):
         entry = self._entries_by_provider.get(provider_name)
         if entry is None:
             return ()
-        return entry.effort_levels.get(model_id, ())
+        model = next((model for model in entry.models if model.id == model_id), None)
+        return model.effort_levels if model is not None else ()
 
     def _update_effort_control(self) -> None:
         """Show a fresh radio group for the highlighted model's effort tiers."""

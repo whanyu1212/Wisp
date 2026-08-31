@@ -153,10 +153,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 2,
-    "event_schema_version": 34,
-    "min_protocol_version": 2,
-    "max_protocol_version": 2,
+    "protocol_version": 3,
+    "event_schema_version": 35,
+    "min_protocol_version": 3,
+    "max_protocol_version": 3,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -421,10 +421,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 2,
-    "event_schema_version": 34,
-    "min_protocol_version": 2,
-    "max_protocol_version": 2,
+    "protocol_version": 3,
+    "event_schema_version": 35,
+    "min_protocol_version": 3,
+    "max_protocol_version": 3,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -674,10 +674,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 2,
-    "event_schema_version": 34,
-    "min_protocol_version": 2,
-    "max_protocol_version": 2,
+    "protocol_version": 3,
+    "event_schema_version": 35,
+    "min_protocol_version": 3,
+    "max_protocol_version": 3,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,

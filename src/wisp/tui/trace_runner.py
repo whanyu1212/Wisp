@@ -525,6 +525,10 @@ class TraceController:
         self.commands.append({"type": "get_commands", "id": cid})
         return cid
 
+    async def get_model_catalog(self, *, command_id: str | None = None) -> str:
+        # Shared traces compare Textual with Rust, whose picker is deferred to #467.
+        return command_id or self._next_id("get_model_catalog")
+
     async def get_skills(self, *, command_id: str | None = None) -> str:
         cid = command_id or self._next_id("get_skills")
         self.commands.append({"type": "get_skills", "id": cid})

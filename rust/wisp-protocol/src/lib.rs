@@ -12,12 +12,12 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v2 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v2/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v3 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v3/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 2;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 3;
 /// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 34;
+pub const EVENT_SCHEMA_VERSION: u32 = 35;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -151,22 +151,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v2/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v3/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v2/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v3/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v2/commands.schema.json"
+        "../../../schemas/live-rpc/v3/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v2/events.schema.json"
+        "../../../schemas/live-rpc/v3/events.schema.json"
     ))
 });
 
@@ -190,6 +190,20 @@ fn validate_cross_field_invariants(
         })?;
         for descriptor in descriptors {
             validate_invariant_list(descriptor_schema, descriptor)?;
+        }
+    }
+    if value.get("type").and_then(Value::as_str) == Some("rpc.model_catalog") {
+        let total_models = value["catalog"]["providers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|provider| provider["models"].as_array())
+            .map(Vec::len)
+            .sum::<usize>();
+        if total_models > 4_096 {
+            return Err(ProtocolDecodeError(
+                "RPC model catalog exceeds the total model limit".into(),
+            ));
         }
     }
     Ok(())
@@ -401,7 +415,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v2/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v3/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -436,7 +450,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v2/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v3/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -496,7 +510,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v2/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v3/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -540,6 +554,11 @@ pub mod commands {
     }
 
     impl WispTypedClientRpcCommands {
+        /// Request the backend-authoritative provider and model catalog.
+        pub fn get_model_catalog(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_model_catalog", "id": id}))
+        }
+
         /// Construct one agent-turn request.
         pub fn prompt(id: &str, prompt: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}))
@@ -841,7 +860,7 @@ pub mod commands {
 
 pub mod events {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v2/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v3/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -854,6 +873,50 @@ pub mod events {
     pub enum CommandFinishedOutcome {
         Succeeded,
         Failed { error: Option<String> },
+    }
+
+    /// Lifecycle metadata for one canonical catalog model.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum ModelLifecycle {
+        Stable,
+        Preview,
+        Legacy,
+    }
+
+    /// One canonical model exposed by a provider.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ModelCatalogEntry {
+        pub id: String,
+        pub lifecycle: Option<ModelLifecycle>,
+        pub effort_levels: Vec<String>,
+    }
+
+    /// One catalog provider and its runtime availability.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ModelCatalogProvider {
+        pub name: String,
+        pub display_name: String,
+        pub default_model: String,
+        pub available: bool,
+        pub models: Vec<ModelCatalogEntry>,
+    }
+
+    /// Backend-authoritative current model selection.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ModelSelection {
+        pub provider: String,
+        pub model: Option<String>,
+        pub effective_model: Option<String>,
+        pub catalog_model: Option<String>,
+        pub effort: Option<String>,
+    }
+
+    /// Bounded picker-relevant model catalog snapshot.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ModelCatalogSnapshot {
+        pub selection: ModelSelection,
+        pub providers: Vec<ModelCatalogProvider>,
     }
 
     impl WispCurrentLiveEventOutput {
@@ -874,6 +937,18 @@ pub mod events {
             self.wire_value()["schema_version"]
                 .as_u64()
                 .expect("validated event has a schema version") as u32
+        }
+
+        /// Project the model catalog reported for one exact command.
+        pub fn model_catalog(&self, id: &str) -> Option<ModelCatalogSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.model_catalog" || value["command_id"] != id {
+                return None;
+            }
+            Some(
+                serde_json::from_value(value["catalog"].clone())
+                    .expect("validated model catalog must match its public projection"),
+            )
         }
 
         /// Project the terminal outcome for one exact command, if this is its event.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest import mock
 
 import anyio
@@ -8,6 +9,12 @@ from textual import events
 from textual.app import App
 from textual.widgets import OptionList, RadioButton, RadioSet
 
+from wisp.events import (
+    RpcModelCatalogEntry,
+    RpcModelCatalogSnapshot,
+    RpcModelProviderSnapshot,
+    RpcModelSelectionSnapshot,
+)
 from wisp.providers.catalog import ModelCatalogProviderEntry, builtin_catalog
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import ModelPicker
@@ -53,11 +60,74 @@ _OPENAI = _entry(
 _ENTRIES = (_ANTHROPIC, _OPENAI)
 
 
+def _snapshot(
+    entries: tuple[ModelCatalogProviderEntry, ...],
+    *,
+    current_provider: str,
+    current_model: str | None,
+    current_effort: str | None,
+    unavailable: frozenset[str] = frozenset(),
+) -> RpcModelCatalogSnapshot:
+    provider = next((entry for entry in entries if entry.name == current_provider), None)
+    effective_model = current_model or (provider.default_model if provider is not None else None)
+    return RpcModelCatalogSnapshot(
+        selection=RpcModelSelectionSnapshot(
+            provider=current_provider,
+            model=current_model,
+            effective_model=effective_model,
+            catalog_model=(
+                provider.canonical_model(effective_model)
+                if provider is not None and effective_model is not None
+                else None
+            ),
+            effort=current_effort,
+        ),
+        providers=tuple(
+            RpcModelProviderSnapshot(
+                name=entry.name,
+                display_name=entry.display_name,
+                default_model=entry.default_model,
+                available=entry.name not in unavailable,
+                models=tuple(
+                    RpcModelCatalogEntry(
+                        id=model_id,
+                        lifecycle=cast(Any, entry.model_lifecycle.get(model_id)),
+                        effort_levels=entry.effort_levels.get(model_id, ()),
+                    )
+                    for model_id in entry.models
+                ),
+            )
+            for entry in entries
+        ),
+    )
+
+
+def _show(
+    renderer: Any,
+    entries: tuple[ModelCatalogProviderEntry, ...],
+    *,
+    current_provider: str,
+    current_model: str | None,
+    current_effort: str | None,
+    unavailable: frozenset[str] = frozenset(),
+) -> None:
+    renderer.model_picker_request(
+        _snapshot(
+            entries,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_effort=current_effort,
+            unavailable=unavailable,
+        )
+    )
+
+
 def test_model_picker_lists_providers_and_models_with_current_marked() -> None:
     async def scenario() -> tuple[list[str], list[bool], int | None]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-haiku-4-5",
@@ -93,7 +163,8 @@ def test_model_picker_distinguishes_openai_api_and_codex_subscription() -> None:
     async def scenario() -> list[str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(100, 30)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 entries,
                 current_provider="openai",
                 current_model=None,
@@ -113,11 +184,38 @@ def test_model_picker_distinguishes_openai_api_and_codex_subscription() -> None:
     ]
 
 
+def test_model_picker_disables_unavailable_providers() -> None:
+    async def scenario() -> tuple[list[str], list[bool], int | None]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            _show(
+                renderer,
+                _ENTRIES,
+                current_provider="anthropic",
+                current_model=None,
+                current_effort=None,
+                unavailable=frozenset({"anthropic"}),
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            return (
+                [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)],
+                [options.get_option_at_index(i).disabled for i in range(options.option_count)],
+                options.highlighted,
+            )
+
+    labels, disabled, highlighted = anyio.run(scenario)
+    assert labels[0] == "Anthropic (unavailable)"
+    assert disabled == [True, True, True, True, False]
+    assert highlighted == 4
+
+
 def test_model_picker_marks_provider_default_current_when_model_unset() -> None:
     async def scenario() -> int | None:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model=None,
@@ -141,7 +239,8 @@ def test_model_picker_defaults_to_first_selectable_row_when_current_is_uncatalog
     async def scenario() -> tuple[int | None, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="uncataloged-provider",
                 current_model="uncataloged-model",
@@ -175,7 +274,8 @@ def test_model_picker_marks_an_alias_current_and_labels_nonstable_models() -> No
     async def scenario() -> list[str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 (entry,),
                 current_provider="acme",
                 current_model="acme-latest",
@@ -197,7 +297,8 @@ def test_model_picker_hides_composer_and_focuses_options() -> None:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
             input_widget = app.query_one("#input", Input)
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -216,7 +317,8 @@ def test_model_picker_enter_selects_highlighted_model_without_effort() -> None:
     async def scenario() -> str:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -236,7 +338,8 @@ def test_model_picker_uses_radio_set_and_arrow_keys_cycle_effort() -> None:
     async def scenario() -> tuple[str, str, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-opus-4-8",
@@ -272,7 +375,8 @@ def test_model_picker_displays_effort_for_every_builtin_codex_model() -> None:
         rendered: dict[str, tuple[str, ...]] = {}
         async with app.run_test(size=(80, 24)) as pilot:
             for model in codex.models:
-                renderer.model_picker_request(
+                _show(
+                    renderer,
                     (codex,),
                     current_provider="openai-codex",
                     current_model=model,
@@ -294,7 +398,8 @@ def test_model_picker_mouse_selects_effort_without_taking_model_list_focus() -> 
     async def scenario() -> tuple[str, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-opus-4-8",
@@ -325,7 +430,8 @@ def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> No
     async def scenario() -> tuple[str, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model="gpt-5.5",
@@ -351,7 +457,8 @@ def test_model_picker_escape_cancels_without_submitting_and_restores_composer() 
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
             input_widget = app.query_one("#input", Input)
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -379,7 +486,8 @@ def test_model_picker_drops_stale_key_and_selection_queued_before_open() -> None
     async def scenario() -> tuple[bool, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -421,7 +529,8 @@ def test_model_picker_preserves_composer_draft_across_selection() -> None:
         async with app.run_test(size=(80, 24)) as pilot:
             input_widget = app.query_one("#input", Input)
             input_widget.value = "draft follow-up"
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -451,7 +560,8 @@ def test_app_on_event_drops_stale_key_queued_before_model_picker_opened() -> Non
     async def scenario() -> tuple[bool, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -491,7 +601,8 @@ def test_model_picker_cancel_restores_composer_draft() -> None:
         async with app.run_test(size=(80, 24)) as pilot:
             input_widget = app.query_one("#input", Input)
             input_widget.value = "draft follow-up"
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="openai",
                 current_model=None,
@@ -534,7 +645,8 @@ def test_model_picker_qualifies_selection_with_provider_for_a_shared_model_id() 
     async def scenario() -> tuple[str, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _SHARED_ID_ENTRIES,
                 current_provider="anthropic",
                 current_model=None,
@@ -550,7 +662,8 @@ def test_model_picker_qualifies_selection_with_provider_for_a_shared_model_id() 
                 first_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(first_answer, str)
 
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _SHARED_ID_ENTRIES,
                 current_provider="anthropic",
                 current_model=None,
@@ -581,7 +694,8 @@ def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> No
     async def scenario() -> tuple[str, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-opus-4-8",
@@ -595,7 +709,8 @@ def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> No
                 untouched_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(untouched_answer, str)
 
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-opus-4-8",
@@ -629,7 +744,8 @@ def test_model_picker_does_not_seed_a_tier_the_current_row_does_not_list() -> No
     async def scenario() -> str:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
-            renderer.model_picker_request(
+            _show(
+                renderer,
                 _ENTRIES,
                 current_provider="anthropic",
                 current_model="claude-opus-4-8",

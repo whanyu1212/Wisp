@@ -35,6 +35,7 @@ from wisp.rpc.commands import (
     GetCommandsCommand,
     GetMcpStatusCommand,
     GetMessagesCommand,
+    GetModelCatalogCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
     GetSessionStatsCommand,
@@ -145,6 +146,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("commands")
         await self._transport.send(GetCommandsCommand(id=selected_id))
+        return selected_id
+
+    async def get_model_catalog(self, *, command_id: str | None = None) -> str:
+        """Request the effective provider/model/effort catalog."""
+
+        selected_id = command_id or self._command_id_factory("model-catalog")
+        await self._transport.send(GetModelCatalogCommand(id=selected_id))
         return selected_id
 
     async def get_skills(self, *, command_id: str | None = None) -> str:
