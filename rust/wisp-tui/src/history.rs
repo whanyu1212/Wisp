@@ -11,7 +11,7 @@ use crate::tool_cards::{
     identity_for_display, process_call_identity,
 };
 use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
-use crate::transcript::SharedTranscript;
+use crate::transcript::{SharedTranscript, TranscriptEntryId};
 
 pub const HISTORY_MESSAGE_LIMIT: usize = 200;
 pub const HISTORY_PAGE_LIMIT: usize = 75;
@@ -86,6 +86,7 @@ pub fn project_rpc_message_page_with_origins(
             });
         }
         let start = transcript.entries().len();
+        let mut assistant_entries = Vec::new();
         let tool_result_entry = match string(message, index, "role")? {
             "system" => None,
             "user" => {
@@ -93,7 +94,8 @@ pub fn project_rpc_message_page_with_origins(
                 None
             }
             "assistant" => {
-                project_assistant(&mut transcript, &mut process_ids, message, index)?;
+                assistant_entries =
+                    project_assistant(&mut transcript, &mut process_ids, message, index)?;
                 None
             }
             "tool" => Some(project_tool_result(
@@ -110,16 +112,23 @@ pub fn project_rpc_message_page_with_origins(
             }
         };
         transcript.mark_history_entries(start, durable_entry_id);
-        if let Some(entry_id) = tool_result_entry {
+        for entry_id in assistant_entries {
+            transcript.add_history_origin(entry_id, durable_entry_id);
+        }
+        if let Some((entry_id, pending_result)) = tool_result_entry {
             transcript.add_history_origin(entry_id, durable_entry_id);
             transcript.mark_history_result_projection(
                 entry_id,
                 bool(message, index, "content_truncated")?,
             );
+            if let Some(result) = pending_result {
+                transcript.record_history_pending_result(entry_id, result);
+            }
         }
         durable_entry_ids.push(durable_entry_id.to_owned());
     }
     transcript.settle_unresolved_tools(MISSING_TOOL_RESULT);
+    transcript.complete_history_entries();
     Ok(ProjectedHistoryPage {
         transcript,
         durable_entry_ids,
@@ -149,7 +158,7 @@ fn project_assistant(
     process_ids: &mut VecDeque<(String, String)>,
     message: &Value,
     index: usize,
-) -> Result<(), HistoryProjectionError> {
+) -> Result<Vec<TranscriptEntryId>, HistoryProjectionError> {
     let content = content_for_history(message, index)?;
     let tool_calls = array(message, index, "tool_calls")?;
     let original_count = message
@@ -171,6 +180,7 @@ fn project_assistant(
     } else if tool_calls.is_empty() {
         transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
     }
+    let mut entries = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
         let tool_call = tool_call_input(tool_call, index)?;
         if let Some(process) = process_call_identity(&tool_call.name, &tool_call.arguments) {
@@ -180,9 +190,12 @@ fn project_assistant(
             }
             process_ids.push_back((tool_call.call_id.clone(), process.process_id));
         }
-        transcript.observe_tool_call(tool_call);
+        let call_id = tool_call.call_id.clone();
+        let entry_id = transcript.observe_tool_call(tool_call);
+        transcript.record_history_call(entry_id, &call_id);
+        entries.push(entry_id);
     }
-    Ok(())
+    Ok(entries)
 }
 
 fn user_content(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
@@ -268,8 +281,9 @@ fn project_tool_result(
     process_ids: &mut VecDeque<(String, String)>,
     message: &Value,
     index: usize,
-) -> Result<crate::transcript::TranscriptEntryId, HistoryProjectionError> {
+) -> Result<(TranscriptEntryId, Option<ToolResultInput>), HistoryProjectionError> {
     let mut result = tool_result(message, index)?;
+    let request_missing = !transcript.has_unresolved_tool_call(&result.call_id);
     result.process_id = process_ids
         .iter()
         .position(|(call_id, _)| call_id == &result.call_id)
@@ -282,7 +296,7 @@ fn project_tool_result(
         project_historical_process_result(&mut result, &process_id);
     }
     if tool_result_status(message) == Some("denied") {
-        if !transcript.has_unresolved_tool_call(&result.call_id) {
+        if request_missing {
             transcript.observe_tool_call(ToolCallInput {
                 call_id: result.call_id.clone(),
                 name: result.name.clone(),
@@ -292,7 +306,13 @@ fn project_tool_result(
         }
         transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
     }
-    Ok(transcript.observe_tool_result(result))
+    let pending_result = request_missing.then(|| result.clone());
+    let call_id = result.call_id.clone();
+    let entry_id = transcript.observe_tool_result(result);
+    if !request_missing {
+        transcript.resolve_history_call(entry_id, &call_id);
+    }
+    Ok((entry_id, pending_result))
 }
 
 fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, HistoryProjectionError> {
@@ -386,7 +406,7 @@ fn tool_result_status(message: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn project_historical_process_result(result: &mut ToolResultInput, process_id: &str) {
+pub(crate) fn project_historical_process_result(result: &mut ToolResultInput, process_id: &str) {
     if result.process_state.as_deref() == Some("cancelled")
         && result.output != INTERRUPTED_TOOL_RESULT_TEXT
     {
@@ -598,6 +618,7 @@ fn optional_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_cards::ProcessDisplayState;
     use crate::transcript::{TranscriptEntryKind, TranscriptRole};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -674,6 +695,121 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[1].status.as_str(), "done");
         assert_eq!(cards[0].status.as_str(), "cancelled");
+    }
+
+    #[test]
+    fn adjacent_pages_reconcile_split_tool_lifecycles() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "read-boundary",
+            "name": "read",
+            "arguments": {"path": "README.md"},
+        }]);
+        let mut result = message("tool", "alpha\nbeta\n");
+        result["tool_call_id"] = json!("read-boundary");
+        result["tool_name"] = json!("read");
+        result["tool_result"] = json!({"summary": "read 2 lines from README.md"});
+        let older = project_rpc_messages(&[assistant]).unwrap();
+        let mut newer = project_rpc_messages(&[result]).unwrap();
+        let mut appended = older.clone();
+
+        assert!(appended.append_history_page(&newer));
+        assert_eq!(
+            appended
+                .entries()
+                .iter()
+                .filter_map(|entry| entry.tool_card())
+                .count(),
+            1
+        );
+        assert!(newer.prepend_history_page(&older));
+
+        let cards = newer
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.tool_card())
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].arguments_available);
+        assert_eq!(cards[0].status.as_str(), "done");
+        assert!(cards[0].has_retained_detail());
+    }
+
+    #[test]
+    fn adjacent_pages_reconcile_split_process_lifecycles() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([
+            {
+                "call_id": "poll-boundary-1",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-1"},
+            },
+            {
+                "call_id": "poll-boundary-2",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-1"},
+            }
+        ]);
+        let mut first_result = message(
+            "tool",
+            "Process process-1 is still running\nstdout:\nfirst output",
+        );
+        first_result["tool_call_id"] = json!("poll-boundary-1");
+        first_result["tool_name"] = json!("bash");
+        first_result["tool_result"] = json!({"status": "running"});
+        let mut second_result = message(
+            "tool",
+            "Process process-1 is still running\nstdout:\nsecond output",
+        );
+        second_result["tool_call_id"] = json!("poll-boundary-2");
+        second_result["tool_name"] = json!("bash");
+        second_result["tool_result"] = json!({"status": "running"});
+        let older = project_rpc_messages(&[assistant]).unwrap();
+        let mut newer = project_rpc_messages(&[first_result, second_result]).unwrap();
+
+        assert!(
+            newer.prepend_history_page(&older),
+            "older={:?} newer={:?}",
+            older.entries(),
+            newer.entries()
+        );
+
+        assert_eq!(newer.entries().len(), 1);
+        let card = newer.entries()[0].process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Running);
+        let first = card.retained_output.text.find("first output").unwrap();
+        let second = card.retained_output.text.find("second output").unwrap();
+        assert!(first < second);
+    }
+
+    #[test]
+    fn adjacent_pages_preserve_denied_process_states() {
+        for (operation, expected) in [
+            ("poll", ProcessDisplayState::PollDenied),
+            ("cancel", ProcessDisplayState::CancelDenied),
+        ] {
+            let call_id = format!("{operation}-denied-boundary");
+            let mut assistant = message("assistant", "");
+            assistant["tool_calls"] = json!([{
+                "call_id": call_id,
+                "name": "bash",
+                "arguments": {"operation": operation, "process_id": "process-1"},
+            }]);
+            let mut result = message("tool", "denied");
+            result["tool_call_id"] = json!(call_id);
+            result["tool_name"] = json!("bash");
+            result["tool_result"] = json!({"status": "denied"});
+            let older = project_rpc_messages(&[assistant]).unwrap();
+            let mut newer = project_rpc_messages(&[result]).unwrap();
+
+            assert!(newer.prepend_history_page(&older));
+
+            assert_eq!(newer.entries().len(), 1);
+            assert_eq!(
+                newer.entries()[0].process_card().unwrap().display_state,
+                expected
+            );
+        }
     }
 
     #[test]

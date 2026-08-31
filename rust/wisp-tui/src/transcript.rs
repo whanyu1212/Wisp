@@ -96,6 +96,8 @@ pub struct TranscriptEntry {
     durable_entry_ids: Vec<String>,
     history_detail_source: Option<ToolDetailSource>,
     history_result_projection_truncated: bool,
+    history_calls: Vec<HistoricalCall>,
+    history_pending_result: Option<Box<ToolResultInput>>,
 }
 
 impl TranscriptEntry {
@@ -133,6 +135,13 @@ struct ToolBinding {
     entry_id: TranscriptEntryId,
     kind: ToolBindingKind,
     resolved: bool,
+    sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoricalCall {
+    call_id: String,
+    kind: ToolBindingKind,
     sequence: u64,
 }
 
@@ -901,6 +910,49 @@ impl Transcript {
         self.entry_mut(entry_id).history_result_projection_truncated = truncated;
     }
 
+    pub(crate) fn record_history_call(&mut self, entry_id: TranscriptEntryId, call_id: &str) {
+        let Some(binding) = self.call_entries.get(call_id).copied() else {
+            return;
+        };
+        if binding.entry_id != entry_id {
+            return;
+        }
+        let entry = self.entry_mut(entry_id);
+        if !entry
+            .history_calls
+            .iter()
+            .any(|call| call.call_id == call_id)
+        {
+            entry.history_calls.push(HistoricalCall {
+                call_id: call_id.to_owned(),
+                kind: binding.kind,
+                sequence: binding.sequence,
+            });
+        }
+    }
+
+    pub(crate) fn resolve_history_call(&mut self, entry_id: TranscriptEntryId, call_id: &str) {
+        self.entry_mut(entry_id)
+            .history_calls
+            .retain(|call| call.call_id != call_id);
+    }
+
+    pub(crate) fn record_history_pending_result(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        result: ToolResultInput,
+    ) {
+        self.entry_mut(entry_id).history_pending_result = Some(Box::new(result));
+    }
+
+    pub(crate) fn complete_history_entries(&mut self) {
+        for entry in &mut self.entries {
+            if entry.history_group.is_some() {
+                entry.state = TranscriptEntryState::Complete;
+            }
+        }
+    }
+
     pub(crate) fn durable_entry_id(&self, entry_id: TranscriptEntryId) -> Option<&str> {
         self.entry(entry_id)
             .and_then(|entry| entry.durable_entry_ids.last())
@@ -1019,6 +1071,8 @@ impl Transcript {
                         durable_entry_ids: Vec::new(),
                         history_detail_source: None,
                         history_result_projection_truncated: false,
+                        history_calls: Vec::new(),
+                        history_pending_result: None,
                     },
                 );
             }
@@ -1093,9 +1147,106 @@ impl Transcript {
         if let Some(marker) = omission_marker {
             self.entries.insert(0, marker);
         }
+        self.reconcile_history_boundaries();
         self.rebuild_entry_indexes();
         self.bump_generation();
         true
+    }
+
+    fn reconcile_history_boundaries(&mut self) {
+        let pending = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry
+                    .history_pending_result
+                    .as_ref()
+                    .map(|result| (index, result.call_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for (original_result_index, call_id) in pending {
+            let result_index = original_result_index.saturating_sub(removed);
+            if result_index >= self.entries.len() {
+                continue;
+            }
+            let Some((call_index, call)) = self.entries[..result_index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| {
+                    entry
+                        .history_calls
+                        .iter()
+                        .find(|call| call.call_id == call_id)
+                        .cloned()
+                        .map(|call| (index, call))
+                })
+            else {
+                continue;
+            };
+            let result = self.entries[result_index]
+                .history_pending_result
+                .as_deref()
+                .expect("pending result exists")
+                .clone();
+            let result_card = self.entries[result_index].tool_card().cloned();
+            let durable_entry_ids = self.entries[result_index].durable_entry_ids.clone();
+            let projection_truncated =
+                self.entries[result_index].history_result_projection_truncated;
+            let detail_source = self.entries[call_index]
+                .history_detail_source
+                .clone()
+                .unwrap_or(ToolDetailSource::None);
+            let reconciled = match (&mut self.entries[call_index].kind, call.kind) {
+                (TranscriptEntryKind::Tool(card), ToolBindingKind::Tool) => {
+                    let Some(result_card) = result_card.as_ref() else {
+                        continue;
+                    };
+                    card.reconcile_historical_result(&result, result_card, detail_source)
+                }
+                (TranscriptEntryKind::Process(card), ToolBindingKind::Process(operation)) => {
+                    let mut result = result;
+                    let process_id = card.process_id.clone();
+                    result.process_id = Some(process_id.clone());
+                    crate::history::project_historical_process_result(&mut result, &process_id);
+                    card.reconcile_historical_result(
+                        operation,
+                        &result,
+                        call.sequence,
+                        result_card
+                            .as_ref()
+                            .is_some_and(|card| card.status == ToolStatus::Denied),
+                    )
+                }
+                (TranscriptEntryKind::Message, _)
+                | (TranscriptEntryKind::Tool(_), ToolBindingKind::Process(_))
+                | (TranscriptEntryKind::Process(_), ToolBindingKind::Tool) => false,
+            };
+            if !reconciled {
+                continue;
+            }
+            {
+                let entry = &mut self.entries[call_index];
+                for durable_entry_id in durable_entry_ids {
+                    if !entry
+                        .durable_entry_ids
+                        .iter()
+                        .any(|existing| existing == &durable_entry_id)
+                    {
+                        entry.durable_entry_ids.push(durable_entry_id);
+                    }
+                }
+                entry.history_result_projection_truncated |= projection_truncated;
+                entry
+                    .history_calls
+                    .retain(|candidate| candidate.call_id != call.call_id);
+                Self::bump_revision(entry);
+            }
+            self.entries.remove(result_index);
+            removed += 1;
+        }
     }
 
     pub(crate) fn retain_historical_entries(
@@ -1196,6 +1347,8 @@ impl Transcript {
             durable_entry_ids: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
+            history_calls: Vec::new(),
+            history_pending_result: None,
         })
     }
 
@@ -1225,6 +1378,8 @@ impl Transcript {
             durable_entry_ids: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
+            history_calls: Vec::new(),
+            history_pending_result: None,
         })
     }
 

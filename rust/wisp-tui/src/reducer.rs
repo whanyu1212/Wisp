@@ -699,8 +699,7 @@ fn begin_history_request(
             command_type: ActiveCommandType::Prompt,
             ..
         })
-    ) || matches!(kind, HistoryRequestKind::Latest)
-        && state.transcript.has_live_entries();
+    ) || state.transcript.has_live_entries();
     state.history_request = Some(HistoryRequest {
         command_id,
         kind,
@@ -3549,6 +3548,70 @@ mod tests {
     }
 
     #[test]
+    fn older_history_allows_leaf_advancement_after_a_completed_live_prompt() {
+        let selected = session("active");
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history.session = Some(selected.clone());
+        state.history.active_leaf_id = Some("old-leaf".into());
+        state.history.oldest_cursor = Some("current-entry".into());
+        state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        state.transcript.append_prompt("historical".into());
+        state.transcript.mark_history_entries(0, "current-entry");
+        state
+            .transcript
+            .append_prompt("completed live prompt".into());
+        let mut ids = DeterministicIds::default();
+
+        reduce(&mut state, UiAction::LoadOlderHistory, &mut ids).unwrap();
+        assert!(
+            state
+                .history_request
+                .as_ref()
+                .is_some_and(|request| request.active_leaf_may_advance)
+        );
+        let mut older = SharedTranscript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(selected),
+                    active_leaf_id: Some("advanced-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: vec!["older-entry".into()],
+                    exact_tool_result: None,
+                    transcript: older,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+        );
+        assert_eq!(
+            state.history.active_leaf_id.as_deref(),
+            Some("advanced-leaf")
+        );
+    }
+
+    #[test]
     fn newer_history_uses_the_retained_tail_cursor_and_clears_eviction_state() {
         let selected = session("active");
         let mut state = UiState::new("fake".into(), None, None);
@@ -3817,6 +3880,7 @@ mod tests {
         state
             .transcript
             .mark_history_result_projection(target, true);
+        state.transcript.append_prompt("later live prompt".into());
         let effects = reduce(&mut state, UiAction::LoadExactDetail { target }, &mut ids).unwrap();
         let command = command_value(&effects[0]).unwrap();
         assert_eq!(command["entry_ids"], serde_json::json!(["result-entry"]));
@@ -3848,7 +3912,7 @@ mod tests {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
                     session: Some(selected),
-                    active_leaf_id: Some("leaf".into()),
+                    active_leaf_id: Some("advanced-leaf".into()),
                     truncated: false,
                     next_before_entry_id: None,
                     next_after_entry_id: None,
@@ -3874,6 +3938,10 @@ mod tests {
                 .as_ref()
                 .map(|detail| detail.target),
             Some(target)
+        );
+        assert_eq!(
+            state.history.active_leaf_id.as_deref(),
+            Some("advanced-leaf")
         );
     }
 }

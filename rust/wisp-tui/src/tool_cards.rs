@@ -411,6 +411,31 @@ impl ToolCardSnapshot {
         true
     }
 
+    pub(crate) fn reconcile_historical_result(
+        &mut self,
+        result: &ToolResultInput,
+        result_card: &Self,
+        detail_source: ToolDetailSource,
+    ) -> bool {
+        if !matches!(self.status, ToolStatus::Requested | ToolStatus::Cancelled) {
+            return false;
+        }
+        self.status = ToolStatus::Requested;
+        self.detail_source = detail_source;
+        self.structured_detail = DetailAvailability::None;
+        if result_card.status == ToolStatus::Denied {
+            self.status = ToolStatus::Denied;
+            self.detail = result_card.detail.clone();
+            self.retained_output = result_card.retained_output.clone();
+            self.backend_truncated = result_card.backend_truncated;
+            self.failure_code = result_card.failure_code.clone();
+            self.retryable = result_card.retryable;
+            self.detail_source = ToolDetailSource::None;
+            return true;
+        }
+        self.apply_result(result)
+    }
+
     pub fn action(&self) -> String {
         let verb = action_verb(&self.name, self.status);
         let mut action = if known_tool(&self.name) {
@@ -621,6 +646,23 @@ impl ProcessCardSnapshot {
             self.display_state = process_result_state(operation, result);
         }
         true
+    }
+
+    pub(crate) fn reconcile_historical_result(
+        &mut self,
+        operation: ProcessOperation,
+        result: &ToolResultInput,
+        sequence: u64,
+        denied: bool,
+    ) -> bool {
+        if !denied {
+            return self.observe(operation, result, sequence);
+        }
+        if self.last_sequence.is_some_and(|current| sequence < current) {
+            self.append_unlabelled("denied");
+            return true;
+        }
+        self.deny(operation, Some("denied"), sequence)
     }
 
     fn accept_sequence(&mut self, sequence: u64) -> bool {
