@@ -727,6 +727,21 @@ impl ProcessCardSnapshot {
         sequence_offset
     }
 
+    pub(crate) fn prepend_historical_older(&mut self, older: &Self) -> u64 {
+        let approval_sequence = self.approval_sequence;
+        let approval_resolved = self.approval_resolved;
+        let mut merged = older.clone();
+        let sequence_offset = merged.merge_historical_newer(self);
+        merged.approval_sequence = approval_sequence.map(|sequence| {
+            sequence
+                .checked_add(sequence_offset)
+                .expect("tool lifecycle sequence exhausted")
+        });
+        merged.approval_resolved = approval_resolved;
+        *self = merged;
+        sequence_offset
+    }
+
     pub(crate) fn next_historical_sequence(&self) -> u64 {
         self.last_sequence
             .map_or(0, |sequence| sequence.saturating_add(1))

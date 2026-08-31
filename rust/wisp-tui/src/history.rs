@@ -1016,6 +1016,95 @@ mod tests {
     }
 
     #[test]
+    fn older_process_history_merges_into_the_promoted_live_card() {
+        let mut newer_call = message("assistant", "");
+        newer_call["tool_calls"] = json!([{
+            "call_id": "poll-newer-promoted",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-promoted"},
+        }]);
+        let mut newer_result = message(
+            "tool",
+            "Process process-promoted completed with exit code 0\nstdout:\nnewer history",
+        );
+        newer_result["tool_call_id"] = json!("poll-newer-promoted");
+        newer_result["tool_name"] = json!("bash");
+        newer_result["tool_result"] = json!({"status": "done"});
+        let mut transcript = project_rpc_messages(&[newer_call, newer_result]).unwrap();
+        let survivor = transcript.entries()[0].id;
+        let live_arguments = json!({"operation": "poll", "process_id": "process-promoted"});
+        let live_call = ToolCallInput {
+            call_id: "poll-live-promoted".into(),
+            name: "bash".into(),
+            arguments: bounded_tool_arguments("bash", &live_arguments),
+            detail_source: ToolDetailSource::None,
+        };
+        let live = transcript.observe_tool_call(live_call.clone());
+        assert_eq!(live, survivor);
+        assert!(transcript.has_unresolved_tool_call("poll-live-promoted"));
+
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-older-promoted",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-promoted"},
+        }]);
+        let mut older_result = message(
+            "tool",
+            "Process process-promoted is still running\nstdout:\nolder history",
+        );
+        older_result["tool_call_id"] = json!("poll-older-promoted");
+        older_result["tool_name"] = json!("bash");
+        older_result["tool_result"] = json!({"status": "done"});
+        let older = project_rpc_messages(&[older_call, older_result]).unwrap();
+        assert!(transcript.prepend_history_page(&older));
+        assert!(transcript.has_unresolved_tool_call("poll-live-promoted"));
+
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(transcript.entries()[0].id, survivor);
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
+        assert_eq!(card.call_count, 3);
+        let older_output = card.retained_output.text.find("older history").unwrap();
+        let newer_output = card.retained_output.text.find("newer history").unwrap();
+        assert!(older_output < newer_output);
+
+        assert_eq!(transcript.observe_approval_requested(live_call), survivor);
+        assert_eq!(
+            transcript.entries()[0]
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::PollAwaitingApproval
+        );
+        assert_eq!(
+            transcript.observe_approval_resolved("poll-live-promoted", true, None),
+            Some(survivor)
+        );
+
+        let mut live_result = message(
+            "tool",
+            "Process process-promoted completed with exit code 0\nstdout:\nlive output",
+        );
+        live_result["tool_call_id"] = json!("poll-live-promoted");
+        live_result["tool_name"] = json!("bash");
+        live_result["tool_result"] = json!({"status": "done"});
+        let mut live_result = tool_result(&live_result, 0).unwrap();
+        live_result.call_id = "poll-live-promoted".into();
+        let process_id = transcript.entries()[0]
+            .process_card()
+            .unwrap()
+            .process_id
+            .clone();
+        live_result.process_id = Some(process_id.clone());
+        project_historical_process_result(&mut live_result, &process_id);
+        assert_eq!(transcript.observe_tool_result(live_result), survivor);
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Completed);
+        assert!(card.retained_output.text.contains("live output"));
+    }
+
+    #[test]
     fn migrated_live_process_reconciles_a_delayed_historical_result() {
         let mut historical_call = message("assistant", "");
         historical_call["tool_calls"] = json!([{

@@ -1302,6 +1302,7 @@ impl Transcript {
             removed += 1;
         }
         self.coalesce_historical_process_cards(inserted_ids);
+        self.merge_historical_process_cards_into_live();
     }
 
     fn coalesce_historical_process_cards(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
@@ -1378,9 +1379,84 @@ impl Transcript {
             merged.history_pending_result = older
                 .history_pending_result
                 .or(newer.history_pending_result);
+            merged.layout_epoch = merged
+                .layout_epoch
+                .checked_add(1)
+                .expect("transcript layout epoch exhausted");
             Self::bump_revision(&mut merged);
             self.entries[survivor_index] = merged;
             self.entries.remove(removed_index);
+        }
+    }
+
+    fn merge_historical_process_cards_into_live(&mut self) {
+        loop {
+            let candidate = self
+                .entries
+                .iter()
+                .enumerate()
+                .find_map(|(older_index, entry)| {
+                    let card = entry.history_group.and_then(|_| entry.process_card())?;
+                    // Split call/result boundaries reconcile separately; only completed page-local
+                    // cards are safe to fold directly into a newer live owner.
+                    if !entry.history_calls.is_empty() || entry.history_pending_result.is_some() {
+                        return None;
+                    }
+                    let live_id = self.process_entries.get(&card.process_id).copied()?;
+                    let live_index = self
+                        .entries
+                        .iter()
+                        .position(|candidate| candidate.id == live_id)?;
+                    (live_index != older_index
+                        && self.entries[live_index].history_group.is_none()
+                        && self.entries[live_index].process_card().is_some())
+                    .then_some((older_index, live_index))
+                });
+            let Some((older_index, live_index)) = candidate else {
+                return;
+            };
+
+            let older = self.entries[older_index].clone();
+            let mut live = self.entries[live_index].clone();
+            let TranscriptEntryKind::Process(live_card) = &mut live.kind else {
+                unreachable!("live process index must target a process card")
+            };
+            let sequence_offset = live_card.prepend_historical_older(
+                older
+                    .process_card()
+                    .expect("historical process entry checked above"),
+            );
+            let live_id = live.id;
+            for binding in self
+                .call_entries
+                .values_mut()
+                .filter(|binding| binding.entry_id == live_id)
+            {
+                binding.sequence = binding
+                    .sequence
+                    .checked_add(sequence_offset)
+                    .expect("tool lifecycle sequence exhausted");
+            }
+            self.next_tool_sequence = self
+                .next_tool_sequence
+                .checked_add(sequence_offset)
+                .expect("tool lifecycle sequence exhausted");
+            for call in &mut live.history_calls {
+                call.sequence = call
+                    .sequence
+                    .checked_add(sequence_offset)
+                    .expect("tool lifecycle sequence exhausted");
+            }
+            // Do not transfer durable origins into the live owner: repeated older-page loads
+            // must not grow metadata outside the bounded historical window.
+            live.history_result_projection_truncated |= older.history_result_projection_truncated;
+            live.layout_epoch = live
+                .layout_epoch
+                .checked_add(1)
+                .expect("transcript layout epoch exhausted");
+            Self::bump_revision(&mut live);
+            self.entries[live_index] = live;
+            self.entries.remove(older_index);
         }
     }
 
