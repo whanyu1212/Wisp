@@ -1249,40 +1249,128 @@ impl Transcript {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_historical_entries(
         &mut self,
         limit: usize,
         evict_newest: bool,
     ) -> Option<Vec<String>> {
-        let mut removed = Vec::new();
-        while self
+        let mut seen = std::collections::BTreeSet::new();
+        let durable_entry_order = self
             .entries
             .iter()
             .filter(|entry| entry.history_group.is_some())
-            .count()
-            > limit
-        {
-            let group = if evict_newest {
-                self.entries
-                    .iter()
-                    .rev()
-                    .find_map(|entry| entry.history_group)
-            } else {
-                self.entries.iter().find_map(|entry| entry.history_group)
-            }?;
+            .flat_map(|entry| entry.durable_entry_ids.iter())
+            .filter(|entry_id| seen.insert((*entry_id).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.retain_historical_entries_in_order(limit, evict_newest, &durable_entry_order)
+    }
+
+    pub(crate) fn retain_historical_entries_in_order(
+        &mut self,
+        limit: usize,
+        evict_newest: bool,
+        durable_entry_order: &[String],
+    ) -> Option<Vec<String>> {
+        let positions = durable_entry_order
+            .iter()
+            .enumerate()
+            .map(|(index, entry_id)| (entry_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut removed = Vec::new();
+        while {
+            let historical_entries = self
+                .entries
+                .iter()
+                .filter(|entry| entry.history_group.is_some());
+            historical_entries.clone().count() > limit
+                || historical_entries
+                    .flat_map(|entry| entry.durable_entry_ids.iter())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    > limit
+        } {
+            let mut ranges = std::collections::BTreeMap::<u64, (usize, usize)>::new();
             for entry in self
                 .entries
                 .iter()
-                .filter(|entry| entry.history_group == Some(group))
+                .filter(|entry| entry.history_group.is_some())
             {
+                let group = entry.history_group.expect("filtered above");
+                for durable_entry_id in &entry.durable_entry_ids {
+                    let position = *positions.get(durable_entry_id.as_str())?;
+                    ranges
+                        .entry(group)
+                        .and_modify(|range| {
+                            range.0 = range.0.min(position);
+                            range.1 = range.1.max(position);
+                        })
+                        .or_insert((position, position));
+                }
+            }
+            let seed = if evict_newest {
+                ranges
+                    .iter()
+                    .max_by_key(|(group, range)| (range.1, range.0, **group))
+            } else {
+                ranges
+                    .iter()
+                    .min_by_key(|(group, range)| (range.0, range.1, **group))
+            }?;
+            let groups = if evict_newest {
+                let mut cutoff = seed.1.0;
+                loop {
+                    let expanded = ranges
+                        .values()
+                        .filter(|range| range.1 >= cutoff)
+                        .map(|range| range.0)
+                        .min()
+                        .unwrap_or(cutoff);
+                    if expanded == cutoff {
+                        break;
+                    }
+                    cutoff = expanded;
+                }
+                ranges
+                    .iter()
+                    .filter_map(|(group, range)| (range.1 >= cutoff).then_some(*group))
+                    .collect::<std::collections::BTreeSet<_>>()
+            } else {
+                let mut cutoff = seed.1.1;
+                loop {
+                    let expanded = ranges
+                        .values()
+                        .filter(|range| range.0 <= cutoff)
+                        .map(|range| range.1)
+                        .max()
+                        .unwrap_or(cutoff);
+                    if expanded == cutoff {
+                        break;
+                    }
+                    cutoff = expanded;
+                }
+                ranges
+                    .iter()
+                    .filter_map(|(group, range)| (range.0 <= cutoff).then_some(*group))
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            for entry in self.entries.iter().filter(|entry| {
+                entry
+                    .history_group
+                    .is_some_and(|group| groups.contains(&group))
+            }) {
                 for durable_entry_id in &entry.durable_entry_ids {
                     if !removed.iter().any(|id| id == durable_entry_id) {
                         removed.push(durable_entry_id.clone());
                     }
                 }
             }
-            self.entries
-                .retain(|entry| entry.history_group != Some(group));
+            self.entries.retain(|entry| {
+                !entry
+                    .history_group
+                    .is_some_and(|group| groups.contains(&group))
+            });
         }
         if !removed.is_empty() {
             self.rebuild_entry_indexes();
@@ -1598,6 +1686,70 @@ mod tests {
         assert!(!retained.contains("entry-4"));
         assert!(retained.contains("entry-5"));
         assert!(retained.contains("entry-1204"));
+    }
+
+    #[test]
+    fn historical_retention_bounds_origins_coalesced_into_one_card() {
+        let mut transcript = Transcript::default();
+        let entry_id = transcript.observe_tool_call(call(
+            "poll-0",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.mark_history_entries(0, "assistant-0");
+        for index in 0..1_200 {
+            transcript.add_history_origin(entry_id, &format!("result-{index}"));
+        }
+
+        let removed = transcript.retain_historical_entries(1_200, false).unwrap();
+
+        assert_eq!(removed.len(), 1_201);
+        assert!(transcript.entries().is_empty());
+        assert!(transcript.historical_durable_entry_ids().is_empty());
+    }
+
+    #[test]
+    fn historical_retention_keeps_durable_origins_contiguous() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("older".into());
+        transcript.mark_history_entries(0, "older");
+        let start = transcript.entries().len();
+        let process = transcript.observe_tool_call(call(
+            "poll-0",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.mark_history_entries(start, "process-call");
+        transcript.add_history_origin(process, "process-result");
+        let start = transcript.entries().len();
+        transcript.append_prompt("interleaved".into());
+        transcript.mark_history_entries(start, "interleaved");
+        let start = transcript.entries().len();
+        transcript.append_prompt("newer".into());
+        transcript.mark_history_entries(start, "newer");
+        let order = [
+            "older".into(),
+            "process-call".into(),
+            "interleaved".into(),
+            "process-result".into(),
+            "newer".into(),
+        ];
+
+        let mut tail = transcript.clone();
+        tail.retain_historical_entries_in_order(3, true, &order)
+            .unwrap();
+        assert_eq!(
+            tail.historical_durable_entry_ids(),
+            ["older".to_owned()].into_iter().collect()
+        );
+
+        transcript
+            .retain_historical_entries_in_order(3, false, &order)
+            .unwrap();
+        assert_eq!(
+            transcript.historical_durable_entry_ids(),
+            ["newer".to_owned()].into_iter().collect()
+        );
     }
 
     #[test]

@@ -1292,7 +1292,11 @@ fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
     state.transcript = report.transcript;
     let prefix_evicted = !state
         .transcript
-        .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, false)
+        .retain_historical_entries_in_order(
+            TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+            false,
+            &report.durable_entry_ids,
+        )
         .unwrap_or_default()
         .is_empty();
     let represented_durable_entry_ids = state.transcript.historical_durable_entry_ids();
@@ -1451,7 +1455,11 @@ fn handle_history_backend_event(
             state.history.oldest_cursor = report.next_before_entry_id;
             let tail_evicted = !state
                 .transcript
-                .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, true)
+                .retain_historical_entries_in_order(
+                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+                    true,
+                    &state.history.represented_durable_entry_order,
+                )
                 .unwrap_or_default()
                 .is_empty();
             sync_represented_history(state);
@@ -1487,7 +1495,11 @@ fn handle_history_backend_event(
             state.history.tail_evicted = state.history.newest_cursor.is_some();
             let prefix_evicted = !state
                 .transcript
-                .retain_historical_entries(TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, false)
+                .retain_historical_entries_in_order(
+                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+                    false,
+                    &state.history.represented_durable_entry_order,
+                )
                 .unwrap_or_default()
                 .is_empty();
             sync_represented_history(state);
@@ -3792,8 +3804,9 @@ mod tests {
         .unwrap();
 
         assert!(state.history.tail_evicted);
-        assert_eq!(state.history.newest_cursor.as_deref(), Some("result-first"));
-        assert_eq!(state.transcript.entries().len(), 1_200);
+        assert_eq!(state.history.newest_cursor.as_deref(), Some("entry-1196"));
+        assert_eq!(state.transcript.entries().len(), 1_198);
+        assert_eq!(state.history.represented_durable_entry_ids.len(), 1_198);
     }
 
     #[test]

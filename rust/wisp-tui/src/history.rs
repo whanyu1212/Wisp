@@ -240,7 +240,7 @@ fn user_content(message: &Value, index: usize) -> Result<String, HistoryProjecti
     if instructions_truncated {
         content.push_str(" [instructions truncated]");
     }
-    Ok(bounded_content(&content, false))
+    Ok(bounded_content(&content, false).0)
 }
 
 fn tool_call_input(value: &Value, index: usize) -> Result<ToolCallInput, HistoryProjectionError> {
@@ -329,7 +329,10 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         && persisted_is_error
         && string(message, index, "content")? == INTERRUPTED_TOOL_RESULT_TEXT;
     let is_error = persisted_is_error || matches!(status, Some("error" | "denied"));
-    let output = content_for_history(message, index)?;
+    let (output, output_locally_truncated) = bounded_content(
+        string(message, index, "content")?,
+        bool(message, index, "content_truncated")?,
+    );
     let raw_before_text = result
         .and_then(|result| result.get("before_text"))
         .map(|value| optional_value_string(value, index, "tool_result.before_text"))
@@ -388,6 +391,7 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
             .and_then(Value::as_bool)
             .unwrap_or(false)
             || bool(message, index, "content_truncated")?
+            || output_locally_truncated
             || before_text_locally_truncated,
         process_id: None,
         process_state: (status == Some("cancelled") || legacy_interrupted)
@@ -485,14 +489,15 @@ fn content_for_history(message: &Value, index: usize) -> Result<String, HistoryP
     Ok(bounded_content(
         string(message, index, "content")?,
         bool(message, index, "content_truncated")?,
-    ))
+    )
+    .0)
 }
 
-fn bounded_content(source: &str, backend_truncated: bool) -> String {
+fn bounded_content(source: &str, backend_truncated: bool) -> (String, bool) {
     let retained = BoundedText::head(source, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
-    let truncated = backend_truncated || retained.dropped_bytes > 0 || retained.dropped_lines > 0;
-    if !truncated {
-        return retained.text;
+    let locally_truncated = retained.dropped_bytes > 0 || retained.dropped_lines > 0;
+    if !backend_truncated && !locally_truncated {
+        return (retained.text, false);
     }
     let separator = if retained.text.is_empty() || retained.text.ends_with('\n') {
         ""
@@ -505,7 +510,7 @@ fn bounded_content(source: &str, backend_truncated: bool) -> String {
         output.pop();
     }
     output.push_str(&suffix);
-    output
+    (output, locally_truncated)
 }
 
 fn source_count(message: &Value, field: &'static str, fallback: usize) -> u64 {
@@ -683,6 +688,38 @@ mod tests {
         let mut bounded_page_result = projected.clone();
         bounded_page_result.before_text = None;
         transcript.observe_tool_result(bounded_page_result);
+        transcript.add_history_origin(target, "result-entry");
+        transcript.mark_history_result_projection(target, true);
+        assert!(
+            transcript
+                .exact_historical_detail(target, &projected)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_tool_projection_rejects_locally_clipped_output() {
+        let oversized = "x".repeat(TOOL_OUTPUT_MAX_BYTES + 1);
+        let mut result = message("tool", &oversized);
+        let entry_id = result["entry_id"].as_str().unwrap().to_owned();
+        result["tool_call_id"] = json!("read-1");
+        result["tool_name"] = json!("read");
+        result["tool_result"] = json!({"truncated": false});
+
+        let projected = project_rpc_exact_tool_result(&[result], &entry_id).unwrap();
+
+        assert!(projected.output.contains(CONTENT_TRUNCATED_MARKER));
+        assert!(projected.truncated);
+        let arguments = json!({"path": "large.txt"});
+        let mut transcript = SharedTranscript::default();
+        let target = transcript.observe_tool_call(ToolCallInput {
+            call_id: projected.call_id.clone(),
+            name: "read".into(),
+            arguments: arguments.clone(),
+            detail_source: project_tool_detail_source("read", arguments.as_object().unwrap()),
+        });
+        transcript.mark_history_entries(0, "call-entry");
+        transcript.observe_tool_result(projected.clone());
         transcript.add_history_origin(target, "result-entry");
         transcript.mark_history_result_projection(target, true);
         assert!(
