@@ -1205,6 +1205,7 @@ def test_session_message_page_projects_tool_result_presentation_metadata(
     assert reloaded.tool_result == entry.tool_result
 
     page = session.read_message_page()
+    assert page.messages[0].content_truncated is False
     assert page.messages[0].tool_result == RpcMessageToolResultSnapshot(
         status="done",
         output_has_exit_status=True,
@@ -1249,10 +1250,20 @@ def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path)
     anyio.run(write)
 
     page = session.read_message_page()
+    assert page.messages[0].content_truncated is True
     assert page.messages[0].tool_result is not None
     assert page.messages[0].tool_result.before_text is None
     assert page.messages[0].tool_result.truncated is True
     assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+    exact = session.read_message_page(
+        entry_ids=(page.messages[0].entry_id,),
+        full_content=True,
+    )
+    assert exact.messages[0].content_truncated is False
+    assert exact.messages[0].tool_result is not None
+    assert exact.messages[0].tool_result.before_text == oversized_before_text
+    assert exact.messages[0].tool_result.truncated is False
 
 
 def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
@@ -1284,6 +1295,7 @@ def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path
         <= jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT
     )
     assert page.messages[0].tool_result.truncated is True
+    assert page.messages[0].content_truncated is True
     assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
