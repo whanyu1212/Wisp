@@ -1252,11 +1252,13 @@ impl LiveUi {
                                 self.render_pending = true;
                                 return Ok(LoopControl::Continue);
                             }
+                            self.notice = None;
                             let control = self
                                 .dispatch(UiAction::Submit(prompt), writer, limit)
                                 .await?;
-                            self.editor.clear();
-                            self.notice = None;
+                            if self.notice.is_none() {
+                                self.editor.clear();
+                            }
                             Ok(control)
                         }
                     }
@@ -3466,7 +3468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_blocked_session_command_keeps_notice_and_editor_text() {
+    async fn history_blocked_commands_keep_notice_and_editor_text() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut live_ui = LiveUi::default();
         live_ui
@@ -3545,6 +3547,24 @@ mod tests {
             Some("Wait for the current history request to finish.")
         );
         assert!(live_ui.render_pending);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui.editor.clear();
+        live_ui.editor.insert_paste("keep this prompt");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(live_ui.editor.text(), "keep this prompt");
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current history request to finish.")
+        );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 

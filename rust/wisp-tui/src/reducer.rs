@@ -554,6 +554,12 @@ fn submit(
     if state.session_operation.is_some() {
         return Err(ReduceError::SessionOperationActive);
     }
+    if state.history_request.is_some() {
+        return Ok(vec![
+            UiEffect::Notice("Wait for the current history request to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     if let Some(current) = &state.current_command {
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
@@ -3469,6 +3475,20 @@ mod tests {
             completion: None,
         });
         let mut ids = DeterministicIds::default();
+
+        let effects = reduce(&mut state, UiAction::Submit("keep me".into()), &mut ids).unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
+        );
+        assert!(state.current_command.is_none());
+        assert!(state.transcript.entries().is_empty());
 
         for action in [UiAction::LoadSessionCatalog, UiAction::NewSession] {
             let effects = reduce(&mut state, action, &mut ids).unwrap();
