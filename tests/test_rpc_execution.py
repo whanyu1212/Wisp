@@ -1217,6 +1217,70 @@ def test_model_catalog_marks_unregistered_providers_without_constructing_deferre
     assert constructed is False
 
 
+def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Path) -> None:
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    model_ids = ("fake", *(f"model-{index}" for index in range(512)))
+    models = ModelRegistry(
+        ModelCatalog(
+            schema_version=2,
+            providers=(
+                ModelCatalogProviderEntry(
+                    name="fake",
+                    display_name="Fake",
+                    default_model="fake",
+                    docs_url="https://example.test/fake",
+                    models=model_ids,
+                ),
+            ),
+        )
+    )
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=models,
+    )
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    overrides = _RpcConfigureOverrides()
+    discovery_events: list[WispEvent] = []
+    rpc_execution_module.handle_rpc_model_catalog_command(
+        {"type": "get_model_catalog", "id": "catalog-1"},
+        agent=agent,
+        runtime=runtime,
+        write_event=discovery_events.append,
+    )
+    assert not any(isinstance(event, RpcModelCatalogReported) for event in discovery_events)
+    assert isinstance(discovery_events[-1], RpcCommandFinished)
+    assert discovery_events[-1].ok is False
+
+    emitted: list[WispEvent] = []
+
+    rpc_execution_module.handle_rpc_configure_command(
+        {"model": "custom-model", "effort": "custom-effort"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+        write_event=emitted.append,
+    )
+
+    assert agent.model == "custom-model"
+    assert agent.effort == "custom-effort"
+    assert overrides.model == "custom-model"
+    assert overrides.effort == "custom-effort"
+    assert not any(isinstance(event, RpcModelCatalogReported) for event in emitted)
+    assert isinstance(emitted[-2], ErrorEvent)
+    assert "Configuration applied; model catalog unavailable" in emitted[-2].message
+    assert isinstance(emitted[-1], RpcCommandFinished)
+    assert emitted[-1].ok is True
+
+
 def test_executor_reports_active_skill_catalog_without_replacing_running_command(
     tmp_path: Path,
 ) -> None:

@@ -3143,6 +3143,57 @@ def test_tui_shell_model_catalog_failure_keeps_typed_model_available() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_does_not_commit_selection_without_authoritative_configure_catalog() -> None:
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController(
+            model_catalog_events=[
+                [
+                    RpcCommandFinished(
+                        command_id="model-catalog-1",
+                        command_type="get_model_catalog",
+                        ok=False,
+                        error="catalog too large",
+                    )
+                ]
+            ],
+            configure_events=[
+                [
+                    ErrorEvent(message="Configuration applied; model catalog unavailable"),
+                    RpcCommandFinished(
+                        command_id="configure-1",
+                        command_type="configure",
+                        ok=True,
+                    ),
+                ]
+            ],
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model custom-model custom-effort", "/quit"]),
+            provider="fake",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "custom-model", "custom-effort", False)]
+        assert shell.current_provider == "fake"
+        assert shell.current_model is None
+        assert shell.current_effort is None
+        assert shell.pending_configures == {}
+        assert not (tmp_path / ".wisp" / "settings.json").exists()
+        rendered = output.getvalue()
+        assert (
+            "Configuration applied, but the authoritative model catalog is unavailable" in rendered
+        )
+        assert "Model set to" not in rendered
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
 def test_tui_shell_hydrates_and_inspects_cached_skill_catalog() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

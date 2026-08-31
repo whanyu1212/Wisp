@@ -211,8 +211,9 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
 
 Adds `rpc.model_catalog`, a correlated snapshot of the current model selection and the ordered,
 runtime-available provider/model catalog. Successful provider, model, and effort configuration emits
-this authoritative result before command completion; discovery commands emit the same result without
-constructing deferred providers.
+this authoritative result before command completion when the catalog fits the wire bounds; an
+oversized catalog fails discovery explicitly without blocking typed configuration. Discovery never
+constructs deferred providers.
 
 ## Schema v34
 

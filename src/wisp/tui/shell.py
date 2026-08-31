@@ -2788,8 +2788,6 @@ class TuiShell:
         if event is None:
             return
         changes_selection = pending.provider is not None or pending.model is not None
-        if event.ok and changes_selection and pending.catalog is None:
-            return
         self.pending_configures.pop(command_id)
         if event.ok:
             catalog = pending.catalog
@@ -2805,16 +2803,22 @@ class TuiShell:
                         f"Effort '{requested_effort}' is not supported by "
                         f"{catalog.selection.effective_model}; using provider default."
                     )
-            if pending.provider is not None:
+            elif changes_selection:
+                self.model_catalog = None
+                self.renderer.notice(
+                    "Configuration applied, but the authoritative model catalog is unavailable; "
+                    "the displayed selection was not changed."
+                )
+            if pending.provider is not None and catalog is not None:
                 if pending.reset_model:
                     self.renderer.notice(
                         f"Provider set to {self.current_provider}; model reset to provider default."
                     )
                 else:
                     self.renderer.notice(f"Provider set to {self.current_provider}")
-            if pending.model is not None:
+            if pending.model is not None and catalog is not None:
                 self.renderer.notice(f"Model set to {self.current_model}")
-            if changes_selection:
+            if changes_selection and catalog is not None:
                 persist_user_model_selection(
                     self.current_provider,
                     self.current_model,

@@ -3589,25 +3589,19 @@ def handle_rpc_configure_command(
     selection_changed = (
         has_provider or has_model or has_effort or (selected_effort != configuration.effort)
     )
-    try:
-        model_catalog = (
-            rpc_model_catalog_snapshot(
+    model_catalog: RpcModelCatalogSnapshot | None = None
+    model_catalog_error: str | None = None
+    if selection_changed:
+        try:
+            model_catalog = rpc_model_catalog_snapshot(
                 runtime=runtime,
                 provider=selected_provider,
                 model=selected_model,
                 effort=selected_effort,
             )
-            if selection_changed
-            else None
-        )
-    except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
-        return
+        except Exception as exc:
+            # Catalog bounds protect RPC consumers, not provider configuration.
+            model_catalog_error = str(exc)
     try:
         agent.reconfigure(
             replace(
@@ -3651,6 +3645,12 @@ def handle_rpc_configure_command(
             configure_overrides.has_auto_compaction_enabled = True
     if model_catalog is not None:
         write_event(RpcModelCatalogReported(command_id=command_id, catalog=model_catalog))
+    elif model_catalog_error is not None:
+        write_event(
+            ErrorEvent(
+                message=f"Configuration applied; model catalog unavailable: {model_catalog_error}"
+            )
+        )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
