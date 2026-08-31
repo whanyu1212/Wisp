@@ -153,6 +153,54 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         })
     );
 
+    let older = commands::WispTypedClientRpcCommands::get_messages_older(
+        "messages-3",
+        Some("session-1"),
+        "entry-75",
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        older,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-3", "session_id": "session-1",
+            "limit": 75, "before_entry_id": "entry-75", "complete_structure": true,
+            "full_content": false, "allow_during_prompt": true
+        })
+    );
+
+    let newer =
+        commands::WispTypedClientRpcCommands::get_messages_newer("messages-4", None, "entry-75")
+            .unwrap()
+            .into_value()
+            .unwrap();
+    assert_eq!(
+        newer,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-4", "limit": 75,
+            "after_entry_id": "entry-75", "complete_structure": true,
+            "full_content": false, "allow_during_prompt": true
+        })
+    );
+
+    let detail = commands::WispTypedClientRpcCommands::get_message_detail(
+        "messages-5",
+        Some("session-1"),
+        "entry-76",
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        detail,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-5", "session_id": "session-1",
+            "limit": 1, "entry_ids": ["entry-76"], "complete_structure": true,
+            "full_content": true, "allow_during_prompt": true
+        })
+    );
+
     let cancel = commands::WispTypedClientRpcCommands::cancel("cancel-1", "prompt-1")
         .unwrap()
         .into_value()
@@ -222,6 +270,15 @@ fn approval_builder_rejects_denied_scopes_and_invalid_ids() {
     assert!(commands::WispTypedClientRpcCommands::get_sessions(&"x".repeat(257)).is_err());
     assert!(commands::WispTypedClientRpcCommands::select_session("select-1", "").is_err());
     assert!(commands::WispTypedClientRpcCommands::get_messages("messages-1", Some("")).is_err());
+    assert!(
+        commands::WispTypedClientRpcCommands::get_messages_older("messages-1", None, "").is_err()
+    );
+    assert!(
+        commands::WispTypedClientRpcCommands::get_messages_newer("messages-1", None, "").is_err()
+    );
+    assert!(
+        commands::WispTypedClientRpcCommands::get_message_detail("messages-1", None, "").is_err()
+    );
     assert!(
         commands::WispTypedClientRpcCommands::approval(
             "approval-1",

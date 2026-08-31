@@ -337,6 +337,8 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 }
                 UiEffect::ShowSessionPicker { .. }
                 | UiEffect::ReplaceTranscript
+                | UiEffect::HistoryWindowChanged
+                | UiEffect::OpenExactDetail(_)
                 | UiEffect::Notice(_)
                 | UiEffect::RequestRender => {}
                 UiEffect::Exit => exited = true,

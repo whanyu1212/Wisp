@@ -5,7 +5,7 @@ use super::{
     SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
     SESSION_UPDATED_AT_MAX_BYTES, SessionIdentity, SessionMessages, SessionSummary,
 };
-use crate::history::project_rpc_message_page;
+use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
     bounded_identity, bounded_tool_arguments, bounded_tool_name,
@@ -233,15 +233,47 @@ impl BackendEvent {
                     "session_path",
                     None,
                 )?;
-                match project_rpc_message_page(
+                match project_rpc_message_page_with_origins(
                     array_field(value, &event_type, "messages")?,
                     bool_field(value, &event_type, "truncated")?,
                 ) {
-                    Ok(transcript) => Self::MessagesReported {
+                    Ok(page) => Self::MessagesReported {
                         command_id,
                         messages: SessionMessages {
                             session,
-                            transcript,
+                            active_leaf_id: optional_exact_string_field(
+                                value,
+                                &event_type,
+                                "active_leaf_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            truncated: bool_field(value, &event_type, "truncated")?,
+                            next_before_entry_id: optional_exact_string_field(
+                                value,
+                                &event_type,
+                                "next_before_entry_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            next_after_entry_id: optional_exact_string_field(
+                                value,
+                                &event_type,
+                                "next_after_entry_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            exact_tool_result: array_field(value, &event_type, "messages")?
+                                .first()
+                                .and_then(|message| message.get("entry_id"))
+                                .and_then(Value::as_str)
+                                .and_then(|entry_id| {
+                                    crate::history::project_rpc_exact_tool_result(
+                                        array_field(value, &event_type, "messages").ok()?,
+                                        entry_id,
+                                    )
+                                    .ok()
+                                    .map(Box::new)
+                                }),
+                            durable_entry_ids: page.durable_entry_ids,
+                            transcript: page.transcript,
                         },
                     },
                     Err(error) => Self::MessagesProjectionFailed {
@@ -346,6 +378,22 @@ fn required_session_identity(
         session_path,
         session_name,
     })
+}
+
+fn optional_exact_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    limit: usize,
+) -> Result<Option<String>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(_)) => exact_string_field(value, event_type, field, limit).map(Some),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
 }
 
 fn exact_string_field(

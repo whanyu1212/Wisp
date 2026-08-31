@@ -37,14 +37,16 @@ WISP_TUI_RENDERER=rust wisp
 ```
 
 The Rust TUI negotiates and validates live RPC v2/event schema v34, supports prompts, approvals,
-project trust, cancellation, a virtual Markdown/tool/diff transcript, and bounded session hydration.
+project trust, cancellation, a virtual Markdown/tool/diff transcript, and bounded session history.
 `/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
 one exact session ID); `/new` deselects the current session and clears the local transcript after the
-backend confirms it. Startup and resumed history load only the newest 200-message page, atomically.
+backend confirms it. Startup and resumed history install the newest 200-message page atomically;
+reaching an edge loads additional 75-message pages while retaining at most 1,200 logical transcript
+rows. An omission row marks history that remains outside the retained window.
 
 This is still experimental and source-build only: current Python distributions do not include the Rust
-binary, and it intentionally omits Textual features such as older/newer history paging, transcript
-search, mouse controls, session tree operations, and steering/follow-up queues. Selecting Rust never
+binary, and it intentionally omits Textual features such as transcript search, mouse controls, session
+tree operations, and steering/follow-up queues. Selecting Rust never
 falls back to Textual. A missing/non-executable binary, unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See
 [Development setup](../contributing/development#rust-tui-scaffold), or select Textual explicitly with
@@ -152,11 +154,19 @@ stays anchored; select the `↓ new` indicator or press `End` to return to the l
 
 ### Resuming long sessions
 
-In Textual, selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the complete
-active-path transcript before revealing the replacement. The experimental Rust TUI instead loads one bounded latest
-page (up to 200 messages) and does not page older or newer history. It reports loading progress and,
-once backend selection commits, clears the old transcript before installing the selected session's
-page. A failed page leaves an explicit error instead of mislabeling old or partially loaded history.
+In Textual, selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the
+complete active-path transcript before revealing the replacement. The experimental Rust TUI installs
+the latest page first, then loads older history with `PageUp` or `Ctrl+Home`; `PageDown` or `Ctrl+End`
+returns through an evicted tail to the latest page. Plain `Home` remains available to the prompt
+editor. Paging preserves surviving viewport anchors; older-page and exact-detail requests can run
+while a prompt is active. Once backend selection commits, the old transcript is cleared before the
+selected session's page is installed. A
+failed or stale page leaves an explicit error instead of mislabeling old or partially loaded history.
+
+Historical file-tool cards keep bounded previews. Press `F6` to browse visible cards and `Enter` to
+open detail; when a persisted preview was clipped, the Rust TUI fetches that one exact result on
+demand and releases it when the detail view closes. It does not cache historical detail or read JSONL
+directly, and cannot recover bytes that the tool truncated before persistence.
 
 Every persisted message row is represented, but representation is logical rather than one widget per
 JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel, and

@@ -1,6 +1,6 @@
 //! Terminal-independent transcript state for the native TUI.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -11,13 +11,16 @@ const MAX_PROCESS_INDEX_BYTES: usize = 256 * 1024;
 const MAX_TRACKED_PROCESS_ID_BYTES: usize = 4 * 1024;
 const MAX_PENDING_DETAIL_SOURCES: usize = 128;
 const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
+const HISTORY_OMISSION_MARKER: &str = "[earlier session history omitted]";
 
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
     ToolCallInput, ToolCardSnapshot, ToolResultInput, ToolStatus, identity_for_display,
     process_call_identity,
 };
-use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource};
+use crate::tool_detail::{
+    DetailAvailability, DetailUnavailableReason, ToolDetailPresentation, ToolDetailSource,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SharedTranscript(Arc<Transcript>);
@@ -88,6 +91,13 @@ pub struct TranscriptEntry {
     pub kind: TranscriptEntryKind,
     revision: u64,
     layout_epoch: u64,
+    history_group: Option<u64>,
+    history_omission: bool,
+    durable_entry_ids: Vec<String>,
+    history_detail_source: Option<ToolDetailSource>,
+    history_result_projection_truncated: bool,
+    history_calls: Vec<HistoricalCall>,
+    history_pending_result: Option<Box<ToolResultInput>>,
 }
 
 impl TranscriptEntry {
@@ -128,10 +138,19 @@ struct ToolBinding {
     sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoricalCall {
+    call_id: String,
+    kind: ToolBindingKind,
+    sequence: u64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Transcript {
     entries: Vec<TranscriptEntry>,
+    entry_indexes: HashMap<TranscriptEntryId, usize>,
     next_entry_id: u64,
+    next_history_group: u64,
     generation: u64,
     pending_response: Option<TranscriptEntryId>,
     started_turn: Option<u64>,
@@ -600,6 +619,28 @@ impl Transcript {
         }) = process_call_identity(&input.name, &input.arguments)
         {
             if let Some(entry_id) = self.process_entry_for(&process_id) {
+                let historical_sequence = self.entry(entry_id).and_then(|entry| {
+                    entry.history_group.and_then(|_| {
+                        entry.process_card().map(|card| {
+                            (
+                                card.next_historical_sequence(),
+                                entry.history_calls.is_empty(),
+                            )
+                        })
+                    })
+                });
+                if let Some((sequence, history_calls_resolved)) = historical_sequence {
+                    if history_calls_resolved {
+                        let entry = self.entry_mut(entry_id);
+                        let TranscriptEntryKind::Process(card) = &mut entry.kind else {
+                            unreachable!("process index must target a process card")
+                        };
+                        card.release_historical_sequence();
+                    } else {
+                        self.next_tool_sequence = self.next_tool_sequence.max(sequence);
+                    }
+                    self.promote_history_entry_to_live(entry_id);
+                }
                 let binding =
                     self.new_tool_binding(entry_id, ToolBindingKind::Process(operation), false);
                 let changed = {
@@ -847,6 +888,858 @@ impl Transcript {
         entry_id
     }
 
+    pub(crate) fn mark_history_entries(&mut self, start: usize, durable_entry_id: &str) {
+        let group = self.next_history_group;
+        self.next_history_group = self
+            .next_history_group
+            .checked_add(1)
+            .expect("history group identifiers exhausted");
+        for entry in &mut self.entries[start..] {
+            entry.history_group = Some(group);
+            if !entry
+                .durable_entry_ids
+                .iter()
+                .any(|id| id == durable_entry_id)
+            {
+                entry.durable_entry_ids.push(durable_entry_id.to_owned());
+            }
+            if let Some(card) = entry.tool_card() {
+                entry.history_detail_source = Some(card.detail_source.clone());
+            }
+        }
+    }
+
+    pub(crate) fn add_history_origin(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        durable_entry_id: &str,
+    ) {
+        let entry = self.entry_mut(entry_id);
+        if !entry
+            .durable_entry_ids
+            .iter()
+            .any(|id| id == durable_entry_id)
+        {
+            entry.durable_entry_ids.push(durable_entry_id.to_owned());
+        }
+    }
+
+    pub(crate) fn mark_history_result_projection(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        truncated: bool,
+    ) {
+        self.entry_mut(entry_id).history_result_projection_truncated = truncated;
+    }
+
+    pub(crate) fn record_history_call(&mut self, entry_id: TranscriptEntryId, call_id: &str) {
+        let Some(binding) = self.call_entries.get(call_id).copied() else {
+            return;
+        };
+        if binding.entry_id != entry_id {
+            return;
+        }
+        let entry = self.entry_mut(entry_id);
+        if !entry
+            .history_calls
+            .iter()
+            .any(|call| call.call_id == call_id)
+        {
+            entry.history_calls.push(HistoricalCall {
+                call_id: call_id.to_owned(),
+                kind: binding.kind,
+                sequence: binding.sequence,
+            });
+        }
+    }
+
+    pub(crate) fn resolve_history_call(&mut self, entry_id: TranscriptEntryId, call_id: &str) {
+        self.entry_mut(entry_id)
+            .history_calls
+            .retain(|call| call.call_id != call_id);
+    }
+
+    pub(crate) fn record_history_pending_result(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        result: ToolResultInput,
+    ) {
+        self.entry_mut(entry_id).history_pending_result = Some(Box::new(result));
+    }
+
+    pub(crate) fn complete_history_entries(&mut self) {
+        for entry in &mut self.entries {
+            if entry.history_group.is_some() {
+                entry.state = TranscriptEntryState::Complete;
+            }
+        }
+    }
+
+    pub(crate) fn durable_entry_id(&self, entry_id: TranscriptEntryId) -> Option<&str> {
+        self.entry(entry_id)
+            .and_then(|entry| entry.durable_entry_ids.last())
+            .map(String::as_str)
+    }
+
+    pub(crate) fn has_live_entries(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.history_group.is_none() && !entry.history_omission)
+    }
+
+    pub(crate) fn exact_historical_detail_target(
+        &self,
+        entry_id: TranscriptEntryId,
+    ) -> Option<TranscriptEntryId> {
+        let entry = self.entry(entry_id)?;
+        entry.tool_card()?;
+        let usable_source = matches!(
+            entry.history_detail_source,
+            Some(
+                ToolDetailSource::Edit(_)
+                    | ToolDetailSource::Write(_)
+                    | ToolDetailSource::Read(_)
+                    | ToolDetailSource::Grep(_)
+                    | ToolDetailSource::Find
+            )
+        );
+        (usable_source
+            && entry.history_result_projection_truncated
+            && entry.durable_entry_ids.len() > 1)
+            .then_some(entry_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn historical_durable_entry_ids(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.history_group.is_some())
+            .flat_map(|entry| entry.durable_entry_ids.iter().cloned())
+            .collect()
+    }
+
+    pub(crate) fn represented_durable_entry_ids(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
+            .flat_map(|entry| entry.durable_entry_ids.iter().cloned())
+            .collect()
+    }
+
+    pub(crate) fn exact_historical_detail(
+        &self,
+        entry_id: TranscriptEntryId,
+        result: &ToolResultInput,
+    ) -> Option<ToolDetailPresentation> {
+        self.exact_historical_detail_target(entry_id)?;
+        let entry = self.entry(entry_id)?;
+        let mut card = entry.tool_card()?.clone();
+        card.detail_source = entry.history_detail_source.clone()?;
+        card.status = ToolStatus::Requested;
+        card.apply_result(result);
+        let DetailAvailability::LiveRetained(detail) = card.structured_detail else {
+            return None;
+        };
+        Some(detail)
+    }
+
+    pub(crate) fn prepend_history_page(&mut self, page: &Transcript) -> bool {
+        self.insert_history_page(page, 0, true)
+    }
+
+    pub(crate) fn append_history_page(&mut self, page: &Transcript) -> bool {
+        let index = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.history_group.is_some())
+            .map_or(0, |index| index + 1);
+        self.insert_history_page(page, index, false)
+    }
+
+    pub(crate) fn replace_history_omission_marker(&mut self, omitted: bool) {
+        let marker_index = self.entries.iter().position(|entry| entry.history_omission);
+        let marker_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.history_omission)
+            .count();
+        let oldest_history_index = self
+            .entries
+            .iter()
+            .position(|entry| entry.history_group.is_some());
+        let marker_is_at_oldest_edge = marker_index
+            .zip(oldest_history_index)
+            .is_some_and(|(marker, oldest)| marker.checked_add(1) == Some(oldest));
+        if (!omitted && marker_count == 0)
+            || (omitted && marker_count == 1 && marker_is_at_oldest_edge)
+        {
+            return;
+        }
+        self.entries.retain(|entry| !entry.history_omission);
+        if omitted {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| entry.history_group.is_some())
+            {
+                let id = TranscriptEntryId(self.next_entry_id);
+                self.next_entry_id = self
+                    .next_entry_id
+                    .checked_add(1)
+                    .expect("transcript entry identifiers exhausted");
+                self.entries.insert(
+                    index,
+                    TranscriptEntry {
+                        id,
+                        role: TranscriptRole::Assistant,
+                        content: HISTORY_OMISSION_MARKER.into(),
+                        state: TranscriptEntryState::Complete,
+                        kind: TranscriptEntryKind::Message,
+                        revision: 0,
+                        layout_epoch: 0,
+                        history_group: None,
+                        history_omission: true,
+                        durable_entry_ids: Vec::new(),
+                        history_detail_source: None,
+                        history_result_projection_truncated: false,
+                        history_calls: Vec::new(),
+                        history_pending_result: None,
+                    },
+                );
+            }
+        }
+        self.rebuild_entry_indexes();
+        self.bump_generation();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_omission_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.history_omission)
+            .count()
+    }
+
+    fn insert_history_page(
+        &mut self,
+        page: &Transcript,
+        index: usize,
+        replace_marker: bool,
+    ) -> bool {
+        if page
+            .entries
+            .iter()
+            .any(|entry| entry.state != TranscriptEntryState::Complete)
+        {
+            return false;
+        }
+        self.next_tool_sequence = self.next_tool_sequence.max(page.next_tool_sequence);
+        let omission_marker = replace_marker
+            .then(|| {
+                self.entries
+                    .iter()
+                    .position(|entry| entry.history_omission)
+                    .map(|index| self.entries.remove(index))
+            })
+            .flatten();
+        let mut groups = HashMap::new();
+        let mut inserted = Vec::with_capacity(page.entries.len());
+        for source in page.entries.iter().filter(|entry| !entry.history_omission) {
+            let mut entry = source.clone();
+            entry.id = TranscriptEntryId(self.next_entry_id);
+            self.next_entry_id = self
+                .next_entry_id
+                .checked_add(1)
+                .expect("transcript entry identifiers exhausted");
+            if let Some(source_group) = entry.history_group {
+                let group = *groups.entry(source_group).or_insert_with(|| {
+                    let next = self.next_history_group;
+                    self.next_history_group = self
+                        .next_history_group
+                        .checked_add(1)
+                        .expect("history group identifiers exhausted");
+                    next
+                });
+                entry.history_group = Some(group);
+            }
+            inserted.push(entry);
+        }
+        if inserted.is_empty() {
+            if let Some(marker) = omission_marker {
+                self.entries.insert(0, marker);
+            }
+            if replace_marker {
+                self.rebuild_entry_indexes();
+                self.bump_generation();
+            }
+            return true;
+        }
+        let inserted_ids = inserted
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<HashSet<_>>();
+        let index = if replace_marker { 0 } else { index };
+        self.entries.splice(index..index, inserted);
+        if let Some(marker) = omission_marker {
+            self.entries.insert(0, marker);
+        }
+        self.reconcile_history_boundaries(&inserted_ids);
+        self.rebuild_entry_indexes();
+        self.index_historical_process_entries();
+        self.bump_generation();
+        true
+    }
+
+    fn reconcile_history_boundaries(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
+        let pending = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry
+                    .history_pending_result
+                    .as_ref()
+                    .map(|result| (index, result.call_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for (original_result_index, call_id) in pending {
+            let result_index = original_result_index.saturating_sub(removed);
+            if result_index >= self.entries.len() {
+                continue;
+            }
+            let preceding = self.entries[..result_index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| {
+                    entry
+                        .history_calls
+                        .iter()
+                        .find(|call| call.call_id == call_id)
+                        .cloned()
+                        .map(|call| (index, call))
+                });
+            let following = || {
+                self.entries[result_index.saturating_add(1)..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, entry)| {
+                        // A historical process card moves to the live suffix when a
+                        // resumed operation reuses it, so a newly fetched persisted
+                        // result can temporarily precede its original call card.
+                        if entry.history_group.is_some() {
+                            return None;
+                        }
+                        entry
+                            .history_calls
+                            .iter()
+                            .find(|call| call.call_id == call_id)
+                            .cloned()
+                            .map(|call| {
+                                (result_index.saturating_add(offset.saturating_add(1)), call)
+                            })
+                    })
+            };
+            let Some((call_index, call)) = preceding.or_else(following) else {
+                continue;
+            };
+            let result = self.entries[result_index]
+                .history_pending_result
+                .as_deref()
+                .expect("pending result exists")
+                .clone();
+            let result_card = self.entries[result_index].tool_card().cloned();
+            let durable_entry_ids = self.entries[result_index].durable_entry_ids.clone();
+            let projection_truncated =
+                self.entries[result_index].history_result_projection_truncated;
+            let detail_source = self.entries[call_index]
+                .history_detail_source
+                .clone()
+                .unwrap_or(ToolDetailSource::None);
+            let reconciled = match (&mut self.entries[call_index].kind, call.kind) {
+                (TranscriptEntryKind::Tool(card), ToolBindingKind::Tool) => {
+                    let Some(result_card) = result_card.as_ref() else {
+                        continue;
+                    };
+                    card.reconcile_historical_result(&result, result_card, detail_source)
+                }
+                (TranscriptEntryKind::Process(card), ToolBindingKind::Process(operation)) => {
+                    let mut result = result;
+                    let process_id = card.process_id.clone();
+                    result.process_id = Some(process_id.clone());
+                    crate::history::project_historical_process_result(&mut result, &process_id);
+                    card.reconcile_historical_result(
+                        operation,
+                        &result,
+                        call.sequence,
+                        result_card
+                            .as_ref()
+                            .is_some_and(|card| card.status == ToolStatus::Denied),
+                    )
+                }
+                (TranscriptEntryKind::Message, _)
+                | (TranscriptEntryKind::Tool(_), ToolBindingKind::Process(_))
+                | (TranscriptEntryKind::Process(_), ToolBindingKind::Tool) => false,
+            };
+            if !reconciled {
+                continue;
+            }
+            {
+                let entry = &mut self.entries[call_index];
+                for durable_entry_id in durable_entry_ids {
+                    if !entry
+                        .durable_entry_ids
+                        .iter()
+                        .any(|existing| existing == &durable_entry_id)
+                    {
+                        entry.durable_entry_ids.push(durable_entry_id);
+                    }
+                }
+                entry.history_result_projection_truncated |= projection_truncated;
+                entry
+                    .history_calls
+                    .retain(|candidate| candidate.call_id != call.call_id);
+                if entry.history_group.is_some() && entry.history_calls.is_empty() {
+                    if let TranscriptEntryKind::Process(card) = &mut entry.kind {
+                        card.release_historical_sequence();
+                    }
+                }
+                Self::bump_revision(entry);
+            }
+            self.entries.remove(result_index);
+            removed += 1;
+        }
+        self.coalesce_historical_process_cards(inserted_ids);
+        self.merge_historical_process_cards_into_live();
+    }
+
+    fn coalesce_historical_process_cards(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
+        // ponytail: O(n²) is bounded by 1,200 retained rows; add an index if that limit grows.
+        loop {
+            let mut process_entries = HashMap::<String, usize>::new();
+            let duplicate = self.entries.iter().enumerate().find_map(|(index, entry)| {
+                let process_id = entry
+                    .history_group
+                    .and_then(|_| entry.process_card())?
+                    .process_id
+                    .clone();
+                process_entries
+                    .insert(process_id, index)
+                    .map(|older_index| (older_index, index))
+            });
+            let Some((older_index, newer_index)) = duplicate else {
+                return;
+            };
+
+            let older = self.entries[older_index].clone();
+            let newer = self.entries[newer_index].clone();
+            let mut merged_card = older
+                .process_card()
+                .expect("process entry checked above")
+                .clone();
+            let newer_sequence_offset = merged_card
+                .merge_historical_newer(newer.process_card().expect("process entry checked above"));
+
+            let keep_newer = inserted_ids.contains(&older.id) && !inserted_ids.contains(&newer.id);
+            let survivor_index = if keep_newer { newer_index } else { older_index };
+            let removed_index = if keep_newer { older_index } else { newer_index };
+            let mut merged = self.entries[survivor_index].clone();
+            merged.kind = TranscriptEntryKind::Process(merged_card);
+            merged.durable_entry_ids = older.durable_entry_ids;
+            for durable_entry_id in newer.durable_entry_ids {
+                if !merged
+                    .durable_entry_ids
+                    .iter()
+                    .any(|candidate| candidate == &durable_entry_id)
+                {
+                    merged.durable_entry_ids.push(durable_entry_id);
+                }
+            }
+            merged.history_result_projection_truncated = older.history_result_projection_truncated
+                || newer.history_result_projection_truncated;
+            merged.history_calls = older.history_calls;
+            for mut call in newer.history_calls {
+                call.sequence = call.sequence.saturating_add(newer_sequence_offset);
+                if !merged
+                    .history_calls
+                    .iter()
+                    .any(|candidate| candidate.call_id == call.call_id)
+                {
+                    merged.history_calls.push(call);
+                }
+            }
+            if merged.history_calls.is_empty() {
+                if let TranscriptEntryKind::Process(card) = &mut merged.kind {
+                    card.release_historical_sequence();
+                }
+            } else if let Some(next_sequence) = merged
+                .history_calls
+                .iter()
+                .map(|call| {
+                    call.sequence
+                        .checked_add(1)
+                        .expect("tool lifecycle sequence exhausted")
+                })
+                .max()
+            {
+                self.next_tool_sequence = self.next_tool_sequence.max(next_sequence);
+            }
+            merged.history_pending_result = older
+                .history_pending_result
+                .or(newer.history_pending_result);
+            merged.layout_epoch = merged
+                .layout_epoch
+                .checked_add(1)
+                .expect("transcript layout epoch exhausted");
+            Self::bump_revision(&mut merged);
+            self.entries[survivor_index] = merged;
+            self.entries.remove(removed_index);
+        }
+    }
+
+    fn merge_historical_process_cards_into_live(&mut self) {
+        loop {
+            let candidate = self
+                .entries
+                .iter()
+                .enumerate()
+                .find_map(|(older_index, entry)| {
+                    let card = entry.history_group.and_then(|_| entry.process_card())?;
+                    // Split call/result boundaries reconcile separately; only completed page-local
+                    // cards are safe to fold directly into a newer live owner.
+                    if !entry.history_calls.is_empty() || entry.history_pending_result.is_some() {
+                        return None;
+                    }
+                    let live_id = self.process_entries.get(&card.process_id).copied()?;
+                    let live_index = self
+                        .entries
+                        .iter()
+                        .position(|candidate| candidate.id == live_id)?;
+                    (live_index != older_index
+                        && self.entries[live_index].history_group.is_none()
+                        && self.entries[live_index].process_card().is_some())
+                    .then_some((older_index, live_index))
+                });
+            let Some((older_index, live_index)) = candidate else {
+                return;
+            };
+
+            let older = self.entries[older_index].clone();
+            let mut live = self.entries[live_index].clone();
+            let TranscriptEntryKind::Process(live_card) = &mut live.kind else {
+                unreachable!("live process index must target a process card")
+            };
+            let sequence_offset = live_card.prepend_historical_older(
+                older
+                    .process_card()
+                    .expect("historical process entry checked above"),
+            );
+            let live_id = live.id;
+            for binding in self
+                .call_entries
+                .values_mut()
+                .filter(|binding| binding.entry_id == live_id)
+            {
+                binding.sequence = binding
+                    .sequence
+                    .checked_add(sequence_offset)
+                    .expect("tool lifecycle sequence exhausted");
+            }
+            self.next_tool_sequence = self
+                .next_tool_sequence
+                .checked_add(sequence_offset)
+                .expect("tool lifecycle sequence exhausted");
+            for call in &mut live.history_calls {
+                call.sequence = call
+                    .sequence
+                    .checked_add(sequence_offset)
+                    .expect("tool lifecycle sequence exhausted");
+            }
+            let live_durable_entry_ids = std::mem::take(&mut live.durable_entry_ids);
+            live.durable_entry_ids = older.durable_entry_ids;
+            for durable_entry_id in live_durable_entry_ids {
+                if !live
+                    .durable_entry_ids
+                    .iter()
+                    .any(|candidate| candidate == &durable_entry_id)
+                {
+                    live.durable_entry_ids.push(durable_entry_id);
+                }
+            }
+            live.history_result_projection_truncated |= older.history_result_projection_truncated;
+            live.layout_epoch = live
+                .layout_epoch
+                .checked_add(1)
+                .expect("transcript layout epoch exhausted");
+            Self::bump_revision(&mut live);
+            self.entries[live_index] = live;
+            self.entries.remove(older_index);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retain_historical_entries(
+        &mut self,
+        limit: usize,
+        evict_newest: bool,
+    ) -> Option<Vec<String>> {
+        let mut seen = std::collections::BTreeSet::new();
+        let durable_entry_order = self
+            .entries
+            .iter()
+            .flat_map(|entry| entry.durable_entry_ids.iter())
+            .filter(|entry_id| seen.insert((*entry_id).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.retain_historical_entries_in_order(limit, evict_newest, &durable_entry_order)
+    }
+
+    pub(crate) fn retain_historical_entries_in_order(
+        &mut self,
+        limit: usize,
+        evict_newest: bool,
+        durable_entry_order: &[String],
+    ) -> Option<Vec<String>> {
+        let positions = durable_entry_order
+            .iter()
+            .enumerate()
+            .map(|(index, entry_id)| (entry_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut removed = Vec::new();
+        while {
+            let historical_entries = self
+                .entries
+                .iter()
+                .filter(|entry| entry.history_group.is_some());
+            historical_entries.clone().count() > limit
+                || self.represented_durable_entry_ids().len() > limit
+        } {
+            if self.represented_durable_entry_ids().len() > limit {
+                let mut edge = None::<(usize, String, bool)>;
+                for entry in &self.entries {
+                    for durable_entry_id in &entry.durable_entry_ids {
+                        let position = *positions.get(durable_entry_id.as_str())?;
+                        let candidate = (
+                            position,
+                            durable_entry_id.clone(),
+                            entry.history_group.is_none(),
+                        );
+                        let replace = edge.as_ref().is_none_or(|current| {
+                            if evict_newest {
+                                candidate.0 > current.0
+                            } else {
+                                candidate.0 < current.0
+                            }
+                        });
+                        if replace {
+                            edge = Some(candidate);
+                        }
+                    }
+                }
+                if let Some((_, durable_entry_id, true)) = edge {
+                    for entry in &mut self.entries {
+                        entry
+                            .durable_entry_ids
+                            .retain(|candidate| candidate != &durable_entry_id);
+                    }
+                    if !removed
+                        .iter()
+                        .any(|candidate| candidate == &durable_entry_id)
+                    {
+                        removed.push(durable_entry_id);
+                    }
+                    continue;
+                }
+            }
+            let mut ranges = std::collections::BTreeMap::<u64, (usize, usize)>::new();
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| entry.history_group.is_some())
+            {
+                let group = entry.history_group.expect("filtered above");
+                for durable_entry_id in &entry.durable_entry_ids {
+                    let position = *positions.get(durable_entry_id.as_str())?;
+                    ranges
+                        .entry(group)
+                        .and_modify(|range| {
+                            range.0 = range.0.min(position);
+                            range.1 = range.1.max(position);
+                        })
+                        .or_insert((position, position));
+                }
+            }
+            let seed = if evict_newest {
+                ranges
+                    .iter()
+                    .max_by_key(|(group, range)| (range.1, range.0, **group))
+            } else {
+                ranges
+                    .iter()
+                    .min_by_key(|(group, range)| (range.0, range.1, **group))
+            }?;
+            let groups = if evict_newest {
+                let mut cutoff = seed.1.0;
+                loop {
+                    let expanded = ranges
+                        .values()
+                        .filter(|range| range.1 >= cutoff)
+                        .map(|range| range.0)
+                        .min()
+                        .unwrap_or(cutoff);
+                    if expanded == cutoff {
+                        break;
+                    }
+                    cutoff = expanded;
+                }
+                ranges
+                    .iter()
+                    .filter_map(|(group, range)| (range.1 >= cutoff).then_some(*group))
+                    .collect::<std::collections::BTreeSet<_>>()
+            } else {
+                let mut cutoff = seed.1.1;
+                loop {
+                    let expanded = ranges
+                        .values()
+                        .filter(|range| range.0 <= cutoff)
+                        .map(|range| range.1)
+                        .max()
+                        .unwrap_or(cutoff);
+                    if expanded == cutoff {
+                        break;
+                    }
+                    cutoff = expanded;
+                }
+                ranges
+                    .iter()
+                    .filter_map(|(group, range)| (range.0 <= cutoff).then_some(*group))
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            for entry in self.entries.iter().filter(|entry| {
+                entry
+                    .history_group
+                    .is_some_and(|group| groups.contains(&group))
+            }) {
+                for durable_entry_id in &entry.durable_entry_ids {
+                    if !removed.iter().any(|id| id == durable_entry_id) {
+                        removed.push(durable_entry_id.clone());
+                    }
+                }
+            }
+            self.entries.retain(|entry| {
+                !entry
+                    .history_group
+                    .is_some_and(|group| groups.contains(&group))
+            });
+        }
+        if !removed.is_empty() {
+            self.rebuild_entry_indexes();
+            self.bump_generation();
+        }
+        Some(removed)
+    }
+
+    fn index_historical_process_entries(&mut self) {
+        let entries = self
+            .entries
+            .iter()
+            .filter(|entry| entry.history_group.is_some())
+            .filter_map(|entry| {
+                entry
+                    .process_card()
+                    .map(|card| (card.process_id.clone(), entry.id))
+            })
+            .collect::<Vec<_>>();
+        for (process_id, entry_id) in entries {
+            if self.process_entries.contains_key(&process_id)
+                || identity_for_display(&process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES
+            {
+                continue;
+            }
+            while self.process_entries.len().saturating_add(1) > MAX_PROCESS_INDEX_ENTRIES
+                || self.process_index_bytes.saturating_add(process_id.len())
+                    > MAX_PROCESS_INDEX_BYTES
+            {
+                if !self.evict_oldest_terminal_process() {
+                    break;
+                }
+            }
+            if self.process_entries.len().saturating_add(1) > MAX_PROCESS_INDEX_ENTRIES
+                || self.process_index_bytes.saturating_add(process_id.len())
+                    > MAX_PROCESS_INDEX_BYTES
+            {
+                continue;
+            }
+            self.process_index_bytes = self.process_index_bytes.saturating_add(process_id.len());
+            self.process_order.push_back(process_id.clone());
+            self.process_entries.insert(process_id, entry_id);
+        }
+    }
+
+    fn promote_history_entry_to_live(&mut self, entry_id: TranscriptEntryId) {
+        let index = *self
+            .entry_indexes
+            .get(&entry_id)
+            .expect("historical process entry must exist");
+        let moves_to_suffix = index.saturating_add(1) < self.entries.len();
+        if moves_to_suffix {
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| self.entries.get_mut(previous))
+            {
+                Self::bump_revision(previous);
+            }
+        }
+        let mut entry = self.entries.remove(index);
+        Self::bump_revision(&mut entry);
+        entry.history_group = None;
+        if moves_to_suffix {
+            if let Some(previous) = self.entries.last_mut() {
+                Self::bump_revision(previous);
+            }
+        }
+        self.entries.push(entry);
+        self.rebuild_entry_indexes();
+        self.bump_generation();
+    }
+
+    fn rebuild_entry_indexes(&mut self) {
+        self.entry_indexes.clear();
+        self.entry_indexes.extend(
+            self.entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (entry.id, index)),
+        );
+        self.call_entries
+            .retain(|_, binding| self.entry_indexes.contains_key(&binding.entry_id));
+        self.call_index_bytes = self.call_entries.keys().map(String::len).sum();
+        self.resolved_call_order.retain(|call_id| {
+            self.call_entries
+                .get(call_id)
+                .is_some_and(|binding| binding.resolved)
+        });
+        self.process_entries
+            .retain(|_, entry_id| self.entry_indexes.contains_key(entry_id));
+        self.process_index_bytes = self.process_entries.keys().map(String::len).sum();
+        self.process_order
+            .retain(|process_id| self.process_entries.contains_key(process_id));
+        self.pending_detail_sources
+            .retain(|entry_id, _| self.entry_indexes.contains_key(entry_id));
+        self.pending_detail_source_bytes = self.pending_detail_sources.values().sum();
+        self.pending_detail_order
+            .retain(|entry_id| self.pending_detail_sources.contains_key(entry_id));
+        self.pending_response = self
+            .pending_response
+            .filter(|entry_id| self.entry_indexes.contains_key(entry_id));
+        self.active_response = self
+            .active_response
+            .filter(|(_, entry_id)| self.entry_indexes.contains_key(entry_id));
+        if self.active_response.is_none() {
+            self.started_turn = None;
+        }
+    }
+
     fn push_message(
         &mut self,
         role: TranscriptRole,
@@ -861,6 +1754,13 @@ impl Transcript {
             kind: TranscriptEntryKind::Message,
             revision: 0,
             layout_epoch: 0,
+            history_group: None,
+            history_omission: false,
+            durable_entry_ids: Vec::new(),
+            history_detail_source: None,
+            history_result_projection_truncated: false,
+            history_calls: Vec::new(),
+            history_pending_result: None,
         })
     }
 
@@ -885,6 +1785,13 @@ impl Transcript {
             kind,
             revision: 0,
             layout_epoch: 0,
+            history_group: None,
+            history_omission: false,
+            durable_entry_ids: Vec::new(),
+            history_detail_source: None,
+            history_result_projection_truncated: false,
+            history_calls: Vec::new(),
+            history_pending_result: None,
         })
     }
 
@@ -899,43 +1806,35 @@ impl Transcript {
             .expect("transcript entry identifiers exhausted");
         entry.id = id;
         self.entries.push(entry);
+        self.entry_indexes.insert(id, self.entries.len() - 1);
         self.bump_generation();
         id
     }
 
     pub(crate) fn entry(&self, entry_id: TranscriptEntryId) -> Option<&TranscriptEntry> {
-        let index = usize::try_from(entry_id.get()).ok()?;
-        self.entries.get(index).filter(|entry| entry.id == entry_id)
+        self.entry_indexes
+            .get(&entry_id)
+            .and_then(|index| self.entries.get(*index))
     }
 
     pub(crate) fn entry_before(&self, entry_id: TranscriptEntryId) -> Option<&TranscriptEntry> {
-        let index = usize::try_from(entry_id.get()).ok()?;
-        let previous = index.checked_sub(1)?;
-        self.entries
-            .get(previous)
-            .filter(|entry| usize::try_from(entry.id.get()) == Ok(previous))
+        let index = *self.entry_indexes.get(&entry_id)?;
+        self.entries.get(index.checked_sub(1)?)
     }
 
     pub(crate) fn entry_after(&self, entry_id: TranscriptEntryId) -> Option<&TranscriptEntry> {
-        let index = usize::try_from(entry_id.get()).ok()?;
-        let next = index.checked_add(1)?;
-        self.entries
-            .get(next)
-            .filter(|entry| usize::try_from(entry.id.get()) == Ok(next))
+        let index = *self.entry_indexes.get(&entry_id)?;
+        self.entries.get(index.checked_add(1)?)
     }
 
     fn entry_mut(&mut self, entry_id: TranscriptEntryId) -> &mut TranscriptEntry {
-        let index =
-            usize::try_from(entry_id.get()).expect("transcript entry identifier must fit in usize");
-        let entry = self
-            .entries
-            .get_mut(index)
+        let index = *self
+            .entry_indexes
+            .get(&entry_id)
             .expect("active transcript entry must exist");
-        assert_eq!(
-            entry.id, entry_id,
-            "transcript entry index must stay stable"
-        );
-        entry
+        self.entries
+            .get_mut(index)
+            .expect("active transcript entry index must exist")
     }
 
     fn set_entry_state(&mut self, entry_id: TranscriptEntryId, state: TranscriptEntryState) {
@@ -1070,6 +1969,276 @@ mod tests {
         assert_eq!(transcript.entries().len(), 4);
         assert_eq!(transcript.entries()[0].content, "one");
         assert_eq!(transcript.entries()[2].content, "two");
+    }
+
+    #[test]
+    fn prepending_and_evicting_history_keeps_surviving_ids_stable() {
+        let mut transcript = Transcript::default();
+        let retained = transcript.append_prompt("retained".into());
+        let mut older = Transcript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+
+        assert!(transcript.prepend_history_page(&older));
+        assert_eq!(transcript.entry(retained).unwrap().content, "retained");
+        assert_eq!(transcript.entry_before(retained).unwrap().content, "older");
+
+        assert_eq!(
+            transcript.retain_historical_entries(0, false),
+            Some(vec!["older-entry".into()])
+        );
+        assert_eq!(transcript.entry(retained).unwrap().content, "retained");
+        assert!(transcript.entry_before(retained).is_none());
+    }
+
+    #[test]
+    fn historical_retention_is_a_hard_logical_entry_bound() {
+        let mut transcript = Transcript::default();
+        for index in 0..1_205 {
+            let start = transcript.entries().len();
+            transcript.append_prompt(format!("message-{index}"));
+            transcript.mark_history_entries(start, &format!("entry-{index}"));
+        }
+
+        assert_eq!(
+            transcript.retain_historical_entries(1_200, false),
+            Some((0..5).map(|index| format!("entry-{index}")).collect())
+        );
+        assert_eq!(transcript.entries().len(), 1_200);
+        let retained = transcript.historical_durable_entry_ids();
+        assert_eq!(retained.len(), 1_200);
+        assert!(!retained.contains("entry-4"));
+        assert!(retained.contains("entry-5"));
+        assert!(retained.contains("entry-1204"));
+    }
+
+    #[test]
+    fn historical_retention_bounds_origins_coalesced_into_one_card() {
+        let mut transcript = Transcript::default();
+        let entry_id = transcript.observe_tool_call(call(
+            "poll-0",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.mark_history_entries(0, "assistant-0");
+        for index in 0..1_200 {
+            transcript.add_history_origin(entry_id, &format!("result-{index}"));
+        }
+
+        let removed = transcript.retain_historical_entries(1_200, false).unwrap();
+
+        assert_eq!(removed.len(), 1_201);
+        assert!(transcript.entries().is_empty());
+        assert!(transcript.historical_durable_entry_ids().is_empty());
+    }
+
+    #[test]
+    fn historical_retention_keeps_durable_origins_contiguous() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("older".into());
+        transcript.mark_history_entries(0, "older");
+        let start = transcript.entries().len();
+        let process = transcript.observe_tool_call(call(
+            "poll-0",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.mark_history_entries(start, "process-call");
+        transcript.add_history_origin(process, "process-result");
+        let start = transcript.entries().len();
+        transcript.append_prompt("interleaved".into());
+        transcript.mark_history_entries(start, "interleaved");
+        let start = transcript.entries().len();
+        transcript.append_prompt("newer".into());
+        transcript.mark_history_entries(start, "newer");
+        let order = [
+            "older".into(),
+            "process-call".into(),
+            "interleaved".into(),
+            "process-result".into(),
+            "newer".into(),
+        ];
+
+        let mut tail = transcript.clone();
+        tail.retain_historical_entries_in_order(3, true, &order)
+            .unwrap();
+        assert_eq!(
+            tail.historical_durable_entry_ids(),
+            ["older".to_owned()].into_iter().collect()
+        );
+
+        transcript
+            .retain_historical_entries_in_order(3, false, &order)
+            .unwrap();
+        assert_eq!(
+            transcript.historical_durable_entry_ids(),
+            ["newer".to_owned()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn historical_eviction_prunes_tool_and_process_indexes() {
+        let mut transcript = Transcript::default();
+        let tool_id = transcript.observe_tool_call(call(
+            "tool-1",
+            "read",
+            serde_json::json!({"path": "old.txt"}),
+        ));
+        transcript.mark_history_entries(0, "tool-entry");
+        assert_eq!(
+            transcript.retain_historical_entries(0, false),
+            Some(vec!["tool-entry".into()])
+        );
+        assert!(transcript.entry(tool_id).is_none());
+        assert_ne!(
+            transcript.observe_tool_call(call(
+                "tool-1",
+                "read",
+                serde_json::json!({"path": "new.txt"}),
+            )),
+            tool_id
+        );
+
+        let start = transcript.entries().len();
+        let process_id = transcript.observe_tool_call(call(
+            "poll-1",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        ));
+        transcript.mark_history_entries(start, "process-entry");
+        transcript.retain_historical_entries(0, true).unwrap();
+        assert!(transcript.entry(process_id).is_none());
+        assert_ne!(
+            transcript.observe_tool_call(call(
+                "poll-2",
+                "bash",
+                serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+            )),
+            process_id
+        );
+    }
+
+    #[test]
+    fn live_process_reuse_migrates_historical_card_out_of_retention() {
+        let mut transcript = Transcript::default();
+        for index in 0..1_200 {
+            let start = transcript.entries().len();
+            transcript.append_prompt(format!("message-{index}"));
+            transcript.mark_history_entries(start, &format!("entry-{index}"));
+        }
+        let start = transcript.entries().len();
+        let survivor = transcript.observe_tool_call(call(
+            "poll-history",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+        ));
+        let mut historical_result = result("poll-history", "historical output");
+        historical_result.name = "bash".into();
+        historical_result.process_id = Some("process-live".into());
+        historical_result.process_state = Some("completed".into());
+        historical_result.stdout = Some("historical output".into());
+        historical_result.stdout_source_bytes = 17;
+        transcript.observe_tool_result(historical_result);
+        transcript.mark_history_entries(start, "process-history");
+        let start = transcript.entries().len();
+        transcript.append_prompt("message-1200".into());
+        transcript.mark_history_entries(start, "entry-1200");
+        assert_ne!(transcript.entries().last().unwrap().id, survivor);
+
+        let live = transcript.observe_tool_call(call(
+            "poll-live",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+        ));
+        assert_eq!(live, survivor);
+        assert_eq!(transcript.entries().last().unwrap().id, survivor);
+        assert!(transcript.has_live_entries());
+        assert!(
+            !transcript
+                .historical_durable_entry_ids()
+                .contains("process-history")
+        );
+        assert!(
+            transcript
+                .represented_durable_entry_ids()
+                .contains("process-history")
+        );
+
+        let removed = transcript
+            .retain_historical_entries_in_order(
+                1_200,
+                true,
+                &(0..1_200)
+                    .map(|index| format!("entry-{index}"))
+                    .chain(std::iter::once("process-history".into()))
+                    .chain(std::iter::once("entry-1200".into()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(removed, vec!["entry-1200", "process-history"]);
+        assert!(
+            !transcript
+                .represented_durable_entry_ids()
+                .contains("process-history")
+        );
+        assert!(transcript.entry(survivor).is_some());
+
+        let mut live_result = result("poll-live", "live output");
+        live_result.name = "bash".into();
+        live_result.process_id = Some("process-live".into());
+        live_result.process_state = Some("running".into());
+        live_result.stdout = Some("live output".into());
+        live_result.stdout_source_bytes = 11;
+        assert_eq!(transcript.observe_tool_result(live_result), survivor);
+        assert!(
+            transcript
+                .entry(survivor)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .retained_output
+                .text
+                .contains("live output")
+        );
+    }
+
+    #[test]
+    fn historical_retention_evicts_whole_message_groups() {
+        let mut transcript = Transcript::default();
+        for index in 0..5 {
+            transcript.append_prompt(format!("grouped-{index}"));
+        }
+        transcript.mark_history_entries(0, "large-group");
+        let start = transcript.entries().len();
+        transcript.append_prompt("survivor".into());
+        transcript.mark_history_entries(start, "survivor");
+
+        assert_eq!(
+            transcript.retain_historical_entries(3, false),
+            Some(vec!["large-group".into()])
+        );
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(transcript.entries()[0].content, "survivor");
+    }
+
+    #[test]
+    fn prepending_history_keeps_the_existing_omission_marker_identity() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("current".into());
+        transcript.mark_history_entries(0, "current-entry");
+        transcript.replace_history_omission_marker(true);
+        let marker_id = transcript.entries()[0].id;
+        let mut older = Transcript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+
+        assert!(transcript.prepend_history_page(&older));
+        assert_eq!(transcript.entries()[0].id, marker_id);
+        assert_eq!(transcript.entries()[1].content, "older");
+        assert_eq!(transcript.entries()[2].content, "current");
+
+        transcript.replace_history_omission_marker(false);
+        assert_eq!(transcript.entries()[0].content, "older");
     }
 
     #[test]

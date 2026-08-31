@@ -516,7 +516,7 @@ impl TranscriptRowCache {
             && !entry.content.is_empty())
         .then(|| self.markdown_snapshot(entry));
         if let Some(cached) = self.rows.get(&key).cloned() {
-            if cached_row_valid(&cached, entry, markdown_snapshot.as_deref()) {
+            if cached_row_valid(transcript, &cached, entry, markdown_snapshot.as_deref()) {
                 self.work.cache_hits = self.work.cache_hits.saturating_add(1);
                 return Some(cached);
             }
@@ -1691,8 +1691,11 @@ pub enum TranscriptViewAction {
     ScrollLines(i32),
     PageUp,
     PageDown,
+    Home,
     FollowTail,
     OutputChanged,
+    /// A persisted page changed around existing semantic anchors, never live output.
+    HistoryChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1762,6 +1765,26 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) {
         match action {
+            TranscriptViewAction::HistoryChanged => {
+                if !self.follow_tail {
+                    self.top = self.top.and_then(|anchor| {
+                        normalize_anchor(
+                            transcript,
+                            cache,
+                            anchor,
+                            self.width,
+                            AnchorNormalization::Content,
+                        )
+                    });
+                    if self.top.is_none() {
+                        self.top = transcript.entries().first().map(|entry| RowAnchor {
+                            entry_id: entry.id,
+                            position: RowPosition::Header,
+                        });
+                        self.follow_tail = self.top.is_none();
+                    }
+                }
+            }
             TranscriptViewAction::OutputChanged => {
                 if !self.follow_tail {
                     self.top = self.top.and_then(|anchor| {
@@ -1793,6 +1816,7 @@ impl TranscriptViewport {
                 let amount = self.height.saturating_sub(1).max(1);
                 self.scroll_down(transcript, cache, amount);
             }
+            TranscriptViewAction::Home => self.scroll_up(transcript, cache, usize::MAX),
             TranscriptViewAction::ScrollLines(lines) if lines < 0 => {
                 self.scroll_up(transcript, cache, lines.unsigned_abs() as usize);
             }
@@ -1825,6 +1849,12 @@ impl TranscriptViewport {
         let rows = collect_rows(transcript, cache, top, self.width, self.height);
         self.populate_overscan(transcript, cache, top, rows.last().map(|row| row.anchor));
         rows
+    }
+
+    pub fn at_oldest(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) -> bool {
+        let _ = self.visible_rows(transcript, cache);
+        self.top
+            .is_some_and(|top| cache.previous_anchor(transcript, top, self.width).is_none())
     }
 
     fn scroll_up(
@@ -1940,6 +1970,7 @@ impl TranscriptViewport {
 }
 
 fn cached_row_valid(
+    transcript: &Transcript,
     cached: &CachedRow,
     entry: &TranscriptEntry,
     markdown: Option<&MarkdownSnapshot>,
@@ -1967,7 +1998,13 @@ fn cached_row_valid(
                 .next
                 .is_some_and(|next| next.entry_id == entry.id && next.position == expected)
         }
-        TranscriptRowKind::Spacer => true,
+        TranscriptRowKind::Spacer => {
+            cached.next
+                == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                    entry_id: next.id,
+                    position: RowPosition::Header,
+                })
+        }
         TranscriptRowKind::Content if entry.role == TranscriptRole::Assistant => {
             let Some(snapshot) = markdown else {
                 return false;
@@ -2760,6 +2797,48 @@ mod tests {
     }
 
     #[test]
+    fn history_changes_preserve_surviving_anchors_and_fall_back_after_eviction() {
+        let mut transcript = Transcript::default();
+        let current = transcript.append_prompt("current".into());
+        transcript.mark_history_entries(0, "current-entry");
+        let live = transcript.append_prompt("live".into());
+        let mut viewport = TranscriptViewport {
+            top: Some(RowAnchor {
+                entry_id: current,
+                position: RowPosition::Header,
+            }),
+            follow_tail: false,
+            ..TranscriptViewport::default()
+        };
+        let mut cache = TranscriptRowCache::default();
+        let mut older = Transcript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+
+        assert!(transcript.prepend_history_page(&older));
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(viewport.top.unwrap().entry_id, current);
+
+        viewport.top = Some(RowAnchor {
+            entry_id: transcript.entries()[0].id,
+            position: RowPosition::Header,
+        });
+        transcript.retain_historical_entries(0, false).unwrap();
+        cache = TranscriptRowCache::default();
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(viewport.top.unwrap().entry_id, live);
+        assert!(!viewport.follow_tail);
+    }
+
+    #[test]
     fn anchored_viewport_survives_authoritative_replacement() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());
@@ -2934,6 +3013,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn moving_historical_process_to_live_suffix_invalidates_cached_links() {
+        let mut transcript = Transcript::default();
+        let older = transcript.append_prompt("older".into());
+        transcript.mark_history_entries(0, "older-entry");
+        let process_start = transcript.entries().len();
+        let process = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-history".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        let mut completed = tool_result("poll-history", "historical output");
+        completed.name = "bash".into();
+        completed.process_id = Some("process-live".into());
+        completed.process_state = Some("completed".into());
+        completed.stdout = Some("historical output".into());
+        completed.stdout_source_bytes = 17;
+        transcript.observe_tool_result(completed);
+        transcript.mark_history_entries(process_start, "process-entry");
+        let newer_start = transcript.entries().len();
+        let newer = transcript.append_prompt("newer".into());
+        transcript.mark_history_entries(newer_start, "newer-entry");
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 40);
+        let _ = viewport.visible_rows(&transcript, &mut cache);
+
+        let reused = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-live".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        assert_eq!(reused, process);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let mut rendered_order = Vec::new();
+        for row in rows {
+            if rendered_order.last() != Some(&row.anchor.entry_id) {
+                rendered_order.push(row.anchor.entry_id);
+            }
+        }
+
+        assert_eq!(
+            transcript
+                .entries()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![older, newer, process]
+        );
+        assert_eq!(rendered_order, vec![older, newer, process]);
     }
 
     #[test]

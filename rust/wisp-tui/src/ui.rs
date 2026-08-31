@@ -268,7 +268,9 @@ fn render_transcript(
             })
             .collect()
     };
-    let title = if viewport.has_unseen_output() {
+    let title = if state.history.tail_evicted && viewport.follows_tail() {
+        " conversation • more history ↓ "
+    } else if viewport.has_unseen_output() {
         " conversation • new ↓ "
     } else if viewport.follows_tail() {
         " conversation "
@@ -284,7 +286,16 @@ fn selected_detail<'a>(
     state: &'a UiState,
     view: &DetailView,
 ) -> Option<&'a ToolDetailPresentation> {
-    let entry = state.transcript.entry(view.selected_entry()?)?;
+    let selected = view.selected_entry()?;
+    if let Some(detail) = state
+        .history
+        .active_exact_detail
+        .as_ref()
+        .filter(|detail| detail.target == selected)
+    {
+        return Some(&detail.presentation);
+    }
+    let entry = state.transcript.entry(selected)?;
     let card = entry.tool_card()?;
     let DetailAvailability::LiveRetained(detail) = &card.structured_detail else {
         return None;
@@ -943,6 +954,36 @@ mod tests {
     }
 
     #[test]
+    fn fetched_exact_detail_is_selected_for_rendering() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let target = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "read-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "README.md"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let presentation = ToolDetailPresentation {
+            kind: crate::tool_detail::DetailPresentationKind::Read,
+            title: "README.md".into(),
+            summary: "1 line".into(),
+            additions: 0,
+            deletions: 0,
+            rows: Vec::new(),
+            truncated: false,
+        };
+        state.history.active_exact_detail = Some(crate::reducer::ActiveExactDetail {
+            target,
+            presentation: presentation.clone(),
+        });
+        let mut view = DetailView::default();
+        view.open(target, &presentation);
+
+        assert_eq!(selected_detail(&state, &view), Some(&presentation));
+    }
+
+    #[test]
     fn idle_screen_contains_live_composer_and_contract() {
         let state = UiState::new("fake".into(), Some("model-x".into()), None);
         let mut editor = PromptEditor::default();
@@ -1240,6 +1281,33 @@ mod tests {
             .unwrap();
 
         assert!(terminal.backend().to_string().contains("new ↓"));
+    }
+
+    #[test]
+    fn transcript_title_reports_an_evicted_newer_tail() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("retained".into());
+        state.history.tail_evicted = true;
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+
+        assert!(terminal.backend().to_string().contains("more history ↓"));
     }
 
     #[test]

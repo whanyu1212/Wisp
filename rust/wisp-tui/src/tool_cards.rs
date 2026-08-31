@@ -411,6 +411,31 @@ impl ToolCardSnapshot {
         true
     }
 
+    pub(crate) fn reconcile_historical_result(
+        &mut self,
+        result: &ToolResultInput,
+        result_card: &Self,
+        detail_source: ToolDetailSource,
+    ) -> bool {
+        if !matches!(self.status, ToolStatus::Requested | ToolStatus::Cancelled) {
+            return false;
+        }
+        self.status = ToolStatus::Requested;
+        self.detail_source = detail_source;
+        self.structured_detail = DetailAvailability::None;
+        if result_card.status == ToolStatus::Denied {
+            self.status = ToolStatus::Denied;
+            self.detail = result_card.detail.clone();
+            self.retained_output = result_card.retained_output.clone();
+            self.backend_truncated = result_card.backend_truncated;
+            self.failure_code = result_card.failure_code.clone();
+            self.retryable = result_card.retryable;
+            self.detail_source = ToolDetailSource::None;
+            return true;
+        }
+        self.apply_result(result)
+    }
+
     pub fn action(&self) -> String {
         let verb = action_verb(&self.name, self.status);
         let mut action = if known_tool(&self.name) {
@@ -621,6 +646,111 @@ impl ProcessCardSnapshot {
             self.display_state = process_result_state(operation, result);
         }
         true
+    }
+
+    pub(crate) fn reconcile_historical_result(
+        &mut self,
+        operation: ProcessOperation,
+        result: &ToolResultInput,
+        sequence: u64,
+        denied: bool,
+    ) -> bool {
+        if !denied {
+            return self.observe(operation, result, sequence);
+        }
+        if self.last_sequence.is_some_and(|current| sequence < current) {
+            self.append_unlabelled("denied");
+            return true;
+        }
+        self.deny(operation, Some("denied"), sequence)
+    }
+
+    pub(crate) fn merge_historical_newer(&mut self, newer: &Self) -> u64 {
+        let sequence_offset = self
+            .last_sequence
+            .map_or(0, |sequence| sequence.saturating_add(1));
+        let separator = usize::from(
+            !self.retained_output.text.is_empty() && !newer.retained_output.text.is_empty(),
+        );
+        let combined = match (
+            self.retained_output.text.is_empty(),
+            newer.retained_output.text.is_empty(),
+        ) {
+            (true, _) => newer.retained_output.text.clone(),
+            (_, true) => self.retained_output.text.clone(),
+            (false, false) => format!(
+                "{}\n{}",
+                self.retained_output.text, newer.retained_output.text
+            ),
+        };
+        let source_bytes = self
+            .retained_output
+            .source_bytes
+            .saturating_add(newer.retained_output.source_bytes)
+            .saturating_add(u64::try_from(separator).unwrap_or(u64::MAX));
+        let source_lines = self
+            .retained_output
+            .source_lines
+            .saturating_add(newer.retained_output.source_lines)
+            .saturating_add(u64::from(
+                separator > 0 && self.retained_output.text.ends_with('\n'),
+            ));
+        let mut retained =
+            BoundedText::tail(&combined, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
+        retained.source_bytes = source_bytes;
+        retained.source_lines = source_lines;
+        retained.base_offset =
+            source_bytes.saturating_sub(u64::try_from(retained.text.len()).unwrap_or(u64::MAX));
+        retained.dropped_bytes = retained.base_offset;
+        retained.dropped_lines = source_lines.saturating_sub(logical_line_count(&retained.text));
+
+        self.display_state = newer.display_state;
+        self.poll_count = self.poll_count.saturating_add(newer.poll_count);
+        self.call_count = self.call_count.saturating_add(newer.call_count);
+        self.retained_output = retained;
+        self.backend_truncated |= newer.backend_truncated;
+        self.backend_dropped_bytes = self
+            .backend_dropped_bytes
+            .saturating_add(newer.backend_dropped_bytes);
+        let last_stream_label = if newer.retained_output.text.is_empty() {
+            self.last_stream_label
+        } else {
+            newer.last_stream_label
+        };
+        self.last_stream_label = last_stream_label
+            .filter(|label| self.retained_output.text.lines().any(|line| line == *label));
+        self.last_sequence = newer
+            .last_sequence
+            .map(|sequence| sequence.saturating_add(sequence_offset));
+        self.approval_sequence = None;
+        self.approval_resolved = false;
+        sequence_offset
+    }
+
+    pub(crate) fn prepend_historical_older(&mut self, older: &Self) -> u64 {
+        let approval_sequence = self.approval_sequence;
+        let approval_resolved = self.approval_resolved;
+        let mut merged = older.clone();
+        let sequence_offset = merged.merge_historical_newer(self);
+        merged.approval_sequence = approval_sequence.map(|sequence| {
+            sequence
+                .checked_add(sequence_offset)
+                .expect("tool lifecycle sequence exhausted")
+        });
+        merged.approval_resolved = approval_resolved;
+        *self = merged;
+        sequence_offset
+    }
+
+    pub(crate) fn next_historical_sequence(&self) -> u64 {
+        self.last_sequence
+            .map_or(0, |sequence| sequence.saturating_add(1))
+    }
+
+    pub(crate) fn release_historical_sequence(&mut self) {
+        self.last_sequence = None;
+        self.approval_sequence = None;
+        self.approval_resolved = false;
     }
 
     fn accept_sequence(&mut self, sequence: u64) -> bool {
@@ -1703,6 +1833,20 @@ mod tests {
         assert!(card.retained_output.text.contains("stdout:\nnext"));
         card.append_stream("stderr:", "\n\n");
         assert!(card.retained_output.text.contains("stderr:"));
+    }
+
+    #[test]
+    fn merged_process_output_counts_inserted_blank_lines() {
+        let mut older = ProcessCardSnapshot::new("process-1".into());
+        older.append_unlabelled("\n\n");
+        let mut newer = ProcessCardSnapshot::new("process-1".into());
+        newer.append_unlabelled("next");
+
+        older.merge_historical_newer(&newer);
+
+        assert_eq!(older.retained_output.text, "\n\nnext");
+        assert_eq!(older.retained_output.source_lines, 3);
+        assert_eq!(older.retained_output.dropped_lines, 0);
     }
 
     #[test]

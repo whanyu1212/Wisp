@@ -1925,6 +1925,10 @@ def _rpc_message_snapshot(
         )
     tool_calls = message.tool_calls or ()
     selected_tool_calls = tool_calls if complete_structure else tool_calls[:MESSAGE_TOOL_CALL_LIMIT]
+    tool_result, tool_result_projection_truncated = _rpc_tool_result_snapshot(
+        entry.tool_result,
+        text_budget=text_budget,
+    )
     return RpcMessageSnapshot(
         entry_id=entry.id,
         parent_id=entry.parent_id,
@@ -1933,7 +1937,7 @@ def _rpc_message_snapshot(
         role=message.role,
         content=content,
         content_original_bytes=content_original_bytes,
-        content_truncated=content_truncated,
+        content_truncated=content_truncated or tool_result_projection_truncated,
         tool_call_id=message.tool_call_id,
         tool_name=message.tool_name,
         tool_calls=tuple(
@@ -1951,7 +1955,7 @@ def _rpc_message_snapshot(
         is_error=message.is_error,
         usage=message.usage,
         cost=message.cost,
-        tool_result=_rpc_tool_result_snapshot(entry.tool_result, text_budget=text_budget),
+        tool_result=tool_result,
         skill_invocation=skill_invocation,
     )
 
@@ -1998,10 +2002,11 @@ def _rpc_tool_result_snapshot(
     tool_result: ToolResultPresentationSnapshot | None,
     *,
     text_budget: _MessagePageTextBudget | None,
-) -> RpcMessageToolResultSnapshot | None:
+) -> tuple[RpcMessageToolResultSnapshot | None, bool]:
     if tool_result is None:
-        return None
+        return None, False
     before_text = tool_result.before_text
+    projection_truncated = False
     truncated = tool_result.truncated
     if before_text is not None and text_budget is not None:
         clipped_before_text, _, before_text_truncated = _clip_text_with_budget(
@@ -2010,6 +2015,7 @@ def _rpc_tool_result_snapshot(
             text_budget=text_budget,
         )
         before_text = None if before_text_truncated else clipped_before_text
+        projection_truncated = projection_truncated or before_text_truncated
         truncated = truncated or before_text_truncated
     summary = tool_result.summary
     if summary is not None and text_budget is not None:
@@ -2018,15 +2024,19 @@ def _rpc_tool_result_snapshot(
             limit=MESSAGE_CONTENT_BYTE_LIMIT,
             text_budget=text_budget,
         )
+        projection_truncated = projection_truncated or summary_truncated
         truncated = truncated or summary_truncated
-    return RpcMessageToolResultSnapshot(
-        status=tool_result.status,
-        exit_code=tool_result.exit_code,
-        output_has_exit_status=tool_result.output_has_exit_status,
-        before_text=before_text,
-        created=tool_result.created,
-        summary=summary,
-        truncated=truncated,
+    return (
+        RpcMessageToolResultSnapshot(
+            status=tool_result.status,
+            exit_code=tool_result.exit_code,
+            output_has_exit_status=tool_result.output_has_exit_status,
+            before_text=before_text,
+            created=tool_result.created,
+            summary=summary,
+            truncated=truncated,
+        ),
+        projection_truncated,
     )
 
 
