@@ -117,17 +117,59 @@ impl PromptEditor {
         self.insert_text(pasted)
     }
 
-    fn insert_text(&mut self, inserted: &str) -> EditOutcome {
-        let normalized = inserted.replace("\r\n", "\n").replace('\r', "\n");
-        let mut safe = String::with_capacity(normalized.len());
-        let mut ignored_controls = 0;
-        for character in normalized.chars() {
-            if is_safe_prompt_character(character) {
-                safe.push(character);
-            } else {
-                ignored_controls += 1;
-            }
+    /// Whether a restored queued draft can precede the current draft without overflow.
+    pub fn can_prepend_restored(&self, restored: &str) -> bool {
+        let (safe, _) = safe_prompt_text(restored);
+        self.restored_text_fits(&safe)
+    }
+
+    /// Put a restored queued draft before the current draft without displacing it on overflow.
+    pub fn prepend_restored(&mut self, restored: &str) -> EditOutcome {
+        let (safe, ignored_controls) = safe_prompt_text(restored);
+        if safe.is_empty() {
+            return EditOutcome {
+                ignored_controls,
+                ..EditOutcome::default()
+            };
         }
+        if !self.restored_text_fits(&safe) {
+            return EditOutcome {
+                ignored_controls,
+                rejected_limit: true,
+                ..EditOutcome::default()
+            };
+        }
+        let separator = usize::from(!self.text.is_empty());
+        let prefix_len = safe.len().saturating_add(separator);
+        self.text.insert_str(0, &safe);
+        if separator != 0 {
+            self.text.insert(safe.len(), '\n');
+        }
+        self.cursor = self.cursor.saturating_add(prefix_len);
+        self.preferred_column = None;
+        EditOutcome {
+            changed: true,
+            ignored_controls,
+            rejected_limit: false,
+        }
+    }
+
+    fn restored_text_fits(&self, safe: &str) -> bool {
+        let separator = usize::from(!self.text.is_empty());
+        self.text
+            .len()
+            .saturating_add(safe.len())
+            .saturating_add(separator)
+            <= MAX_PROMPT_BYTES
+            && self
+                .line_count()
+                .saturating_add(safe.bytes().filter(|byte| *byte == b'\n').count())
+                .saturating_add(separator)
+                <= MAX_PROMPT_LINES
+    }
+
+    fn insert_text(&mut self, inserted: &str) -> EditOutcome {
+        let (safe, ignored_controls) = safe_prompt_text(inserted);
         if safe.is_empty() {
             return EditOutcome {
                 ignored_controls,
@@ -236,6 +278,20 @@ impl PromptEditor {
             .map_or(self.text.len(), |index| self.cursor + index);
         (start, end)
     }
+}
+
+fn safe_prompt_text(inserted: &str) -> (String, usize) {
+    let normalized = inserted.replace("\r\n", "\n").replace('\r', "\n");
+    let mut safe = String::with_capacity(normalized.len());
+    let mut ignored_controls = 0;
+    for character in normalized.chars() {
+        if is_safe_prompt_character(character) {
+            safe.push(character);
+        } else {
+            ignored_controls += 1;
+        }
+    }
+    (safe, ignored_controls)
 }
 
 fn is_safe_prompt_character(character: char) -> bool {
@@ -364,6 +420,21 @@ mod tests {
         let outcome = editor.insert_paste(&"x".repeat(MAX_PROMPT_BYTES));
         assert!(outcome.rejected_limit);
         assert_eq!(editor.text(), "kept");
+    }
+
+    #[test]
+    fn restored_draft_prepends_without_displacing_the_newer_draft() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("newer");
+        let outcome = editor.prepend_restored("older\u{1b}\r\nline");
+        assert!(outcome.changed);
+        assert_eq!(outcome.ignored_controls, 1);
+        assert_eq!(editor.text(), "older\nline\nnewer");
+
+        let preserved = editor.text().to_owned();
+        let outcome = editor.prepend_restored(&"x".repeat(MAX_PROMPT_BYTES));
+        assert!(outcome.rejected_limit);
+        assert_eq!(editor.text(), preserved);
     }
 
     #[test]

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import anyio
+from pydantic import ValidationError
 
 from wisp.agent.mode import AgentMode
 from wisp.events import (
@@ -120,9 +121,14 @@ class RecordingTraceRenderer(LineTuiRenderer):
         self._resolved_process_call_bytes = 0
         self._trace_current_command_id: str | None = None
         self._streaming = False
+        self.restored_drafts: list[str] = []
 
     def view_updated(self, snapshot: Any) -> None:
         self.view_snapshots.append(snapshot)
+
+    def restore_submissions(self, submissions: tuple[Any, ...]) -> bool:
+        self.restored_drafts.extend(submission.content for submission in submissions)
+        return True
 
     def notice(self, message: str) -> None:
         self.notices.append(message)
@@ -484,7 +490,13 @@ class TraceController:
         self._events: deque[Any] = deque()
 
     def _next_id(self, prefix: str) -> str:
-        return self._id_factory.next(prefix)
+        return self._id_factory.next(
+            {
+                "tui-steering": "steer",
+                "tui-follow_up": "follow_up",
+                "tui-queue-restore": "pop_queue",
+            }.get(prefix, prefix)
+        )
 
     async def prompt(self, prompt: str, *, command_id: str | None = None) -> str:
         cid = command_id or self._next_id("prompt")
@@ -688,6 +700,7 @@ class TraceRunResult:
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None
+    restored_drafts: tuple[str, ...]
     tool_cards: tuple[TraceToolCardProjection, ...]
     notices: tuple[str, ...]
     errors: tuple[str, ...]
@@ -1084,6 +1097,35 @@ class TraceRunner:
                 should_exit = await self.shell._handle_input_line(
                     _InputLine(text=sub, mode=_InputMode.idle)
                 )
+            elif inp.type == "local.steer":
+                sid = new_submission_id()
+                from wisp.tui.input_types import TuiSubmission
+
+                sub = TuiSubmission(
+                    id=SubmissionId(int(sid)),
+                    content=inp.content,
+                    display=inp.content,
+                    input_mode="running",
+                    queue_kind="steering",
+                )
+                await self.shell._submit_queue_message(sub, "steering")
+                should_exit = False
+            elif inp.type == "local.follow_up":
+                sid = new_submission_id()
+                from wisp.tui.input_types import TuiSubmission
+
+                sub = TuiSubmission(
+                    id=SubmissionId(int(sid)),
+                    content=inp.content,
+                    display=inp.content,
+                    input_mode="running",
+                    queue_kind="follow_up",
+                )
+                await self.shell._submit_queue_message(sub, "follow_up")
+                should_exit = False
+            elif inp.type == "local.restore_queue":
+                await self.shell._restore_latest_queue_item()
+                should_exit = False
             elif inp.type == "local.slash":
                 # For slash commands, synthesize an input line with slash text.
                 # parse_tui_slash_command only recognizes "/"-prefixed text, so
@@ -1133,9 +1175,15 @@ class TraceRunner:
                     transient=bool(inp.transient) if not inp.trusted else False,
                 )
             elif inp.type == "rpc.event":
-                event = KnownWispEventAdapter.validate_python(inp.event)
-                self.renderer._trace_current_command_id = self.shell.state.current_command_id
-                should_exit = await self.shell._handle_rpc_event(event)
+                try:
+                    event = KnownWispEventAdapter.validate_python(inp.event)
+                except ValidationError as exc:
+                    if not all(error["type"] == "union_tag_invalid" for error in exc.errors()):
+                        raise
+                    should_exit = False
+                else:
+                    self.renderer._trace_current_command_id = self.shell.state.current_command_id
+                    should_exit = await self.shell._handle_rpc_event(event)
             elif inp.type == "rpc.closed":
                 should_exit = self.shell._handle_rpc_closed(_RpcEventsClosed(error=inp.error))
             else:  # pragma: no cover - schema discriminator prevents this
@@ -1159,6 +1207,7 @@ class TraceRunner:
             view=view,
             interaction=interaction,
             retained_text=self.renderer.retained_text,
+            restored_drafts=tuple(self.renderer.restored_drafts),
             tool_cards=self.renderer.tool_card_projection(),
             notices=tuple(self.renderer.notices),
             errors=tuple(self.renderer.errors),

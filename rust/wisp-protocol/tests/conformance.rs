@@ -50,6 +50,46 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         serde_json::json!({"type": "prompt", "id": "prompt-1", "prompt": "hello"})
     );
 
+    let steer = commands::WispTypedClientRpcCommands::steer("steer-1", "change course")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        steer,
+        serde_json::json!({"type": "steer", "id": "steer-1", "content": "change course"})
+    );
+
+    let follow_up = commands::WispTypedClientRpcCommands::follow_up("follow-up-1", "continue")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        follow_up,
+        serde_json::json!({"type": "follow_up", "id": "follow-up-1", "content": "continue"})
+    );
+
+    let queue_state = commands::WispTypedClientRpcCommands::get_queue_state("queue-state-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        queue_state,
+        serde_json::json!({"type": "get_queue_state", "id": "queue-state-1"})
+    );
+
+    let pop = commands::WispTypedClientRpcCommands::pop_queue(
+        "queue-pop-1",
+        commands::QueueKind::FollowUp,
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        pop,
+        serde_json::json!({"type": "pop_queue", "id": "queue-pop-1", "kind": "follow_up"})
+    );
+    assert_eq!(commands::QueueKind::Steering.as_wire_value(), "steering");
+
     let approval = commands::WispTypedClientRpcCommands::approval(
         "approval-1",
         "call-1",
@@ -201,6 +241,102 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         })
     );
 
+    let named = commands::WispTypedClientRpcCommands::set_session_name("name-1", "release work")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        named,
+        serde_json::json!({"type": "set_session_name", "id": "name-1", "name": "release work"})
+    );
+    let cleared = commands::WispTypedClientRpcCommands::set_session_name("name-2", "")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        cleared,
+        serde_json::json!({"type": "set_session_name", "id": "name-2", "name": ""})
+    );
+
+    let cloned = commands::WispTypedClientRpcCommands::clone_session("clone-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        cloned,
+        serde_json::json!({"type": "clone_session", "id": "clone-1"})
+    );
+
+    let forked = commands::WispTypedClientRpcCommands::fork_session("fork-1", "entry-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        forked,
+        serde_json::json!({"type": "fork_session", "id": "fork-1", "entry_id": "entry-1"})
+    );
+
+    let first_tree = commands::WispTypedClientRpcCommands::get_session_tree("tree-1", None)
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        first_tree,
+        serde_json::json!({"type": "get_session_tree", "id": "tree-1", "limit": 200})
+    );
+    let next_tree =
+        commands::WispTypedClientRpcCommands::get_session_tree("tree-2", Some("entry-200"))
+            .unwrap()
+            .into_value()
+            .unwrap();
+    assert_eq!(
+        next_tree,
+        serde_json::json!({
+            "type": "get_session_tree", "id": "tree-2", "limit": 200,
+            "after_entry_id": "entry-200"
+        })
+    );
+
+    let navigated =
+        commands::WispTypedClientRpcCommands::navigate_session_tree("navigate-1", "entry-2")
+            .unwrap()
+            .into_value()
+            .unwrap();
+    assert_eq!(
+        navigated,
+        serde_json::json!({
+            "type": "navigate_session_tree", "id": "navigate-1", "entry_id": "entry-2"
+        })
+    );
+
+    let unreverted = commands::WispTypedClientRpcCommands::unrevert_session_tree("unrevert-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        unreverted,
+        serde_json::json!({"type": "unrevert_session_tree", "id": "unrevert-1"})
+    );
+
+    assert!(commands::WispTypedClientRpcCommands::set_session_name("", "name").is_err());
+    assert!(commands::WispTypedClientRpcCommands::clone_session(&"x".repeat(257)).is_err());
+    assert!(commands::WispTypedClientRpcCommands::fork_session("fork-empty", "").is_err());
+    assert!(
+        commands::WispTypedClientRpcCommands::navigate_session_tree("navigate-empty", "").is_err()
+    );
+    assert!(
+        commands::WispTypedClientRpcCommands::get_session_tree("tree-empty", Some("")).is_err()
+    );
+    assert!(commands::WispTypedClientRpcCommands::unrevert_session_tree("").is_err());
+    let oversized_entry_id = "x".repeat(8 * 1024);
+    assert_eq!(
+        commands::WispTypedClientRpcCommands::fork_session("fork-long", &oversized_entry_id)
+            .unwrap()
+            .into_value()
+            .unwrap()["entry_id"],
+        oversized_entry_id
+    );
+
     let cancel = commands::WispTypedClientRpcCommands::cancel("cancel-1", "prompt-1")
         .unwrap()
         .into_value()
@@ -267,6 +403,13 @@ fn approval_builder_rejects_denied_scopes_and_invalid_ids() {
         .is_err()
     );
     assert!(commands::WispTypedClientRpcCommands::prompt("", "hello").is_err());
+    assert!(commands::WispTypedClientRpcCommands::steer("", "hello").is_err());
+    assert!(commands::WispTypedClientRpcCommands::follow_up(&"x".repeat(257), "hello").is_err());
+    assert!(commands::WispTypedClientRpcCommands::get_queue_state("").is_err());
+    assert!(
+        commands::WispTypedClientRpcCommands::pop_queue("", commands::QueueKind::Steering,)
+            .is_err()
+    );
     assert!(commands::WispTypedClientRpcCommands::get_sessions(&"x".repeat(257)).is_err());
     assert!(commands::WispTypedClientRpcCommands::select_session("select-1", "").is_err());
     assert!(commands::WispTypedClientRpcCommands::get_messages("messages-1", Some("")).is_err());

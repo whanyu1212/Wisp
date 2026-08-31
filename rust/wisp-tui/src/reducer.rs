@@ -7,7 +7,7 @@ use wisp_protocol::ProtocolDecodeError;
 use crate::tool_cards::{BoundedText, ToolCallInput, ToolResultInput, bounded_identity};
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
-use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
+use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
 
 mod event_projection;
 
@@ -19,12 +19,16 @@ const CANCELLING_APPROVAL_REASON: &str = "Denied from TUI: cancelling";
 const CANCELLED_TRUST_REASON: &str = "Trust prompt cancelled";
 const RPC_CANCELLED_PREFIX: &str = "RPC command cancelled:";
 pub const SESSION_CATALOG_LIMIT: usize = 50;
+pub const SESSION_TREE_PAGE_LIMIT: usize = 200;
+pub const SESSION_TREE_RETAINED_LIMIT: usize = 400;
 pub const SESSION_ID_MAX_BYTES: usize = 4 * 1024;
 const SESSION_PATH_MAX_BYTES: usize = 4 * 1024;
 const SESSION_LABEL_MAX_BYTES: usize = 512;
 const SESSION_UPDATED_AT_MAX_BYTES: usize = 128;
 const SESSION_ENTRY_COUNT_MAX: u32 = 1_000_000_000;
 const SESSION_NOTICE_MAX_BYTES: usize = 1024;
+pub const QUEUE_MESSAGE_LIMIT: usize = 100;
+pub const QUEUE_CONTENT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionIdentity {
@@ -52,6 +56,82 @@ pub struct SessionMessages {
     pub durable_entry_ids: Vec<String>,
     pub exact_tool_result: Option<Box<ToolResultInput>>,
     pub transcript: SharedTranscript,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionTreeNodeKind {
+    Message,
+    Event,
+    Compaction,
+}
+
+impl SessionTreeNodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Event => "event",
+            Self::Compaction => "compaction",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTreeNode {
+    pub entry_id: String,
+    pub parent_id: Option<String>,
+    pub created_at: String,
+    pub kind: SessionTreeNodeKind,
+    pub role: Option<String>,
+    pub preview: String,
+    pub preview_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTreePage {
+    pub session: Option<SessionIdentity>,
+    pub active_leaf_id: Option<String>,
+    pub total_node_count: u32,
+    pub nodes: Vec<SessionTreeNode>,
+    pub truncated: bool,
+    pub next_after_entry_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDerivation {
+    pub source: SessionIdentity,
+    pub source_active_leaf_id: Option<String>,
+    pub session: SessionIdentity,
+    pub active_leaf_id: Option<String>,
+    pub entry_count: u32,
+    pub selected_entry_id: Option<String>,
+    pub selected_prompt: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionNameChange {
+    pub session: SessionIdentity,
+    pub previous_name: Option<String>,
+    pub entry_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTreeNavigation {
+    pub session: SessionIdentity,
+    pub selected_entry_id: String,
+    pub previous_active_leaf_id: Option<String>,
+    pub active_leaf_id: Option<String>,
+    pub editor_text: Option<String>,
+    pub changed: bool,
+    pub entry_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTreeUnrevert {
+    pub session: SessionIdentity,
+    pub source_transition_id: String,
+    pub previous_active_leaf_id: Option<String>,
+    pub active_leaf_id: Option<String>,
+    pub entry_count: u32,
 }
 
 pub const TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT: usize = 1_200;
@@ -92,6 +172,7 @@ enum HistoryRequestKind {
         cursor: String,
     },
     Latest,
+    PostPromptSync,
     ExactDetail {
         target: crate::transcript::TranscriptEntryId,
         entry_id: String,
@@ -126,7 +207,42 @@ pub enum SessionOperation {
     HydratingSelection {
         command_id: String,
         selected: SessionIdentity,
+        restore_editor_text: Option<String>,
+        committed_operation: &'static str,
         report: Option<SessionMessages>,
+        completion: Option<SessionCompletion>,
+    },
+    NamingSession {
+        command_id: String,
+        changed: Option<SessionNameChange>,
+        completion: Option<SessionCompletion>,
+    },
+    CloningSession {
+        command_id: String,
+        derived: Option<SessionDerivation>,
+        completion: Option<SessionCompletion>,
+    },
+    ForkingSession {
+        command_id: String,
+        requested_entry_id: String,
+        derived: Option<SessionDerivation>,
+        completion: Option<SessionCompletion>,
+    },
+    LoadingTree {
+        command_id: String,
+        after_entry_id: Option<String>,
+        page: Option<SessionTreePage>,
+        completion: Option<SessionCompletion>,
+    },
+    NavigatingTree {
+        command_id: String,
+        requested_entry_id: String,
+        navigation: Option<SessionTreeNavigation>,
+        completion: Option<SessionCompletion>,
+    },
+    UnrevertingTree {
+        command_id: String,
+        unreverted: Option<SessionTreeUnrevert>,
         completion: Option<SessionCompletion>,
     },
     CreatingSession {
@@ -141,6 +257,12 @@ impl SessionOperation {
             Self::LoadingCatalog { .. } => "Loading sessions…",
             Self::SelectingSession { .. } => "Selecting session…",
             Self::HydratingSelection { .. } => "Loading session history…",
+            Self::NamingSession { .. } => "Naming session…",
+            Self::CloningSession { .. } => "Cloning session…",
+            Self::ForkingSession { .. } => "Forking session…",
+            Self::LoadingTree { .. } => "Loading session tree…",
+            Self::NavigatingTree { .. } => "Navigating session tree…",
+            Self::UnrevertingTree { .. } => "Restoring session tree…",
             Self::CreatingSession { .. } => "Creating new session…",
         }
     }
@@ -258,6 +380,173 @@ pub struct PendingApproval {
     pub safety: String,
 }
 
+/// One queue item retained by the reducer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedMessage {
+    pub content: String,
+    pub local_order: Option<u64>,
+    identity: u64,
+}
+
+/// Authoritative queue contents plus local identity and ordering metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QueueState {
+    pub steering: Vec<QueuedMessage>,
+    pub follow_up: Vec<QueuedMessage>,
+    next_identity: u64,
+}
+
+impl QueueState {
+    fn messages(&self, kind: QueueKind) -> &[QueuedMessage] {
+        match kind {
+            QueueKind::Steering => &self.steering,
+            QueueKind::FollowUp => &self.follow_up,
+        }
+    }
+
+    fn messages_mut(&mut self, kind: QueueKind) -> &mut Vec<QueuedMessage> {
+        match kind {
+            QueueKind::Steering => &mut self.steering,
+            QueueKind::FollowUp => &mut self.follow_up,
+        }
+    }
+
+    fn replace(&mut self, kind: QueueKind, contents: Vec<String>) -> Vec<u64> {
+        let previous = std::mem::take(self.messages_mut(kind));
+        let mut previous = previous.into_iter().map(Some).collect::<Vec<_>>();
+        let mut replacement = Vec::with_capacity(contents.len());
+        let mut new_identities = Vec::new();
+
+        for content in contents {
+            if let Some(index) = previous.iter().position(|message| {
+                message
+                    .as_ref()
+                    .is_some_and(|message| message.content == content)
+            }) {
+                replacement.push(previous[index].take().expect("matched queue item exists"));
+            } else {
+                let identity = self.next_identity;
+                self.next_identity = self
+                    .next_identity
+                    .checked_add(1)
+                    .expect("queue item identity exhausted");
+                replacement.push(QueuedMessage {
+                    content,
+                    local_order: None,
+                    identity,
+                });
+                new_identities.push(identity);
+            }
+        }
+        *self.messages_mut(kind) = replacement;
+        new_identities
+    }
+
+    fn assign_local_order(&mut self, kind: QueueKind, identity: u64, local_order: u64) {
+        if let Some(message) = self
+            .messages_mut(kind)
+            .iter_mut()
+            .find(|message| message.identity == identity)
+        {
+            message.local_order = Some(local_order);
+        }
+    }
+
+    fn item_matches(&self, kind: QueueKind, identity: u64, content: &str) -> bool {
+        self.messages(kind)
+            .iter()
+            .any(|message| message.identity == identity && message.content == content)
+    }
+
+    fn remove_first(&mut self, kind: QueueKind, content: &str) -> bool {
+        let messages = self.messages_mut(kind);
+        let Some(index) = messages
+            .iter()
+            .position(|message| message.content == content)
+        else {
+            return false;
+        };
+        messages.remove(index);
+        true
+    }
+
+    fn remove_last(&mut self, kind: QueueKind, content: &str) -> bool {
+        let messages = self.messages_mut(kind);
+        let Some(index) = messages
+            .iter()
+            .rposition(|message| message.content == content)
+        else {
+            return false;
+        };
+        messages.remove(index);
+        true
+    }
+
+    fn newest_kind(&self) -> Option<QueueKind> {
+        let newest = self
+            .steering
+            .iter()
+            .map(|message| (QueueKind::Steering, message))
+            .chain(
+                self.follow_up
+                    .iter()
+                    .map(|message| (QueueKind::FollowUp, message)),
+            )
+            .filter_map(|(kind, message)| message.local_order.map(|order| (kind, order)))
+            .max_by_key(|(_, order)| *order)
+            .map(|(kind, _)| kind);
+        newest.or_else(|| {
+            self.follow_up
+                .last()
+                .map(|_| QueueKind::FollowUp)
+                .or_else(|| self.steering.last().map(|_| QueueKind::Steering))
+        })
+    }
+
+    fn newest(&self) -> Option<(QueueKind, &QueuedMessage)> {
+        let kind = self.newest_kind()?;
+        self.messages(kind).last().map(|message| (kind, message))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueueRemovalOperation {
+    Pop,
+    Clear,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingQueueSubmission {
+    kind: QueueKind,
+    content: String,
+    local_order: u64,
+    observed_queue_update: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingQueueRestore {
+    command_id: String,
+    kind: QueueKind,
+    removal_received: bool,
+    removed_content: Option<String>,
+    completion: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueueSubmissionPreflightError {
+    Empty,
+    Full,
+}
+
+impl QueueSubmissionPreflightError {
+    pub(crate) const fn notice(self) -> &'static str {
+        match self {
+            Self::Empty => "Enter non-empty text before queueing.",
+            Self::Full => "Queue is full (100 messages or 8 MiB); kept your draft.",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -270,8 +559,7 @@ pub struct UiState {
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
     pub session_operation: Option<SessionOperation>,
-    pub queued_steering: usize,
-    pub queued_follow_ups: usize,
+    pub queue: QueueState,
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_trust_request_id: Option<String>,
@@ -281,6 +569,11 @@ pub struct UiState {
     pub transcript: SharedTranscript,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
+    post_prompt_session_sync_pending: bool,
+    post_prompt_stats_command_id: Option<String>,
+    pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
+    pending_queue_restore: Option<PendingQueueRestore>,
+    next_queue_order: u64,
 }
 
 impl UiState {
@@ -308,8 +601,7 @@ impl UiState {
             last_session: None,
             selected_session: None,
             session_operation: None,
-            queued_steering: 0,
-            queued_follow_ups: 0,
+            queue: QueueState::default(),
             current_command: None,
             pending_approval: None,
             pending_trust_request_id: None,
@@ -319,7 +611,110 @@ impl UiState {
             transcript: SharedTranscript::default(),
             history: HistoryWindow::default(),
             history_request: None,
+            post_prompt_session_sync_pending: false,
+            post_prompt_stats_command_id: None,
+            pending_queue_submissions: std::collections::BTreeMap::new(),
+            pending_queue_restore: None,
+            next_queue_order: 0,
         }
+    }
+
+    pub fn queued_steering(&self) -> usize {
+        self.queue.steering.len()
+    }
+
+    pub fn queued_follow_ups(&self) -> usize {
+        self.queue.follow_up.len()
+    }
+
+    pub(crate) fn editor_editable(&self) -> bool {
+        !self.exit_requested
+            && self.input_ready
+            && self.session_operation.is_none()
+            && match self.current_command.as_ref() {
+                None => self.view_status == ViewStatus::Idle,
+                Some(ActiveCommand {
+                    command_type: ActiveCommandType::Prompt,
+                    ..
+                }) => {
+                    self.view_status == ViewStatus::Running
+                        && self.interaction_status == InteractionStatus::Running
+                        && !self.cancel_requested
+                }
+                Some(_) => false,
+            }
+    }
+
+    pub(crate) fn active_prompt_editable(&self) -> bool {
+        self.editor_editable() && self.current_command.is_some()
+    }
+
+    pub(crate) fn queue_restore_candidate(&self) -> Option<(QueueKind, &str)> {
+        self.pending_queue_restore
+            .is_none()
+            .then(|| self.queue.newest())
+            .flatten()
+            .map(|(kind, message)| (kind, message.content.as_str()))
+    }
+
+    pub(crate) fn queue_submission_preflight(
+        &self,
+        content: &str,
+    ) -> Result<(), QueueSubmissionPreflightError> {
+        if content.trim().is_empty() {
+            return Err(QueueSubmissionPreflightError::Empty);
+        }
+        let (count, bytes) = self
+            .queue_items()
+            .map(|(_, _, content)| content)
+            .chain(
+                self.unobserved_queue_submissions()
+                    .map(|(_, content)| content),
+            )
+            .fold((0usize, 0usize), |(count, bytes), content| {
+                (count.saturating_add(1), bytes.saturating_add(content.len()))
+            });
+        if count.saturating_add(1) > QUEUE_MESSAGE_LIMIT
+            || bytes.saturating_add(content.len()) > QUEUE_CONTENT_BYTES_LIMIT
+        {
+            return Err(QueueSubmissionPreflightError::Full);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn queue_items(&self) -> impl Iterator<Item = (QueueKind, u64, &str)> {
+        self.queue
+            .steering
+            .iter()
+            .map(|message| {
+                (
+                    QueueKind::Steering,
+                    message.identity,
+                    message.content.as_str(),
+                )
+            })
+            .chain(self.queue.follow_up.iter().map(|message| {
+                (
+                    QueueKind::FollowUp,
+                    message.identity,
+                    message.content.as_str(),
+                )
+            }))
+    }
+
+    pub(crate) fn unobserved_queue_submissions(&self) -> impl Iterator<Item = (QueueKind, &str)> {
+        self.pending_queue_submissions
+            .values()
+            .filter(|pending| !pending.observed_queue_update)
+            .map(|pending| (pending.kind, pending.content.as_str()))
+    }
+
+    pub(crate) fn pending_queue_restore_item(&self) -> Option<(QueueKind, &str)> {
+        let pending = self.pending_queue_restore.as_ref()?;
+        pending
+            .removed_content
+            .as_deref()
+            .map(|content| (pending.kind, content))
     }
 
     pub fn input_mode(&self) -> &'static str {
@@ -338,6 +733,10 @@ impl UiState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandKind {
     Prompt,
+    Steer,
+    FollowUp,
+    PopQueue,
+    GetQueueState,
     Approval,
     Cancel,
     Trust,
@@ -346,12 +745,22 @@ pub enum CommandKind {
     NewSession,
     SelectSession,
     GetMessages,
+    SetSessionName,
+    CloneSession,
+    ForkSession,
+    GetSessionTree,
+    NavigateSessionTree,
+    UnrevertSessionTree,
 }
 
 impl CommandKind {
     pub fn prefix(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
+            Self::Steer => "steer",
+            Self::FollowUp => "follow_up",
+            Self::PopQueue => "pop_queue",
+            Self::GetQueueState => "get_queue_state",
             Self::Approval => "approval",
             Self::Cancel => "cancel",
             Self::Trust => "trust",
@@ -360,6 +769,12 @@ impl CommandKind {
             Self::NewSession => "new_session",
             Self::SelectSession => "select_session",
             Self::GetMessages => "get_messages",
+            Self::SetSessionName => "set_session_name",
+            Self::CloneSession => "clone_session",
+            Self::ForkSession => "fork_session",
+            Self::GetSessionTree => "get_session_tree",
+            Self::NavigateSessionTree => "navigate_session_tree",
+            Self::UnrevertSessionTree => "unrevert_session_tree",
         }
     }
 }
@@ -407,6 +822,21 @@ pub enum BackendEvent {
         model: Option<String>,
         effort: Option<String>,
     },
+    QueueUpdated {
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
+    QueueItemsRemoved {
+        command_id: String,
+        operation: QueueRemovalOperation,
+        kind: Option<QueueKind>,
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
+    QueueMessageInjected {
+        kind: QueueKind,
+        content: String,
+    },
     SessionsReported {
         command_id: String,
         sessions: Vec<SessionSummary>,
@@ -415,6 +845,30 @@ pub enum BackendEvent {
     SessionSelected {
         command_id: String,
         session: SessionIdentity,
+    },
+    SessionNameChanged {
+        command_id: String,
+        changed: SessionNameChange,
+    },
+    SessionCloned {
+        command_id: String,
+        derived: SessionDerivation,
+    },
+    SessionForked {
+        command_id: String,
+        derived: SessionDerivation,
+    },
+    SessionTreeReported {
+        command_id: String,
+        page: SessionTreePage,
+    },
+    SessionTreeNavigated {
+        command_id: String,
+        navigation: SessionTreeNavigation,
+    },
+    SessionTreeUnreverted {
+        command_id: String,
+        unreverted: SessionTreeUnrevert,
     },
     MessagesReported {
         command_id: String,
@@ -438,12 +892,39 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
+    Steer(String),
+    FollowUp(String),
+    RestoreNewestQueueDraft,
+    RefreshQueueState,
     StartupHydration,
     LoadSessionCatalog,
     SelectSession {
         session_id: String,
     },
     NewSession,
+    SetSessionName(String),
+    CloneSession,
+    ForkSession {
+        entry_id: String,
+    },
+    LoadSessionTree {
+        after_entry_id: Option<String>,
+    },
+    NavigateSessionTree {
+        entry_id: String,
+    },
+    UnrevertSessionTree,
+    RejectCommittedHydration {
+        command_id: String,
+        limit: usize,
+    },
+    RejectPostPromptSessionSync {
+        command_id: String,
+        limit: usize,
+    },
+    SkipPostPromptStats {
+        command_id: String,
+    },
     LoadOlderHistory,
     LoadNewerHistory,
     ReloadLatestHistory,
@@ -473,10 +954,25 @@ pub enum UiAction {
 #[derive(Debug)]
 pub enum UiEffect {
     SendCommand(WispTypedClientRpcCommands),
+    RestoreDraft {
+        content: String,
+        local_order: Option<u64>,
+    },
     ShowSessionPicker {
         sessions: Vec<SessionSummary>,
         selected_session_id: Option<String>,
     },
+    ShowSessionTreePage {
+        page: SessionTreePage,
+        append: bool,
+    },
+    CloseSessionTree,
+    RestoreSessionDraft(String),
+    SendCommittedHydration {
+        command: WispTypedClientRpcCommands,
+        session_id: String,
+    },
+    SendPostPromptSessionSync(WispTypedClientRpcCommands),
     ReplaceTranscript,
     HistoryWindowChanged,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
@@ -506,10 +1002,31 @@ pub fn reduce(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     match action {
         UiAction::Submit(content) => submit(state, content, ids),
+        UiAction::Steer(content) => queue_submission(state, QueueKind::Steering, content, ids),
+        UiAction::FollowUp(content) => queue_submission(state, QueueKind::FollowUp, content, ids),
+        UiAction::RestoreNewestQueueDraft => restore_newest_queue_draft(state, ids),
+        UiAction::RefreshQueueState => refresh_queue_state(ids),
         UiAction::StartupHydration => start_startup_hydration(state, ids),
         UiAction::LoadSessionCatalog => load_session_catalog(state, ids),
         UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
         UiAction::NewSession => new_session(state, ids),
+        UiAction::SetSessionName(name) => set_session_name(state, name, ids),
+        UiAction::CloneSession => clone_session(state, ids),
+        UiAction::ForkSession { entry_id } => fork_session(state, entry_id, ids),
+        UiAction::LoadSessionTree { after_entry_id } => {
+            load_session_tree(state, after_entry_id, ids)
+        }
+        UiAction::NavigateSessionTree { entry_id } => navigate_session_tree(state, entry_id, ids),
+        UiAction::UnrevertSessionTree => unrevert_session_tree(state, ids),
+        UiAction::RejectCommittedHydration { command_id, limit } => {
+            reject_committed_hydration(state, &command_id, limit)
+        }
+        UiAction::RejectPostPromptSessionSync { command_id, limit } => {
+            reject_post_prompt_session_sync(state, &command_id, limit)
+        }
+        UiAction::SkipPostPromptStats { command_id } => {
+            skip_post_prompt_stats(state, &command_id, ids)
+        }
         UiAction::LoadOlderHistory => load_older_history(state, ids),
         UiAction::LoadNewerHistory => load_newer_history(state, ids),
         UiAction::ReloadLatestHistory => reload_latest_history(state, ids),
@@ -551,6 +1068,12 @@ fn submit(
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
+    if session_sync_pending(state) {
+        return Ok(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     if state.session_operation.is_some() {
         return Err(ReduceError::SessionOperationActive);
     }
@@ -580,7 +1103,101 @@ fn submit(
     ])
 }
 
+fn queue_submission(
+    state: &mut UiState,
+    kind: QueueKind,
+    content: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Err(error) = state.queue_submission_preflight(&content) {
+        return Ok(vec![
+            UiEffect::Notice(error.notice().into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    let id = ids.next_id(match kind {
+        QueueKind::Steering => CommandKind::Steer,
+        QueueKind::FollowUp => CommandKind::FollowUp,
+    });
+    let command = match kind {
+        QueueKind::Steering => WispTypedClientRpcCommands::steer(&id, &content)?,
+        QueueKind::FollowUp => WispTypedClientRpcCommands::follow_up(&id, &content)?,
+    };
+    let local_order = state.next_queue_order;
+    state.next_queue_order = state
+        .next_queue_order
+        .checked_add(1)
+        .expect("queue submission order exhausted");
+    state.pending_queue_submissions.insert(
+        id,
+        PendingQueueSubmission {
+            kind,
+            content,
+            local_order,
+            observed_queue_update: false,
+        },
+    );
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn restore_newest_queue_draft(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.pending_queue_restore.is_some() {
+        return Ok(vec![
+            UiEffect::Notice("A queued item is already being restored.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    let Some(kind) = state.queue.newest_kind() else {
+        return Ok(vec![
+            UiEffect::Notice("No queued steering or follow-up to restore.".into()),
+            UiEffect::RequestRender,
+        ]);
+    };
+    let id = ids.next_id(CommandKind::PopQueue);
+    let command = WispTypedClientRpcCommands::pop_queue(&id, kind)?;
+    state.pending_queue_restore = Some(PendingQueueRestore {
+        command_id: id,
+        kind,
+        removal_received: false,
+        removed_content: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn refresh_queue_state(ids: &mut impl CommandIdSource) -> Result<Vec<UiEffect>, ReduceError> {
+    Ok(vec![queue_state_effect(ids)?, UiEffect::RequestRender])
+}
+
+fn queue_state_effect(ids: &mut impl CommandIdSource) -> Result<UiEffect, ProtocolDecodeError> {
+    let id = ids.next_id(CommandKind::GetQueueState);
+    Ok(UiEffect::SendCommand(
+        WispTypedClientRpcCommands::get_queue_state(&id)?,
+    ))
+}
+
+fn clear_queue_cache(state: &mut UiState) {
+    state.queue = QueueState::default();
+    state.pending_queue_submissions.clear();
+    state.pending_queue_restore = None;
+}
+
 fn begin_session_operation(state: &UiState) -> Result<Option<Vec<UiEffect>>, ReduceError> {
+    if session_sync_pending(state) {
+        return Ok(Some(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]));
+    }
     if state.history_request.is_some() {
         return Ok(Some(vec![
             UiEffect::Notice("Wait for the current history request to finish.".into()),
@@ -664,6 +1281,7 @@ fn select_session(
     });
     Ok(vec![
         UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
         UiEffect::RequestRender,
     ])
 }
@@ -681,8 +1299,265 @@ fn new_session(
     state.session_operation = Some(SessionOperation::CreatingSession { command_id: id });
     Ok(vec![
         UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
         UiEffect::RequestRender,
     ])
+}
+
+fn selected_session(state: &UiState) -> Result<&SessionIdentity, Vec<UiEffect>> {
+    if session_sync_pending(state) {
+        return Err(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    state.selected_session.as_ref().ok_or_else(|| {
+        vec![
+            UiEffect::Notice("No persisted session is selected.".into()),
+            UiEffect::RequestRender,
+        ]
+    })
+}
+
+fn set_session_name(
+    state: &mut UiState,
+    name: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::SetSessionName);
+    let command = WispTypedClientRpcCommands::set_session_name(&id, &name)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::NamingSession {
+        command_id: id,
+        changed: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn clone_session(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::CloneSession);
+    let command = WispTypedClientRpcCommands::clone_session(&id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::CloningSession {
+        command_id: id,
+        derived: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn fork_session(
+    state: &mut UiState,
+    entry_id: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !valid_session_id(&entry_id) {
+        return Ok(vec![
+            UiEffect::Notice("Tree entry ID is empty or exceeds the 4096-byte limit.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::ForkSession);
+    let command = WispTypedClientRpcCommands::fork_session(&id, &entry_id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::ForkingSession {
+        command_id: id,
+        requested_entry_id: entry_id,
+        derived: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn load_session_tree(
+    state: &mut UiState,
+    after_entry_id: Option<String>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if after_entry_id
+        .as_deref()
+        .is_some_and(|entry_id| !valid_session_id(entry_id))
+    {
+        return Ok(vec![
+            UiEffect::Notice("Tree cursor is empty or exceeds the 4096-byte limit.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::GetSessionTree);
+    let command = WispTypedClientRpcCommands::get_session_tree(&id, after_entry_id.as_deref())?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::LoadingTree {
+        command_id: id,
+        after_entry_id,
+        page: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn navigate_session_tree(
+    state: &mut UiState,
+    entry_id: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !valid_session_id(&entry_id) {
+        return Ok(vec![
+            UiEffect::Notice("Tree entry ID is empty or exceeds the 4096-byte limit.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::NavigateSessionTree);
+    let command = WispTypedClientRpcCommands::navigate_session_tree(&id, &entry_id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::NavigatingTree {
+        command_id: id,
+        requested_entry_id: entry_id,
+        navigation: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn unrevert_session_tree(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Err(effects) = selected_session(state) {
+        return Ok(effects);
+    }
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
+    let id = ids.next_id(CommandKind::UnrevertSessionTree);
+    let command = WispTypedClientRpcCommands::unrevert_session_tree(&id)?;
+    state.input_ready = false;
+    state.session_operation = Some(SessionOperation::UnrevertingTree {
+        command_id: id,
+        unreverted: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::CloseSessionTree,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn reject_committed_hydration(
+    state: &mut UiState,
+    command_id: &str,
+    limit: usize,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    let Some(SessionOperation::HydratingSelection {
+        command_id: pending,
+        selected,
+        committed_operation,
+        ..
+    }) = state.session_operation.as_ref()
+    else {
+        return Ok(Vec::new());
+    };
+    if pending != command_id {
+        return Ok(Vec::new());
+    }
+    let session_id = selected.session_id.clone();
+    let committed_operation = *committed_operation;
+    state.session_operation = None;
+    state.input_ready = true;
+    Ok(vec![
+        UiEffect::Notice(format!(
+            "{committed_operation} committed session {session_id}, but its history request exceeds the negotiated {limit}-byte RPC frame limit. Reopen the session after reconnecting with a larger limit."
+        )),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn reject_post_prompt_session_sync(
+    state: &mut UiState,
+    command_id: &str,
+    limit: usize,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    let Some(request) = state.history_request.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if request.command_id != command_id
+        || !matches!(request.kind, HistoryRequestKind::PostPromptSync)
+    {
+        return Ok(Vec::new());
+    }
+    state.history_request = None;
+    state.post_prompt_session_sync_pending = false;
+    Ok(vec![
+        UiEffect::Notice(format!(
+            "Session metadata refresh exceeds the negotiated {limit}-byte RPC frame limit; reopen the session to refresh its active branch."
+        )),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn skip_post_prompt_stats(
+    state: &mut UiState,
+    command_id: &str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.post_prompt_stats_command_id.as_deref() != Some(command_id) {
+        return Ok(Vec::new());
+    }
+    state.post_prompt_stats_command_id = None;
+    Ok(start_post_prompt_session_sync(state, ids)?)
 }
 
 fn history_session_id(state: &UiState) -> Option<&str> {
@@ -692,6 +1567,10 @@ fn history_session_id(state: &UiState) -> Option<&str> {
         .as_ref()
         .or(state.selected_session.as_ref())
         .map(|session| session.session_id.as_str())
+}
+
+fn session_sync_pending(state: &UiState) -> bool {
+    state.post_prompt_session_sync_pending
 }
 
 fn can_request_history(state: &UiState, allow_during_prompt: bool) -> bool {
@@ -793,6 +1672,28 @@ fn reload_latest_history(
         HistoryRequestKind::Latest,
         command,
     ))
+}
+
+fn start_post_prompt_session_sync(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.history_request.is_some() {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command = WispTypedClientRpcCommands::get_messages(&id, history_session_id(state))?;
+    state.history_request = Some(HistoryRequest {
+        command_id: id,
+        kind: HistoryRequestKind::PostPromptSync,
+        active_leaf_may_advance: true,
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendPostPromptSessionSync(command),
+        UiEffect::RequestRender,
+    ])
 }
 
 fn load_exact_detail(
@@ -956,6 +1857,69 @@ fn restore_active_or_idle(state: &mut UiState) {
     }
 }
 
+fn capture_session_completion(
+    event: &BackendEvent,
+    command_id: &str,
+    command_type: &str,
+    completion: &mut Option<SessionCompletion>,
+) -> bool {
+    let BackendEvent::CommandFinished {
+        command_id: received,
+        command_type: received_type,
+        ok,
+        error,
+    } = event
+    else {
+        return false;
+    };
+    if received != command_id || received_type != command_type {
+        return false;
+    }
+    if completion.is_none() {
+        *completion = Some(SessionCompletion {
+            ok: *ok,
+            error: error
+                .as_deref()
+                .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+        });
+    }
+    true
+}
+
+fn commit_session_and_hydrate(
+    state: &mut UiState,
+    selected: SessionIdentity,
+    restore_editor_text: Option<String>,
+    committed_operation: &'static str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command = WispTypedClientRpcCommands::get_messages(&id, Some(&selected.session_id))?;
+    state.selected_session = Some(selected.clone());
+    state.last_session = Some(selected.session_id.clone());
+    state.transcript = SharedTranscript::default();
+    state.history = HistoryWindow::default();
+    clear_queue_cache(state);
+    state.history_request = None;
+    state.session_operation = Some(SessionOperation::HydratingSelection {
+        command_id: id,
+        selected: selected.clone(),
+        restore_editor_text,
+        committed_operation,
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::ReplaceTranscript,
+        UiEffect::SendCommittedHydration {
+            command,
+            session_id: selected.session_id,
+        },
+        queue_state_effect(ids)?,
+        UiEffect::RequestRender,
+    ])
+}
+
 fn handle_session_backend_event(
     state: &mut UiState,
     event: &BackendEvent,
@@ -965,6 +1929,29 @@ fn handle_session_backend_event(
         return Ok(None);
     };
 
+    match (&operation, event) {
+        (
+            SessionOperation::HydratingSelection {
+                command_id,
+                selected,
+                committed_operation,
+                ..
+            },
+            BackendEvent::MessagesProjectionFailed {
+                command_id: received,
+                error,
+            },
+        ) if received == command_id => {
+            return Ok(Some(committed_hydration_failure(
+                state,
+                selected,
+                committed_operation,
+                error.clone(),
+            )));
+        }
+        _ => {}
+    }
+
     let projection_failure = match (&operation, event) {
         (
             SessionOperation::StartupHydration { command_id, .. },
@@ -973,13 +1960,6 @@ fn handle_session_backend_event(
                 error,
             },
         ) if received == command_id => Some(("startup history", error.clone())),
-        (
-            SessionOperation::HydratingSelection { command_id, .. },
-            BackendEvent::MessagesProjectionFailed {
-                command_id: received,
-                error,
-            },
-        ) if received == command_id => Some(("session history", error.clone())),
         _ => None,
     };
     if let Some((operation, error)) = projection_failure {
@@ -1001,23 +1981,7 @@ fn handle_session_backend_event(
                 }
                 true
             }
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ok,
-                error,
-            } if received == command_id && command_type == "get_messages" => {
-                if completion.is_none() {
-                    *completion = Some(SessionCompletion {
-                        ok: *ok,
-                        error: error
-                            .as_deref()
-                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
-                    });
-                }
-                true
-            }
-            _ => false,
+            _ => capture_session_completion(event, command_id, "get_messages", completion),
         },
         SessionOperation::LoadingCatalog {
             command_id,
@@ -1040,23 +2004,7 @@ fn handle_session_backend_event(
                 }
                 true
             }
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ok,
-                error,
-            } if received == command_id && command_type == "get_sessions" => {
-                if completion.is_none() {
-                    *completion = Some(SessionCompletion {
-                        ok: *ok,
-                        error: error
-                            .as_deref()
-                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
-                    });
-                }
-                true
-            }
-            _ => false,
+            _ => capture_session_completion(event, command_id, "get_sessions", completion),
         },
         SessionOperation::SelectingSession {
             command_id,
@@ -1068,34 +2016,27 @@ fn handle_session_backend_event(
                 command_id: received,
                 session,
             } if received == command_id => {
-                if selected.is_none() && session.session_id == *requested_session_id {
+                if session.session_id != *requested_session_id {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session selection",
+                        Some("backend returned another session".into()),
+                    )));
+                }
+                if selected.is_none() {
                     *selected = Some(session.clone());
                 }
                 true
             }
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ok,
-                error,
-            } if received == command_id && command_type == "select_session" => {
-                if completion.is_none() {
-                    *completion = Some(SessionCompletion {
-                        ok: *ok,
-                        error: error
-                            .as_deref()
-                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
-                    });
-                }
-                true
-            }
-            _ => false,
+            _ => capture_session_completion(event, command_id, "select_session", completion),
         },
         SessionOperation::HydratingSelection {
             command_id,
             selected,
             report,
             completion,
+            committed_operation,
+            ..
         } => match event {
             BackendEvent::MessagesReported {
                 command_id: received,
@@ -1107,33 +2048,199 @@ fn handle_session_backend_event(
                         .as_ref()
                         .is_some_and(|session| same_session(session, selected))
                     {
-                        return Ok(Some(session_failure(
+                        return Ok(Some(committed_hydration_failure(
                             state,
-                            "session history hydration",
-                            Some("backend returned another session".into()),
+                            selected,
+                            committed_operation,
+                            "backend returned another session".into(),
                         )));
                     }
                     *report = Some(messages.clone());
                 }
                 true
             }
-            BackendEvent::CommandFinished {
+            _ => capture_session_completion(event, command_id, "get_messages", completion),
+        },
+        SessionOperation::NamingSession {
+            command_id,
+            changed,
+            completion,
+        } => match event {
+            BackendEvent::SessionNameChanged {
                 command_id: received,
-                command_type,
-                ok,
-                error,
-            } if received == command_id && command_type == "get_messages" => {
-                if completion.is_none() {
-                    *completion = Some(SessionCompletion {
-                        ok: *ok,
-                        error: error
-                            .as_deref()
-                            .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
-                    });
+                changed: received_change,
+            } if received == command_id => {
+                if !state
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| same_session(selected, &received_change.session))
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session naming",
+                        Some("backend returned another session".into()),
+                    )));
+                }
+                if changed.is_none() {
+                    *changed = Some(received_change.clone());
                 }
                 true
             }
-            _ => false,
+            _ => capture_session_completion(event, command_id, "set_session_name", completion),
+        },
+        SessionOperation::CloningSession {
+            command_id,
+            derived,
+            completion,
+        } => match event {
+            BackendEvent::SessionCloned {
+                command_id: received,
+                derived: received_derivation,
+            } if received == command_id => {
+                if !state
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| same_session(selected, &received_derivation.source))
+                    || received_derivation.source_active_leaf_id != state.history.active_leaf_id
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session clone",
+                        Some("backend returned another source session".into()),
+                    )));
+                }
+                if derived.is_none() {
+                    *derived = Some(received_derivation.clone());
+                }
+                true
+            }
+            _ => capture_session_completion(event, command_id, "clone_session", completion),
+        },
+        SessionOperation::ForkingSession {
+            command_id,
+            requested_entry_id,
+            derived,
+            completion,
+        } => match event {
+            BackendEvent::SessionForked {
+                command_id: received,
+                derived: received_derivation,
+            } if received == command_id => {
+                if !state
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| same_session(selected, &received_derivation.source))
+                    || received_derivation.source_active_leaf_id != state.history.active_leaf_id
+                    || received_derivation.selected_entry_id.as_ref() != Some(requested_entry_id)
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session fork",
+                        Some("backend returned another session or tree entry".into()),
+                    )));
+                }
+                if derived.is_none() {
+                    *derived = Some(received_derivation.clone());
+                }
+                true
+            }
+            _ => capture_session_completion(event, command_id, "fork_session", completion),
+        },
+        SessionOperation::LoadingTree {
+            command_id,
+            after_entry_id,
+            page,
+            completion,
+        } => match event {
+            BackendEvent::SessionTreeReported {
+                command_id: received,
+                page: received_page,
+            } if received == command_id => {
+                let requested_session = state.selected_session.as_ref();
+                let invalid_scope = !matches!(
+                    (requested_session, received_page.session.as_ref()),
+                    (Some(selected), Some(received)) if same_session(selected, received)
+                );
+                let invalid_cursor = after_entry_id.as_ref().is_some_and(|cursor| {
+                    received_page
+                        .nodes
+                        .iter()
+                        .any(|node| &node.entry_id == cursor)
+                        || received_page.next_after_entry_id.as_ref() == Some(cursor)
+                });
+                if invalid_scope
+                    || received_page.active_leaf_id != state.history.active_leaf_id
+                    || invalid_cursor
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session tree",
+                        Some("backend returned a stale or malformed page".into()),
+                    )));
+                }
+                if page.is_none() {
+                    *page = Some(received_page.clone());
+                }
+                true
+            }
+            _ => capture_session_completion(event, command_id, "get_session_tree", completion),
+        },
+        SessionOperation::NavigatingTree {
+            command_id,
+            requested_entry_id,
+            navigation,
+            completion,
+        } => match event {
+            BackendEvent::SessionTreeNavigated {
+                command_id: received,
+                navigation: received_navigation,
+            } if received == command_id => {
+                if received_navigation.selected_entry_id != *requested_entry_id
+                    || !state.selected_session.as_ref().is_some_and(|selected| {
+                        same_session(selected, &received_navigation.session)
+                    })
+                    || received_navigation.previous_active_leaf_id != state.history.active_leaf_id
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session tree navigation",
+                        Some("backend returned another session, entry, or active leaf".into()),
+                    )));
+                }
+                if navigation.is_none() {
+                    *navigation = Some(received_navigation.clone());
+                }
+                true
+            }
+            _ => capture_session_completion(event, command_id, "navigate_session_tree", completion),
+        },
+        SessionOperation::UnrevertingTree {
+            command_id,
+            unreverted,
+            completion,
+        } => match event {
+            BackendEvent::SessionTreeUnreverted {
+                command_id: received,
+                unreverted: received_unrevert,
+            } if received == command_id => {
+                if !state
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| same_session(selected, &received_unrevert.session))
+                    || received_unrevert.previous_active_leaf_id != state.history.active_leaf_id
+                {
+                    return Ok(Some(session_failure(
+                        state,
+                        "session tree unrevert",
+                        Some("backend returned another session or active leaf".into()),
+                    )));
+                }
+                if unreverted.is_none() {
+                    *unreverted = Some(received_unrevert.clone());
+                }
+                true
+            }
+            _ => capture_session_completion(event, command_id, "unrevert_session_tree", completion),
         },
         SessionOperation::CreatingSession { command_id } => matches!(
             event,
@@ -1165,9 +2272,14 @@ fn handle_session_backend_event(
                 .selected_session
                 .as_ref()
                 .map(|session| session.session_id.clone());
+            clear_queue_cache(state);
             install_history_snapshot(state, report);
             state.input_ready = true;
-            vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+            vec![
+                UiEffect::ReplaceTranscript,
+                queue_state_effect(ids)?,
+                UiEffect::RequestRender,
+            ]
         }
         SessionOperation::StartupHydration { .. } => {
             state.session_operation = Some(operation);
@@ -1210,45 +2322,193 @@ fn handle_session_backend_event(
             selected: Some(selected),
             completion: Some(_),
             ..
-        } => {
-            let id = ids.next_id(CommandKind::GetMessages);
-            let command =
-                WispTypedClientRpcCommands::get_messages(&id, Some(&selected.session_id))?;
-            state.selected_session = Some(selected.clone());
-            state.last_session = Some(selected.session_id.clone());
-            state.transcript = SharedTranscript::default();
-            state.history = HistoryWindow::default();
-            state.history_request = None;
-            state.session_operation = Some(SessionOperation::HydratingSelection {
-                command_id: id,
-                selected,
-                report: None,
-                completion: None,
-            });
-            vec![
-                UiEffect::ReplaceTranscript,
-                UiEffect::SendCommand(command),
-                UiEffect::RequestRender,
-            ]
-        }
+        } => commit_session_and_hydrate(state, selected, None, "Session selection", ids)?,
         SessionOperation::SelectingSession { .. } => {
             state.session_operation = Some(operation);
             return Ok(Some(Vec::new()));
         }
         SessionOperation::HydratingSelection {
             completion: Some(completion),
+            selected,
+            committed_operation,
             ..
-        } if !completion.ok => session_failure(state, "session history", completion.error),
+        } if !completion.ok => session_failure(
+            state,
+            "session history hydration",
+            Some(format!(
+                "{committed_operation} committed session {}, but history loading failed: {}. Use /resume {} to retry",
+                selected.session_id,
+                completion
+                    .error
+                    .unwrap_or_else(|| "backend reported failure".into()),
+                selected.session_id,
+            )),
+        ),
         SessionOperation::HydratingSelection {
-            report: Some(report),
+            report: Some(mut report),
+            completion: Some(_),
+            restore_editor_text,
+            selected,
+            ..
+        } => {
+            if let Some(history_session) = report
+                .session
+                .as_mut()
+                .filter(|history_session| same_session(history_session, &selected))
+            {
+                history_session.session_name = selected.session_name;
+            }
+            install_history_snapshot(state, report);
+            state.input_ready = true;
+            let mut effects = vec![UiEffect::ReplaceTranscript];
+            if let Some(text) = restore_editor_text {
+                effects.push(UiEffect::RestoreSessionDraft(text));
+            }
+            effects.push(UiEffect::RequestRender);
+            effects
+        }
+        SessionOperation::HydratingSelection { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::NamingSession {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session naming", completion.error),
+        SessionOperation::NamingSession {
+            changed: Some(changed),
             completion: Some(_),
             ..
         } => {
-            install_history_snapshot(state, report);
+            if let Some(selected) = state.selected_session.as_mut() {
+                selected.session_name = changed.session.session_name.clone();
+            }
+            if let Some(history) = state
+                .history
+                .session
+                .as_mut()
+                .filter(|history| same_session(history, &changed.session))
+            {
+                history.session_name = changed.session.session_name;
+            }
             state.input_ready = true;
-            vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+            vec![UiEffect::RequestRender]
         }
-        SessionOperation::HydratingSelection { .. } => {
+        SessionOperation::NamingSession { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::CloningSession {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session clone", completion.error),
+        SessionOperation::CloningSession {
+            derived: Some(derived),
+            completion: Some(_),
+            ..
+        } => commit_session_and_hydrate(state, derived.session, None, "Session clone", ids)?,
+        SessionOperation::CloningSession { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::ForkingSession {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session fork", completion.error),
+        SessionOperation::ForkingSession {
+            derived: Some(derived),
+            completion: Some(_),
+            ..
+        } => commit_session_and_hydrate(
+            state,
+            derived.session,
+            derived.selected_prompt,
+            "Session fork",
+            ids,
+        )?,
+        SessionOperation::ForkingSession { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::LoadingTree {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session tree", completion.error),
+        SessionOperation::LoadingTree {
+            after_entry_id,
+            page: Some(page),
+            completion: Some(_),
+            ..
+        } => {
+            state.input_ready = true;
+            vec![
+                UiEffect::ShowSessionTreePage {
+                    page,
+                    append: after_entry_id.is_some(),
+                },
+                UiEffect::RequestRender,
+            ]
+        }
+        SessionOperation::LoadingTree { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::NavigatingTree {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session tree navigation", completion.error),
+        SessionOperation::NavigatingTree {
+            navigation: Some(navigation),
+            completion: Some(_),
+            ..
+        } if !navigation.changed => {
+            state.input_ready = true;
+            let mut effects = Vec::new();
+            if let Some(text) = navigation.editor_text {
+                effects.push(UiEffect::RestoreSessionDraft(text));
+            }
+            effects.push(UiEffect::RequestRender);
+            effects
+        }
+        SessionOperation::NavigatingTree {
+            navigation: Some(navigation),
+            completion: Some(_),
+            ..
+        } => {
+            let mut selected = navigation.session;
+            selected.session_name = state
+                .selected_session
+                .as_ref()
+                .and_then(|session| session.session_name.clone());
+            commit_session_and_hydrate(
+                state,
+                selected,
+                navigation.editor_text,
+                "Session tree navigation",
+                ids,
+            )?
+        }
+        SessionOperation::NavigatingTree { .. } => {
+            state.session_operation = Some(operation);
+            return Ok(Some(Vec::new()));
+        }
+        SessionOperation::UnrevertingTree {
+            completion: Some(completion),
+            ..
+        } if !completion.ok => session_failure(state, "session tree unrevert", completion.error),
+        SessionOperation::UnrevertingTree {
+            unreverted: Some(unreverted),
+            completion: Some(_),
+            ..
+        } => {
+            let mut selected = unreverted.session;
+            selected.session_name = state
+                .selected_session
+                .as_ref()
+                .and_then(|session| session.session_name.clone());
+            commit_session_and_hydrate(state, selected, None, "Session tree unrevert", ids)?
+        }
+        SessionOperation::UnrevertingTree { .. } => {
             state.session_operation = Some(operation);
             return Ok(Some(Vec::new()));
         }
@@ -1258,9 +2518,14 @@ fn handle_session_backend_event(
                 state.selected_session = None;
                 state.last_session = None;
                 state.history = HistoryWindow::default();
+                clear_queue_cache(state);
                 state.history_request = None;
                 state.input_ready = true;
-                vec![UiEffect::ReplaceTranscript, UiEffect::RequestRender]
+                vec![
+                    UiEffect::ReplaceTranscript,
+                    queue_state_effect(ids)?,
+                    UiEffect::RequestRender,
+                ]
             }
             BackendEvent::CommandFinished { error, .. } => session_failure(
                 state,
@@ -1292,6 +2557,22 @@ fn session_failure(state: &mut UiState, operation: &str, error: Option<String>) 
         )),
         UiEffect::RequestRender,
     ]
+}
+
+fn committed_hydration_failure(
+    state: &mut UiState,
+    selected: &SessionIdentity,
+    committed_operation: &str,
+    error: String,
+) -> Vec<UiEffect> {
+    session_failure(
+        state,
+        "session history hydration",
+        Some(format!(
+            "{committed_operation} committed session {}, but history loading failed: {error}. Use /resume {} to retry",
+            selected.session_id, selected.session_id,
+        )),
+    )
 }
 
 fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
@@ -1377,6 +2658,17 @@ fn history_request_failure(error: String) -> Vec<UiEffect> {
     ]
 }
 
+fn finish_history_request_failure(
+    state: &mut UiState,
+    kind: &HistoryRequestKind,
+    error: String,
+) -> Vec<UiEffect> {
+    if matches!(kind, HistoryRequestKind::PostPromptSync) {
+        state.post_prompt_session_sync_pending = false;
+    }
+    history_request_failure(error)
+}
+
 fn handle_history_backend_event(
     state: &mut UiState,
     event: &BackendEvent,
@@ -1388,7 +2680,11 @@ fn handle_history_backend_event(
             messages,
         } if command_id == &request.command_id => {
             if request.report.is_some() {
-                return Some(history_request_failure("duplicate history report".into()));
+                return Some(finish_history_request_failure(
+                    state,
+                    &request.kind,
+                    "duplicate history report".into(),
+                ));
             }
             request.report = Some(messages.clone());
             true
@@ -1396,7 +2692,11 @@ fn handle_history_backend_event(
         BackendEvent::MessagesProjectionFailed { command_id, error }
             if command_id == &request.command_id =>
         {
-            return Some(history_request_failure(error.clone()));
+            return Some(finish_history_request_failure(
+                state,
+                &request.kind,
+                error.clone(),
+            ));
         }
         BackendEvent::CommandFinished {
             command_id,
@@ -1405,7 +2705,9 @@ fn handle_history_backend_event(
             error,
         } if command_id == &request.command_id && command_type == "get_messages" => {
             if !ok {
-                return Some(history_request_failure(
+                return Some(finish_history_request_failure(
+                    state,
+                    &request.kind,
                     error
                         .as_deref()
                         .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES))
@@ -1432,6 +2734,29 @@ fn handle_history_backend_event(
     }
     let report = request.report.take().expect("checked above");
     match request.kind {
+        HistoryRequestKind::PostPromptSync => {
+            state.post_prompt_session_sync_pending = false;
+            let Some(mut refreshed) = report.session else {
+                return Some(history_request_failure(
+                    "completed prompt did not report its persisted session".into(),
+                ));
+            };
+            let existing = state
+                .selected_session
+                .as_ref()
+                .or(state.history.session.as_ref());
+            if existing.is_some_and(|selected| !same_session(selected, &refreshed)) {
+                return Some(history_request_failure(
+                    "completed prompt reported another persisted session".into(),
+                ));
+            }
+            refreshed.session_name = existing.and_then(|session| session.session_name.clone());
+            state.last_session = Some(refreshed.session_id.clone());
+            state.selected_session = Some(refreshed.clone());
+            state.history.session = Some(refreshed);
+            state.history.active_leaf_id = report.active_leaf_id;
+            Some(vec![UiEffect::RequestRender])
+        }
         HistoryRequestKind::Older { cursor } | HistoryRequestKind::Newer { cursor }
             if !same_history_scope(&state.history, &report, request.active_leaf_may_advance)
                 || report.durable_entry_ids.is_empty()
@@ -1572,12 +2897,148 @@ fn handle_history_backend_event(
     }
 }
 
+fn apply_queue_update(state: &mut UiState, steering: Vec<String>, follow_up: Vec<String>) {
+    let mut new_steering = state.queue.replace(QueueKind::Steering, steering);
+    let mut new_follow_up = state.queue.replace(QueueKind::FollowUp, follow_up);
+    let mut pending = state
+        .pending_queue_submissions
+        .iter()
+        .filter(|(_, pending)| !pending.observed_queue_update)
+        .map(|(command_id, pending)| {
+            (
+                command_id.clone(),
+                pending.kind,
+                pending.content.clone(),
+                pending.local_order,
+            )
+        })
+        .collect::<Vec<_>>();
+    pending.sort_by_key(|(_, _, _, local_order)| *local_order);
+
+    for (command_id, kind, content, local_order) in pending {
+        let candidates = match kind {
+            QueueKind::Steering => &mut new_steering,
+            QueueKind::FollowUp => &mut new_follow_up,
+        };
+        let Some(index) = candidates
+            .iter()
+            .position(|identity| state.queue.item_matches(kind, *identity, &content))
+        else {
+            continue;
+        };
+        let identity = candidates.remove(index);
+        state.queue.assign_local_order(kind, identity, local_order);
+        if let Some(pending) = state.pending_queue_submissions.get_mut(&command_id) {
+            pending.observed_queue_update = true;
+        }
+    }
+}
+
+fn finish_pending_queue_restore(state: &mut UiState) -> Vec<UiEffect> {
+    let Some(pending) = state.pending_queue_restore.as_ref() else {
+        return Vec::new();
+    };
+    if pending.completion == Some(false) {
+        state.pending_queue_restore = None;
+        return Vec::new();
+    }
+    if pending.completion != Some(true) || !pending.removal_received {
+        return Vec::new();
+    }
+    let pending = state
+        .pending_queue_restore
+        .take()
+        .expect("checked pending queue restore");
+    pending
+        .removed_content
+        .map(|content| UiEffect::RestoreDraft {
+            content,
+            local_order: None,
+        })
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn handle_queue_items_removed(
+    state: &mut UiState,
+    command_id: String,
+    operation: QueueRemovalOperation,
+    kind: Option<QueueKind>,
+    steering: Vec<String>,
+    follow_up: Vec<String>,
+) -> Vec<UiEffect> {
+    let pending_kind = {
+        let Some(pending) = state.pending_queue_restore.as_ref() else {
+            return Vec::new();
+        };
+        if pending.command_id != command_id
+            || operation != QueueRemovalOperation::Pop
+            || kind != Some(pending.kind)
+        {
+            return Vec::new();
+        }
+        pending.kind
+    };
+    let removed_content = match pending_kind {
+        QueueKind::Steering => steering.into_iter().next(),
+        QueueKind::FollowUp => follow_up.into_iter().next(),
+    };
+    if let Some(content) = removed_content.as_deref() {
+        state.queue.remove_last(pending_kind, content);
+    }
+    let pending = state
+        .pending_queue_restore
+        .as_mut()
+        .expect("checked pending queue restore");
+    pending.removal_received = true;
+    pending.removed_content = removed_content;
+    finish_pending_queue_restore(state)
+}
+
+fn handle_queue_command_finished(
+    state: &mut UiState,
+    command_id: String,
+    command_type: String,
+    ok: bool,
+) -> Option<Vec<UiEffect>> {
+    if let Some(pending) = state.pending_queue_submissions.remove(&command_id) {
+        let expected_command_type = match pending.kind {
+            QueueKind::Steering => "steer",
+            QueueKind::FollowUp => "follow_up",
+        };
+        if expected_command_type != command_type {
+            state.pending_queue_submissions.insert(command_id, pending);
+            return None;
+        }
+        return Some(if ok {
+            Vec::new()
+        } else {
+            vec![UiEffect::RestoreDraft {
+                content: pending.content,
+                local_order: Some(pending.local_order),
+            }]
+        });
+    }
+    let pending = state.pending_queue_restore.as_mut()?;
+    if pending.command_id != command_id || command_type != "pop_queue" {
+        return None;
+    }
+    pending.completion = Some(ok);
+    Some(finish_pending_queue_restore(state))
+}
+
 fn handle_backend_event(
     state: &mut UiState,
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    if let Some(effects) = handle_history_backend_event(state, &event) {
+    if let Some(mut effects) = handle_history_backend_event(state, &event) {
+        if state.post_prompt_session_sync_pending
+            && state.post_prompt_stats_command_id.is_none()
+            && state.history_request.is_none()
+        {
+            effects.extend(start_post_prompt_session_sync(state, ids)?);
+        }
         return Ok(effects);
     }
     if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
@@ -1683,8 +3144,35 @@ fn handle_backend_event(
             state.effort = effort;
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::QueueUpdated {
+            steering,
+            follow_up,
+        } => {
+            apply_queue_update(state, steering, follow_up);
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::QueueItemsRemoved {
+            command_id,
+            operation,
+            kind,
+            steering,
+            follow_up,
+        } => Ok(handle_queue_items_removed(
+            state, command_id, operation, kind, steering, follow_up,
+        )),
+        BackendEvent::QueueMessageInjected { kind, content } => {
+            state.transcript.append_prompt(content.clone());
+            state.queue.remove_first(kind, &content);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::SessionsReported { .. }
         | BackendEvent::SessionSelected { .. }
+        | BackendEvent::SessionNameChanged { .. }
+        | BackendEvent::SessionCloned { .. }
+        | BackendEvent::SessionForked { .. }
+        | BackendEvent::SessionTreeReported { .. }
+        | BackendEvent::SessionTreeNavigated { .. }
+        | BackendEvent::SessionTreeUnreverted { .. }
         | BackendEvent::MessagesReported { .. }
         | BackendEvent::MessagesProjectionFailed { .. } => Ok(Vec::new()),
         BackendEvent::CommandFinished {
@@ -1693,6 +3181,17 @@ fn handle_backend_event(
             ok,
             error,
         } => {
+            if state.post_prompt_stats_command_id.as_deref() == Some(command_id.as_str())
+                && command_type == "get_session_stats"
+            {
+                state.post_prompt_stats_command_id = None;
+                return start_post_prompt_session_sync(state, ids);
+            }
+            if let Some(effects) =
+                handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
+            {
+                return Ok(effects);
+            }
             let matches_current = state.current_command.as_ref().is_some_and(|current| {
                 current.id == command_id && current.command_type.as_str() == command_type
             });
@@ -1701,6 +3200,8 @@ fn handle_backend_event(
             }
             let stats_id = ids.next_id(CommandKind::GetSessionStats);
             let stats = WispTypedClientRpcCommands::get_session_stats(&stats_id)?;
+            state.post_prompt_session_sync_pending = true;
+            state.post_prompt_stats_command_id = Some(stats_id);
             state.current_command = None;
             state.pending_approval = None;
             state.pending_trust_request_id = None;
@@ -1751,7 +3252,13 @@ mod tests {
     fn command_value(effect: &UiEffect) -> Option<Value> {
         match effect {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
-            UiEffect::ShowSessionPicker { .. }
+            UiEffect::SendCommittedHydration { command, .. } => Some(command.to_value().unwrap()),
+            UiEffect::SendPostPromptSessionSync(command) => Some(command.to_value().unwrap()),
+            UiEffect::RestoreDraft { .. }
+            | UiEffect::ShowSessionPicker { .. }
+            | UiEffect::ShowSessionTreePage { .. }
+            | UiEffect::CloseSessionTree
+            | UiEffect::RestoreSessionDraft(_)
             | UiEffect::ReplaceTranscript
             | UiEffect::HistoryWindowChanged
             | UiEffect::OpenExactDetail(_)
@@ -1892,6 +3399,142 @@ mod tests {
             command_value(&effects[0]).unwrap()["type"],
             "get_session_stats"
         );
+    }
+
+    #[test]
+    fn prompt_completion_syncs_the_selected_session_and_active_leaf_in_either_order() {
+        for result_first in [true, false] {
+            let selected = session("active");
+            let mut state = UiState::new("fake".into(), None, None);
+            state.selected_session = Some(selected.clone());
+            state.history.session = Some(selected.clone());
+            state.history.active_leaf_id = Some("old-leaf".into());
+            state.current_command = Some(ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: ActiveCommandType::Prompt,
+            });
+            let mut ids = DeterministicIds::default();
+
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(
+                command_value(&effects[0]).unwrap()["type"],
+                "get_session_stats"
+            );
+            assert!(state.post_prompt_session_sync_pending);
+
+            let blocked = reduce(&mut state, UiAction::CloneSession, &mut ids).unwrap();
+            assert!(matches!(
+                blocked.as_slice(),
+                [UiEffect::Notice(message), UiEffect::RequestRender]
+                    if message.contains("metadata refresh")
+            ));
+
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_session_stats-1", "get_session_stats", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["type"], "get_messages");
+
+            let report = BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(SessionIdentity {
+                        session_name: None,
+                        ..selected.clone()
+                    }),
+                    active_leaf_id: Some("new-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: SharedTranscript::default(),
+                },
+            };
+            let completion = finished("get_messages-1", "get_messages", true);
+            let ordered = if result_first {
+                [report, completion]
+            } else {
+                [completion, report]
+            };
+            for event in ordered {
+                reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+            }
+
+            assert!(!state.post_prompt_session_sync_pending);
+            assert_eq!(state.selected_session, Some(selected.clone()));
+            assert_eq!(state.history.session, Some(selected));
+            assert_eq!(state.history.active_leaf_id.as_deref(), Some("new-leaf"));
+            let effects = reduce(&mut state, UiAction::CloneSession, &mut ids).unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["type"], "clone_session");
+        }
+    }
+
+    #[test]
+    fn first_prompt_adopts_the_backend_created_session() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut ids = DeterministicIds::default();
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_session_stats-1", "get_session_stats", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let created = SessionIdentity {
+            session_id: "created".into(),
+            session_path: "/sessions/created.jsonl".into(),
+            session_name: None,
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(created.clone()),
+                    active_leaf_id: Some("created-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: SharedTranscript::default(),
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.selected_session, Some(created.clone()));
+        assert_eq!(state.history.session, Some(created));
+        assert_eq!(
+            state.history.active_leaf_id.as_deref(),
+            Some("created-leaf")
+        );
+        assert_eq!(state.last_session.as_deref(), Some("created"));
     }
 
     #[test]
@@ -2085,6 +3728,73 @@ mod tests {
                 "type": "rpc.session.selected", "command_id": "select-1",
                 "session_id": "x".repeat(SESSION_ID_MAX_BYTES + 1),
                 "session_path": "/sessions/x.jsonl", "session_name": null
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn session_workflow_event_projection_is_bounded_and_rejects_duplicate_tree_nodes() {
+        let cloned = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.session.cloned",
+            "command_id": "clone-1",
+            "source_session_id": "source",
+            "source_session_path": "/sessions/source.jsonl",
+            "source_session_name": "Source",
+            "source_active_leaf_id": "entry-1",
+            "session_id": "clone",
+            "session_path": "/sessions/clone.jsonl",
+            "session_name": "Clone",
+            "active_leaf_id": "entry-1",
+            "entry_count": 1
+        }))
+        .unwrap();
+        assert!(matches!(
+            cloned,
+            BackendEvent::SessionCloned { derived, .. }
+                if derived.source.session_id == "source"
+                    && derived.session.session_name.as_deref() == Some("Clone")
+        ));
+
+        let node = serde_json::json!({
+            "entry_id": "entry-1",
+            "parent_id": null,
+            "operation_id": "prompt-1",
+            "created_at": "2026-01-02T03:04:05Z",
+            "kind": "message",
+            "role": "user",
+            "preview": "x".repeat(SESSION_LABEL_MAX_BYTES + 20),
+            "preview_truncated": false
+        });
+        let page = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.session.tree",
+            "command_id": "tree-1",
+            "session_id": "source",
+            "session_path": "/sessions/source.jsonl",
+            "active_leaf_id": "entry-1",
+            "total_node_count": 1,
+            "nodes": [node.clone()],
+            "truncated": false,
+            "next_after_entry_id": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            page,
+            BackendEvent::SessionTreeReported { page, .. }
+                if page.nodes[0].preview.len() <= SESSION_LABEL_MAX_BYTES
+                    && page.nodes[0].preview_truncated
+        ));
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.session.tree",
+                "command_id": "tree-2",
+                "session_id": "source",
+                "session_path": "/sessions/source.jsonl",
+                "active_leaf_id": "entry-1",
+                "total_node_count": 2,
+                "nodes": [node.clone(), node],
+                "truncated": false,
+                "next_after_entry_id": null
             }))
             .is_err()
         );
@@ -3090,6 +4800,1003 @@ mod tests {
         }
     }
 
+    fn derivation(source: &str, target: &str) -> SessionDerivation {
+        SessionDerivation {
+            source: session(source),
+            source_active_leaf_id: Some("source-leaf".into()),
+            session: session(target),
+            active_leaf_id: Some("target-leaf".into()),
+            entry_count: 2,
+            selected_entry_id: None,
+            selected_prompt: None,
+        }
+    }
+
+    #[test]
+    fn clone_waits_for_both_events_in_either_order_then_hydrates_the_clone() {
+        for finish_first in [false, true] {
+            let mut state = UiState::unconfigured();
+            state.selected_session = Some(session("source"));
+            state.history.session = Some(session("source"));
+            state.history.active_leaf_id = Some("source-leaf".into());
+            state.transcript.append_prompt("source transcript".into());
+            let mut ids = DeterministicIds::default();
+            reduce(&mut state, UiAction::CloneSession, &mut ids).unwrap();
+            let result = BackendEvent::SessionCloned {
+                command_id: "clone_session-1".into(),
+                derived: derivation("source", "clone"),
+            };
+            let finish = finished("clone_session-1", "clone_session", true);
+            let events = if finish_first {
+                [finish, result]
+            } else {
+                [result, finish]
+            };
+            assert!(
+                reduce(
+                    &mut state,
+                    UiAction::BackendEvent(events[0].clone()),
+                    &mut ids
+                )
+                .unwrap()
+                .is_empty()
+            );
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(events[1].clone()),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.selected_session, Some(session("clone")));
+            assert!(state.transcript.entries().is_empty());
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                UiEffect::SendCommittedHydration { session_id, .. } if session_id == "clone"
+            )));
+
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(history(
+                    "get_messages-1",
+                    Some(session("clone")),
+                    "clone transcript",
+                )),
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(
+                state.transcript.latest_user_text(),
+                Some("clone transcript")
+            );
+        }
+    }
+
+    #[test]
+    fn fork_and_navigation_restore_prompts_only_after_authoritative_hydration() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("source-leaf".into());
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::ForkSession {
+                entry_id: "user-2".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let mut forked = derivation("source", "fork");
+        forked.selected_entry_id = Some("user-2".into());
+        forked.selected_prompt = Some("restore me\u{1b}[31m".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("fork_session-1", "fork_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionForked {
+                command_id: "fork_session-1".into(),
+                derived: forked,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::RestoreSessionDraft(_)))
+        );
+        let mut unnamed_fork = session("fork");
+        unnamed_fork.session_name = None;
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(history("get_messages-1", Some(unnamed_fork), "forked")),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::RestoreSessionDraft(text) if text == "restore me\u{1b}[31m"
+        )));
+        assert_eq!(
+            state
+                .history
+                .session
+                .as_ref()
+                .and_then(|session| session.session_name.as_deref()),
+            Some("fork name")
+        );
+
+        state.history.active_leaf_id = Some("leaf-2".into());
+        reduce(
+            &mut state,
+            UiAction::NavigateSessionTree {
+                entry_id: "user-1".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionTreeNavigated {
+                command_id: "navigate_session_tree-1".into(),
+                navigation: SessionTreeNavigation {
+                    session: session("fork"),
+                    selected_entry_id: "user-1".into(),
+                    previous_active_leaf_id: Some("leaf-2".into()),
+                    active_leaf_id: Some("leaf-1".into()),
+                    editor_text: Some("edit again".into()),
+                    changed: true,
+                    entry_count: 4,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "navigate_session_tree-1",
+                "navigate_session_tree",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(history("get_messages-2", Some(session("fork")), "older")),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-2", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::RestoreSessionDraft(text) if text == "edit again"
+        )));
+    }
+
+    #[test]
+    fn naming_and_tree_pages_commit_only_correlated_bounded_results() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("leaf-2".into());
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::SetSessionName("renamed".into()),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionNameChanged {
+                command_id: "set_session_name-1".into(),
+                changed: SessionNameChange {
+                    session: SessionIdentity {
+                        session_name: Some("renamed".into()),
+                        ..session("source")
+                    },
+                    previous_name: Some("source name".into()),
+                    entry_count: 3,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .selected_session
+                .as_ref()
+                .unwrap()
+                .session_name
+                .as_deref(),
+            Some("source name")
+        );
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("set_session_name-1", "set_session_name", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .selected_session
+                .as_ref()
+                .unwrap()
+                .session_name
+                .as_deref(),
+            Some("renamed")
+        );
+        assert_eq!(
+            state
+                .history
+                .session
+                .as_ref()
+                .unwrap()
+                .session_name
+                .as_deref(),
+            Some("renamed")
+        );
+
+        reduce(
+            &mut state,
+            UiAction::LoadSessionTree {
+                after_entry_id: None,
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let page = SessionTreePage {
+            session: Some(SessionIdentity {
+                session_name: None,
+                ..session("source")
+            }),
+            active_leaf_id: Some("leaf-2".into()),
+            total_node_count: 1,
+            nodes: vec![SessionTreeNode {
+                entry_id: "leaf-2".into(),
+                parent_id: None,
+                created_at: "2026-01-02T03:04:05Z".into(),
+                kind: SessionTreeNodeKind::Message,
+                role: Some("user".into()),
+                preview: "hello".into(),
+                preview_truncated: false,
+            }],
+            truncated: false,
+            next_after_entry_id: None,
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_session_tree-1", "get_session_tree", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionTreeReported {
+                command_id: "get_session_tree-1".into(),
+                page: page.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::ShowSessionTreePage { page: shown, append: false }, UiEffect::RequestRender]
+                if shown == &page
+        ));
+    }
+
+    #[test]
+    fn wrong_tree_entry_preserves_history_and_unrevert_rehydrates_the_committed_leaf() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("leaf-1".into());
+        state.transcript.append_prompt("keep me".into());
+        let before = state.transcript.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::NavigateSessionTree {
+                entry_id: "requested".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionTreeNavigated {
+                command_id: "navigate_session_tree-1".into(),
+                navigation: SessionTreeNavigation {
+                    session: session("source"),
+                    selected_entry_id: "wrong".into(),
+                    previous_active_leaf_id: Some("leaf-1".into()),
+                    active_leaf_id: Some("leaf-2".into()),
+                    editor_text: None,
+                    changed: true,
+                    entry_count: 3,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.transcript, before);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+
+        reduce(&mut state, UiAction::UnrevertSessionTree, &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "unrevert_session_tree-1",
+                "unrevert_session_tree",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionTreeUnreverted {
+                command_id: "unrevert_session_tree-1".into(),
+                unreverted: SessionTreeUnrevert {
+                    session: session("source"),
+                    source_transition_id: "transition-1".into(),
+                    previous_active_leaf_id: Some("leaf-1".into()),
+                    active_leaf_id: Some("leaf-2".into()),
+                    entry_count: 4,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::SendCommittedHydration { session_id, .. } if session_id == "source"
+        )));
+        assert!(state.transcript.entries().is_empty());
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(history(
+                "get_messages-1",
+                Some(session("source")),
+                "restored",
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.transcript.latest_user_text(), Some("restored"));
+    }
+
+    #[test]
+    fn no_op_user_navigation_restores_the_prompt_without_rehydrating() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("leaf-1".into());
+        state.transcript.append_prompt("kept".into());
+        let before = state.transcript.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::NavigateSessionTree {
+                entry_id: "user-2".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "navigate_session_tree-1",
+                "navigate_session_tree",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionTreeNavigated {
+                command_id: "navigate_session_tree-1".into(),
+                navigation: SessionTreeNavigation {
+                    session: session("source"),
+                    selected_entry_id: "user-2".into(),
+                    previous_active_leaf_id: Some("leaf-1".into()),
+                    active_leaf_id: Some("leaf-1".into()),
+                    editor_text: Some("edit me".into()),
+                    changed: false,
+                    entry_count: 2,
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.transcript, before);
+        assert!(state.session_operation.is_none());
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::RestoreSessionDraft(text) if text == "edit me"
+        )));
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::SendCommittedHydration { .. }))
+        );
+    }
+
+    #[test]
+    fn queue_event_projection_preserves_contents_and_enforces_runtime_bounds() {
+        let updated = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "queue.updated",
+            "steering": ["first", "duplicate"],
+            "follow_up": ["duplicate"]
+        }))
+        .unwrap();
+        assert!(matches!(
+            updated,
+            BackendEvent::QueueUpdated { steering, follow_up }
+                if steering == ["first", "duplicate"] && follow_up == ["duplicate"]
+        ));
+
+        let removed = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "queue.items.removed",
+            "command_id": "pop-1",
+            "operation": "pop",
+            "kind": "follow_up",
+            "steering": [],
+            "follow_up": ["draft"]
+        }))
+        .unwrap();
+        assert!(matches!(
+            removed,
+            BackendEvent::QueueItemsRemoved {
+                operation: QueueRemovalOperation::Pop,
+                kind: Some(QueueKind::FollowUp),
+                follow_up,
+                ..
+            } if follow_up == ["draft"]
+        ));
+
+        let injected = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "queue.message.injected",
+            "kind": "steering",
+            "content": "expanded provider content",
+            "skill_invocation": {"original_content": "/skill request"}
+        }))
+        .unwrap();
+        assert_eq!(
+            injected,
+            BackendEvent::QueueMessageInjected {
+                kind: QueueKind::Steering,
+                content: "/skill request".into(),
+            }
+        );
+
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "queue.updated",
+                "steering": vec!["x"; QUEUE_MESSAGE_LIMIT / 2],
+                "follow_up": vec!["y"; QUEUE_MESSAGE_LIMIT / 2]
+            }))
+            .is_ok()
+        );
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "queue.updated",
+                "steering": ["x".repeat(QUEUE_CONTENT_BYTES_LIMIT)],
+                "follow_up": []
+            }))
+            .is_ok()
+        );
+
+        for invalid in [
+            serde_json::json!({
+                "type": "queue.items.removed",
+                "command_id": "pop-1",
+                "operation": "pop",
+                "kind": null,
+                "steering": [],
+                "follow_up": []
+            }),
+            serde_json::json!({
+                "type": "queue.items.removed",
+                "command_id": "pop-1",
+                "operation": "pop",
+                "kind": "steering",
+                "steering": ["first", "second"],
+                "follow_up": []
+            }),
+            serde_json::json!({
+                "type": "queue.items.removed",
+                "command_id": "pop-1",
+                "operation": "pop",
+                "kind": "steering",
+                "steering": [],
+                "follow_up": ["wrong queue"]
+            }),
+        ] {
+            assert!(matches!(
+                BackendEvent::from_projection_value(&invalid),
+                Err(EventProjectionError::InvalidField { .. })
+            ));
+        }
+
+        assert!(matches!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "queue.updated",
+                "steering": vec!["x"; QUEUE_MESSAGE_LIMIT + 1],
+                "follow_up": []
+            })),
+            Err(EventProjectionError::TooManyQueueMessages { .. })
+        ));
+        assert!(matches!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "queue.items.removed",
+                "command_id": "pop-1",
+                "operation": "clear",
+                "kind": null,
+                "steering": vec!["x"; QUEUE_MESSAGE_LIMIT + 1],
+                "follow_up": []
+            })),
+            Err(EventProjectionError::TooManyQueueMessages { .. })
+        ));
+        assert!(matches!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "queue.message.injected",
+                "kind": "steering",
+                "content": "x".repeat(QUEUE_CONTENT_BYTES_LIMIT + 1),
+                "skill_invocation": null
+            })),
+            Err(EventProjectionError::OversizedQueueContent { .. })
+        ));
+    }
+
+    #[test]
+    fn queue_updates_replace_authoritatively_and_preserve_duplicate_identities() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["first".into(), "duplicate".into(), "duplicate".into()],
+                follow_up: vec!["follow-up".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let identities = state
+            .queue
+            .steering
+            .iter()
+            .map(|message| message.identity)
+            .collect::<Vec<_>>();
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["duplicate".into(), "first".into(), "duplicate".into()],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.queued_steering(), 3);
+        assert_eq!(state.queued_follow_ups(), 0);
+        assert_eq!(
+            state
+                .queue
+                .steering
+                .iter()
+                .map(|message| message.identity)
+                .collect::<Vec<_>>(),
+            vec![identities[1], identities[0], identities[2]]
+        );
+    }
+
+    #[test]
+    fn queue_injection_uses_visible_content_and_removes_the_first_duplicate() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["duplicate".into(), "duplicate".into()],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let second_identity = state.queue.steering[1].identity;
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueMessageInjected {
+                kind: QueueKind::Steering,
+                content: "duplicate".into(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.transcript.latest_user_text(), Some("duplicate"));
+        assert_eq!(state.queue.steering.len(), 1);
+        assert_eq!(state.queue.steering[0].identity, second_identity);
+    }
+
+    #[test]
+    fn queue_restore_prefers_newest_local_order_over_fallback_queue_order() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: Vec::new(),
+                follow_up: vec!["older follow-up".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::Steer("newer steering".into()),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["newer steering".into()],
+                follow_up: vec!["older follow-up".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("steer-1", "steer", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(&mut state, UiAction::RestoreNewestQueueDraft, &mut ids).unwrap();
+        assert_eq!(command_value(&effects[0]).unwrap()["kind"], "steering");
+    }
+
+    #[test]
+    fn failed_queue_submission_restores_its_saved_draft() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Steer("saved draft".into()), &mut ids).unwrap();
+        assert_eq!(command_value(&effects[0]).unwrap()["type"], "steer");
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("steer-1", "steer", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::RestoreDraft { content, local_order: Some(0) }] if content == "saved draft"
+        ));
+        assert!(state.pending_queue_submissions.is_empty());
+    }
+
+    #[test]
+    fn queue_restore_waits_for_matching_pop_removal_in_either_event_order() {
+        let mut fallback = UiState::new("fake".into(), None, None);
+        let mut fallback_ids = DeterministicIds::default();
+        reduce(
+            &mut fallback,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["steering".into()],
+                follow_up: vec!["follow-up".into()],
+            }),
+            &mut fallback_ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut fallback,
+            UiAction::RestoreNewestQueueDraft,
+            &mut fallback_ids,
+        )
+        .unwrap();
+        assert_eq!(command_value(&effects[0]).unwrap()["kind"], "follow_up");
+
+        for removal_first in [true, false] {
+            let mut state = UiState::new("fake".into(), None, None);
+            let mut ids = DeterministicIds::default();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: Vec::new(),
+                    follow_up: vec!["draft".into()],
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            let effects = reduce(&mut state, UiAction::RestoreNewestQueueDraft, &mut ids).unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["kind"], "follow_up");
+
+            let removed = BackendEvent::QueueItemsRemoved {
+                command_id: "pop_queue-1".into(),
+                operation: QueueRemovalOperation::Pop,
+                kind: Some(QueueKind::FollowUp),
+                steering: Vec::new(),
+                follow_up: vec!["draft".into()],
+            };
+            let finished = finished("pop_queue-1", "pop_queue", true);
+            let (first, second) = if removal_first {
+                (removed, finished)
+            } else {
+                (finished, removed)
+            };
+            assert!(
+                reduce(&mut state, UiAction::BackendEvent(first), &mut ids)
+                    .unwrap()
+                    .is_empty()
+            );
+            let effects = reduce(&mut state, UiAction::BackendEvent(second), &mut ids).unwrap();
+            assert!(matches!(
+                effects.as_slice(),
+                [UiEffect::RestoreDraft { content, local_order: None }] if content == "draft"
+            ));
+            assert!(state.pending_queue_restore.is_none());
+        }
+    }
+
+    #[test]
+    fn stale_queue_removal_and_cancel_leave_queue_state_intact() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["steering".into()],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let before = state.queue.clone();
+        reduce(&mut state, UiAction::RestoreNewestQueueDraft, &mut ids).unwrap();
+        assert!(
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                    command_id: "stale-pop".into(),
+                    operation: QueueRemovalOperation::Pop,
+                    kind: Some(QueueKind::Steering),
+                    steering: vec!["steering".into()],
+                    follow_up: Vec::new(),
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("pop_queue-1", "pop_queue", true)),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(state.queue, before);
+
+        assert!(
+            reduce(&mut state, UiAction::Cancel, &mut ids)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.queue, before);
+    }
+
+    #[test]
+    fn queue_submission_rejects_blank_and_combined_capacity_overflow() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Steer(" \n\t".into()), &mut ids).unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::Notice(_), UiEffect::RequestRender]
+        ));
+        assert!(state.pending_queue_submissions.is_empty());
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["x".into(); QUEUE_MESSAGE_LIMIT - 2],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.queue_submission_preflight("x").is_ok());
+        reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
+        assert!(state.queue_submission_preflight("x").is_ok());
+        reduce(&mut state, UiAction::FollowUp("x".into()), &mut ids).unwrap();
+        assert_eq!(
+            state.queue_submission_preflight("x"),
+            Err(QueueSubmissionPreflightError::Full)
+        );
+        let effects = reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::Notice(_), UiEffect::RequestRender]
+        ));
+        assert_eq!(state.pending_queue_submissions.len(), 2);
+    }
+
+    #[test]
+    fn queue_submission_accepts_exact_byte_capacity_and_rejects_one_over() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["x".repeat(QUEUE_CONTENT_BYTES_LIMIT - 1)],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.queue_submission_preflight("x").is_ok());
+        reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
+        assert_eq!(
+            state.queue_submission_preflight("x"),
+            Err(QueueSubmissionPreflightError::Full)
+        );
+        let effects = reduce(&mut state, UiAction::FollowUp("x".into()), &mut ids).unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::Notice(_), UiEffect::RequestRender]
+        ));
+    }
+
+    #[test]
+    fn queue_pop_removes_the_last_matching_duplicate() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["duplicate".into(), "between".into(), "duplicate".into()],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let first_identity = state.queue.steering[0].identity;
+        let last_identity = state.queue.steering[2].identity;
+        reduce(&mut state, UiAction::RestoreNewestQueueDraft, &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                command_id: "pop_queue-1".into(),
+                operation: QueueRemovalOperation::Pop,
+                kind: Some(QueueKind::Steering),
+                steering: vec!["duplicate".into()],
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.queue.steering.len(), 2);
+        assert_eq!(state.queue.steering[0].identity, first_identity);
+        assert_ne!(state.queue.steering[1].identity, last_identity);
+    }
+
+    #[test]
+    fn session_commits_clear_queue_cache_and_refresh_queue_state() {
+        let mut startup = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut startup, UiAction::StartupHydration, &mut ids).unwrap();
+        reduce(
+            &mut startup,
+            UiAction::BackendEvent(history("get_messages-1", None, "history")),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut startup,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
+        }));
+
+        for action in [
+            UiAction::SelectSession {
+                session_id: "next".into(),
+            },
+            UiAction::NewSession,
+        ] {
+            let mut state = UiState::new("fake".into(), None, None);
+            let mut ids = DeterministicIds::default();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: vec!["stale".into()],
+                    follow_up: vec!["stale follow-up".into()],
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            let effects = reduce(&mut state, action, &mut ids).unwrap();
+            let command = command_value(&effects[0]).unwrap();
+            let effects = if command["type"] == "select_session" {
+                reduce(
+                    &mut state,
+                    UiAction::BackendEvent(BackendEvent::SessionSelected {
+                        command_id: "select_session-1".into(),
+                        session: session("next"),
+                    }),
+                    &mut ids,
+                )
+                .unwrap();
+                reduce(
+                    &mut state,
+                    UiAction::BackendEvent(finished("select_session-1", "select_session", true)),
+                    &mut ids,
+                )
+                .unwrap()
+            } else {
+                reduce(
+                    &mut state,
+                    UiAction::BackendEvent(finished("new_session-1", "new_session", true)),
+                    &mut ids,
+                )
+                .unwrap()
+            };
+            assert!(state.queue.steering.is_empty());
+            assert!(state.queue.follow_up.is_empty());
+            assert!(effects.iter().any(|effect| {
+                command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
+            }));
+        }
+    }
+
     #[test]
     fn startup_hydration_commits_only_after_a_matching_report_and_finish_in_any_order() {
         for report_first in [true, false] {
@@ -3457,11 +6164,9 @@ mod tests {
         .unwrap();
         assert!(state.selected_session.is_none());
         assert!(state.transcript.entries().is_empty());
-        assert!(
-            effects
-                .iter()
-                .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
-        );
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
+        }));
     }
 
     #[test]

@@ -512,6 +512,23 @@ pub mod commands {
         AllSession,
     }
 
+    /// One active agent queue addressed by the live RPC protocol.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum QueueKind {
+        Steering,
+        FollowUp,
+    }
+
+    impl QueueKind {
+        /// Return the canonical live-RPC wire value.
+        pub const fn as_wire_value(self) -> &'static str {
+            match self {
+                Self::Steering => "steering",
+                Self::FollowUp => "follow_up",
+            }
+        }
+    }
+
     impl ApprovalScope {
         fn as_wire_value(self) -> &'static str {
             match self {
@@ -526,6 +543,16 @@ pub mod commands {
         /// Construct one agent-turn request.
         pub fn prompt(id: &str, prompt: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}))
+        }
+
+        /// Queue text after the active run's current assistant/tool batch.
+        pub fn steer(id: &str, content: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "steer", "id": id, "content": content}))
+        }
+
+        /// Queue text for when the active run would otherwise stop.
+        pub fn follow_up(id: &str, content: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "follow_up", "id": id, "content": content}))
         }
 
         /// Construct a response to one pending tool approval request.
@@ -689,9 +716,88 @@ pub mod commands {
             deserialize(value)
         }
 
+        /// Set or clear the selected session's display name.
+        pub fn set_session_name(id: &str, name: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "set_session_name",
+                "id": id,
+                "name": name,
+            }))
+        }
+
+        /// Clone the selected session's active path and select the clone.
+        pub fn clone_session(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "clone_session", "id": id}))
+        }
+
+        /// Fork before one persisted user message and select the fork.
+        pub fn fork_session(id: &str, entry_id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "fork_session",
+                "id": id,
+                "entry_id": entry_id,
+            }))
+        }
+
+        /// Request one bounded append-ordered page of the selected session tree.
+        pub fn get_session_tree(
+            id: &str,
+            after_entry_id: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_session_tree",
+                "id": id,
+                "limit": 200,
+            });
+            if let Some(after_entry_id) = after_entry_id {
+                value
+                    .as_object_mut()
+                    .expect("command constructors create JSON objects")
+                    .insert(
+                        "after_entry_id".into(),
+                        serde_json::Value::String(after_entry_id.into()),
+                    );
+            }
+            deserialize(value)
+        }
+
+        /// Navigate the selected session tree to one persisted entry.
+        pub fn navigate_session_tree(
+            id: &str,
+            entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "navigate_session_tree",
+                "id": id,
+                "entry_id": entry_id,
+            }))
+        }
+
+        /// Reverse the selected session's latest explicit tree navigation.
+        pub fn unrevert_session_tree(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "unrevert_session_tree",
+                "id": id,
+            }))
+        }
+
         /// Construct a request to cancel a running or queued command.
         pub fn cancel(id: &str, target_id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))
+        }
+
+        /// Request the active or retained queue state.
+        pub fn get_queue_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_queue_state", "id": id}))
+        }
+
+        /// Remove the latest item from one active queue.
+        pub fn pop_queue(id: &str, kind: QueueKind) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "pop_queue",
+                "id": id,
+                "kind": kind.as_wire_value(),
+            }))
         }
 
         /// Construct a response to one pending project-trust request.

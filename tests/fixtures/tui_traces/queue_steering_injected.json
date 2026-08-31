@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "name": "queue_steering_injected",
+  "description": "Steering queues, snapshots, then enters the active transcript.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    }
+  },
+  "inputs": [
+    {
+      "type": "local.steer",
+      "content": "steer now",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.updated",
+        "schema_version": 34,
+        "steering": ["steer now"],
+        "follow_up": []
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.message.injected",
+        "schema_version": 34,
+        "kind": "steering",
+        "content": "steer now"
+      },
+      "clock_ms": 20
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "steer",
+        "id": "steer-1",
+        "content": "steer now"
+      }
+    ],
+    "view": {
+      "status": "running",
+      "input_mode": "running",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null,
+    "restored_drafts": []
+  }
+}

@@ -37,17 +37,28 @@ WISP_TUI_RENDERER=rust wisp
 ```
 
 The Rust TUI negotiates and validates live RPC v2/event schema v34, supports prompts, approvals,
-project trust, cancellation, a virtual Markdown/tool/diff transcript, and bounded session history.
+project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
+and bounded session history.
 `/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
 one exact session ID); `/new` deselects the current session and clears the local transcript after the
 backend confirms it. Startup and resumed history install the newest 200-message page atomically;
 reaching an edge loads additional 75-message pages while retaining at most 1,200 logical transcript
 rows. An omission row marks history that remains outside the retained window.
 
+The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and
+`/name --clear`, `/clone`, `/tree`, and `/unrevert`. The `/tree` picker uses `Up`/`Down`,
+`PageUp`/`PageDown`, `Home`/`End`, `Enter` to navigate, `f` to fork a selected user-message node,
+and `Escape` to close. It requests 200 append-ordered nodes per page and retains only the newest two
+pages (400 nodes); an omission row appears after the oldest page is evicted, and reopening `/tree`
+starts again from the first page. Forking restores the selected prompt after the fork's authoritative
+history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
+prompts that exceed the editor limit are rejected explicitly rather than truncated.
+
 This is still experimental and source-build only: current Python distributions do not include the Rust
-binary, and it intentionally omits Textual features such as transcript search, mouse controls, session
-tree operations, and steering/follow-up queues. Selecting Rust never
-falls back to Textual. A missing/non-executable binary, unsupported platform, package-version mismatch,
+binary, and it intentionally omits Textual features such as transcript search and mouse controls.
+Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
+Selecting Rust never falls back to Textual. A missing/non-executable binary,
+unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See
 [Development setup](../contributing/development#rust-tui-scaffold), or select Textual explicitly with
 `wisp tui --renderer textual`.
@@ -59,20 +70,24 @@ process (never persisted), or deny.
 
 ## Steering and follow-ups
 
-The composer remains active while a prompt runs. In the Textual and prompt-toolkit fullscreen TUIs:
+The composer remains active while a prompt runs. In the Textual, prompt-toolkit fullscreen, and
+experimental Rust TUIs:
 
 - `Enter` sends a steering message for the active run. It is injected at the next safe request
   boundary, after any current assistant/tool batch.
 - `Alt+Enter` queues follow-up work that starts when the active run would otherwise finish.
 - `Alt+Up` removes the newest queued steering or follow-up message and restores it ahead of the
   current draft, after the shared runtime confirms the queue change.
-- `Escape` cancels the active prompt without discarding runtime-owned queued messages.
+- `Escape` cancels the active prompt in the Python fullscreen TUIs. The Rust TUI accepts either
+  `Escape` or `Ctrl+C`. Cancellation does not discard runtime-owned queued messages.
 
 A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
-count indicates when more are queued. The footer reports separate steering and follow-up totals.
-Accepted input is tracked through authoritative RPC queue events, so failed submissions return to the
-composer instead of disappearing. Queue contents that remain when the TUI shuts down are reported as
-unsent rather than silently dropped.
+count indicates when more are queued. Python fullscreen TUIs report separate steering and follow-up
+totals in the footer; Rust shows them in its header and composer. Python returns failed submissions to
+the composer. Rust retains them as recoverable drafts: `Alt+Up` restores one ahead of the current
+draft. The Rust TUI clears a submitted draft only after the JSONL writer flushes it, refreshes queue
+state after startup and session changes, and reports queued or recovering text as unsent if the
+transport closes.
 
 The line renderer accepts text entered during a run as follow-up work, but does not expose the
 fullscreen steering and restoration keybindings.

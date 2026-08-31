@@ -54,6 +54,12 @@ struct TraceInitialView {
 enum TraceInput {
     #[serde(rename = "local.submit")]
     Submit { content: String, clock_ms: u64 },
+    #[serde(rename = "local.steer")]
+    Steer { content: String, clock_ms: u64 },
+    #[serde(rename = "local.follow_up")]
+    FollowUp { content: String, clock_ms: u64 },
+    #[serde(rename = "local.restore_queue")]
+    RestoreQueue { clock_ms: u64 },
     #[serde(rename = "local.slash")]
     Slash {
         #[serde(rename = "command")]
@@ -96,6 +102,9 @@ impl TraceInput {
     fn clock_ms(&self) -> u64 {
         match self {
             Self::Submit { clock_ms, .. }
+            | Self::Steer { clock_ms, .. }
+            | Self::FollowUp { clock_ms, .. }
+            | Self::RestoreQueue { clock_ms }
             | Self::Slash { clock_ms, .. }
             | Self::Cancel { clock_ms }
             | Self::Approve { clock_ms, .. }
@@ -158,6 +167,8 @@ struct TraceExpected {
     #[serde(default)]
     retained_text: Option<String>,
     #[serde(default)]
+    restored_drafts: Vec<String>,
+    #[serde(default)]
     tool_cards: Option<Vec<TraceToolCard>>,
 }
 
@@ -167,6 +178,7 @@ struct ReplayOutput {
     view: TraceView,
     interaction: TraceInteraction,
     retained_text: Option<String>,
+    restored_drafts: Vec<String>,
     tool_cards: Vec<TraceToolCard>,
 }
 
@@ -214,6 +226,54 @@ fn every_shared_tui_trace_matches_the_rust_reducer() {
             );
         }
     }
+}
+
+#[test]
+fn trace_schema_enforces_queue_events_but_allows_unknown_events() {
+    let schema: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/tui-traces/v1/trace.schema.json"
+    )))
+    .unwrap();
+    let validator = jsonschema::draft202012::new(&schema).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/tui_traces/queue_steering_injected.json");
+    let mut trace: Value = serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+
+    for event in [
+        serde_json::json!({
+            "type": "queue.updated",
+            "schema_version": 34,
+            "steering_mode": "invalid",
+        }),
+        serde_json::json!({
+            "type": "queue.items.removed",
+            "schema_version": 34,
+            "command_id": "pop-1",
+            "operation": "pop",
+        }),
+        serde_json::json!({
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "kind": "steering",
+            "content": "expanded",
+            "skill_invocation": {"original_content": "/skill request"},
+        }),
+    ] {
+        trace["inputs"] = serde_json::json!([{
+            "type": "rpc.event",
+            "event": event,
+            "clock_ms": 0,
+        }]);
+        assert!(validator.validate(&trace).is_err());
+    }
+
+    trace["inputs"] = serde_json::json!([{
+        "type": "rpc.event",
+        "event": {"type": "future.queue.event", "payload": {"value": true}},
+        "clock_ms": 0,
+    }]);
+    assert!(validator.validate(&trace).is_ok());
 }
 
 #[test]
@@ -321,6 +381,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
     let mut state = initial_state(&trace.initial)?;
     let mut ids = DeterministicIds::default();
     let mut commands = Vec::new();
+    let mut restored_drafts = Vec::new();
     let mut exited = false;
 
     for input in &trace.inputs {
@@ -330,12 +391,18 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
         let action = trace_action(input)?;
         for effect in reduce(&mut state, action, &mut ids).map_err(|error| error.to_string())? {
             match effect {
-                UiEffect::SendCommand(command) => {
+                UiEffect::SendCommand(command)
+                | UiEffect::SendCommittedHydration { command, .. }
+                | UiEffect::SendPostPromptSessionSync(command) => {
                     let mut value = command.to_value().map_err(|error| error.to_string())?;
                     normalize_trace_command(&mut value);
                     commands.push(value);
                 }
+                UiEffect::RestoreDraft { content, .. } => restored_drafts.push(content),
+                UiEffect::RestoreSessionDraft(content) => restored_drafts.push(content),
                 UiEffect::ShowSessionPicker { .. }
+                | UiEffect::ShowSessionTreePage { .. }
+                | UiEffect::CloseSessionTree
                 | UiEffect::ReplaceTranscript
                 | UiEffect::HistoryWindowChanged
                 | UiEffect::OpenExactDetail(_)
@@ -354,6 +421,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
             .latest_assistant_text()
             .filter(|content| !content.is_empty())
             .map(str::to_owned),
+        restored_drafts,
         tool_cards: state
             .transcript
             .entries()
@@ -457,6 +525,9 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
 fn trace_action(input: &TraceInput) -> Result<UiAction, String> {
     match input {
         TraceInput::Submit { content, .. } => Ok(UiAction::Submit(content.clone())),
+        TraceInput::Steer { content, .. } => Ok(UiAction::Steer(content.clone())),
+        TraceInput::FollowUp { content, .. } => Ok(UiAction::FollowUp(content.clone())),
+        TraceInput::RestoreQueue { .. } => Ok(UiAction::RestoreNewestQueueDraft),
         TraceInput::Approve {
             call_id,
             approved,
@@ -496,8 +567,8 @@ fn view_projection(state: &UiState) -> TraceView {
         status: state.view_status.as_str().into(),
         input_mode: state.input_mode().into(),
         input_ready: state.input_ready,
-        queued_steering: state.queued_steering,
-        queued_follow_ups: state.queued_follow_ups,
+        queued_steering: state.queued_steering(),
+        queued_follow_ups: state.queued_follow_ups(),
         provider: state.provider.clone(),
         model: state.model.clone(),
         effort: state.effort.clone(),
@@ -555,6 +626,11 @@ fn assert_expected(trace: &TraceFile, actual: &ReplayOutput) {
     assert_eq!(
         actual.retained_text, trace.expected.retained_text,
         "trace {} retained text",
+        trace.name
+    );
+    assert_eq!(
+        actual.restored_drafts, trace.expected.restored_drafts,
+        "trace {} restored drafts",
         trace.name
     );
     if let Some(expected) = &trace.expected.tool_cards {
