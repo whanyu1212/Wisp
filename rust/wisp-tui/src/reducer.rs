@@ -574,21 +574,29 @@ fn submit(
     ])
 }
 
-fn begin_session_operation(state: &UiState) -> Result<(), ReduceError> {
-    if state.session_operation.is_some() || state.history_request.is_some() {
+fn begin_session_operation(state: &UiState) -> Result<Option<Vec<UiEffect>>, ReduceError> {
+    if state.history_request.is_some() {
+        return Ok(Some(vec![
+            UiEffect::Notice("Wait for the current history request to finish.".into()),
+            UiEffect::RequestRender,
+        ]));
+    }
+    if state.session_operation.is_some() {
         return Err(ReduceError::SessionOperationActive);
     }
     if let Some(current) = &state.current_command {
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn start_startup_hydration(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    begin_session_operation(state)?;
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
     let id = ids.next_id(CommandKind::GetMessages);
     let command = WispTypedClientRpcCommands::get_messages(&id, None)?;
     state.input_ready = false;
@@ -607,7 +615,9 @@ fn load_session_catalog(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    begin_session_operation(state)?;
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
     let id = ids.next_id(CommandKind::GetSessions);
     let command = WispTypedClientRpcCommands::get_sessions(&id)?;
     state.input_ready = false;
@@ -634,7 +644,9 @@ fn select_session(
             UiEffect::RequestRender,
         ]);
     }
-    begin_session_operation(state)?;
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
     let id = ids.next_id(CommandKind::SelectSession);
     let command = WispTypedClientRpcCommands::select_session(&id, &session_id)?;
     state.input_ready = false;
@@ -654,7 +666,9 @@ fn new_session(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    begin_session_operation(state)?;
+    if let Some(effects) = begin_session_operation(state)? {
+        return Ok(effects);
+    }
     let id = ids.next_id(CommandKind::NewSession);
     let command = WispTypedClientRpcCommands::new_session(&id)?;
     state.input_ready = false;
@@ -3430,6 +3444,35 @@ mod tests {
                 .iter()
                 .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
         );
+    }
+
+    #[test]
+    fn session_commands_during_history_requests_return_a_notice() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.history_request = Some(HistoryRequest {
+            command_id: "history-1".into(),
+            kind: HistoryRequestKind::Latest,
+            active_leaf_may_advance: false,
+            report: None,
+            completion: None,
+        });
+        let mut ids = DeterministicIds::default();
+
+        for action in [UiAction::LoadSessionCatalog, UiAction::NewSession] {
+            let effects = reduce(&mut state, action, &mut ids).unwrap();
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, UiEffect::Notice(_)))
+            );
+            assert!(
+                effects
+                    .iter()
+                    .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
+            );
+            assert!(state.session_operation.is_none());
+            assert!(state.history_request.is_some());
+        }
     }
 
     #[test]

@@ -330,12 +330,17 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         && string(message, index, "content")? == INTERRUPTED_TOOL_RESULT_TEXT;
     let is_error = persisted_is_error || matches!(status, Some("error" | "denied"));
     let output = content_for_history(message, index)?;
-    let before_text = result
+    let raw_before_text = result
         .and_then(|result| result.get("before_text"))
         .map(|value| optional_value_string(value, index, "tool_result.before_text"))
         .transpose()?
-        .flatten()
-        .map(|value| bounded_content(value, false));
+        .flatten();
+    let (before_text, before_text_locally_truncated) =
+        raw_before_text.map_or((None, false), |value| {
+            let retained = BoundedText::head(value, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
+            let truncated = retained.dropped_bytes > 0 || retained.dropped_lines > 0;
+            ((!truncated).then_some(retained.text), truncated)
+        });
     let summary = result
         .and_then(|result| result.get("summary"))
         .map(|value| optional_value_string(value, index, "tool_result.summary"))
@@ -382,7 +387,8 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
             .and_then(|result| result.get("truncated"))
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            || bool(message, index, "content_truncated")?,
+            || bool(message, index, "content_truncated")?
+            || before_text_locally_truncated,
         process_id: None,
         process_state: (status == Some("cancelled") || legacy_interrupted)
             .then(|| "cancelled".into()),
@@ -646,6 +652,44 @@ mod tests {
             project_rpc_exact_tool_result(&[result], "other-entry"),
             Err(HistoryProjectionError::ExactEntryMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn exact_tool_projection_rejects_oversized_before_snapshots() {
+        let oversized = "x".repeat(TOOL_OUTPUT_MAX_BYTES + 1);
+        let mut result = message("tool", "wrote file");
+        let entry_id = result["entry_id"].as_str().unwrap().to_owned();
+        result["tool_call_id"] = json!("write-1");
+        result["tool_name"] = json!("write");
+        result["tool_result"] = json!({
+            "before_text": oversized,
+            "created": false,
+            "truncated": false,
+        });
+
+        let projected = project_rpc_exact_tool_result(&[result], &entry_id).unwrap();
+
+        assert!(projected.before_text.is_none());
+        assert!(projected.truncated);
+        let arguments = json!({"path": "large.txt", "content": "replacement"});
+        let mut transcript = SharedTranscript::default();
+        let target = transcript.observe_tool_call(ToolCallInput {
+            call_id: projected.call_id.clone(),
+            name: "write".into(),
+            arguments: arguments.clone(),
+            detail_source: project_tool_detail_source("write", arguments.as_object().unwrap()),
+        });
+        transcript.mark_history_entries(0, "call-entry");
+        let mut bounded_page_result = projected.clone();
+        bounded_page_result.before_text = None;
+        transcript.observe_tool_result(bounded_page_result);
+        transcript.add_history_origin(target, "result-entry");
+        transcript.mark_history_result_projection(target, true);
+        assert!(
+            transcript
+                .exact_historical_detail(target, &projected)
+                .is_none()
+        );
     }
 
     #[test]
