@@ -286,7 +286,16 @@ fn selected_detail<'a>(
     state: &'a UiState,
     view: &DetailView,
 ) -> Option<&'a ToolDetailPresentation> {
-    let entry = state.transcript.entry(view.selected_entry()?)?;
+    let selected = view.selected_entry()?;
+    if let Some(detail) = state
+        .history
+        .active_exact_detail
+        .as_ref()
+        .filter(|detail| detail.target == selected)
+    {
+        return Some(&detail.presentation);
+    }
+    let entry = state.transcript.entry(selected)?;
     let card = entry.tool_card()?;
     let DetailAvailability::LiveRetained(detail) = &card.structured_detail else {
         return None;
@@ -942,6 +951,36 @@ mod tests {
             })
             .unwrap();
         terminal.backend().to_string()
+    }
+
+    #[test]
+    fn fetched_exact_detail_is_selected_for_rendering() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let target = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "read-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "README.md"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let presentation = ToolDetailPresentation {
+            kind: crate::tool_detail::DetailPresentationKind::Read,
+            title: "README.md".into(),
+            summary: "1 line".into(),
+            additions: 0,
+            deletions: 0,
+            rows: Vec::new(),
+            truncated: false,
+        };
+        state.history.active_exact_detail = Some(crate::reducer::ActiveExactDetail {
+            target,
+            presentation: presentation.clone(),
+        });
+        let mut view = DetailView::default();
+        view.open(target, &presentation);
+
+        assert_eq!(selected_detail(&state, &view), Some(&presentation));
     }
 
     #[test]
