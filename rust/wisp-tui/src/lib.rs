@@ -541,6 +541,16 @@ impl LiveUi {
                             "Skipped session stats refresh because the negotiated {limit}-byte RPC frame limit is too small."
                         ));
                         self.render_pending = true;
+                        let command_id = value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("validated RPC commands have string IDs")
+                            .to_owned();
+                        pending.extend(reducer::reduce(
+                            &mut self.state,
+                            UiAction::SkipPostPromptStats { command_id },
+                            &mut self.ids,
+                        )?);
                         continue;
                     }
                     send_payload(writer, payload, limit).await?;
@@ -639,6 +649,24 @@ impl LiveUi {
                         pending.extend(reducer::reduce(
                             &mut self.state,
                             UiAction::RejectCommittedHydration { command_id, limit },
+                            &mut self.ids,
+                        )?);
+                        continue;
+                    }
+                    send_payload(writer, payload, limit).await?;
+                }
+                UiEffect::SendPostPromptSessionSync(command) => {
+                    let value = serde_json::to_value(&command)?;
+                    let payload = Bytes::from(serde_json::to_vec(&value)?);
+                    if payload.len() > limit {
+                        let command_id = value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("validated RPC commands have string IDs")
+                            .to_owned();
+                        pending.extend(reducer::reduce(
+                            &mut self.state,
+                            UiAction::RejectPostPromptSessionSync { command_id, limit },
                             &mut self.ids,
                         )?);
                         continue;
@@ -1421,7 +1449,18 @@ impl LiveUi {
         let Some(picker) = self.session_tree_picker.as_mut() else {
             return Ok(LoopControl::Continue);
         };
-        match picker.handle_key(key) {
+        let action = picker.handle_key(key);
+        if self.state.session_operation.is_some()
+            && matches!(
+                action,
+                SessionTreePickerAction::LoadNext(_)
+                    | SessionTreePickerAction::Navigate(_)
+                    | SessionTreePickerAction::Fork(_)
+            )
+        {
+            return Ok(LoopControl::Continue);
+        }
+        match action {
             SessionTreePickerAction::None => {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
@@ -1438,9 +1477,6 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             SessionTreePickerAction::LoadNext(after_entry_id) => {
-                if self.state.session_operation.is_some() {
-                    return Ok(LoopControl::Continue);
-                }
                 self.dispatch_session_action(
                     UiAction::LoadSessionTree {
                         after_entry_id: Some(after_entry_id),
@@ -4947,6 +4983,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tree_picker_ignores_navigation_and_fork_while_a_page_is_loading() {
+        let selected = reducer::SessionIdentity {
+            session_id: "active".into(),
+            session_path: "/sessions/active.jsonl".into(),
+            session_name: None,
+        };
+        let page = reducer::SessionTreePage {
+            session: Some(selected.clone()),
+            active_leaf_id: Some("entry-1".into()),
+            total_node_count: 1,
+            nodes: vec![reducer::SessionTreeNode {
+                entry_id: "entry-1".into(),
+                parent_id: None,
+                created_at: "2026-01-02T03:04:05Z".into(),
+                kind: reducer::SessionTreeNodeKind::Message,
+                role: Some("user".into()),
+                preview: "prompt".into(),
+                preview_truncated: false,
+            }],
+            truncated: true,
+            next_after_entry_id: Some("entry-1".into()),
+        };
+        let mut live_ui = LiveUi {
+            session_tree_picker: Some(SessionTreePicker::new(page)),
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.state.selected_session = Some(selected);
+        live_ui.state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+            command_id: "get_session_tree-1".into(),
+            after_entry_id: Some("previous-entry".into()),
+            page: None,
+            completion: None,
+        });
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+
+        for code in [KeyCode::Enter, KeyCode::Char('f'), KeyCode::PageDown] {
+            assert_eq!(
+                live_ui
+                    .handle_session_tree_picker_key(
+                        KeyEvent::new(code, KeyModifiers::NONE),
+                        &writer_tx,
+                        MAX_APPLICATION_FRAME_BYTES,
+                    )
+                    .await
+                    .unwrap(),
+                LoopControl::Continue
+            );
+        }
+
+        assert!(live_ui.session_tree_picker.is_some());
+        assert!(live_ui.state.session_operation.is_some());
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
     async fn history_blocked_commands_keep_notice_and_editor_text() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut live_ui = LiveUi::default();
@@ -5051,7 +5143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_automatic_stats_refresh_is_non_terminal() {
+    async fn oversized_automatic_refreshes_are_non_terminal() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::Running;
@@ -5088,7 +5180,7 @@ mod tests {
             live_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.contains("stats refresh"))
+                .is_some_and(|notice| notice.contains("Session metadata refresh"))
         );
         assert!(live_ui.render_pending);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));

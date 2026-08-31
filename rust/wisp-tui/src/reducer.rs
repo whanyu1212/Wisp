@@ -172,6 +172,7 @@ enum HistoryRequestKind {
         cursor: String,
     },
     Latest,
+    PostPromptSync,
     ExactDetail {
         target: crate::transcript::TranscriptEntryId,
         entry_id: String,
@@ -568,6 +569,8 @@ pub struct UiState {
     pub transcript: SharedTranscript,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
+    post_prompt_session_sync_pending: bool,
+    post_prompt_stats_command_id: Option<String>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -608,6 +611,8 @@ impl UiState {
             transcript: SharedTranscript::default(),
             history: HistoryWindow::default(),
             history_request: None,
+            post_prompt_session_sync_pending: false,
+            post_prompt_stats_command_id: None,
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -913,6 +918,13 @@ pub enum UiAction {
         command_id: String,
         limit: usize,
     },
+    RejectPostPromptSessionSync {
+        command_id: String,
+        limit: usize,
+    },
+    SkipPostPromptStats {
+        command_id: String,
+    },
     LoadOlderHistory,
     LoadNewerHistory,
     ReloadLatestHistory,
@@ -960,6 +972,7 @@ pub enum UiEffect {
         command: WispTypedClientRpcCommands,
         session_id: String,
     },
+    SendPostPromptSessionSync(WispTypedClientRpcCommands),
     ReplaceTranscript,
     HistoryWindowChanged,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
@@ -1008,6 +1021,12 @@ pub fn reduce(
         UiAction::RejectCommittedHydration { command_id, limit } => {
             reject_committed_hydration(state, &command_id, limit)
         }
+        UiAction::RejectPostPromptSessionSync { command_id, limit } => {
+            reject_post_prompt_session_sync(state, &command_id, limit)
+        }
+        UiAction::SkipPostPromptStats { command_id } => {
+            skip_post_prompt_stats(state, &command_id, ids)
+        }
         UiAction::LoadOlderHistory => load_older_history(state, ids),
         UiAction::LoadNewerHistory => load_newer_history(state, ids),
         UiAction::ReloadLatestHistory => reload_latest_history(state, ids),
@@ -1048,6 +1067,12 @@ fn submit(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     if content.trim().is_empty() {
         return Ok(Vec::new());
+    }
+    if session_sync_pending(state) {
+        return Ok(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
     }
     if state.session_operation.is_some() {
         return Err(ReduceError::SessionOperationActive);
@@ -1167,6 +1192,12 @@ fn clear_queue_cache(state: &mut UiState) {
 }
 
 fn begin_session_operation(state: &UiState) -> Result<Option<Vec<UiEffect>>, ReduceError> {
+    if session_sync_pending(state) {
+        return Ok(Some(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]));
+    }
     if state.history_request.is_some() {
         return Ok(Some(vec![
             UiEffect::Notice("Wait for the current history request to finish.".into()),
@@ -1274,6 +1305,12 @@ fn new_session(
 }
 
 fn selected_session(state: &UiState) -> Result<&SessionIdentity, Vec<UiEffect>> {
+    if session_sync_pending(state) {
+        return Err(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     state.selected_session.as_ref().ok_or_else(|| {
         vec![
             UiEffect::Notice("No persisted session is selected.".into()),
@@ -1488,6 +1525,41 @@ fn reject_committed_hydration(
     ])
 }
 
+fn reject_post_prompt_session_sync(
+    state: &mut UiState,
+    command_id: &str,
+    limit: usize,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    let Some(request) = state.history_request.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if request.command_id != command_id
+        || !matches!(request.kind, HistoryRequestKind::PostPromptSync)
+    {
+        return Ok(Vec::new());
+    }
+    state.history_request = None;
+    state.post_prompt_session_sync_pending = false;
+    Ok(vec![
+        UiEffect::Notice(format!(
+            "Session metadata refresh exceeds the negotiated {limit}-byte RPC frame limit; reopen the session to refresh its active branch."
+        )),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn skip_post_prompt_stats(
+    state: &mut UiState,
+    command_id: &str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.post_prompt_stats_command_id.as_deref() != Some(command_id) {
+        return Ok(Vec::new());
+    }
+    state.post_prompt_stats_command_id = None;
+    Ok(start_post_prompt_session_sync(state, ids)?)
+}
+
 fn history_session_id(state: &UiState) -> Option<&str> {
     state
         .history
@@ -1495,6 +1567,10 @@ fn history_session_id(state: &UiState) -> Option<&str> {
         .as_ref()
         .or(state.selected_session.as_ref())
         .map(|session| session.session_id.as_str())
+}
+
+fn session_sync_pending(state: &UiState) -> bool {
+    state.post_prompt_session_sync_pending
 }
 
 fn can_request_history(state: &UiState, allow_during_prompt: bool) -> bool {
@@ -1596,6 +1672,28 @@ fn reload_latest_history(
         HistoryRequestKind::Latest,
         command,
     ))
+}
+
+fn start_post_prompt_session_sync(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.history_request.is_some() {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::GetMessages);
+    let command = WispTypedClientRpcCommands::get_messages(&id, history_session_id(state))?;
+    state.history_request = Some(HistoryRequest {
+        command_id: id,
+        kind: HistoryRequestKind::PostPromptSync,
+        active_leaf_may_advance: true,
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendPostPromptSessionSync(command),
+        UiEffect::RequestRender,
+    ])
 }
 
 fn load_exact_detail(
@@ -2560,6 +2658,17 @@ fn history_request_failure(error: String) -> Vec<UiEffect> {
     ]
 }
 
+fn finish_history_request_failure(
+    state: &mut UiState,
+    kind: &HistoryRequestKind,
+    error: String,
+) -> Vec<UiEffect> {
+    if matches!(kind, HistoryRequestKind::PostPromptSync) {
+        state.post_prompt_session_sync_pending = false;
+    }
+    history_request_failure(error)
+}
+
 fn handle_history_backend_event(
     state: &mut UiState,
     event: &BackendEvent,
@@ -2571,7 +2680,11 @@ fn handle_history_backend_event(
             messages,
         } if command_id == &request.command_id => {
             if request.report.is_some() {
-                return Some(history_request_failure("duplicate history report".into()));
+                return Some(finish_history_request_failure(
+                    state,
+                    &request.kind,
+                    "duplicate history report".into(),
+                ));
             }
             request.report = Some(messages.clone());
             true
@@ -2579,7 +2692,11 @@ fn handle_history_backend_event(
         BackendEvent::MessagesProjectionFailed { command_id, error }
             if command_id == &request.command_id =>
         {
-            return Some(history_request_failure(error.clone()));
+            return Some(finish_history_request_failure(
+                state,
+                &request.kind,
+                error.clone(),
+            ));
         }
         BackendEvent::CommandFinished {
             command_id,
@@ -2588,7 +2705,9 @@ fn handle_history_backend_event(
             error,
         } if command_id == &request.command_id && command_type == "get_messages" => {
             if !ok {
-                return Some(history_request_failure(
+                return Some(finish_history_request_failure(
+                    state,
+                    &request.kind,
                     error
                         .as_deref()
                         .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES))
@@ -2615,6 +2734,29 @@ fn handle_history_backend_event(
     }
     let report = request.report.take().expect("checked above");
     match request.kind {
+        HistoryRequestKind::PostPromptSync => {
+            state.post_prompt_session_sync_pending = false;
+            let Some(mut refreshed) = report.session else {
+                return Some(history_request_failure(
+                    "completed prompt did not report its persisted session".into(),
+                ));
+            };
+            let existing = state
+                .selected_session
+                .as_ref()
+                .or(state.history.session.as_ref());
+            if existing.is_some_and(|selected| !same_session(selected, &refreshed)) {
+                return Some(history_request_failure(
+                    "completed prompt reported another persisted session".into(),
+                ));
+            }
+            refreshed.session_name = existing.and_then(|session| session.session_name.clone());
+            state.last_session = Some(refreshed.session_id.clone());
+            state.selected_session = Some(refreshed.clone());
+            state.history.session = Some(refreshed);
+            state.history.active_leaf_id = report.active_leaf_id;
+            Some(vec![UiEffect::RequestRender])
+        }
         HistoryRequestKind::Older { cursor } | HistoryRequestKind::Newer { cursor }
             if !same_history_scope(&state.history, &report, request.active_leaf_may_advance)
                 || report.durable_entry_ids.is_empty()
@@ -2890,7 +3032,13 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    if let Some(effects) = handle_history_backend_event(state, &event) {
+    if let Some(mut effects) = handle_history_backend_event(state, &event) {
+        if state.post_prompt_session_sync_pending
+            && state.post_prompt_stats_command_id.is_none()
+            && state.history_request.is_none()
+        {
+            effects.extend(start_post_prompt_session_sync(state, ids)?);
+        }
         return Ok(effects);
     }
     if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
@@ -3033,6 +3181,12 @@ fn handle_backend_event(
             ok,
             error,
         } => {
+            if state.post_prompt_stats_command_id.as_deref() == Some(command_id.as_str())
+                && command_type == "get_session_stats"
+            {
+                state.post_prompt_stats_command_id = None;
+                return start_post_prompt_session_sync(state, ids);
+            }
             if let Some(effects) =
                 handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
             {
@@ -3046,6 +3200,8 @@ fn handle_backend_event(
             }
             let stats_id = ids.next_id(CommandKind::GetSessionStats);
             let stats = WispTypedClientRpcCommands::get_session_stats(&stats_id)?;
+            state.post_prompt_session_sync_pending = true;
+            state.post_prompt_stats_command_id = Some(stats_id);
             state.current_command = None;
             state.pending_approval = None;
             state.pending_trust_request_id = None;
@@ -3097,6 +3253,7 @@ mod tests {
         match effect {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
             UiEffect::SendCommittedHydration { command, .. } => Some(command.to_value().unwrap()),
+            UiEffect::SendPostPromptSessionSync(command) => Some(command.to_value().unwrap()),
             UiEffect::RestoreDraft { .. }
             | UiEffect::ShowSessionPicker { .. }
             | UiEffect::ShowSessionTreePage { .. }
@@ -3242,6 +3399,142 @@ mod tests {
             command_value(&effects[0]).unwrap()["type"],
             "get_session_stats"
         );
+    }
+
+    #[test]
+    fn prompt_completion_syncs_the_selected_session_and_active_leaf_in_either_order() {
+        for result_first in [true, false] {
+            let selected = session("active");
+            let mut state = UiState::new("fake".into(), None, None);
+            state.selected_session = Some(selected.clone());
+            state.history.session = Some(selected.clone());
+            state.history.active_leaf_id = Some("old-leaf".into());
+            state.current_command = Some(ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: ActiveCommandType::Prompt,
+            });
+            let mut ids = DeterministicIds::default();
+
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(
+                command_value(&effects[0]).unwrap()["type"],
+                "get_session_stats"
+            );
+            assert!(state.post_prompt_session_sync_pending);
+
+            let blocked = reduce(&mut state, UiAction::CloneSession, &mut ids).unwrap();
+            assert!(matches!(
+                blocked.as_slice(),
+                [UiEffect::Notice(message), UiEffect::RequestRender]
+                    if message.contains("metadata refresh")
+            ));
+
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_session_stats-1", "get_session_stats", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["type"], "get_messages");
+
+            let report = BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(SessionIdentity {
+                        session_name: None,
+                        ..selected.clone()
+                    }),
+                    active_leaf_id: Some("new-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: SharedTranscript::default(),
+                },
+            };
+            let completion = finished("get_messages-1", "get_messages", true);
+            let ordered = if result_first {
+                [report, completion]
+            } else {
+                [completion, report]
+            };
+            for event in ordered {
+                reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+            }
+
+            assert!(!state.post_prompt_session_sync_pending);
+            assert_eq!(state.selected_session, Some(selected.clone()));
+            assert_eq!(state.history.session, Some(selected));
+            assert_eq!(state.history.active_leaf_id.as_deref(), Some("new-leaf"));
+            let effects = reduce(&mut state, UiAction::CloneSession, &mut ids).unwrap();
+            assert_eq!(command_value(&effects[0]).unwrap()["type"], "clone_session");
+        }
+    }
+
+    #[test]
+    fn first_prompt_adopts_the_backend_created_session() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut ids = DeterministicIds::default();
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_session_stats-1", "get_session_stats", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let created = SessionIdentity {
+            session_id: "created".into(),
+            session_path: "/sessions/created.jsonl".into(),
+            session_name: None,
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: "get_messages-1".into(),
+                messages: SessionMessages {
+                    session: Some(created.clone()),
+                    active_leaf_id: Some("created-leaf".into()),
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: SharedTranscript::default(),
+                },
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.selected_session, Some(created.clone()));
+        assert_eq!(state.history.session, Some(created));
+        assert_eq!(
+            state.history.active_leaf_id.as_deref(),
+            Some("created-leaf")
+        );
+        assert_eq!(state.last_session.as_deref(), Some("created"));
     }
 
     #[test]

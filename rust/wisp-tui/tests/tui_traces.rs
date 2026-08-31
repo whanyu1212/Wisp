@@ -392,7 +392,8 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
         for effect in reduce(&mut state, action, &mut ids).map_err(|error| error.to_string())? {
             match effect {
                 UiEffect::SendCommand(command)
-                | UiEffect::SendCommittedHydration { command, .. } => {
+                | UiEffect::SendCommittedHydration { command, .. }
+                | UiEffect::SendPostPromptSessionSync(command) => {
                     let mut value = command.to_value().map_err(|error| error.to_string())?;
                     normalize_trace_command(&mut value);
                     commands.push(value);
