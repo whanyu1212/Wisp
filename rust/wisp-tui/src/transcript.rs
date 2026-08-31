@@ -1556,10 +1556,26 @@ impl Transcript {
             .entry_indexes
             .get(&entry_id)
             .expect("historical process entry must exist");
+        let moves_to_suffix = index.saturating_add(1) < self.entries.len();
+        if moves_to_suffix {
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| self.entries.get_mut(previous))
+            {
+                Self::bump_revision(previous);
+            }
+        }
         let mut entry = self.entries.remove(index);
+        Self::bump_revision(&mut entry);
         entry.history_group = None;
+        if moves_to_suffix {
+            if let Some(previous) = self.entries.last_mut() {
+                Self::bump_revision(previous);
+            }
+        }
         self.entries.push(entry);
         self.rebuild_entry_indexes();
+        self.bump_generation();
     }
 
     fn rebuild_entry_indexes(&mut self) {

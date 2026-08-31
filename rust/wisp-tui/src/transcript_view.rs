@@ -516,7 +516,7 @@ impl TranscriptRowCache {
             && !entry.content.is_empty())
         .then(|| self.markdown_snapshot(entry));
         if let Some(cached) = self.rows.get(&key).cloned() {
-            if cached_row_valid(&cached, entry, markdown_snapshot.as_deref()) {
+            if cached_row_valid(transcript, &cached, entry, markdown_snapshot.as_deref()) {
                 self.work.cache_hits = self.work.cache_hits.saturating_add(1);
                 return Some(cached);
             }
@@ -1970,6 +1970,7 @@ impl TranscriptViewport {
 }
 
 fn cached_row_valid(
+    transcript: &Transcript,
     cached: &CachedRow,
     entry: &TranscriptEntry,
     markdown: Option<&MarkdownSnapshot>,
@@ -1997,7 +1998,13 @@ fn cached_row_valid(
                 .next
                 .is_some_and(|next| next.entry_id == entry.id && next.position == expected)
         }
-        TranscriptRowKind::Spacer => true,
+        TranscriptRowKind::Spacer => {
+            cached.next
+                == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                    entry_id: next.id,
+                    position: RowPosition::Header,
+                })
+        }
         TranscriptRowKind::Content if entry.role == TranscriptRole::Assistant => {
             let Some(snapshot) = markdown else {
                 return false;
@@ -3006,6 +3013,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn moving_historical_process_to_live_suffix_invalidates_cached_links() {
+        let mut transcript = Transcript::default();
+        let older = transcript.append_prompt("older".into());
+        transcript.mark_history_entries(0, "older-entry");
+        let process_start = transcript.entries().len();
+        let process = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-history".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        let mut completed = tool_result("poll-history", "historical output");
+        completed.name = "bash".into();
+        completed.process_id = Some("process-live".into());
+        completed.process_state = Some("completed".into());
+        completed.stdout = Some("historical output".into());
+        completed.stdout_source_bytes = 17;
+        transcript.observe_tool_result(completed);
+        transcript.mark_history_entries(process_start, "process-entry");
+        let newer_start = transcript.entries().len();
+        let newer = transcript.append_prompt("newer".into());
+        transcript.mark_history_entries(newer_start, "newer-entry");
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 40);
+        let _ = viewport.visible_rows(&transcript, &mut cache);
+
+        let reused = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-live".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        assert_eq!(reused, process);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let mut rendered_order = Vec::new();
+        for row in rows {
+            if rendered_order.last() != Some(&row.anchor.entry_id) {
+                rendered_order.push(row.anchor.entry_id);
+            }
+        }
+
+        assert_eq!(
+            transcript
+                .entries()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![older, newer, process]
+        );
+        assert_eq!(rendered_order, vec![older, newer, process]);
     }
 
     #[test]
