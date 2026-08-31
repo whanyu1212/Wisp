@@ -1,6 +1,6 @@
 //! Terminal-independent transcript state for the native TUI.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -1142,18 +1142,23 @@ impl Transcript {
             }
             return true;
         }
+        let inserted_ids = inserted
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<HashSet<_>>();
         let index = if replace_marker { 0 } else { index };
         self.entries.splice(index..index, inserted);
         if let Some(marker) = omission_marker {
             self.entries.insert(0, marker);
         }
-        self.reconcile_history_boundaries();
+        self.reconcile_history_boundaries(&inserted_ids);
         self.rebuild_entry_indexes();
+        self.index_historical_process_entries();
         self.bump_generation();
         true
     }
 
-    fn reconcile_history_boundaries(&mut self) {
+    fn reconcile_history_boundaries(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
         let pending = self
             .entries
             .iter()
@@ -1246,6 +1251,70 @@ impl Transcript {
             }
             self.entries.remove(result_index);
             removed += 1;
+        }
+        self.coalesce_historical_process_cards(inserted_ids);
+    }
+
+    fn coalesce_historical_process_cards(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
+        // ponytail: O(n²) is bounded by 1,200 retained rows; add an index if that limit grows.
+        loop {
+            let mut process_entries = HashMap::<String, usize>::new();
+            let duplicate = self.entries.iter().enumerate().find_map(|(index, entry)| {
+                let process_id = entry
+                    .history_group
+                    .and_then(|_| entry.process_card())?
+                    .process_id
+                    .clone();
+                process_entries
+                    .insert(process_id, index)
+                    .map(|older_index| (older_index, index))
+            });
+            let Some((older_index, newer_index)) = duplicate else {
+                return;
+            };
+
+            let older = self.entries[older_index].clone();
+            let newer = self.entries[newer_index].clone();
+            let mut merged_card = older
+                .process_card()
+                .expect("process entry checked above")
+                .clone();
+            merged_card
+                .merge_historical_newer(newer.process_card().expect("process entry checked above"));
+
+            let keep_newer = inserted_ids.contains(&older.id) && !inserted_ids.contains(&newer.id);
+            let survivor_index = if keep_newer { newer_index } else { older_index };
+            let removed_index = if keep_newer { older_index } else { newer_index };
+            let mut merged = self.entries[survivor_index].clone();
+            merged.kind = TranscriptEntryKind::Process(merged_card);
+            merged.durable_entry_ids = older.durable_entry_ids;
+            for durable_entry_id in newer.durable_entry_ids {
+                if !merged
+                    .durable_entry_ids
+                    .iter()
+                    .any(|candidate| candidate == &durable_entry_id)
+                {
+                    merged.durable_entry_ids.push(durable_entry_id);
+                }
+            }
+            merged.history_result_projection_truncated = older.history_result_projection_truncated
+                || newer.history_result_projection_truncated;
+            merged.history_calls = older.history_calls;
+            for call in newer.history_calls {
+                if !merged
+                    .history_calls
+                    .iter()
+                    .any(|candidate| candidate.call_id == call.call_id)
+                {
+                    merged.history_calls.push(call);
+                }
+            }
+            merged.history_pending_result = older
+                .history_pending_result
+                .or(newer.history_pending_result);
+            Self::bump_revision(&mut merged);
+            self.entries[survivor_index] = merged;
+            self.entries.remove(removed_index);
         }
     }
 
@@ -1377,6 +1446,43 @@ impl Transcript {
             self.bump_generation();
         }
         Some(removed)
+    }
+
+    fn index_historical_process_entries(&mut self) {
+        let entries = self
+            .entries
+            .iter()
+            .filter(|entry| entry.history_group.is_some())
+            .filter_map(|entry| {
+                entry
+                    .process_card()
+                    .map(|card| (card.process_id.clone(), entry.id))
+            })
+            .collect::<Vec<_>>();
+        for (process_id, entry_id) in entries {
+            if self.process_entries.contains_key(&process_id)
+                || identity_for_display(&process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES
+            {
+                continue;
+            }
+            while self.process_entries.len().saturating_add(1) > MAX_PROCESS_INDEX_ENTRIES
+                || self.process_index_bytes.saturating_add(process_id.len())
+                    > MAX_PROCESS_INDEX_BYTES
+            {
+                if !self.evict_oldest_terminal_process() {
+                    break;
+                }
+            }
+            if self.process_entries.len().saturating_add(1) > MAX_PROCESS_INDEX_ENTRIES
+                || self.process_index_bytes.saturating_add(process_id.len())
+                    > MAX_PROCESS_INDEX_BYTES
+            {
+                continue;
+            }
+            self.process_index_bytes = self.process_index_bytes.saturating_add(process_id.len());
+            self.process_order.push_back(process_id.clone());
+            self.process_entries.insert(process_id, entry_id);
+        }
     }
 
     fn rebuild_entry_indexes(&mut self) {

@@ -864,6 +864,169 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_pages_coalesce_completed_process_operations() {
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-older",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"},
+        }]);
+        let mut older_result = message(
+            "tool",
+            "Process process-1 is still running\nstdout:\nolder output",
+        );
+        older_result["tool_call_id"] = json!("poll-older");
+        older_result["tool_name"] = json!("bash");
+        older_result["tool_result"] = json!({"status": "done"});
+        let mut newer_call = message("assistant", "");
+        newer_call["tool_calls"] = json!([{
+            "call_id": "poll-newer",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"},
+        }]);
+        let mut newer_result = message(
+            "tool",
+            "Process process-1 completed with exit code 0\nstdout:\nnewer output",
+        );
+        newer_result["tool_call_id"] = json!("poll-newer");
+        newer_result["tool_name"] = json!("bash");
+        newer_result["tool_result"] = json!({"status": "done"});
+        let older = project_rpc_messages(&[older_call, older_result]).unwrap();
+        let newer = project_rpc_messages(&[newer_call, newer_result]).unwrap();
+        let older_id = older.entries()[0].id;
+        let newer_id = newer.entries()[0].id;
+        let mut appended = older.clone();
+        let mut prepended = newer.clone();
+
+        assert!(appended.append_history_page(&newer));
+        assert_eq!(appended.entries()[0].id, older_id);
+        assert!(prepended.prepend_history_page(&older));
+        assert_eq!(prepended.entries()[0].id, newer_id);
+
+        for transcript in [&appended, &prepended] {
+            assert_eq!(transcript.entries().len(), 1);
+            let card = transcript.entries()[0].process_card().unwrap();
+            assert_eq!(card.display_state, ProcessDisplayState::Completed);
+            assert_eq!(card.call_count, 2);
+            assert_eq!(card.poll_count, 2);
+            let older_output = card.retained_output.text.find("older output").unwrap();
+            let newer_output = card.retained_output.text.find("newer output").unwrap();
+            assert!(older_output < newer_output);
+        }
+    }
+
+    #[test]
+    fn coalesced_process_preserves_newer_unresolved_operation_order() {
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-complete",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"},
+        }]);
+        let mut older_result = message(
+            "tool",
+            "Process process-1 is still running\nstdout:\nolder output",
+        );
+        older_result["tool_call_id"] = json!("poll-complete");
+        older_result["tool_name"] = json!("bash");
+        older_result["tool_result"] = json!({"status": "done"});
+        let mut unresolved = message("assistant", "");
+        unresolved["tool_calls"] = json!([
+            {
+                "call_id": "poll-first",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-1"},
+            },
+            {
+                "call_id": "poll-second",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-1"},
+            }
+        ]);
+        let mut first_result = message(
+            "tool",
+            "Process process-1 is still running\nstdout:\nfirst result",
+        );
+        first_result["tool_call_id"] = json!("poll-first");
+        first_result["tool_name"] = json!("bash");
+        first_result["tool_result"] = json!({"status": "done"});
+        let mut transcript = project_rpc_messages(&[older_call, older_result]).unwrap();
+        let unresolved = project_rpc_messages(&[unresolved]).unwrap();
+        let first_result = project_rpc_messages(&[first_result]).unwrap();
+
+        assert!(transcript.append_history_page(&unresolved));
+        assert!(transcript.append_history_page(&first_result));
+
+        assert_eq!(transcript.entries().len(), 1);
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::PollInterrupted);
+        assert_eq!(card.call_count, 3);
+        assert!(card.retained_output.text.contains("first result"));
+    }
+
+    #[test]
+    fn appended_process_history_reuses_the_survivor_for_live_updates() {
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-older-live",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-live"},
+        }]);
+        let mut older_result = message(
+            "tool",
+            "Process process-live is still running\nstdout:\nolder output",
+        );
+        older_result["tool_call_id"] = json!("poll-older-live");
+        older_result["tool_name"] = json!("bash");
+        older_result["tool_result"] = json!({"status": "done"});
+        let older =
+            project_rpc_message_page_with_origins(&[older_call, older_result], false).unwrap();
+        let mut transcript = SharedTranscript::default();
+        transcript.append_prompt("newest".into());
+        transcript.mark_history_entries(0, "newest-entry");
+        assert!(transcript.prepend_history_page(&older.transcript));
+        let survivor = transcript.entries()[0].id;
+        let mut retained_order = older.durable_entry_ids;
+        retained_order.push("newest-entry".into());
+        assert_eq!(
+            transcript.retain_historical_entries_in_order(2, true, &retained_order),
+            Some(vec!["newest-entry".into()])
+        );
+
+        let mut newer_call = message("assistant", "");
+        newer_call["tool_calls"] = json!([{
+            "call_id": "poll-newer-live",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-live"},
+        }]);
+        let mut newer_result = message(
+            "tool",
+            "Process process-live completed with exit code 0\nstdout:\nnewer output",
+        );
+        newer_result["tool_call_id"] = json!("poll-newer-live");
+        newer_result["tool_name"] = json!("bash");
+        newer_result["tool_result"] = json!({"status": "done"});
+        let newer = project_rpc_messages(&[newer_call, newer_result]).unwrap();
+        assert!(transcript.append_history_page(&newer));
+        assert_eq!(transcript.entries()[0].id, survivor);
+
+        let live_arguments = json!({"operation": "poll", "process_id": "process-live"});
+        let live = transcript.observe_tool_call(ToolCallInput {
+            call_id: "poll-live".into(),
+            name: "bash".into(),
+            arguments: bounded_tool_arguments("bash", &live_arguments),
+            detail_source: ToolDetailSource::None,
+        });
+
+        assert_eq!(live, survivor);
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(
+            transcript.entries()[0].process_card().unwrap().call_count,
+            3
+        );
+    }
+
+    #[test]
     fn adjacent_pages_preserve_denied_process_states() {
         for (operation, expected) in [
             ("poll", ProcessDisplayState::PollDenied),
