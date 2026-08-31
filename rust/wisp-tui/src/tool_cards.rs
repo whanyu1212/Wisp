@@ -727,6 +727,11 @@ impl ProcessCardSnapshot {
         sequence_offset
     }
 
+    pub(crate) fn next_historical_sequence(&self) -> u64 {
+        self.last_sequence
+            .map_or(0, |sequence| sequence.saturating_add(1))
+    }
+
     pub(crate) fn release_historical_sequence(&mut self) {
         self.last_sequence = None;
         self.approval_sequence = None;

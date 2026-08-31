@@ -619,15 +619,27 @@ impl Transcript {
         }) = process_call_identity(&input.name, &input.arguments)
         {
             if let Some(entry_id) = self.process_entry_for(&process_id) {
-                let release_historical_sequence = self.entry(entry_id).is_some_and(|entry| {
-                    entry.history_group.is_some() && entry.history_calls.is_empty()
+                let historical_sequence = self.entry(entry_id).and_then(|entry| {
+                    entry.history_group.and_then(|_| {
+                        entry.process_card().map(|card| {
+                            (
+                                card.next_historical_sequence(),
+                                entry.history_calls.is_empty(),
+                            )
+                        })
+                    })
                 });
-                if release_historical_sequence {
-                    let entry = self.entry_mut(entry_id);
-                    let TranscriptEntryKind::Process(card) = &mut entry.kind else {
-                        unreachable!("process index must target a process card")
-                    };
-                    card.release_historical_sequence();
+                if let Some((sequence, history_calls_resolved)) = historical_sequence {
+                    if history_calls_resolved {
+                        let entry = self.entry_mut(entry_id);
+                        let TranscriptEntryKind::Process(card) = &mut entry.kind else {
+                            unreachable!("process index must target a process card")
+                        };
+                        card.release_historical_sequence();
+                    } else {
+                        self.next_tool_sequence = self.next_tool_sequence.max(sequence);
+                    }
+                    self.promote_history_entry_to_live(entry_id);
                 }
                 let binding =
                     self.new_tool_binding(entry_id, ToolBindingKind::Process(operation), false);
@@ -1112,6 +1124,7 @@ impl Transcript {
         {
             return false;
         }
+        self.next_tool_sequence = self.next_tool_sequence.max(page.next_tool_sequence);
         let omission_marker = replace_marker
             .then(|| {
                 self.entries
@@ -1186,7 +1199,7 @@ impl Transcript {
             if result_index >= self.entries.len() {
                 continue;
             }
-            let Some((call_index, call)) = self.entries[..result_index]
+            let preceding = self.entries[..result_index]
                 .iter()
                 .enumerate()
                 .rev()
@@ -1197,8 +1210,29 @@ impl Transcript {
                         .find(|call| call.call_id == call_id)
                         .cloned()
                         .map(|call| (index, call))
-                })
-            else {
+                });
+            let following = || {
+                self.entries[result_index.saturating_add(1)..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, entry)| {
+                        // A historical process card moves to the live suffix when a
+                        // resumed operation reuses it, so a newly fetched persisted
+                        // result can temporarily precede its original call card.
+                        if entry.history_group.is_some() {
+                            return None;
+                        }
+                        entry
+                            .history_calls
+                            .iter()
+                            .find(|call| call.call_id == call_id)
+                            .cloned()
+                            .map(|call| {
+                                (result_index.saturating_add(offset.saturating_add(1)), call)
+                            })
+                    })
+            };
+            let Some((call_index, call)) = preceding.or_else(following) else {
                 continue;
             };
             let result = self.entries[result_index]
@@ -1257,7 +1291,7 @@ impl Transcript {
                 entry
                     .history_calls
                     .retain(|candidate| candidate.call_id != call.call_id);
-                if entry.history_calls.is_empty() {
+                if entry.history_group.is_some() && entry.history_calls.is_empty() {
                     if let TranscriptEntryKind::Process(card) = &mut entry.kind {
                         card.release_historical_sequence();
                     }
@@ -1329,6 +1363,17 @@ impl Transcript {
                 if let TranscriptEntryKind::Process(card) = &mut merged.kind {
                     card.release_historical_sequence();
                 }
+            } else if let Some(next_sequence) = merged
+                .history_calls
+                .iter()
+                .map(|call| {
+                    call.sequence
+                        .checked_add(1)
+                        .expect("tool lifecycle sequence exhausted")
+                })
+                .max()
+            {
+                self.next_tool_sequence = self.next_tool_sequence.max(next_sequence);
             }
             merged.history_pending_result = older
                 .history_pending_result
@@ -1504,6 +1549,17 @@ impl Transcript {
             self.process_order.push_back(process_id.clone());
             self.process_entries.insert(process_id, entry_id);
         }
+    }
+
+    fn promote_history_entry_to_live(&mut self, entry_id: TranscriptEntryId) {
+        let index = *self
+            .entry_indexes
+            .get(&entry_id)
+            .expect("historical process entry must exist");
+        let mut entry = self.entries.remove(index);
+        entry.history_group = None;
+        self.entries.push(entry);
+        self.rebuild_entry_indexes();
     }
 
     fn rebuild_entry_indexes(&mut self) {
@@ -1918,6 +1974,80 @@ mod tests {
                 serde_json::json!({"operation": "poll", "process_id": "process-1"}),
             )),
             process_id
+        );
+    }
+
+    #[test]
+    fn live_process_reuse_migrates_historical_card_out_of_retention() {
+        let mut transcript = Transcript::default();
+        for index in 0..1_200 {
+            let start = transcript.entries().len();
+            transcript.append_prompt(format!("message-{index}"));
+            transcript.mark_history_entries(start, &format!("entry-{index}"));
+        }
+        let start = transcript.entries().len();
+        let survivor = transcript.observe_tool_call(call(
+            "poll-history",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+        ));
+        let mut historical_result = result("poll-history", "historical output");
+        historical_result.name = "bash".into();
+        historical_result.process_id = Some("process-live".into());
+        historical_result.process_state = Some("completed".into());
+        historical_result.stdout = Some("historical output".into());
+        historical_result.stdout_source_bytes = 17;
+        transcript.observe_tool_result(historical_result);
+        transcript.mark_history_entries(start, "process-history");
+        let start = transcript.entries().len();
+        transcript.append_prompt("message-1200".into());
+        transcript.mark_history_entries(start, "entry-1200");
+        assert_ne!(transcript.entries().last().unwrap().id, survivor);
+
+        let live = transcript.observe_tool_call(call(
+            "poll-live",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-live"}),
+        ));
+        assert_eq!(live, survivor);
+        assert_eq!(transcript.entries().last().unwrap().id, survivor);
+        assert!(transcript.has_live_entries());
+        assert!(
+            !transcript
+                .historical_durable_entry_ids()
+                .contains("process-history")
+        );
+
+        let removed = transcript
+            .retain_historical_entries_in_order(
+                1_200,
+                true,
+                &(0..1_200)
+                    .map(|index| format!("entry-{index}"))
+                    .chain(std::iter::once("process-history".into()))
+                    .chain(std::iter::once("entry-1200".into()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(removed, vec!["entry-1200"]);
+        assert!(transcript.entry(survivor).is_some());
+
+        let mut live_result = result("poll-live", "live output");
+        live_result.name = "bash".into();
+        live_result.process_id = Some("process-live".into());
+        live_result.process_state = Some("running".into());
+        live_result.stdout = Some("live output".into());
+        live_result.stdout_source_bytes = 11;
+        assert_eq!(transcript.observe_tool_result(live_result), survivor);
+        assert!(
+            transcript
+                .entry(survivor)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .retained_output
+                .text
+                .contains("live output")
         );
     }
 

@@ -1016,6 +1016,48 @@ mod tests {
     }
 
     #[test]
+    fn migrated_live_process_reconciles_a_delayed_historical_result() {
+        let mut historical_call = message("assistant", "");
+        historical_call["tool_calls"] = json!([{
+            "call_id": "poll-delayed-live",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-delayed-live"},
+        }]);
+        let older = project_rpc_messages(&[historical_call]).unwrap();
+        let mut transcript = SharedTranscript::default();
+        transcript.append_prompt("newer history".into());
+        transcript.mark_history_entries(0, "newer-history");
+        assert!(transcript.prepend_history_page(&older));
+        let survivor = transcript.entries()[0].id;
+
+        let live_arguments = json!({"operation": "poll", "process_id": "process-delayed-live"});
+        let live = transcript.observe_tool_call(ToolCallInput {
+            call_id: "poll-current-live".into(),
+            name: "bash".into(),
+            arguments: bounded_tool_arguments("bash", &live_arguments),
+            detail_source: ToolDetailSource::None,
+        });
+        assert_eq!(live, survivor);
+        assert_eq!(transcript.entries().last().unwrap().id, survivor);
+
+        let mut delayed_result = message(
+            "tool",
+            "Process process-delayed-live completed with exit code 0\nstdout:\ndelayed output",
+        );
+        delayed_result["tool_call_id"] = json!("poll-delayed-live");
+        delayed_result["tool_name"] = json!("bash");
+        delayed_result["tool_result"] = json!({"status": "done"});
+        let delayed = project_rpc_messages(&[delayed_result]).unwrap();
+        assert!(transcript.append_history_page(&delayed));
+
+        let card = transcript.entries().last().unwrap().process_card().unwrap();
+        assert_eq!(transcript.entries().len(), 2);
+        assert_eq!(transcript.entries().last().unwrap().id, survivor);
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
+        assert!(card.retained_output.text.contains("delayed output"));
+    }
+
+    #[test]
     fn appended_process_history_reuses_the_survivor_for_live_updates() {
         let mut older_call = message("assistant", "");
         older_call["tool_calls"] = json!([{
@@ -1078,6 +1120,55 @@ mod tests {
         let live_arguments = json!({"operation": "poll", "process_id": "process-live"});
         let live = transcript.observe_tool_call(ToolCallInput {
             call_id: "poll-live".into(),
+            name: "bash".into(),
+            arguments: bounded_tool_arguments("bash", &live_arguments),
+            detail_source: ToolDetailSource::None,
+        });
+
+        assert_eq!(live, survivor);
+        assert_eq!(transcript.entries().len(), 1);
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.call_count, 4);
+        assert_eq!(card.display_state, ProcessDisplayState::Polling);
+    }
+
+    #[test]
+    fn merged_unresolved_history_advances_the_live_sequence() {
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-sequence-older",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-sequence"},
+        }]);
+        let mut older_result = message(
+            "tool",
+            "Process process-sequence is still running\nstdout:\nolder output",
+        );
+        older_result["tool_call_id"] = json!("poll-sequence-older");
+        older_result["tool_name"] = json!("bash");
+        older_result["tool_result"] = json!({"status": "done"});
+        let mut transcript = project_rpc_messages(&[older_call, older_result]).unwrap();
+
+        let mut newer_calls = message("assistant", "");
+        newer_calls["tool_calls"] = json!([
+            {
+                "call_id": "poll-sequence-newer-1",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-sequence"},
+            },
+            {
+                "call_id": "poll-sequence-newer-2",
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-sequence"},
+            }
+        ]);
+        let newer = project_rpc_messages(&[newer_calls]).unwrap();
+        assert!(transcript.append_history_page(&newer));
+        let survivor = transcript.entries()[0].id;
+
+        let live_arguments = json!({"operation": "poll", "process_id": "process-sequence"});
+        let live = transcript.observe_tool_call(ToolCallInput {
+            call_id: "poll-sequence-live".into(),
             name: "bash".into(),
             arguments: bounded_tool_arguments("bash", &live_arguments),
             detail_source: ToolDetailSource::None,

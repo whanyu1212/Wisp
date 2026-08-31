@@ -435,9 +435,11 @@ impl LiveUi {
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
-        let control = self.dispatch(action, writer, limit).await?;
-        self.editor.clear();
         self.notice = None;
+        let control = self.dispatch(action, writer, limit).await?;
+        if self.notice.is_none() {
+            self.editor.clear();
+        }
         Ok(control)
     }
 
@@ -3460,6 +3462,89 @@ mod tests {
         ));
         assert!(live_ui.state.session_operation.is_none());
         assert!(live_ui.state.input_ready);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn history_blocked_session_command_keeps_notice_and_editor_text() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui
+            .dispatch_session_action(
+                UiAction::StartupHydration,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+            panic!("startup hydration must queue one frame");
+        };
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::MessagesReported {
+                    command_id: "get_messages-1".into(),
+                    messages: reducer::SessionMessages {
+                        session: Some(reducer::SessionIdentity {
+                            session_id: "active".into(),
+                            session_path: "/sessions/active.jsonl".into(),
+                            session_name: None,
+                        }),
+                        active_leaf_id: Some("leaf".into()),
+                        truncated: false,
+                        next_before_entry_id: None,
+                        next_after_entry_id: None,
+                        durable_entry_ids: Vec::new(),
+                        exact_tool_result: None,
+                        transcript: transcript::SharedTranscript::default(),
+                    },
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_messages-1".into(),
+                    command_type: "get_messages".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::ReloadLatestHistory,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+            panic!("latest history reload must queue one frame");
+        };
+
+        live_ui.editor.insert_paste("/new");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(live_ui.editor.text(), "/new");
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current history request to finish.")
+        );
+        assert!(live_ui.render_pending);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
