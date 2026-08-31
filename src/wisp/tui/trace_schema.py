@@ -21,6 +21,8 @@ from pydantic import (
     model_validator,
 )
 
+from wisp.events import KnownWispEventAdapter
+
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_FORMAT_VERSION = 1
 TRACE_SCHEMA_VERSION = 1
@@ -61,6 +63,145 @@ type JsonValue = (
     | Annotated[dict[_JsonKey, "JsonValue"], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
 )
 type JsonObject = Annotated[dict[_JsonKey, JsonValue], Field(max_length=_MAX_JSON_COLLECTION_ITEMS)]
+
+_QUEUE_EVENT_TYPES = frozenset({"queue.updated", "queue.items.removed", "queue.message.injected"})
+_TRACE_TIMESTAMP_SCHEMA = {
+    "type": "string",
+    "format": "date-time",
+    "pattern": (
+        r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T"
+        r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?"
+        r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$"
+    ),
+}
+_QUEUE_TRACE_EVENT_CONSTRAINTS: list[dict[str, Any]] = [
+    {
+        "if": {
+            "properties": {"type": {"const": "queue.updated"}},
+            "required": ["type"],
+        },
+        "then": {
+            "additionalProperties": False,
+            "properties": {
+                "type": {"const": "queue.updated"},
+                "schema_version": {"enum": list(range(13, 35))},
+                "timestamp": _TRACE_TIMESTAMP_SCHEMA,
+                "steering": {"type": "array", "items": {"type": "string"}},
+                "follow_up": {"type": "array", "items": {"type": "string"}},
+                "steering_mode": {"enum": ["one_at_a_time", "all"]},
+                "follow_up_mode": {"enum": ["one_at_a_time", "all"]},
+            },
+        },
+    },
+    {
+        "if": {
+            "properties": {"type": {"const": "queue.items.removed"}},
+            "required": ["type"],
+        },
+        "then": {
+            "additionalProperties": False,
+            "properties": {
+                "type": {"const": "queue.items.removed"},
+                "schema_version": {"enum": list(range(15, 35))},
+                "timestamp": _TRACE_TIMESTAMP_SCHEMA,
+                "command_id": {"type": "string"},
+                "operation": {"enum": ["pop", "clear"]},
+                "kind": {"enum": ["steering", "follow_up", None]},
+                "steering": {"type": "array", "items": {"type": "string"}},
+                "follow_up": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["type", "command_id", "operation"],
+            "allOf": [
+                {
+                    "if": {"properties": {"operation": {"const": "pop"}}},
+                    "then": {
+                        "properties": {
+                            "kind": {"enum": ["steering", "follow_up"]},
+                            "steering": {"maxItems": 1},
+                            "follow_up": {"maxItems": 1},
+                        },
+                        "required": ["kind"],
+                        "not": {
+                            "properties": {
+                                "steering": {"minItems": 1},
+                                "follow_up": {"minItems": 1},
+                            }
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"kind": {"const": "steering"}},
+                        "required": ["kind"],
+                    },
+                    "then": {"properties": {"follow_up": {"maxItems": 0}}},
+                },
+                {
+                    "if": {
+                        "properties": {"kind": {"const": "follow_up"}},
+                        "required": ["kind"],
+                    },
+                    "then": {"properties": {"steering": {"maxItems": 0}}},
+                },
+            ],
+        },
+    },
+    {
+        "if": {
+            "properties": {"type": {"const": "queue.message.injected"}},
+            "required": ["type"],
+        },
+        "then": {
+            "additionalProperties": False,
+            "properties": {
+                "type": {"const": "queue.message.injected"},
+                "schema_version": {"enum": list(range(14, 35))},
+                "timestamp": _TRACE_TIMESTAMP_SCHEMA,
+                "kind": {"enum": ["steering", "follow_up"]},
+                "content": {"type": "string"},
+                "skill_invocation": {
+                    "anyOf": [
+                        {"type": "null"},
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 64,
+                                    "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                                },
+                                "original_content": {"type": "string"},
+                                "request": {"type": "string"},
+                                "content_sha256": {
+                                    "type": "string",
+                                    "pattern": r"^[0-9a-f]{64}$",
+                                },
+                                "instructions_truncated": {"type": "boolean"},
+                            },
+                            "required": [
+                                "name",
+                                "original_content",
+                                "request",
+                                "content_sha256",
+                            ],
+                        },
+                    ]
+                },
+            },
+            "required": ["type", "kind", "content"],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"skill_invocation": {"not": {"type": "null"}}},
+                        "required": ["skill_invocation"],
+                    },
+                    "then": {"properties": {"schema_version": {"enum": list(range(28, 35))}}},
+                }
+            ],
+        },
+    },
+]
 
 
 def _bound_json_structure(value: Any, *, label: str) -> Any:
@@ -158,6 +299,23 @@ class TraceLocalSubmit(_TraceModel):
     clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
 
 
+class TraceLocalSteer(_TraceModel):
+    type: Literal["local.steer"] = "local.steer"
+    content: str = Field(min_length=1, max_length=MAX_TRACE_CONTENT_CHARS)
+    clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
+
+
+class TraceLocalFollowUp(_TraceModel):
+    type: Literal["local.follow_up"] = "local.follow_up"
+    content: str = Field(min_length=1, max_length=MAX_TRACE_CONTENT_CHARS)
+    clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
+
+
+class TraceLocalRestoreQueue(_TraceModel):
+    type: Literal["local.restore_queue"] = "local.restore_queue"
+    clock_ms: int = Field(ge=0, le=3_600_000, strict=True)
+
+
 class TraceLocalSlash(_TraceModel):
     type: Literal["local.slash"] = "local.slash"
     command: str = Field(min_length=1, max_length=64, pattern=r"^[a-z/][a-z0-9/_-]*$")
@@ -245,6 +403,7 @@ class TraceRpcEvent(_TraceModel):
                     },
                     "then": {"properties": {"approved": {"type": "boolean"}}},
                 },
+                *_QUEUE_TRACE_EVENT_CONSTRAINTS,
             ],
             "x-wisp-max-depth": _MAX_JSON_DEPTH,
             "x-wisp-max-nodes": _MAX_JSON_NODES,
@@ -256,6 +415,10 @@ class TraceRpcEvent(_TraceModel):
     @classmethod
     def _bound_event_structure(cls, value: Any) -> Any:
         bounded = _bound_json_structure(value, label="RPC event")
+        if isinstance(bounded, dict) and bounded.get("type") in _QUEUE_EVENT_TYPES:
+            if "timestamp" in bounded and not isinstance(bounded["timestamp"], str):
+                raise ValueError("queue event timestamp must be a trace string")
+            KnownWispEventAdapter.validate_python(bounded)
         boolean_fields: tuple[str, ...]
         if isinstance(bounded, dict) and bounded.get("type") == "tool.result":
             exit_code = bounded.get("exit_code")
@@ -300,6 +463,9 @@ class TraceRpcClosed(_TraceModel):
 
 TraceInput = Annotated[
     TraceLocalSubmit
+    | TraceLocalSteer
+    | TraceLocalFollowUp
+    | TraceLocalRestoreQueue
     | TraceLocalSlash
     | TraceLocalCancel
     | TraceLocalApprove
@@ -349,6 +515,9 @@ class TraceExpected(_TraceModel):
     view: TraceViewProjection
     interaction: TraceInteractionProjection
     retained_text: str | None = Field(default=None, max_length=MAX_TRACE_CONTENT_CHARS)
+    restored_drafts: tuple[
+        Annotated[str, StringConstraints(min_length=1, max_length=MAX_TRACE_CONTENT_CHARS)], ...
+    ] = Field(default=(), max_length=_MAX_TRACE_EVENTS, strict=False)
     tool_cards: tuple[TraceToolCardProjection, ...] | None = Field(
         default=None,
         max_length=_MAX_TRACE_EVENTS,

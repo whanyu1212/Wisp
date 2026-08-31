@@ -65,6 +65,17 @@
         "interaction": {
           "$ref": "#/$defs/TraceInteractionProjection"
         },
+        "restored_drafts": {
+          "default": [],
+          "items": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Restored Drafts",
+          "type": "array"
+        },
         "retained_text": {
           "anyOf": [
             {
@@ -425,6 +436,57 @@
       "title": "TraceLocalCancel",
       "type": "object"
     },
+    "TraceLocalFollowUp": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "type": {
+          "const": "local.follow_up",
+          "default": "local.follow_up",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "clock_ms"
+      ],
+      "title": "TraceLocalFollowUp",
+      "type": "object"
+    },
+    "TraceLocalRestoreQueue": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "type": {
+          "const": "local.restore_queue",
+          "default": "local.restore_queue",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clock_ms"
+      ],
+      "title": "TraceLocalRestoreQueue",
+      "type": "object"
+    },
     "TraceLocalSlash": {
       "additionalProperties": false,
       "properties": {
@@ -464,6 +526,35 @@
         "clock_ms"
       ],
       "title": "TraceLocalSlash",
+      "type": "object"
+    },
+    "TraceLocalSteer": {
+      "additionalProperties": false,
+      "properties": {
+        "clock_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "title": "Clock Ms",
+          "type": "integer"
+        },
+        "content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "type": {
+          "const": "local.steer",
+          "default": "local.steer",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "clock_ms"
+      ],
+      "title": "TraceLocalSteer",
       "type": "object"
     },
     "TraceLocalSubmit": {
@@ -679,6 +770,373 @@
                   }
                 }
               }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "queue.updated"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "additionalProperties": false,
+                "properties": {
+                  "follow_up": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "follow_up_mode": {
+                    "enum": [
+                      "one_at_a_time",
+                      "all"
+                    ]
+                  },
+                  "schema_version": {
+                    "enum": [
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34
+                    ]
+                  },
+                  "steering": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "steering_mode": {
+                    "enum": [
+                      "one_at_a_time",
+                      "all"
+                    ]
+                  },
+                  "timestamp": {
+                    "format": "date-time",
+                    "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "queue.updated"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "queue.items.removed"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "operation": {
+                          "const": "pop"
+                        }
+                      }
+                    },
+                    "then": {
+                      "not": {
+                        "properties": {
+                          "follow_up": {
+                            "minItems": 1
+                          },
+                          "steering": {
+                            "minItems": 1
+                          }
+                        }
+                      },
+                      "properties": {
+                        "follow_up": {
+                          "maxItems": 1
+                        },
+                        "kind": {
+                          "enum": [
+                            "steering",
+                            "follow_up"
+                          ]
+                        },
+                        "steering": {
+                          "maxItems": 1
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "kind": {
+                          "const": "steering"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    },
+                    "then": {
+                      "properties": {
+                        "follow_up": {
+                          "maxItems": 0
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "kind": {
+                          "const": "follow_up"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    },
+                    "then": {
+                      "properties": {
+                        "steering": {
+                          "maxItems": 0
+                        }
+                      }
+                    }
+                  }
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string"
+                  },
+                  "follow_up": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "enum": [
+                      "steering",
+                      "follow_up",
+                      null
+                    ]
+                  },
+                  "operation": {
+                    "enum": [
+                      "pop",
+                      "clear"
+                    ]
+                  },
+                  "schema_version": {
+                    "enum": [
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34
+                    ]
+                  },
+                  "steering": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "timestamp": {
+                    "format": "date-time",
+                    "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "queue.items.removed"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command_id",
+                  "operation"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "queue.message.injected"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "skill_invocation": {
+                          "not": {
+                            "type": "null"
+                          }
+                        }
+                      },
+                      "required": [
+                        "skill_invocation"
+                      ]
+                    },
+                    "then": {
+                      "properties": {
+                        "schema_version": {
+                          "enum": [
+                            28,
+                            29,
+                            30,
+                            31,
+                            32,
+                            33,
+                            34
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ],
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "steering",
+                      "follow_up"
+                    ]
+                  },
+                  "schema_version": {
+                    "enum": [
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34
+                    ]
+                  },
+                  "skill_invocation": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "content_sha256": {
+                            "pattern": "^[0-9a-f]{64}$",
+                            "type": "string"
+                          },
+                          "instructions_truncated": {
+                            "type": "boolean"
+                          },
+                          "name": {
+                            "maxLength": 64,
+                            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                            "type": "string"
+                          },
+                          "original_content": {
+                            "type": "string"
+                          },
+                          "request": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "original_content",
+                          "request",
+                          "content_sha256"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "timestamp": {
+                    "format": "date-time",
+                    "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "queue.message.injected"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "content"
+                ]
+              }
             }
           ],
           "required": [
@@ -861,7 +1319,10 @@
           "mapping": {
             "local.approve": "#/$defs/TraceLocalApprove",
             "local.cancel": "#/$defs/TraceLocalCancel",
+            "local.follow_up": "#/$defs/TraceLocalFollowUp",
+            "local.restore_queue": "#/$defs/TraceLocalRestoreQueue",
             "local.slash": "#/$defs/TraceLocalSlash",
+            "local.steer": "#/$defs/TraceLocalSteer",
             "local.submit": "#/$defs/TraceLocalSubmit",
             "local.trust": "#/$defs/TraceLocalTrust",
             "rpc.closed": "#/$defs/TraceRpcClosed",
@@ -872,6 +1333,15 @@
         "oneOf": [
           {
             "$ref": "#/$defs/TraceLocalSubmit"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalSteer"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalFollowUp"
+          },
+          {
+            "$ref": "#/$defs/TraceLocalRestoreQueue"
           },
           {
             "$ref": "#/$defs/TraceLocalSlash"

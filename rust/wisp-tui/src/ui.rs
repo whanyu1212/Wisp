@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use wisp_protocol::commands::QueueKind;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
@@ -99,9 +100,22 @@ pub fn render_interactive(
     }
 
     let composer_height = if editable(state) {
-        u16::try_from(editor.line_count().saturating_add(2))
-            .unwrap_or(MAX_COMPOSER_HEIGHT)
-            .clamp(3, MAX_COMPOSER_HEIGHT)
+        let queue_rows = if state.active_prompt_editable() {
+            state
+                .queued_steering()
+                .saturating_add(state.queued_follow_ups())
+                .min(3)
+        } else {
+            0
+        };
+        u16::try_from(
+            editor
+                .line_count()
+                .saturating_add(queue_rows)
+                .saturating_add(2),
+        )
+        .unwrap_or(MAX_COMPOSER_HEIGHT)
+        .clamp(3, MAX_COMPOSER_HEIGHT)
     } else if decision_pending {
         5
     } else {
@@ -127,7 +141,7 @@ pub fn render_interactive(
         browse_selected,
     );
     render_composer(frame, chunks[2], state, editor);
-    render_footer(frame, chunks[3], notice);
+    render_footer(frame, chunks[3], state, notice);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection: &ConnectionInfo) {
@@ -161,7 +175,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
                 .unwrap_or(&session.session_path),
         );
     }
-    let title = Line::from(vec![
+    let mut title = vec![
         Span::styled(
             " WISP ",
             Style::default()
@@ -173,7 +187,15 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
             state.view_status.as_str(),
             status_style.add_modifier(Modifier::BOLD),
         ),
-    ]);
+    ];
+    if state.active_prompt_editable() {
+        title.push(Span::raw(format!(
+            " • s:{}/l:{}",
+            state.queued_steering(),
+            state.queued_follow_ups()
+        )));
+    }
+    let title = Line::from(title);
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(&details))
             .alignment(Alignment::Center)
@@ -424,8 +446,21 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &PromptEditor) {
-    let title = if state.session_operation.is_some() {
-        " session "
+    let queued_total = state
+        .queued_steering()
+        .saturating_add(state.queued_follow_ups());
+    let title = if state.active_prompt_editable() {
+        let omitted = queued_total.saturating_sub(3);
+        format!(
+            " queue steer:{} later:{}{} ",
+            state.queued_steering(),
+            state.queued_follow_ups(),
+            (omitted > 0)
+                .then(|| format!(" +{omitted}"))
+                .unwrap_or_default()
+        )
+    } else if state.session_operation.is_some() {
+        " session ".into()
     } else {
         match state.view_status {
             ViewStatus::Idle => " prompt ",
@@ -434,6 +469,7 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
             ViewStatus::WaitingForTrust => " trust required ",
             ViewStatus::Error => " prompt failed ",
         }
+        .into()
     };
     let border_style = match state.view_status {
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
@@ -448,29 +484,63 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         .border_style(border_style);
     let inner = block.inner(area);
     if editable(state) {
+        frame.render_widget(block, area);
+        let preview_rows = if state.active_prompt_editable() {
+            queued_total
+                .min(3)
+                .min(usize::from(inner.height.saturating_sub(1)))
+        } else {
+            0
+        };
+        if preview_rows > 0 {
+            let preview_area = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: u16::try_from(preview_rows).unwrap_or(inner.height),
+            };
+            frame.render_widget(
+                Paragraph::new(Text::from(queue_preview_lines(
+                    state,
+                    preview_rows,
+                    usize::from(inner.width),
+                ))),
+                preview_area,
+            );
+        }
+        let editor_area = Rect {
+            x: inner.x,
+            y: inner
+                .y
+                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            width: inner.width,
+            height: inner
+                .height
+                .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
+        };
         let row = editor.cursor_row();
         let column = editor.cursor_column();
-        let vertical_scroll = row.saturating_sub(usize::from(inner.height.saturating_sub(1)));
-        let horizontal_scroll = column.saturating_sub(usize::from(inner.width.saturating_sub(1)));
+        let vertical_scroll = row.saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
+        let horizontal_scroll =
+            column.saturating_sub(usize::from(editor_area.width.saturating_sub(1)));
         let cursor_visible_row = row.saturating_sub(vertical_scroll);
         let display_text = composer_visible_text(
             editor,
             vertical_scroll,
             horizontal_scroll,
-            usize::from(inner.width),
-            usize::from(inner.height),
+            usize::from(editor_area.width),
+            usize::from(editor_area.height),
             cursor_visible_row,
         );
         let cursor_horizontal_scroll = display_text.cursor_horizontal_scroll;
-        let paragraph = Paragraph::new(display_text.text).block(block);
-        frame.render_widget(paragraph, area);
-        let cursor_x = inner.x.saturating_add(
+        frame.render_widget(Paragraph::new(display_text.text), editor_area);
+        let cursor_x = editor_area.x.saturating_add(
             u16::try_from(column.saturating_sub(cursor_horizontal_scroll)).unwrap_or(u16::MAX),
         );
-        let cursor_y = inner
+        let cursor_y = editor_area
             .y
             .saturating_add(u16::try_from(row.saturating_sub(vertical_scroll)).unwrap_or(u16::MAX));
-        if cursor_x < inner.right() && cursor_y < inner.bottom() {
+        if cursor_x < editor_area.right() && cursor_y < editor_area.bottom() {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
         return;
@@ -512,6 +582,44 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn queue_preview_lines(state: &UiState, max_rows: usize, width: usize) -> Vec<Line<'static>> {
+    state
+        .queue_items()
+        .take(max_rows)
+        .map(|(kind, _, content)| {
+            let label = match kind {
+                QueueKind::Steering => "steer",
+                QueueKind::FollowUp => "later",
+            };
+            Line::from(bounded_queue_preview(
+                &format!("{label}: {}", bounded_decision_preview(content)),
+                width,
+            ))
+        })
+        .collect()
+}
+
+fn bounded_queue_preview(content: &str, width: usize) -> String {
+    if content.width() <= width {
+        return content.into();
+    }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let mut preview = String::new();
+    let mut used = 0_usize;
+    for grapheme in content.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if used.saturating_add(grapheme_width) > width - 1 {
+            break;
+        }
+        preview.push_str(grapheme);
+        used = used.saturating_add(grapheme_width);
+    }
+    preview.push('…');
+    preview
 }
 
 struct ComposerVisibleText {
@@ -639,11 +747,15 @@ fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str) {
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
+fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState, notice: Option<&str>) {
     let (content, style) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
             Style::default().fg(Color::Yellow),
+        ),
+        None if state.active_prompt_editable() => (
+            "Enter steer • Alt-Enter later • Alt-Up restore • Esc/Ctrl-C cancels".into(),
+            Style::default().fg(Color::DarkGray),
         ),
         None => (
             "Enter send • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-C quit".into(),
@@ -659,10 +771,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, notice: Option<&str>) {
 }
 
 fn editable(state: &UiState) -> bool {
-    state.input_ready
-        && state.session_operation.is_none()
-        && state.current_command.is_none()
-        && state.view_status == ViewStatus::Idle
+    state.editor_editable()
 }
 
 fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
@@ -854,10 +963,23 @@ fn terminal_control_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reducer::{ActiveCommand, ActiveCommandType, PendingApproval};
+    use crate::reducer::{
+        ActiveCommand, ActiveCommandType, BackendEvent, CommandIdSource, CommandKind,
+        InteractionStatus, PendingApproval, reduce,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[derive(Default)]
+    struct TestIds(u64);
+
+    impl CommandIdSource for TestIds {
+        fn next_id(&mut self, kind: CommandKind) -> String {
+            self.0 += 1;
+            format!("{}-{}", kind.prefix(), self.0)
+        }
+    }
 
     fn connection() -> ConnectionInfo {
         ConnectionInfo {
@@ -1021,6 +1143,48 @@ mod tests {
         let cancelling = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(cancelling.contains("Cancelling current prompt"));
         assert!(!cancelling.contains("Esc/Ctrl-C cancels"));
+    }
+
+    #[test]
+    fn active_queue_editor_renders_bounded_sanitized_previews_and_counts() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut ids = TestIds::default();
+        reduce(
+            &mut state,
+            crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec![
+                    "first\u{1b}[2J\u{202e}spoof".into(),
+                    format!("{}TAIL", "x".repeat(500)),
+                ],
+                follow_up: vec!["later one".into(), "later omitted".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("new steering");
+
+        let rendered = render_to_string(80, 18, &state, &editor);
+        assert!(rendered.contains("new steering"));
+        assert!(rendered.contains("queue steer:2 later:2 +1"));
+        assert!(rendered.contains("steer: first�[2J�spoof"));
+        assert!(rendered.contains("later: later one"));
+        assert!(!rendered.contains("TAIL"));
+        assert!(!rendered.contains("steering arrives"));
+        assert!(rendered.contains("Enter steer"));
+        assert!(rendered.contains("Alt-Enter later"));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains('\u{202e}'));
+
+        let tiny = render_to_string(30, 8, &state, &editor);
+        assert!(!tiny.contains("terminal too"));
+        assert!(tiny.contains("s:2/l:2") || tiny.contains("steer:2"));
     }
 
     #[test]

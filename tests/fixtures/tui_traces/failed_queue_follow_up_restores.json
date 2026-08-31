@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "failed_queue_follow_up_restores",
+  "description": "A failed follow-up command restores its exact composer draft.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    }
+  },
+  "inputs": [
+    {
+      "type": "local.follow_up",
+      "content": "save this follow-up",
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "schema_version": 34,
+        "command_id": "follow_up-1",
+        "command_type": "follow_up",
+        "ok": false,
+        "error": "backend refused"
+      },
+      "clock_ms": 10
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "follow_up",
+        "id": "follow_up-1",
+        "content": "save this follow-up"
+      }
+    ],
+    "view": {
+      "status": "running",
+      "input_mode": "running",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null,
+    "restored_drafts": ["save this follow-up"]
+  }
+}

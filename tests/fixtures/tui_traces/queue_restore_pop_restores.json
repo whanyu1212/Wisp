@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "name": "queue_restore_pop_restores",
+  "description": "A correlated successful pop restores the removed follow-up draft.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    }
+  },
+  "inputs": [
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.updated",
+        "schema_version": 34,
+        "steering": [],
+        "follow_up": ["restore this follow-up"]
+      },
+      "clock_ms": 0
+    },
+    {
+      "type": "local.restore_queue",
+      "clock_ms": 10
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.items.removed",
+        "schema_version": 34,
+        "command_id": "pop_queue-1",
+        "operation": "pop",
+        "kind": "follow_up",
+        "steering": [],
+        "follow_up": ["restore this follow-up"]
+      },
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "rpc.command.finished",
+        "schema_version": 34,
+        "command_id": "pop_queue-1",
+        "command_type": "pop_queue",
+        "ok": true
+      },
+      "clock_ms": 30
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "pop_queue",
+        "id": "pop_queue-1",
+        "kind": "follow_up"
+      }
+    ],
+    "view": {
+      "status": "running",
+      "input_mode": "running",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null,
+    "restored_drafts": ["restore this follow-up"]
+  }
+}

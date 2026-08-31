@@ -60,8 +60,16 @@ The typed session API can derive a new session without rewriting its source:
 - A **fork** copies the path before a selected user message and returns that prompt for editing.
 
 Copied entries retain stable IDs, parent links, timestamps, and accounting metadata under a new
-session ID. These are available to RPC clients via `clone_session` / `fork_session`; direct CLI and
-TUI commands are not yet exposed.
+session ID. RPC clients use `clone_session` / `fork_session`. The experimental Rust TUI exposes
+`/clone` and a keyboard-only `/tree` picker: `Enter` navigates to a node, `f` forks a selected user
+message, and `/unrevert` reverses the latest eligible navigation. Fork and user-message navigation
+restore the editable prompt only after the authoritative target history loads. The picker requests
+200 append-ordered nodes at a time, retains two pages (400 nodes), evicts whole oldest pages, and
+restarts at the first page whenever `/tree` is reopened.
+
+The Rust TUI also supports `/name <display name>` and `/name --clear`. Textual and the direct CLI do
+not currently expose these direct session commands; they remain available through the typed RPC and
+SDK surfaces.
 
 ::: warning Deprecated
 `wisp.agent.messages.SessionEntry(...)` remains available as a factory. New integrations should

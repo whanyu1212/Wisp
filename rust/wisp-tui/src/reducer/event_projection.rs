@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 
 use super::{
-    BackendEvent, MessageContentKind, PendingApproval, SESSION_CATALOG_LIMIT,
-    SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
-    SESSION_UPDATED_AT_MAX_BYTES, SessionIdentity, SessionMessages, SessionSummary,
+    BackendEvent, MessageContentKind, PendingApproval, QUEUE_CONTENT_BYTES_LIMIT,
+    QUEUE_MESSAGE_LIMIT, QueueRemovalOperation, SESSION_CATALOG_LIMIT, SESSION_ENTRY_COUNT_MAX,
+    SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES, SESSION_TREE_PAGE_LIMIT,
+    SESSION_UPDATED_AT_MAX_BYTES, SessionDerivation, SessionIdentity, SessionMessages,
+    SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode, SessionTreeNodeKind,
+    SessionTreePage, SessionTreeUnrevert,
 };
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
@@ -13,6 +16,8 @@ use crate::tool_cards::{
 use crate::tool_detail::{capture_write_before, project_tool_detail_source};
 use serde_json::Value;
 use thiserror::Error;
+use wisp_protocol::MAX_APPLICATION_FRAME_BYTES;
+use wisp_protocol::commands::QueueKind;
 use wisp_protocol::events::WispCurrentLiveEventOutput;
 
 #[derive(Debug, Error)]
@@ -32,6 +37,14 @@ pub enum EventProjectionError {
     },
     #[error("session report has more than {SESSION_CATALOG_LIMIT} sessions")]
     TooManySessions,
+    #[error("session tree report has more than {SESSION_TREE_PAGE_LIMIT} nodes")]
+    TooManyTreeNodes,
+    #[error("queue event {event_type:?} has more than {QUEUE_MESSAGE_LIMIT} messages")]
+    TooManyQueueMessages { event_type: String },
+    #[error(
+        "queue event {event_type:?} exceeds the {QUEUE_CONTENT_BYTES_LIMIT}-byte content limit"
+    )]
+    OversizedQueueContent { event_type: String },
 }
 
 impl BackendEvent {
@@ -203,6 +216,46 @@ impl BackendEvent {
                 model: nullable_string_field(value, &event_type, "model")?,
                 effort: nullable_string_field(value, &event_type, "effort")?,
             },
+            "queue.updated" => {
+                let steering = array_field(value, &event_type, "steering")?;
+                let follow_up = array_field(value, &event_type, "follow_up")?;
+                validate_queue_arrays(
+                    &event_type,
+                    [("steering", steering), ("follow_up", follow_up)],
+                )?;
+                Self::QueueUpdated {
+                    steering: queue_strings(steering),
+                    follow_up: queue_strings(follow_up),
+                }
+            }
+            "queue.items.removed" => {
+                let steering = array_field(value, &event_type, "steering")?;
+                let follow_up = array_field(value, &event_type, "follow_up")?;
+                validate_queue_arrays(
+                    &event_type,
+                    [("steering", steering), ("follow_up", follow_up)],
+                )?;
+                let operation = queue_removal_operation_field(value, &event_type)?;
+                let kind = optional_queue_kind_field(value, &event_type)?;
+                validate_queue_removal_shape(&event_type, operation, kind, steering, follow_up)?;
+                Self::QueueItemsRemoved {
+                    command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                    operation,
+                    kind,
+                    steering: queue_strings(steering),
+                    follow_up: queue_strings(follow_up),
+                }
+            }
+            "queue.message.injected" => {
+                let content = string_field(value, &event_type, "content")?;
+                validate_queue_payload(&event_type, [content.as_str()])?;
+                let visible_content = queue_visible_content(value, &event_type, content)?;
+                validate_queue_payload(&event_type, [visible_content.as_str()])?;
+                Self::QueueMessageInjected {
+                    kind: queue_kind_field(value, &event_type, "kind")?,
+                    content: visible_content,
+                }
+            }
             "rpc.sessions" => Self::SessionsReported {
                 command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                 sessions: session_summaries(value, &event_type)?,
@@ -223,6 +276,45 @@ impl BackendEvent {
                     "session_path",
                     Some("session_name"),
                 )?,
+            },
+            "rpc.session.name_changed" => Self::SessionNameChanged {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                changed: SessionNameChange {
+                    session: required_session_identity(
+                        value,
+                        &event_type,
+                        "session_id",
+                        "session_path",
+                        Some("name"),
+                    )?,
+                    previous_name: optional_bounded_display_string_field(
+                        value,
+                        &event_type,
+                        "previous_name",
+                        SESSION_LABEL_MAX_BYTES,
+                    )?,
+                    entry_count: bounded_entry_count(value, &event_type)?,
+                },
+            },
+            "rpc.session.cloned" => Self::SessionCloned {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                derived: session_derivation(value, &event_type, false)?,
+            },
+            "rpc.session.forked" => Self::SessionForked {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                derived: session_derivation(value, &event_type, true)?,
+            },
+            "rpc.session.tree" => Self::SessionTreeReported {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                page: session_tree_page(value, &event_type)?,
+            },
+            "rpc.session.tree.navigated" => Self::SessionTreeNavigated {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                navigation: session_tree_navigation(value, &event_type)?,
+            },
+            "rpc.session.tree.unreverted" => Self::SessionTreeUnreverted {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                unreverted: session_tree_unrevert(value, &event_type)?,
             },
             "rpc.messages" => {
                 let command_id = exact_string_field(value, &event_type, "command_id", 256)?;
@@ -297,6 +389,247 @@ impl BackendEvent {
         };
         Ok(projected)
     }
+}
+
+fn bounded_entry_count(value: &Value, event_type: &str) -> Result<u32, EventProjectionError> {
+    Ok(u64_field(value, event_type, "entry_count")?.min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32)
+}
+
+fn session_derivation(
+    value: &Value,
+    event_type: &str,
+    forked: bool,
+) -> Result<SessionDerivation, EventProjectionError> {
+    let source = required_session_identity(
+        value,
+        event_type,
+        "source_session_id",
+        "source_session_path",
+        Some("source_session_name"),
+    )?;
+    let session = required_session_identity(
+        value,
+        event_type,
+        "session_id",
+        "session_path",
+        Some("session_name"),
+    )?;
+    if source.session_id == session.session_id {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "session_id",
+        });
+    }
+    let selected_entry_id = forked
+        .then(|| exact_string_field(value, event_type, "selected_entry_id", SESSION_ID_MAX_BYTES))
+        .transpose()?;
+    let selected_prompt = forked
+        .then(|| {
+            exact_string_field(
+                value,
+                event_type,
+                "selected_prompt",
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+        })
+        .transpose()?;
+    Ok(SessionDerivation {
+        source,
+        source_active_leaf_id: optional_exact_string_field(
+            value,
+            event_type,
+            "source_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        session,
+        active_leaf_id: optional_exact_string_field(
+            value,
+            event_type,
+            "active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        entry_count: bounded_entry_count(value, event_type)?,
+        selected_entry_id,
+        selected_prompt,
+    })
+}
+
+fn session_tree_page(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreePage, EventProjectionError> {
+    let raw_nodes = array_field(value, event_type, "nodes")?;
+    if raw_nodes.len() > SESSION_TREE_PAGE_LIMIT {
+        return Err(EventProjectionError::TooManyTreeNodes);
+    }
+    let session = optional_session_identity(value, event_type, "session_id", "session_path", None)?;
+    let active_leaf_id =
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
+    let total_node_count = u64_field(value, event_type, "total_node_count")?
+        .min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32;
+    let truncated = bool_field(value, event_type, "truncated")?;
+    let next_after_entry_id = optional_exact_string_field(
+        value,
+        event_type,
+        "next_after_entry_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let mut entry_ids = std::collections::BTreeSet::new();
+    let nodes = raw_nodes
+        .iter()
+        .map(|node| {
+            let entry_id = exact_string_field(node, event_type, "entry_id", SESSION_ID_MAX_BYTES)?;
+            if !entry_ids.insert(entry_id.clone()) {
+                return Err(EventProjectionError::InvalidField {
+                    event_type: event_type.to_owned(),
+                    field: "nodes",
+                });
+            }
+            let kind = match string_field_ref(node, event_type, "kind")? {
+                "message" => SessionTreeNodeKind::Message,
+                "event" => SessionTreeNodeKind::Event,
+                "compaction" => SessionTreeNodeKind::Compaction,
+                _ => {
+                    return Err(EventProjectionError::InvalidField {
+                        event_type: event_type.to_owned(),
+                        field: "kind",
+                    });
+                }
+            };
+            let role = optional_exact_string_field(node, event_type, "role", 32)?;
+            let valid_role = matches!(
+                role.as_deref(),
+                Some("system" | "user" | "assistant" | "tool")
+            );
+            if (kind == SessionTreeNodeKind::Message) != valid_role {
+                return Err(EventProjectionError::InvalidField {
+                    event_type: event_type.to_owned(),
+                    field: "role",
+                });
+            }
+            let raw_preview = string_field_ref(node, event_type, "preview")?;
+            let bounded_preview = BoundedText::head(raw_preview, SESSION_LABEL_MAX_BYTES, 8);
+            optional_exact_string_field(node, event_type, "operation_id", SESSION_ID_MAX_BYTES)?;
+            Ok(SessionTreeNode {
+                entry_id,
+                parent_id: optional_exact_string_field(
+                    node,
+                    event_type,
+                    "parent_id",
+                    SESSION_ID_MAX_BYTES,
+                )?,
+                created_at: bounded_display_string_field(
+                    node,
+                    event_type,
+                    "created_at",
+                    SESSION_UPDATED_AT_MAX_BYTES,
+                )?,
+                kind,
+                role,
+                preview: bounded_preview.text,
+                preview_truncated: bool_field(node, event_type, "preview_truncated")?
+                    || bounded_preview.dropped_bytes > 0
+                    || bounded_preview.dropped_lines > 0,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let valid_cursor = truncated
+        && !nodes.is_empty()
+        && next_after_entry_id.as_ref() == nodes.last().map(|node| &node.entry_id);
+    if nodes.len() > total_node_count as usize
+        || truncated != next_after_entry_id.is_some()
+        || (truncated && !valid_cursor)
+        || (session.is_none()
+            && (active_leaf_id.is_some()
+                || total_node_count != 0
+                || !nodes.is_empty()
+                || truncated))
+    {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "tree page",
+        });
+    }
+    Ok(SessionTreePage {
+        session,
+        active_leaf_id,
+        total_node_count,
+        nodes,
+        truncated,
+        next_after_entry_id,
+    })
+}
+
+fn session_tree_navigation(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreeNavigation, EventProjectionError> {
+    let previous_active_leaf_id = optional_exact_string_field(
+        value,
+        event_type,
+        "previous_active_leaf_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let active_leaf_id =
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
+    let changed = bool_field(value, event_type, "changed")?;
+    if changed == (previous_active_leaf_id == active_leaf_id) {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "changed",
+        });
+    }
+    Ok(SessionTreeNavigation {
+        session: required_session_identity(value, event_type, "session_id", "session_path", None)?,
+        selected_entry_id: exact_string_field(
+            value,
+            event_type,
+            "selected_entry_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        previous_active_leaf_id,
+        active_leaf_id,
+        editor_text: optional_exact_string_field(
+            value,
+            event_type,
+            "editor_text",
+            MAX_APPLICATION_FRAME_BYTES,
+        )?,
+        changed,
+        entry_count: bounded_entry_count(value, event_type)?,
+    })
+}
+
+fn session_tree_unrevert(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreeUnrevert, EventProjectionError> {
+    let previous_active_leaf_id = optional_exact_string_field(
+        value,
+        event_type,
+        "previous_active_leaf_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let active_leaf_id =
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
+    if previous_active_leaf_id == active_leaf_id {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "active_leaf_id",
+        });
+    }
+    Ok(SessionTreeUnrevert {
+        session: required_session_identity(value, event_type, "session_id", "session_path", None)?,
+        source_transition_id: exact_string_field(
+            value,
+            event_type,
+            "source_transition_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        previous_active_leaf_id,
+        active_leaf_id,
+        entry_count: bounded_entry_count(value, event_type)?,
+    })
 }
 
 fn session_summaries(
@@ -426,6 +759,161 @@ fn array_field<'a>(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+fn queue_strings(contents: &[Value]) -> Vec<String> {
+    contents
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .expect("queue strings were validated before cloning")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn validate_queue_arrays<'a>(
+    event_type: &str,
+    arrays: impl IntoIterator<Item = (&'static str, &'a [Value])>,
+) -> Result<(), EventProjectionError> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for (field, contents) in arrays {
+        for content in contents {
+            let content = content
+                .as_str()
+                .ok_or_else(|| EventProjectionError::InvalidField {
+                    event_type: event_type.to_owned(),
+                    field,
+                })?;
+            count = count.saturating_add(1);
+            bytes = bytes.saturating_add(content.len());
+        }
+    }
+    if count > QUEUE_MESSAGE_LIMIT {
+        return Err(EventProjectionError::TooManyQueueMessages {
+            event_type: event_type.to_owned(),
+        });
+    }
+    if bytes > QUEUE_CONTENT_BYTES_LIMIT {
+        return Err(EventProjectionError::OversizedQueueContent {
+            event_type: event_type.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_queue_payload<'a>(
+    event_type: &str,
+    contents: impl IntoIterator<Item = &'a str>,
+) -> Result<(), EventProjectionError> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for content in contents {
+        count = count.saturating_add(1);
+        bytes = bytes.saturating_add(content.len());
+    }
+    if count > QUEUE_MESSAGE_LIMIT {
+        return Err(EventProjectionError::TooManyQueueMessages {
+            event_type: event_type.to_owned(),
+        });
+    }
+    if bytes > QUEUE_CONTENT_BYTES_LIMIT {
+        return Err(EventProjectionError::OversizedQueueContent {
+            event_type: event_type.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn queue_kind_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<QueueKind, EventProjectionError> {
+    match string_field_ref(value, event_type, field)? {
+        "steering" => Ok(QueueKind::Steering),
+        "follow_up" => Ok(QueueKind::FollowUp),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        }),
+    }
+}
+
+fn optional_queue_kind_field(
+    value: &Value,
+    event_type: &str,
+) -> Result<Option<QueueKind>, EventProjectionError> {
+    match value.get("kind") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(_)) => queue_kind_field(value, event_type, "kind").map(Some),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "kind",
+        }),
+    }
+}
+
+fn queue_removal_operation_field(
+    value: &Value,
+    event_type: &str,
+) -> Result<QueueRemovalOperation, EventProjectionError> {
+    match string_field_ref(value, event_type, "operation")? {
+        "pop" => Ok(QueueRemovalOperation::Pop),
+        "clear" => Ok(QueueRemovalOperation::Clear),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "operation",
+        }),
+    }
+}
+
+fn validate_queue_removal_shape(
+    event_type: &str,
+    operation: QueueRemovalOperation,
+    kind: Option<QueueKind>,
+    steering: &[Value],
+    follow_up: &[Value],
+) -> Result<(), EventProjectionError> {
+    let valid = !matches!(operation, QueueRemovalOperation::Pop) || kind.is_some();
+    let matching_kind = match kind {
+        Some(QueueKind::Steering) => follow_up.is_empty(),
+        Some(QueueKind::FollowUp) => steering.is_empty(),
+        None => true,
+    };
+    let pop_size = !matches!(operation, QueueRemovalOperation::Pop)
+        || steering.len().saturating_add(follow_up.len()) <= 1;
+    if valid && matching_kind && pop_size {
+        Ok(())
+    } else {
+        Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "queue removal",
+        })
+    }
+}
+
+fn queue_visible_content(
+    value: &Value,
+    event_type: &str,
+    content: String,
+) -> Result<String, EventProjectionError> {
+    match value.get("skill_invocation") {
+        None | Some(Value::Null) => Ok(content),
+        Some(Value::Object(invocation)) => match invocation.get("original_content") {
+            None | Some(Value::Null) => Ok(content),
+            Some(Value::String(original_content)) => Ok(original_content.clone()),
+            Some(_) => Err(EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field: "skill_invocation",
+            }),
+        },
+        Some(_) => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "skill_invocation",
+        }),
+    }
 }
 
 fn string_field_ref<'a>(

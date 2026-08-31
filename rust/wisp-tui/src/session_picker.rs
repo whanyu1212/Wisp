@@ -153,7 +153,7 @@ fn session_line(session: &SessionSummary, selected: bool, width: usize) -> Line<
     Line::from(Span::styled(content, style))
 }
 
-fn terminal_row(content: &str, width: usize) -> String {
+pub(crate) fn terminal_row(content: &str, width: usize) -> String {
     let content = crate::ui::sanitize_for_terminal(content).replace('\n', " ");
     if content.width() <= width {
         return content;

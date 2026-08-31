@@ -117,6 +117,162 @@ def test_trace_schema_rejects_coerced_tool_booleans() -> None:
         TraceFileAdapter.validate_python(data)
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "queue.updated",
+            "schema_version": 34,
+            "steering_mode": "invalid",
+        },
+        {
+            "type": "queue.updated",
+            "schema_version": 34,
+            "timestamp": "not-a-timestamp",
+        },
+        {
+            "type": "queue.items.removed",
+            "schema_version": 34,
+            "timestamp": "not-a-timestamp",
+            "command_id": "clear-1",
+            "operation": "clear",
+        },
+        {
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "timestamp": "not-a-timestamp",
+            "kind": "steering",
+            "content": "steer",
+        },
+        {
+            "type": "queue.updated",
+            "schema_version": 34,
+            "timestamp": 0,
+        },
+        {
+            "type": "queue.items.removed",
+            "schema_version": 34,
+            "timestamp": 0,
+            "command_id": "clear-1",
+            "operation": "clear",
+        },
+        {
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "timestamp": 0,
+            "kind": "steering",
+            "content": "steer",
+        },
+        {
+            "type": "queue.items.removed",
+            "schema_version": 34,
+            "command_id": "pop-1",
+            "operation": "pop",
+        },
+        {
+            "type": "queue.items.removed",
+            "schema_version": 34,
+            "command_id": "pop-1",
+            "operation": "pop",
+            "kind": "steering",
+            "follow_up": ["wrong queue"],
+        },
+        {
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "kind": "steering",
+            "content": "expanded",
+            "skill_invocation": {"original_content": "/skill request"},
+        },
+        {
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "kind": "steering",
+            "content": "expanded",
+            "skill_invocation": {
+                "name": "skill",
+                "original_content": "/skill request",
+                "request": "request",
+                "content_sha256": "0" * 64,
+                "instructions_truncated": 0,
+            },
+        },
+        {
+            "type": "queue.message.injected",
+            "schema_version": 34,
+            "kind": "steering",
+            "content": "expanded",
+            "skill_invocation": {
+                "name": "skill",
+                "original_content": "/skill request",
+                "request": "request",
+                "content_sha256": "not-a-sha",
+                "unexpected": True,
+            },
+        },
+    ],
+)
+def test_trace_schema_and_model_reject_invalid_queue_events(event: dict[str, Any]) -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "invalid_queue_event",
+        [{"type": "rpc.event", "event": event, "clock_ms": 0}],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError):
+        TraceFileAdapter.validate_python(data)
+
+
+@pytest.mark.parametrize("kind", [pytest.param("omitted"), pytest.param(None)])
+def test_trace_schema_accepts_clear_all_queue_events_without_a_kind(kind: str | None) -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    event: dict[str, Any] = {
+        "type": "queue.items.removed",
+        "schema_version": 34,
+        "command_id": "clear-1",
+        "operation": "clear",
+        "steering": ["steer"],
+        "follow_up": ["later"],
+    }
+    if kind is None:
+        event["kind"] = None
+    data = _inline_trace(
+        "clear_all_queue_event",
+        [{"type": "rpc.event", "event": event, "clock_ms": 0}],
+        _default_initial(),
+    )
+
+    Draft202012Validator(schema).validate(data)
+    TraceFileAdapter.validate_python(data)
+
+
+def test_trace_schema_keeps_unknown_rpc_events_generic() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "unknown_rpc_event",
+        [
+            {
+                "type": "rpc.event",
+                "event": {"type": "future.queue.event", "payload": {"value": True}},
+                "clock_ms": 0,
+            }
+        ],
+        _default_initial(),
+    )
+
+    Draft202012Validator(schema).validate(data)
+    trace = TraceFileAdapter.validate_python(data)
+
+    async def replay() -> None:
+        result = await run_trace(trace)
+        assert result.commands == ()
+
+    anyio.run(replay)
+
+
 def test_trace_schema_rejects_integers_beyond_the_finite_json_number_range() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     data = _inline_trace(
@@ -253,6 +409,11 @@ def test_trace_replay_matches_expected_projection(path: Path) -> None:
             f"  actual:   {result.retained_text!r}\n"
             f"  expected: {trace.expected.retained_text!r}"
         )
+        assert result.restored_drafts == trace.expected.restored_drafts, (
+            f"restored_drafts mismatch in {path.name}\n"
+            f"  actual:   {result.restored_drafts!r}\n"
+            f"  expected: {trace.expected.restored_drafts!r}"
+        )
         if trace.expected.tool_cards is not None:
             assert result.tool_cards == trace.expected.tool_cards, (
                 f"tool_cards mismatch in {path.name}\n"
@@ -300,6 +461,7 @@ def test_trace_replay_is_deterministic(path: Path) -> None:
         assert r1.view == r2.view
         assert r1.interaction == r2.interaction
         assert r1.retained_text == r2.retained_text
+        assert r1.restored_drafts == r2.restored_drafts
         assert r1.tokens == r2.tokens
 
     anyio.run(run_twice)
@@ -321,6 +483,7 @@ def test_trace_replay_determinism_across_repeated_runs() -> None:
             result = await run_trace(trace)
             assert result.commands == first.commands
             assert result.view == first.view
+            assert result.restored_drafts == first.restored_drafts
 
     anyio.run(many)
 
@@ -445,6 +608,36 @@ def test_slash_argument_vectors_are_bounded() -> None:
     )
     with pytest.raises(ValueError, match="inputs.0.*args"):
         TraceFileAdapter.validate_python(too_many)
+
+
+@pytest.mark.parametrize("input_type", ["local.steer", "local.follow_up"])
+def test_local_queue_content_is_bounded(input_type: str) -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "queue_content_limit",
+        [{"type": input_type, "content": "x" * 4001, "clock_ms": 0}],
+        _default_initial(),
+    )
+
+    with pytest.raises(JsonSchemaValidationError, match="not valid"):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="inputs.0.*content"):
+        TraceFileAdapter.validate_python(data)
+
+
+def test_restored_drafts_are_bounded() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    data = _inline_trace(
+        "restored_draft_limit",
+        [{"type": "local.restore_queue", "clock_ms": 0}],
+        _default_initial(),
+    )
+    data["expected"]["restored_drafts"] = ["x" * 4001]
+
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema).validate(data)
+    with pytest.raises(ValueError, match="expected.restored_drafts"):
+        TraceFileAdapter.validate_python(data)
 
 
 def test_replay_stops_at_exit_and_rejects_trailing_inputs() -> None:

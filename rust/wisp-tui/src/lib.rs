@@ -11,6 +11,7 @@ mod process;
 mod prompt_editor;
 pub mod reducer;
 mod session_picker;
+mod session_tree_picker;
 mod syntax;
 mod terminal;
 mod tool_cards;
@@ -37,6 +38,7 @@ use reducer::{
     ViewStatus,
 };
 use session_picker::{SessionPicker, SessionPickerAction};
+use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::pending;
@@ -56,7 +58,7 @@ use transcript_view::{
     TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
 };
 use ui::ConnectionInfo;
-use wisp_protocol::commands::{ApprovalScope, WispTypedClientRpcCommands};
+use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
 use wisp_protocol::events::WispCurrentLiveEventOutput;
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 use wisp_protocol::handshake_response::RpcHandshakeResponse;
@@ -126,6 +128,8 @@ pub enum Error {
     ContractMismatch { protocol: u32, events: u32 },
     #[error("RPC writer stopped unexpectedly")]
     WriterStopped,
+    #[error("queue submission was not accepted by the writer within 5 seconds")]
+    QueueSubmissionTimeout,
     #[error("RPC reader stopped unexpectedly")]
     ReaderStopped,
     #[error("RPC stdout event queue is full; the frontend cannot keep up with the backend")]
@@ -185,8 +189,85 @@ fn render_transport_closed_diagnostic(state: &UiState) -> String {
     output.finish()
 }
 
+const UNSENT_QUEUE_REPORT_MAX_LINES: usize = 16;
+const UNSENT_QUEUE_REPORT_MAX_BYTES: usize = 1024;
+const UNSENT_QUEUE_REPORT_MAX_CHARS: usize = 512;
+
+fn queue_kind_label(kind: QueueKind) -> &'static str {
+    match kind {
+        QueueKind::Steering => "steer",
+        QueueKind::FollowUp => "later",
+    }
+}
+
+fn render_unsent_queue_diagnostics<'a>(
+    state: &'a UiState,
+    deferred: &'a [DeferredQueueRecovery],
+) -> Vec<String> {
+    let mut items = Vec::<(&'static str, &'static str, &'a str, usize)>::new();
+    let mut add = |context: &'static str, label: &'static str, content: &'a str| {
+        if let Some((_, _, _, count)) =
+            items
+                .iter_mut()
+                .find(|(item_context, item_label, item_content, _)| {
+                    *item_context == context && *item_label == label && *item_content == content
+                })
+        {
+            *count = count.saturating_add(1);
+        } else {
+            items.push((context, label, content, 1));
+        }
+    };
+
+    for (kind, _, content) in state.queue_items() {
+        add("queued", queue_kind_label(kind), content);
+    }
+    for (kind, content) in state.unobserved_queue_submissions() {
+        add("in-flight", queue_kind_label(kind), content);
+    }
+    if let Some((kind, content)) = state.pending_queue_restore_item() {
+        add("restoring", queue_kind_label(kind), content);
+    }
+    for recovery in deferred {
+        add("deferred recovery", "queue", &recovery.content);
+    }
+    let mut lines = Vec::new();
+    let mut omitted = 0_usize;
+    for (context, label, content, count) in items {
+        if lines.len() >= UNSENT_QUEUE_REPORT_MAX_LINES.saturating_sub(1) {
+            omitted = omitted.saturating_add(count);
+            continue;
+        }
+        let mut output =
+            BoundedTerminalText::new(UNSENT_QUEUE_REPORT_MAX_BYTES, UNSENT_QUEUE_REPORT_MAX_CHARS);
+        if count == 1 {
+            std::fmt::write(
+                &mut output,
+                format_args!("wisp-tui: {context} {label} item will not run: {content}"),
+            )
+        } else {
+            std::fmt::write(
+                &mut output,
+                format_args!("wisp-tui: {context} {label} item x{count} will not run: {content}"),
+            )
+        }
+        .expect("bounded terminal renderer cannot fail");
+        lines.push(output.finish());
+    }
+    if omitted > 0 {
+        lines.push(format!(
+            "wisp-tui: {omitted} additional queued item(s) will not run."
+        ));
+    }
+    lines
+}
+
 enum WriterMessage {
-    Frame { payload: Bytes, limit: usize },
+    Frame {
+        payload: Bytes,
+        limit: usize,
+        ack: Option<oneshot::Sender<Result<(), ()>>>,
+    },
     Close,
 }
 
@@ -315,6 +396,12 @@ enum UnsendableResponseContext {
     Cancelling(String),
 }
 
+#[derive(Debug)]
+struct DeferredQueueRecovery {
+    content: String,
+    local_order: Option<u64>,
+}
+
 struct LiveUi {
     state: UiState,
     transcript_viewport: TranscriptViewport,
@@ -327,7 +414,10 @@ struct LiveUi {
     render_pending: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
     unsendable_response_context: Option<UnsendableResponseContext>,
+    deferred_queue_recovery: Vec<DeferredQueueRecovery>,
+    recovered_queue_recovery: bool,
     session_picker: Option<SessionPicker>,
+    session_tree_picker: Option<SessionTreePicker>,
 }
 
 impl Default for LiveUi {
@@ -344,7 +434,10 @@ impl Default for LiveUi {
             render_pending: true,
             rendered_decision_context: None,
             unsendable_response_context: None,
+            deferred_queue_recovery: Vec::new(),
+            recovered_queue_recovery: false,
             session_picker: None,
+            session_tree_picker: None,
         }
     }
 }
@@ -357,6 +450,78 @@ impl LiveUi {
         self.browse_selected = None;
     }
 
+    fn deferred_queue_recovery_bytes(&self) -> usize {
+        self.deferred_queue_recovery
+            .iter()
+            .fold(0_usize, |bytes, recovery| {
+                bytes.saturating_add(recovery.content.len())
+            })
+    }
+
+    fn deferred_queue_recovery_can_accept(&self, content: &str) -> bool {
+        self.deferred_queue_recovery.len() < reducer::QUEUE_MESSAGE_LIMIT
+            && self
+                .deferred_queue_recovery_bytes()
+                .saturating_add(content.len())
+                <= reducer::QUEUE_CONTENT_BYTES_LIMIT
+    }
+
+    fn defer_queue_recovery(&mut self, content: String, local_order: Option<u64>) {
+        assert!(
+            self.deferred_queue_recovery_can_accept(&content),
+            "deferred recoveries must stay within runtime queue limits"
+        );
+        let position = local_order
+            .and_then(|local_order| {
+                self.deferred_queue_recovery.iter().position(|recovery| {
+                    recovery
+                        .local_order
+                        .is_some_and(|existing| existing > local_order)
+                })
+            })
+            .unwrap_or(self.deferred_queue_recovery.len());
+        self.deferred_queue_recovery.insert(
+            position,
+            DeferredQueueRecovery {
+                content,
+                local_order,
+            },
+        );
+        self.notice = Some(
+            "Could not restore queued text because it exceeds the editor limit; Alt+Up restores deferred items one at a time."
+                .into(),
+        );
+        self.render_pending = true;
+    }
+
+    fn retry_deferred_queue_recovery(&mut self) -> bool {
+        let Some(recovery) = self.deferred_queue_recovery.first() else {
+            return false;
+        };
+        let outcome = self.editor.prepend_restored(&recovery.content);
+        self.notice = if outcome.rejected_limit {
+            Some(
+                "Deferred queued text still exceeds the editor limit; kept your newer draft unchanged."
+                    .into(),
+            )
+        } else if outcome.changed {
+            self.deferred_queue_recovery.remove(0);
+            self.recovered_queue_recovery = true;
+            if outcome.ignored_controls > 0 {
+                Some(format!(
+                    "Restored queued text after ignoring {} unsafe terminal control character(s).",
+                    outcome.ignored_controls
+                ))
+            } else {
+                None
+            }
+        } else {
+            Some("Deferred queued text had no editable content; it remains pending.".into())
+        };
+        self.render_pending = true;
+        true
+    }
+
     async fn apply_effects(
         &mut self,
         effects: Vec<UiEffect>,
@@ -364,7 +529,8 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let mut control = LoopControl::Continue;
-        for effect in effects {
+        let mut pending = VecDeque::from(effects);
+        while let Some(effect) = pending.pop_front() {
             match effect {
                 UiEffect::SendCommand(command) => {
                     let value = serde_json::to_value(&command)?;
@@ -379,13 +545,105 @@ impl LiveUi {
                     }
                     send_payload(writer, payload, limit).await?;
                 }
+                UiEffect::RestoreDraft {
+                    content,
+                    local_order: Some(local_order),
+                } => self.defer_queue_recovery(content, Some(local_order)),
+                UiEffect::RestoreDraft {
+                    content,
+                    local_order: None,
+                } => {
+                    let outcome = self.editor.prepend_restored(&content);
+                    if outcome.rejected_limit {
+                        self.defer_queue_recovery(content, None);
+                    } else {
+                        if outcome.changed {
+                            self.recovered_queue_recovery = true;
+                        }
+                        self.notice = if outcome.ignored_controls > 0 {
+                            Some(format!(
+                                "Restored queued text after ignoring {} unsafe terminal control character(s).",
+                                outcome.ignored_controls
+                            ))
+                        } else if outcome.changed {
+                            None
+                        } else {
+                            Some(
+                                "Queued text had no editable content; kept your newer draft unchanged."
+                                    .into(),
+                            )
+                        };
+                        self.render_pending = true;
+                    }
+                }
                 UiEffect::ShowSessionPicker {
                     sessions,
                     selected_session_id,
                 } => {
+                    self.session_tree_picker = None;
                     self.session_picker =
                         Some(SessionPicker::new(sessions, selected_session_id.as_deref()));
                     self.render_pending = true;
+                }
+                UiEffect::ShowSessionTreePage { page, append } => {
+                    self.session_picker = None;
+                    if append {
+                        if let Some(picker) = self.session_tree_picker.as_mut() {
+                            if let Err(notice) = picker.append(page) {
+                                self.notice = Some(notice.into());
+                            }
+                        } else {
+                            self.notice = Some(
+                                "Session tree picker was closed before its next page arrived."
+                                    .into(),
+                            );
+                        }
+                    } else {
+                        self.session_tree_picker = Some(SessionTreePicker::new(page));
+                    }
+                    self.render_pending = true;
+                }
+                UiEffect::CloseSessionTree => {
+                    self.session_tree_picker = None;
+                    self.render_pending = true;
+                }
+                UiEffect::RestoreSessionDraft(content) => {
+                    let outcome = self.editor.insert_paste(&content);
+                    self.notice = if outcome.rejected_limit {
+                        Some(
+                            "The restored session prompt exceeds the editor limit; it was not truncated or inserted."
+                                .into(),
+                        )
+                    } else if outcome.ignored_controls > 0 {
+                        Some(format!(
+                            "Restored the session prompt after ignoring {} unsafe terminal control character(s).",
+                            outcome.ignored_controls
+                        ))
+                    } else {
+                        None
+                    };
+                    self.render_pending = true;
+                }
+                UiEffect::SendCommittedHydration {
+                    command,
+                    session_id: _,
+                } => {
+                    let value = serde_json::to_value(&command)?;
+                    let payload = Bytes::from(serde_json::to_vec(&value)?);
+                    if payload.len() > limit {
+                        let command_id = value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("validated RPC commands have string IDs")
+                            .to_owned();
+                        pending.extend(reducer::reduce(
+                            &mut self.state,
+                            UiAction::RejectCommittedHydration { command_id, limit },
+                            &mut self.ids,
+                        )?);
+                        continue;
+                    }
+                    send_payload(writer, payload, limit).await?;
                 }
                 UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
                 UiEffect::HistoryWindowChanged => self.render_pending = true,
@@ -632,7 +890,9 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            if let Some(picker) = &self.session_picker {
+            if let Some(picker) = &self.session_tree_picker {
+                session_tree_picker::render(frame, frame.area(), picker);
+            } else if let Some(picker) = &self.session_picker {
                 session_picker::render(frame, frame.area(), picker);
             } else {
                 ui::render_interactive(
@@ -781,7 +1041,7 @@ impl LiveUi {
                 LoopControl::Continue
             });
         }
-        if self.prompt_editable() || self.state.view_status == ViewStatus::Error {
+        if self.idle_prompt_editable() || self.state.view_status == ViewStatus::Error {
             if quit_if_idle {
                 return Ok(LoopControl::Exit);
             }
@@ -796,11 +1056,127 @@ impl LiveUi {
         self.dispatch(UiAction::Cancel, writer, limit).await
     }
 
-    fn prompt_editable(&self) -> bool {
-        self.state.input_ready
-            && self.state.session_operation.is_none()
-            && self.state.current_command.is_none()
-            && self.state.view_status == ViewStatus::Idle
+    async fn dispatch_queue_action(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if matches!(&action, UiAction::RestoreNewestQueueDraft)
+            && self.retry_deferred_queue_recovery()
+        {
+            return Ok(LoopControl::Continue);
+        }
+        let clear_editor = matches!(&action, UiAction::Steer(_) | UiAction::FollowUp(_));
+        if clear_editor
+            && !self.deferred_queue_recovery.is_empty()
+            && !self.recovered_queue_recovery
+        {
+            self.notice = Some(
+                "Restore deferred queued text with Alt+Up before queueing another message.".into(),
+            );
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if clear_editor
+            && self.recovered_queue_recovery
+            && !self.deferred_queue_recovery_can_accept(self.editor.text())
+        {
+            self.notice = Some(
+                "Recovered text plus deferred items exceeds the queue limit; keep editing before queueing it."
+                    .into(),
+            );
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let command = match &action {
+            UiAction::Steer(content) => {
+                if let Err(error) = self.state.queue_submission_preflight(content) {
+                    self.notice = Some(error.notice().into());
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                Some((
+                    "Steering",
+                    WispTypedClientRpcCommands::steer(
+                        &self.ids.peek_id(CommandKind::Steer),
+                        content,
+                    )?,
+                ))
+            }
+            UiAction::FollowUp(content) => {
+                if let Err(error) = self.state.queue_submission_preflight(content) {
+                    self.notice = Some(error.notice().into());
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                Some((
+                    "Follow-up",
+                    WispTypedClientRpcCommands::follow_up(
+                        &self.ids.peek_id(CommandKind::FollowUp),
+                        content,
+                    )?,
+                ))
+            }
+            UiAction::RestoreNewestQueueDraft => {
+                let Some((kind, content)) = self.state.queue_restore_candidate() else {
+                    return self.dispatch(action, writer, limit).await;
+                };
+                if !self.editor.can_prepend_restored(content) {
+                    self.notice = Some(
+                        "Queued text no longer fits with your newer draft; kept the queue unchanged."
+                            .into(),
+                    );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                Some((
+                    "Queued-item restoration",
+                    WispTypedClientRpcCommands::pop_queue(
+                        &self.ids.peek_id(CommandKind::PopQueue),
+                        kind,
+                    )
+                    .expect("validated queue kind builds a pop command"),
+                ))
+            }
+            _ => None,
+        };
+        let Some((label, command)) = command else {
+            return self.dispatch(action, writer, limit).await;
+        };
+        let payload = Bytes::from(serde_json::to_vec(&command)?);
+        if payload.len() > limit {
+            self.notice = Some(format!(
+                "{label} encoded RPC frame is {} bytes, exceeding the negotiated {limit}-byte limit; the editor text was kept.",
+                payload.len()
+            ));
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        send_payload_confirmed(writer, payload, limit).await?;
+        self.notice = None;
+        let mut effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if matches!(effects.first(), Some(UiEffect::SendCommand(_))) {
+            effects.remove(0);
+        }
+        let control = self.apply_effects(effects, writer, limit).await?;
+        if clear_editor && self.notice.is_none() {
+            self.editor.clear();
+            self.recovered_queue_recovery = false;
+        }
+        Ok(control)
+    }
+
+    fn idle_prompt_editable(&self) -> bool {
+        self.state.editor_editable() && self.state.current_command.is_none()
+    }
+
+    fn active_prompt_editable(&self) -> bool {
+        self.state.active_prompt_editable()
+    }
+
+    fn editor_editable(&self) -> bool {
+        self.state.editor_editable()
     }
 
     fn update_edit_notice(&mut self, outcome: EditOutcome) -> bool {
@@ -1036,6 +1412,59 @@ impl LiveUi {
         }
     }
 
+    async fn handle_session_tree_picker_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(picker) = self.session_tree_picker.as_mut() else {
+            return Ok(LoopControl::Continue);
+        };
+        match picker.handle_key(key) {
+            SessionTreePickerAction::None => {
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionTreePickerAction::Cancelled => {
+                self.session_tree_picker = None;
+                self.notice = None;
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionTreePickerAction::ForkUnavailable => {
+                self.notice = Some("Only persisted user-message nodes can be forked.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionTreePickerAction::LoadNext(after_entry_id) => {
+                if self.state.session_operation.is_some() {
+                    return Ok(LoopControl::Continue);
+                }
+                self.dispatch_session_action(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: Some(after_entry_id),
+                    },
+                    writer,
+                    limit,
+                )
+                .await
+            }
+            SessionTreePickerAction::Navigate(entry_id) => {
+                self.dispatch_session_action(
+                    UiAction::NavigateSessionTree { entry_id },
+                    writer,
+                    limit,
+                )
+                .await
+            }
+            SessionTreePickerAction::Fork(entry_id) => {
+                self.dispatch_session_action(UiAction::ForkSession { entry_id }, writer, limit)
+                    .await
+            }
+        }
+    }
+
     fn handle_detail_key(&mut self, key: KeyEvent) -> LoopControl {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
             self.detail_view.close();
@@ -1142,6 +1571,11 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         match input {
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) if self.session_tree_picker.is_some() => {
+                self.handle_session_tree_picker_key(key, writer, limit)
+                    .await
+            }
+            Input::Paste(_) if self.session_tree_picker.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.session_picker.is_some() => {
                 self.handle_session_picker_key(key, writer, limit).await
             }
@@ -1204,7 +1638,29 @@ impl LiveUi {
                     None => Ok(LoopControl::Continue),
                 }
             }
-            Input::Key(key) if self.prompt_editable() => match self.editor.handle_key(key) {
+            Input::Key(key)
+                if self.editor_editable()
+                    && key.code == KeyCode::Up
+                    && key.modifiers == KeyModifiers::ALT =>
+            {
+                if self.retry_deferred_queue_recovery() {
+                    Ok(LoopControl::Continue)
+                } else if self.active_prompt_editable() {
+                    self.dispatch_queue_action(UiAction::RestoreNewestQueueDraft, writer, limit)
+                        .await
+                } else {
+                    Ok(LoopControl::Continue)
+                }
+            }
+            Input::Key(key) if self.active_prompt_editable() && active_queue_submit(key) => {
+                let action = if key.modifiers.contains(KeyModifiers::ALT) {
+                    UiAction::FollowUp(self.editor.text().to_owned())
+                } else {
+                    UiAction::Steer(self.editor.text().to_owned())
+                };
+                self.dispatch_queue_action(action, writer, limit).await
+            }
+            Input::Key(key) if self.editor_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
                     let prompt = self.editor.text().to_owned();
                     match session_command(&prompt) {
@@ -1234,6 +1690,36 @@ impl LiveUi {
                         SessionCommand::New => {
                             self.dispatch_session_action(UiAction::NewSession, writer, limit)
                                 .await
+                        }
+                        SessionCommand::Name(name) => {
+                            self.dispatch_session_action(
+                                UiAction::SetSessionName(name),
+                                writer,
+                                limit,
+                            )
+                            .await
+                        }
+                        SessionCommand::Clone => {
+                            self.dispatch_session_action(UiAction::CloneSession, writer, limit)
+                                .await
+                        }
+                        SessionCommand::Tree => {
+                            self.dispatch_session_action(
+                                UiAction::LoadSessionTree {
+                                    after_entry_id: None,
+                                },
+                                writer,
+                                limit,
+                            )
+                            .await
+                        }
+                        SessionCommand::Unrevert => {
+                            self.dispatch_session_action(
+                                UiAction::UnrevertSessionTree,
+                                writer,
+                                limit,
+                            )
+                            .await
                         }
                         SessionCommand::Invalid(usage) => {
                             self.notice = Some(usage.into());
@@ -1272,7 +1758,7 @@ impl LiveUi {
                 }
                 EditorAction::Ignored => Ok(LoopControl::Continue),
             },
-            Input::Paste(pasted) if self.prompt_editable() => {
+            Input::Paste(pasted) if self.editor_editable() => {
                 let outcome = self.editor.insert_paste(&pasted);
                 let notice_changed = self.update_edit_notice(outcome);
                 if outcome.changed || notice_changed {
@@ -1334,6 +1820,10 @@ fn is_escape(key: KeyEvent) -> bool {
 
 fn is_browse_key(key: KeyEvent) -> bool {
     key.code == KeyCode::F(6) && key.modifiers == KeyModifiers::NONE
+}
+
+fn active_queue_submit(key: KeyEvent) -> bool {
+    key.code == KeyCode::Enter && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
 }
 
 fn transcript_view_action(key: KeyEvent) -> Option<TranscriptViewAction> {
@@ -1483,111 +1973,120 @@ async fn run(cli: Cli) -> Result<(), Error> {
             event_schema_version: events,
         };
         let mut live_ui = LiveUi::default();
-        live_ui
-            .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
-            .await?;
         let mut transport_closed_diagnostic = None;
-        let mut redraw = interval(FRAME_INTERVAL);
-        redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let loop_result = loop {
-            match input_rx.try_recv() {
-                Ok(input) => {
-                    if live_ui
-                        .handle_input(input, &writer_tx, max_client_frame)
-                        .await?
-                        == LoopControl::Exit
-                    {
-                        break Ok(());
-                    }
-                    continue;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break Ok(()),
-            }
-            tokio::select! {
-                input = input_rx.recv() => {
-                    match input {
-                        Some(input) => {
-                            if live_ui.handle_input(input, &writer_tx, max_client_frame).await?
-                                == LoopControl::Exit
-                            {
-                                break Ok(());
-                            }
+        let loop_result = async {
+            live_ui
+                .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
+                .await?;
+            let mut redraw = interval(FRAME_INTERVAL);
+            redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                match input_rx.try_recv() {
+                    Ok(input) => {
+                        if live_ui
+                            .handle_input(input, &writer_tx, max_client_frame)
+                            .await?
+                            == LoopControl::Exit
+                        {
+                            break Ok(());
                         }
-                        None => break Ok(()),
+                        continue;
                     }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => break Ok(()),
                 }
-                event = receive_event(&mut event_rx, events_open) => {
-                    match event {
-                        Some(event) => {
-                            if live_ui.dispatch(
-                                UiAction::BackendEvent(event.event),
-                                &writer_tx,
-                                max_client_frame,
-                            ).await? == LoopControl::Exit {
-                                break Ok(());
+                tokio::select! {
+                    input = input_rx.recv() => {
+                        match input {
+                            Some(input) => {
+                                if live_ui.handle_input(input, &writer_tx, max_client_frame).await?
+                                    == LoopControl::Exit
+                                {
+                                    break Ok(());
+                                }
                             }
+                            None => break Ok(()),
                         }
-                        None => events_open = false,
                     }
-                }
-                outcome = receive_reader_outcome(&mut reader_outcome) => {
-                    reader_outcome = None;
-                    match outcome {
-                        Ok(ReaderTermination::Eof) => {
-                            live_ui
-                                .drain_backend_events(
-                                    &mut event_rx,
+                    event = receive_event(&mut event_rx, events_open) => {
+                        match event {
+                            Some(event) => {
+                                if live_ui.dispatch(
+                                    UiAction::BackendEvent(event.event),
                                     &writer_tx,
                                     max_client_frame,
-                                )
-                                .await?;
-                            live_ui
-                                .close_transport(
-                                    terminal.terminal(),
-                                    &connection,
-                                    &writer_tx,
-                                    max_client_frame,
-                                    None,
-                                )
-                                .await?;
-                            transport_closed_diagnostic =
-                                Some(render_transport_closed_diagnostic(&live_ui.state));
-                            backend
-                                .wait_gracefully(Duration::from_millis(100))
-                                .await?;
-                            let error = match backend.try_wait()? {
-                                Some(status) => classify_backend_exit(status),
-                                None => Error::BackendStreamEnded,
-                            };
-                            break Err(error);
+                                ).await? == LoopControl::Exit {
+                                    break Ok(());
+                                }
+                            }
+                            None => events_open = false,
                         }
-                        Err(error) => break Err(error),
                     }
-                }
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    if live_ui.interrupt(&writer_tx, max_client_frame, true).await?
-                        == LoopControl::Exit
-                    {
-                        break Ok(());
+                    outcome = receive_reader_outcome(&mut reader_outcome) => {
+                        reader_outcome = None;
+                        match outcome {
+                            Ok(ReaderTermination::Eof) => {
+                                live_ui
+                                    .drain_backend_events(
+                                        &mut event_rx,
+                                        &writer_tx,
+                                        max_client_frame,
+                                    )
+                                    .await?;
+                                live_ui
+                                    .close_transport(
+                                        terminal.terminal(),
+                                        &connection,
+                                        &writer_tx,
+                                        max_client_frame,
+                                        None,
+                                    )
+                                    .await?;
+                                transport_closed_diagnostic =
+                                    Some(render_transport_closed_diagnostic(&live_ui.state));
+                                backend
+                                    .wait_gracefully(Duration::from_millis(100))
+                                    .await?;
+                                let error = match backend.try_wait()? {
+                                    Some(status) => classify_backend_exit(status),
+                                    None => Error::BackendStreamEnded,
+                                };
+                                break Err(error);
+                            }
+                            Err(error) => break Err(error),
+                        }
                     }
-                }
-                _ = redraw.tick() => {
-                    if live_ui.render_pending {
-                        live_ui.draw(terminal.terminal(), &connection)?;
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        if live_ui.interrupt(&writer_tx, max_client_frame, true).await?
+                            == LoopControl::Exit
+                        {
+                            break Ok(());
+                        }
+                    }
+                    _ = redraw.tick() => {
+                        if live_ui.render_pending {
+                            live_ui.draw(terminal.terminal(), &connection)?;
+                        }
                     }
                 }
             }
-        };
+        }
+        .await;
         let _ = input_stop_tx.send(true);
         drop(input_rx);
-        input.await??;
+        let input_result = input.await.map_err(Error::Task).and_then(|result| result);
         drop(terminal);
+        let unsent_queue_diagnostics =
+            render_unsent_queue_diagnostics(&live_ui.state, &live_ui.deferred_queue_recovery);
         if let Some(diagnostic) = transport_closed_diagnostic {
             eprintln!("{diagnostic}");
         }
+        for diagnostic in unsent_queue_diagnostics {
+            eprintln!("{diagnostic}");
+        }
         loop_result?;
+        input_result?;
 
         queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
         let shutdown_writer = writer.take().expect("RPC writer is still owned");
@@ -1628,7 +2127,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     }
     .await;
 
-    let _ = writer_tx.send(WriterMessage::Close).await;
+    let _ = writer_tx.try_send(WriterMessage::Close);
     drop(writer_tx);
     let cleanup = match backend.wait_gracefully(Duration::from_millis(100)).await {
         Ok(true) => Ok(()),
@@ -1745,9 +2244,40 @@ async fn send_payload(
         return Err(Error::FrameTooLarge { limit });
     }
     writer
-        .send(WriterMessage::Frame { payload, limit })
+        .send(WriterMessage::Frame {
+            payload,
+            limit,
+            ack: None,
+        })
         .await
         .map_err(|_| Error::WriterStopped)
+}
+
+async fn send_payload_confirmed(
+    writer: &mpsc::Sender<WriterMessage>,
+    payload: Bytes,
+    limit: usize,
+) -> Result<(), Error> {
+    if payload.len() > limit {
+        return Err(Error::FrameTooLarge { limit });
+    }
+    let (ack_tx, ack_rx) = oneshot::channel();
+    timeout(HANDSHAKE_TIMEOUT, async {
+        writer
+            .send(WriterMessage::Frame {
+                payload,
+                limit,
+                ack: Some(ack_tx),
+            })
+            .await
+            .map_err(|_| Error::WriterStopped)?;
+        ack_rx
+            .await
+            .map_err(|_| Error::WriterStopped)?
+            .map_err(|_| Error::WriterStopped)
+    })
+    .await
+    .map_err(|_| Error::QueueSubmissionTimeout)?
 }
 
 async fn queue_shutdown_and_close(
@@ -1768,13 +2298,34 @@ async fn writer_task<W: AsyncWrite + Unpin>(
 ) -> Result<(), Error> {
     while let Some(message) = messages.recv().await {
         match message {
-            WriterMessage::Frame { payload, limit } => {
-                if payload.len() > limit {
-                    return Err(Error::FrameTooLarge { limit });
+            WriterMessage::Frame {
+                payload,
+                limit,
+                ack,
+            } => {
+                let result = async {
+                    if payload.len() > limit {
+                        return Err(Error::FrameTooLarge { limit });
+                    }
+                    writer.write_all(&payload).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
+                    Ok(())
                 }
-                writer.write_all(&payload).await?;
-                writer.write_all(b"\n").await?;
-                writer.flush().await?;
+                .await;
+                match result {
+                    Ok(()) => {
+                        if let Some(ack) = ack {
+                            let _ = ack.send(Ok(()));
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ack) = ack {
+                            let _ = ack.send(Err(()));
+                        }
+                        return Err(error);
+                    }
+                }
             }
             WriterMessage::Close => break,
         }
@@ -1986,6 +2537,10 @@ enum SessionCommand {
     ResumeCatalog,
     ResumeSession(String),
     New,
+    Name(String),
+    Clone,
+    Tree,
+    Unrevert,
     Invalid(&'static str),
 }
 
@@ -1997,11 +2552,34 @@ fn session_command(prompt: &str) -> SessionCommand {
     if trimmed == "/new" {
         return SessionCommand::New;
     }
+    if trimmed == "/clone" {
+        return SessionCommand::Clone;
+    }
+    if trimmed == "/tree" {
+        return SessionCommand::Tree;
+    }
+    if trimmed == "/unrevert" {
+        return SessionCommand::Unrevert;
+    }
     let parts = trimmed.split_whitespace().collect::<Vec<_>>();
     match parts.as_slice() {
         ["/resume", session_id] => SessionCommand::ResumeSession((*session_id).into()),
         ["/resume", ..] => SessionCommand::Invalid("Usage: /resume [session-id]"),
         ["/new", ..] => SessionCommand::Invalid("Usage: /new"),
+        ["/clone", ..] => SessionCommand::Invalid("Usage: /clone"),
+        ["/tree", ..] => SessionCommand::Invalid("Usage: /tree"),
+        ["/unrevert", ..] => SessionCommand::Invalid("Usage: /unrevert"),
+        ["/name", "--clear"] => SessionCommand::Name(String::new()),
+        ["/name", "--clear", ..] | ["/name"] => {
+            SessionCommand::Invalid("Usage: /name <display name> | /name --clear")
+        }
+        ["/name", ..] => SessionCommand::Name(
+            trimmed
+                .strip_prefix("/name")
+                .expect("matched /name command")
+                .trim()
+                .into(),
+        ),
         _ => SessionCommand::Prompt,
     }
 }
@@ -2056,7 +2634,7 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reducer::{ActiveCommand, ActiveCommandType};
+    use crate::reducer::{ActiveCommand, ActiveCommandType, InteractionStatus};
     use ratatui::backend::TestBackend;
     use serde_json::json;
     use std::fmt::Write as _;
@@ -2074,6 +2652,23 @@ mod tests {
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })
+    }
+
+    fn active_prompt_ui(draft: &str) -> LiveUi {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste(draft);
+        live_ui
     }
 
     fn shutdown_event(command_id: &str) -> serde_json::Value {
@@ -2424,6 +3019,7 @@ mod tests {
         tx.send(WriterMessage::Frame {
             payload: Bytes::from_static(b"12345"),
             limit: 4,
+            ack: None,
         })
         .await
         .unwrap();
@@ -2558,12 +3154,34 @@ mod tests {
         ));
         assert!(matches!(session_command("/new"), SessionCommand::New));
         assert!(matches!(
+            session_command("/name release candidate"),
+            SessionCommand::Name(name) if name == "release candidate"
+        ));
+        assert!(matches!(
+            session_command("/name --clear"),
+            SessionCommand::Name(name) if name.is_empty()
+        ));
+        assert!(matches!(session_command("/clone"), SessionCommand::Clone));
+        assert!(matches!(session_command("/tree"), SessionCommand::Tree));
+        assert!(matches!(
+            session_command("/unrevert"),
+            SessionCommand::Unrevert
+        ));
+        assert!(matches!(
             session_command("/resume one two"),
             SessionCommand::Invalid("Usage: /resume [session-id]")
         ));
         assert!(matches!(
             session_command("/new extra"),
             SessionCommand::Invalid("Usage: /new")
+        ));
+        assert!(matches!(
+            session_command("/name --clear extra"),
+            SessionCommand::Invalid("Usage: /name <display name> | /name --clear")
+        ));
+        assert!(matches!(
+            session_command("/tree extra"),
+            SessionCommand::Invalid("Usage: /tree")
         ));
         assert!(matches!(
             session_command("/unrelated"),
@@ -2614,6 +3232,94 @@ mod tests {
         assert!(!live_ui.transcript_viewport.has_unseen_output());
         assert!(live_ui.browse_selected.is_none());
         assert!(!live_ui.detail_view.is_open());
+    }
+
+    #[tokio::test]
+    async fn restored_session_prompts_are_filtered_and_never_truncated_into_the_editor() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui
+            .apply_effects(
+                vec![UiEffect::RestoreSessionDraft("safe\u{1b}[31m".into())],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "safe[31m");
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("ignoring 1"))
+        );
+
+        live_ui.editor.clear();
+        live_ui.notice = None;
+        live_ui
+            .apply_effects(
+                vec![UiEffect::RestoreSessionDraft(
+                    "x".repeat(prompt_editor::MAX_PROMPT_BYTES + 1),
+                )],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.editor.text().is_empty());
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("not truncated"))
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_post_commit_hydration_stays_recoverable() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        let selected = reducer::SessionIdentity {
+            session_id: "committed-session".into(),
+            session_path: "/sessions/committed-session.jsonl".into(),
+            session_name: None,
+        };
+        live_ui.state.selected_session = Some(selected.clone());
+        live_ui.state.input_ready = false;
+        live_ui.state.session_operation = Some(reducer::SessionOperation::HydratingSelection {
+            command_id: "get_messages-1".into(),
+            selected: selected.clone(),
+            restore_editor_text: None,
+            committed_operation: "Session clone",
+            report: None,
+            completion: None,
+        });
+        let command =
+            WispTypedClientRpcCommands::get_messages("get_messages-1", Some(&selected.session_id))
+                .unwrap();
+
+        live_ui
+            .apply_effects(
+                vec![UiEffect::SendCommittedHydration {
+                    command,
+                    session_id: selected.session_id.clone(),
+                }],
+                &writer_tx,
+                32,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.state.session_operation.is_none());
+        assert!(live_ui.state.input_ready);
+        assert_eq!(live_ui.state.selected_session, Some(selected));
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("committed session"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
@@ -2721,6 +3427,779 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
             json!({"type": "prompt", "id": "prompt-1", "prompt": "hello\nworld"})
         );
+    }
+
+    #[tokio::test]
+    async fn active_prompt_editor_routes_steer_follow_up_and_newlines() {
+        let (writer_client, mut writer_server) = duplex(1024);
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(writer_task(writer_client, writer_rx));
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+
+        live_ui.editor.insert_paste("steer now");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let mut frame = [0; 256];
+        let frame_len = writer_server.read(&mut frame).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame[..frame_len - 1]).unwrap(),
+            json!({"type": "steer", "id": "steer-1", "content": "steer now"})
+        );
+        assert!(live_ui.editor.text().is_empty());
+        assert_eq!(live_ui.state.queued_steering(), 0);
+
+        live_ui.editor.insert_paste("later please");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let frame_len = writer_server.read(&mut frame).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame[..frame_len - 1]).unwrap(),
+            json!({"type": "follow_up", "id": "follow_up-2", "content": "later please"})
+        );
+        assert!(live_ui.editor.text().is_empty());
+        assert_eq!(live_ui.state.queued_follow_ups(), 0);
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "\n\n");
+
+        let mut idle = LiveUi::default();
+        idle.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+            &writer_tx,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(idle.editor.text(), "\n");
+        drop(writer_tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn compacting_active_prompt_rejects_queue_input() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Compacting;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("keep this draft");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(!live_ui.active_prompt_editable());
+        assert_eq!(live_ui.editor.text(), "keep this draft");
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn active_alt_up_restores_after_pop_and_keeps_the_newer_draft() {
+        let (writer_client, mut writer_server) = duplex(1024);
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(writer_task(writer_client, writer_rx));
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: vec!["restored steering".into()],
+                    follow_up: Vec::new(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui.editor.insert_paste("newer draft");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let mut frame = [0; 256];
+        let frame_len = writer_server.read(&mut frame).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame[..frame_len - 1]).unwrap(),
+            json!({"type": "pop_queue", "id": "pop_queue-1", "kind": "steering"})
+        );
+        assert_eq!(live_ui.editor.text(), "newer draft");
+        assert_eq!(live_ui.state.queued_steering(), 1);
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                    command_id: "pop_queue-1".into(),
+                    operation: reducer::QueueRemovalOperation::Pop,
+                    kind: Some(QueueKind::Steering),
+                    steering: vec!["restored steering".into()],
+                    follow_up: Vec::new(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "pop_queue-1".into(),
+                    command_type: "pop_queue".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "restored steering\nnewer draft");
+        assert_eq!(live_ui.state.queued_steering(), 0);
+        drop(writer_tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn alt_up_preflights_cached_queue_text_and_retries_deferred_recovery() {
+        let (writer_client, mut writer_server) = duplex(1024);
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(writer_task(writer_client, writer_rx));
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: vec!["restored steering".into()],
+                    follow_up: Vec::new(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui.editor.insert_paste("newer draft");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let mut frame = [0; 256];
+        let frame_len = writer_server.read(&mut frame).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame[..frame_len - 1]).unwrap()["type"],
+            "pop_queue"
+        );
+
+        live_ui
+            .editor
+            .insert_paste(&"x".repeat(crate::prompt_editor::MAX_PROMPT_BYTES - 11));
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                    command_id: "pop_queue-1".into(),
+                    operation: reducer::QueueRemovalOperation::Pop,
+                    kind: Some(QueueKind::Steering),
+                    steering: vec!["restored steering".into()],
+                    follow_up: Vec::new(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "pop_queue-1".into(),
+                    command_type: "pop_queue".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            live_ui
+                .deferred_queue_recovery
+                .first()
+                .map(|recovery| recovery.content.as_str()),
+            Some("restored steering")
+        );
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(!live_ui.deferred_queue_recovery.is_empty());
+        assert!(
+            timeout(Duration::from_millis(10), writer_server.read(&mut frame))
+                .await
+                .is_err()
+        );
+        live_ui.editor.clear();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "restored steering");
+        assert!(live_ui.deferred_queue_recovery.is_empty());
+        live_ui.editor.insert_paste(
+            &"x".repeat(crate::prompt_editor::MAX_PROMPT_BYTES - live_ui.editor.text().len()),
+        );
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: vec!["cached candidate".into()],
+                    follow_up: Vec::new(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.state.queued_steering(), 1);
+        assert!(
+            timeout(Duration::from_millis(10), writer_server.read(&mut frame))
+                .await
+                .is_err()
+        );
+        drop(writer_tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_alt_up_restores_deferred_queue_recovery_without_popping() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.defer_queue_recovery("recover after idle".into(), Some(0));
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(live_ui.editor.text(), "recover after idle");
+        assert!(live_ui.deferred_queue_recovery.is_empty());
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_submission_times_out_without_changing_state_when_writer_channel_stalls() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        writer_tx.send(WriterMessage::Close).await.unwrap();
+        let mut live_ui = active_prompt_ui("keep this draft");
+        let state_before = live_ui.state.clone();
+
+        assert!(matches!(
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await,
+            Err(Error::QueueSubmissionTimeout)
+        ));
+        assert_eq!(live_ui.state, state_before);
+        assert_eq!(live_ui.editor.text(), "keep this draft");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_submission_times_out_without_changing_state_when_writer_ack_stalls() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = active_prompt_ui("keep this draft");
+        let state_before = live_ui.state.clone();
+
+        assert!(matches!(
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await,
+            Err(Error::QueueSubmissionTimeout)
+        ));
+        assert_eq!(live_ui.state, state_before);
+        assert_eq!(live_ui.editor.text(), "keep this draft");
+    }
+
+    #[tokio::test]
+    async fn queue_writer_failure_does_not_commit_state_or_clear_editor() {
+        let (writer_client, writer_server) = duplex(64);
+        drop(writer_server);
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(writer_task(writer_client, writer_rx));
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("keep this draft");
+        let state_before = live_ui.state.clone();
+
+        assert!(matches!(
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await,
+            Err(Error::WriterStopped)
+        ));
+        assert_eq!(live_ui.state, state_before);
+        assert_eq!(live_ui.editor.text(), "keep this draft");
+        assert!(matches!(writer.await.unwrap(), Err(Error::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn queue_submission_whitespace_keeps_editor_and_does_not_send() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste(" \n\t");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), " \n\t");
+        assert_eq!(live_ui.state.unobserved_queue_submissions().count(), 0);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("non-empty"))
+        );
+    }
+
+    #[tokio::test]
+    async fn active_queue_preflight_and_writer_failure_keep_editor_and_state_retryable() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("exact frame");
+        let encoded_len = serde_json::to_vec(
+            &WispTypedClientRpcCommands::steer("steer-1", "exact frame").unwrap(),
+        )
+        .unwrap()
+        .len();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "exact frame");
+        assert_eq!(live_ui.state.unobserved_queue_submissions().count(), 0);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        drop(writer_rx);
+        assert!(matches!(
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await,
+            Err(Error::WriterStopped)
+        ));
+        assert_eq!(live_ui.editor.text(), "exact frame");
+        assert_eq!(live_ui.state.unobserved_queue_submissions().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn approval_and_trust_keep_the_queue_draft_exclusive_then_editable() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "read".into(),
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui.editor.insert_paste("saved queue draft");
+        live_ui
+            .handle_input(
+                Input::Paste(" ignored".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "saved queue draft");
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("approval denial must remain exclusive");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "approval"
+        );
+        assert_eq!(live_ui.editor.text(), "saved queue draft");
+        assert!(live_ui.active_prompt_editable());
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "saved queue draftx");
+
+        live_ui.state.view_status = ViewStatus::WaitingForTrust;
+        live_ui.state.pending_trust_request_id = Some("trust-1".into());
+        live_ui
+            .handle_input(
+                Input::Paste(" ignored again".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.editor.text(), "saved queue draftx");
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("trust denial must remain exclusive");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "trust"
+        );
+        assert_eq!(live_ui.editor.text(), "saved queue draftx");
+        assert!(live_ui.active_prompt_editable());
+    }
+
+    #[test]
+    fn unsent_queue_diagnostics_are_bounded_safe_and_deduplicated() {
+        let mut state = UiState::unconfigured();
+        let mut ids = SequentialCommandIds::default();
+        reducer::reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["queued\u{1b}[2J\u{202e}steer".into()],
+                follow_up: vec!["restore me".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reducer::reduce(&mut state, UiAction::Steer("in flight".into()), &mut ids).unwrap();
+        reducer::reduce(&mut state, UiAction::RestoreNewestQueueDraft, &mut ids).unwrap();
+        reducer::reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                command_id: "pop_queue-2".into(),
+                operation: reducer::QueueRemovalOperation::Pop,
+                kind: Some(QueueKind::FollowUp),
+                steering: Vec::new(),
+                follow_up: vec!["restore me".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        let deferred = [DeferredQueueRecovery {
+            content: "deferred recovery".into(),
+            local_order: Some(0),
+        }];
+        let lines = render_unsent_queue_diagnostics(&state, &deferred);
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("queued steer item will not run"));
+        assert!(rendered.contains("in-flight steer item will not run"));
+        assert!(rendered.contains("restoring later item will not run"));
+        assert_eq!(rendered.matches("restore me").count(), 1);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("deferred recovery queue item"))
+                .count(),
+            1
+        );
+        assert!(lines.iter().all(|line| {
+            line.len() <= UNSENT_QUEUE_REPORT_MAX_BYTES
+                && line.chars().count() <= UNSENT_QUEUE_REPORT_MAX_CHARS
+                && line
+                    .chars()
+                    .all(|character| !character.is_control() && !is_bidi_control(character))
+        }));
+    }
+
+    #[tokio::test]
+    async fn failed_queue_recoveries_are_individual_ordered_and_recoverable() {
+        let (writer_client, _writer_server) = duplex(2 * prompt_editor::MAX_PROMPT_BYTES);
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(writer_task(writer_client, writer_rx));
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        live_ui
+            .editor
+            .insert_paste(&"n".repeat(prompt_editor::MAX_PROMPT_BYTES - 512 * 1024));
+        let first = format!("first{}", "a".repeat(600 * 1024 - "first".len()));
+        let second = format!("second{}", "b".repeat(600 * 1024 - "second".len()));
+
+        live_ui
+            .apply_effects(
+                vec![
+                    UiEffect::RestoreDraft {
+                        content: second.clone(),
+                        local_order: Some(1),
+                    },
+                    UiEffect::RestoreDraft {
+                        content: first.clone(),
+                        local_order: Some(0),
+                    },
+                ],
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            live_ui
+                .deferred_queue_recovery
+                .iter()
+                .map(|recovery| recovery.content.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str()]
+        );
+        assert_eq!(live_ui.deferred_queue_recovery_bytes(), 1_200 * 1024);
+
+        live_ui.editor.clear();
+        assert!(live_ui.retry_deferred_queue_recovery());
+        assert_eq!(live_ui.editor.text(), first);
+        assert_eq!(live_ui.deferred_queue_recovery.len(), 1);
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.editor.text().is_empty());
+        assert!(!live_ui.recovered_queue_recovery);
+        assert_eq!(live_ui.deferred_queue_recovery.len(), 1);
+
+        live_ui.editor.insert_paste("newer draft");
+        assert!(live_ui.retry_deferred_queue_recovery());
+        assert_eq!(live_ui.editor.text(), format!("{second}\nnewer draft"));
+        drop(writer_tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn deferred_recovery_queue_uses_exact_runtime_bounds() {
+        let mut live_ui = LiveUi::default();
+        let item_bytes = reducer::QUEUE_CONTENT_BYTES_LIMIT / reducer::QUEUE_MESSAGE_LIMIT;
+        for local_order in 0..reducer::QUEUE_MESSAGE_LIMIT {
+            let bytes = if local_order + 1 == reducer::QUEUE_MESSAGE_LIMIT {
+                reducer::QUEUE_CONTENT_BYTES_LIMIT - live_ui.deferred_queue_recovery_bytes()
+            } else {
+                item_bytes
+            };
+            live_ui.defer_queue_recovery("x".repeat(bytes), Some(local_order as u64));
+        }
+        assert_eq!(
+            live_ui.deferred_queue_recovery.len(),
+            reducer::QUEUE_MESSAGE_LIMIT
+        );
+        assert_eq!(
+            live_ui.deferred_queue_recovery_bytes(),
+            reducer::QUEUE_CONTENT_BYTES_LIMIT
+        );
+        assert!(!live_ui.deferred_queue_recovery_can_accept("x"));
+    }
+
+    #[test]
+    fn unsent_queue_diagnostics_preserve_deferred_multiplicity() {
+        let deferred = [
+            DeferredQueueRecovery {
+                content: "same deferred text".into(),
+                local_order: Some(0),
+            },
+            DeferredQueueRecovery {
+                content: "same deferred text".into(),
+                local_order: Some(1),
+            },
+        ];
+        let lines = render_unsent_queue_diagnostics(&UiState::unconfigured(), &deferred);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("item x2 will not run: same deferred text"));
+        assert!(lines[0].len() <= UNSENT_QUEUE_REPORT_MAX_BYTES);
+        assert!(lines[0].chars().count() <= UNSENT_QUEUE_REPORT_MAX_CHARS);
     }
 
     #[tokio::test]
@@ -3519,6 +4998,9 @@ mod tests {
             )
             .await
             .unwrap();
+        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+            panic!("startup history completion must refresh queue state");
+        };
         live_ui
             .dispatch(
                 UiAction::ReloadLatestHistory,
