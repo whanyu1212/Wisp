@@ -1294,7 +1294,7 @@ impl Transcript {
                 .process_card()
                 .expect("process entry checked above")
                 .clone();
-            merged_card
+            let newer_sequence_offset = merged_card
                 .merge_historical_newer(newer.process_card().expect("process entry checked above"));
 
             let keep_newer = inserted_ids.contains(&older.id) && !inserted_ids.contains(&newer.id);
@@ -1315,7 +1315,8 @@ impl Transcript {
             merged.history_result_projection_truncated = older.history_result_projection_truncated
                 || newer.history_result_projection_truncated;
             merged.history_calls = older.history_calls;
-            for call in newer.history_calls {
+            for mut call in newer.history_calls {
+                call.sequence = call.sequence.saturating_add(newer_sequence_offset);
                 if !merged
                     .history_calls
                     .iter()

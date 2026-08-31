@@ -665,7 +665,10 @@ impl ProcessCardSnapshot {
         self.deny(operation, Some("denied"), sequence)
     }
 
-    pub(crate) fn merge_historical_newer(&mut self, newer: &Self) {
+    pub(crate) fn merge_historical_newer(&mut self, newer: &Self) -> u64 {
+        let sequence_offset = self
+            .last_sequence
+            .map_or(0, |sequence| sequence.saturating_add(1));
         let separator = usize::from(
             !self.retained_output.text.is_empty() && !newer.retained_output.text.is_empty(),
         );
@@ -716,9 +719,12 @@ impl ProcessCardSnapshot {
         };
         self.last_stream_label = last_stream_label
             .filter(|label| self.retained_output.text.lines().any(|line| line == *label));
-        self.last_sequence = newer.last_sequence;
+        self.last_sequence = newer
+            .last_sequence
+            .map(|sequence| sequence.saturating_add(sequence_offset));
         self.approval_sequence = None;
         self.approval_resolved = false;
+        sequence_offset
     }
 
     pub(crate) fn release_historical_sequence(&mut self) {

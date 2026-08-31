@@ -965,6 +965,57 @@ mod tests {
     }
 
     #[test]
+    fn delayed_older_process_result_cannot_regress_newer_state() {
+        let mut older_call = message("assistant", "");
+        older_call["tool_calls"] = json!([{
+            "call_id": "poll-delayed",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-delayed"},
+        }]);
+        let mut newer_call = message("assistant", "");
+        newer_call["tool_calls"] = json!([{
+            "call_id": "poll-completed",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-delayed"},
+        }]);
+        let mut newer_result = message(
+            "tool",
+            "Process process-delayed completed with exit code 0\nstdout:\nnewer output",
+        );
+        newer_result["tool_call_id"] = json!("poll-completed");
+        newer_result["tool_name"] = json!("bash");
+        newer_result["tool_result"] = json!({"status": "done"});
+        let mut delayed_result = message(
+            "tool",
+            "Process process-delayed is still running\nstdout:\nolder output",
+        );
+        delayed_result["tool_call_id"] = json!("poll-delayed");
+        delayed_result["tool_name"] = json!("bash");
+        delayed_result["tool_result"] = json!({"status": "done"});
+        let older = project_rpc_messages(&[older_call]).unwrap();
+        let mut transcript = project_rpc_messages(&[newer_call, newer_result]).unwrap();
+        let delayed_result = project_rpc_messages(&[delayed_result]).unwrap();
+        let survivor = transcript.entries()[0].id;
+
+        assert!(transcript.prepend_history_page(&older));
+        assert_eq!(transcript.entries()[0].id, survivor);
+        assert_eq!(
+            transcript.entries()[0]
+                .process_card()
+                .unwrap()
+                .display_state,
+            ProcessDisplayState::Completed
+        );
+        assert!(transcript.append_history_page(&delayed_result));
+
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(transcript.entries()[0].id, survivor);
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(card.display_state, ProcessDisplayState::Completed);
+        assert!(card.retained_output.text.contains("older output"));
+    }
+
+    #[test]
     fn appended_process_history_reuses_the_survivor_for_live_updates() {
         let mut older_call = message("assistant", "");
         older_call["tool_calls"] = json!([{
