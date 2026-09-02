@@ -52,6 +52,7 @@ from wisp.tui.history import (
     HistoryHydrationPolicy,
 )
 from wisp.tui.input_types import TuiSubmission, new_submission_id
+from wisp.tui.shell import _PendingConnectionMutation
 from wisp.tui.state import (
     TuiCancelRequested,
     TuiExitReason,
@@ -3416,6 +3417,28 @@ def test_tui_shell_disconnect_acknowledges_deletion_after_catalog_fallback(
         assert "hidden-stored-key" not in rendered
 
     anyio.run(run)
+
+
+def test_tui_shell_successful_connection_mutation_without_report_invalidates_catalog() -> None:
+    shell = TuiShell(ScriptedController())
+    shell.connection_catalog = shell._fallback_connection_catalog()
+    pending = _PendingConnectionMutation(
+        command_id="disconnect-1",
+        command_type="disconnect_provider",
+        provider="openai",
+        completion=RpcCommandFinished(
+            command_id="disconnect-1",
+            command_type="disconnect_provider",
+            ok=True,
+        ),
+    )
+    shell._pending_connection_mutations[pending.command_id] = pending
+
+    shell._finish_connection_mutation(pending)
+
+    assert shell.connection_catalog is None
+    assert pending.command_id not in shell._pending_connection_mutations
+    assert pending.done.is_set()
 
 
 def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:

@@ -1074,6 +1074,8 @@ class TuiShell:
             pending.error = completion.error or "request failed"
         elif pending.report is not None:
             self._adopt_connection_catalog(pending.report.catalog)
+        else:
+            self.connection_catalog = None
         if pending.command_type == "begin_device_code" and pending.error is None:
             self._call_renderer_optional("connect_completed", pending.provider)
             self.renderer.notice(f"Connected: {pending.provider}")
