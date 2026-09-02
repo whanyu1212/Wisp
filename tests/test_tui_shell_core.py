@@ -3262,7 +3262,11 @@ def test_tui_shell_requests_and_renders_mcp_status() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(tmp_path: Path) -> None:
+def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "frontend-only")
     shell = TuiShell(
         ScriptedController(),
         auth_path=tmp_path / "auth.json",
@@ -3281,6 +3285,13 @@ def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(tmp_path: Pa
     assert shell._connection_catalog_error == "temporary backend failure"
     assert shell.connection_catalog
     assert shell._current_connection_catalog() == shell.connection_catalog
+    openai = next(
+        method
+        for family in shell.connection_catalog
+        for method in family.methods
+        if method.provider == "openai"
+    )
+    assert openai.source == "missing"
 
     shell._connection_catalog_error = None
     shell.connection_catalog = ()
@@ -3782,7 +3793,9 @@ def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     anyio.run(run)
 
 
-def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
+def test_tui_shell_auth_status_uses_disconnected_fallback_after_catalog_error(
+    tmp_path: Path,
+) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
     auth_path.chmod(0o600)
@@ -3804,14 +3817,14 @@ def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
         await shell.run()
 
         rendered = output.getvalue()
-        assert "Auth storage error: Invalid auth file JSON:" in rendered
-        assert "openai-codex: not logged in" not in rendered
+        assert "Connection catalog unavailable: Invalid auth file JSON:" in rendered
+        assert "openai-codex: not logged in" in rendered
         assert controller.prompts == []
 
     anyio.run(run)
 
 
-def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
+def test_tui_shell_logout_reports_backend_storage_errors(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
     auth_path.chmod(0o600)
@@ -3821,11 +3834,24 @@ def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
             model_catalog=rpc_builtin_model_catalog(provider="openai"),
             auth_error="Invalid auth file JSON: auth.json",
         )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/logout openai-codex"
+            while not controller.disconnect_requests:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["/logout openai-codex", "/quit"]),
+            prompt_reader=reader,
             provider="openai-codex",
             auth_path=auth_path,
         )
@@ -3841,11 +3867,7 @@ def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
     anyio.run(run)
 
 
-def test_tui_shell_connect_reports_storage_errors(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    del monkeypatch
+def test_tui_shell_connect_reports_backend_storage_errors(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
     auth_path.chmod(0o600)
@@ -3857,11 +3879,24 @@ def test_tui_shell_connect_reports_storage_errors(
             ),
             auth_error="Invalid auth file JSON: auth.json",
         )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/connect openai-codex"
+            while not controller.device_code_requests:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["/connect openai-codex", "/quit"]),
+            prompt_reader=reader,
             provider="openai-codex",
             auth_path=auth_path,
         )
@@ -3869,8 +3904,8 @@ def test_tui_shell_connect_reports_storage_errors(
         await shell.run()
 
         rendered = output.getvalue()
-        assert "Starting openai-codex device-code login..." not in rendered
-        assert "Auth storage error: Invalid auth file JSON:" in rendered
+        assert "Starting openai-codex device-code login..." in rendered
+        assert "Connection failed: Invalid auth file JSON:" in rendered
         assert "Connected: openai-codex" not in rendered
         assert "access-token" not in rendered
 

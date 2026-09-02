@@ -23,6 +23,7 @@ from wisp.auth.connections import (
     connection_catalog as local_connection_catalog,
 )
 from wisp.auth.storage import (
+    AuthCredential,
     JsonAuthStore,
 )
 from wisp.config import DEFAULT_PROVIDER, default_auth_path
@@ -949,9 +950,11 @@ class TuiShell:
         return self._fallback_connection_catalog()
 
     def _fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
+        empty_store: dict[str, AuthCredential] = {}
         return local_connection_catalog(
-            self.auth_store,
+            empty_store,
             openai_compatible_provider=self._openai_compatible_provider,
+            environ=lambda _name: None,
         )
 
     def _safe_fallback_connection_catalog(

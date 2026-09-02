@@ -11,7 +11,6 @@ from collections.abc import Awaitable, Callable
 from wisp.auth.connections import (
     ConnectionProviderStatus,
     auth_status_line,
-    configured_environment_variables,
     connection_method,
     supports_api_key,
 )
@@ -50,14 +49,6 @@ class AuthCommands:
             self._renderer.command_error("Usage: /auth [provider]")
             return
         provider = args[0] if args else self._get_default_provider()
-        environment_variables = configured_environment_variables(
-            provider,
-            openai_compatible_provider=self._openai_compatible_provider,
-        )
-        if environment_variables:
-            configured_via = ", ".join(environment_variables)
-            self._renderer.notice(f"{provider}: api key configured via {configured_via}")
-            return
         try:
             method = connection_method(self._get_catalog(), provider)
         except Exception as extra:  # noqa: BLE001 - show storage failure in the TUI
@@ -117,23 +108,22 @@ class AuthCommands:
             return
         try:
             await self._store_api_key(provider, normalized)
+            method = connection_method(self._get_catalog(), provider)
         except Exception as exc:  # noqa: BLE001 - show storage failure in the TUI
             self._connect_error(f"Auth storage error: {exc}")
             return
         self._call_renderer_optional("connect_completed", provider)
-        environment_variables = configured_environment_variables(
-            provider,
-            openai_compatible_provider=self._openai_compatible_provider,
+        environment_variable = (
+            method.environment_variable
+            if method is not None and method.source == "environment"
+            else None
         )
-        if not environment_variables:
+        if environment_variable is None:
             self._renderer.notice(f"Connected: {provider}")
             return
-        names = ", ".join(environment_variables)
-        verb = "takes" if len(environment_variables) == 1 else "take"
-        pronoun = "it" if len(environment_variables) == 1 else "them"
         self._renderer.notice(
-            f"Stored API key for {provider}; {names} still {verb} precedence. "
-            f"Unset {pronoun} in your shell to use the stored key."
+            f"Stored API key for {provider}; {environment_variable} still takes precedence. "
+            "Unset it in your shell to use the stored key."
         )
 
     async def disconnect(self, args: tuple[str, ...]) -> None:
@@ -163,29 +153,30 @@ class AuthCommands:
         provider: str,
         catalog: tuple[ConnectionProviderStatus, ...],
     ) -> None:
-        environment_variables = configured_environment_variables(
-            provider,
-            openai_compatible_provider=self._openai_compatible_provider,
-        )
         method = connection_method(catalog, provider)
         deleted = bool(method is not None and method.has_stored_credential)
         try:
             await self._on_disconnect(provider)
+            method = connection_method(self._get_catalog(), provider)
         except Exception as extra:  # noqa: BLE001 - show storage failure in the TUI
             self._renderer.command_error(f"Auth storage error: {extra}")
             return
-        if environment_variables:
-            names = ", ".join(environment_variables)
-            pronoun = "it" if len(environment_variables) == 1 else "them"
+        environment_variable = (
+            method.environment_variable
+            if method is not None and method.source == "environment"
+            else None
+        )
+        if environment_variable is not None:
             if deleted:
                 self._call_renderer_optional("connect_completed", provider)
                 self._renderer.notice(
                     f"Removed stored credentials for {provider}; still connected through "
-                    f"{names}. Unset {pronoun} in your shell to disconnect."
+                    f"{environment_variable}. Unset it in your shell to disconnect."
                 )
             else:
                 self._connect_error(
-                    f"{provider} is connected through {names}; unset {pronoun} in your shell."
+                    f"{provider} is connected through {environment_variable}; "
+                    "unset it in your shell."
                 )
             return
         if deleted:

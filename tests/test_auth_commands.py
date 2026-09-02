@@ -5,7 +5,12 @@ from __future__ import annotations
 import anyio
 from pytest import MonkeyPatch
 
-from wisp.auth.connections import connection_catalog
+from wisp.auth.connections import (
+    ConnectionMethodStatus,
+    ConnectionProviderStatus,
+    ConnectionSource,
+    connection_catalog,
+)
 from wisp.auth.storage import ApiKeyCredential, AuthStorageError, OAuthCredential
 from wisp.tui.auth_commands import AuthCommands
 
@@ -82,6 +87,65 @@ def test_status_reports_not_logged_in_for_missing_credential() -> None:
     commands, renderer = _commands(_FakeStore())
     commands.status(())
     assert renderer.notices == ["openai: not logged in"]
+    assert renderer.errors == []
+
+
+def test_auth_notices_use_backend_catalog_instead_of_frontend_environment(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "frontend-only")
+    source: dict[str, ConnectionSource] = {"value": "missing"}
+    has_stored_credential = {"value": False}
+    renderer = _FakeRenderer()
+
+    def catalog() -> tuple[ConnectionProviderStatus, ...]:
+        return (
+            ConnectionProviderStatus(
+                id="openai",
+                label="OpenAI",
+                methods=(
+                    ConnectionMethodStatus(
+                        provider="openai",
+                        label="OpenAI API key",
+                        kind="api_key",
+                        source=source["value"],
+                        environment_variable="OPENAI_API_KEY",
+                        has_stored_credential=has_stored_credential["value"],
+                    ),
+                ),
+            ),
+        )
+
+    async def store_api_key(_provider: str, _api_key: str) -> None:
+        source["value"] = "environment"
+        has_stored_credential["value"] = True
+
+    async def disconnect_provider(_provider: str) -> None:
+        source["value"] = "missing"
+        has_stored_credential["value"] = False
+
+    commands = AuthCommands(
+        renderer,
+        catalog,
+        lambda: "openai",
+        store_api_key=store_api_key,
+        disconnect_provider=disconnect_provider,
+        begin_device_code=lambda _provider: anyio.sleep(0),
+    )
+
+    async def run() -> None:
+        commands.status(())
+        await commands.connect_api_key("openai", "stored-key")
+        await commands.disconnect(("openai",))
+
+    anyio.run(run)
+
+    assert renderer.notices == [
+        "openai: not logged in",
+        "Stored API key for openai; OPENAI_API_KEY still takes precedence. "
+        "Unset it in your shell to use the stored key.",
+        "Disconnected: openai",
+    ]
     assert renderer.errors == []
 
 
@@ -261,9 +325,7 @@ def test_custom_provider_auth_uses_named_environment_with_generic_fallback(
     catalog = commands._connection_catalog()
     custom = next(family for family in catalog if family.id == "openrouter")
 
-    assert renderer.notices == [
-        "openrouter: api key configured via OPENROUTER_API_KEY, OPENAI_COMPATIBLE_API_KEY"
-    ]
+    assert renderer.notices == ["openrouter: api key configured via OPENROUTER_API_KEY"]
     assert custom.label == "openrouter"
     assert custom.methods[0].provider == "openrouter"
     assert custom.methods[0].source == "environment"
@@ -276,7 +338,7 @@ def test_custom_provider_auth_uses_named_environment_with_generic_fallback(
     assert renderer.notices == ["openrouter: api key configured via OPENAI_COMPATIBLE_API_KEY"]
 
 
-def test_custom_provider_connect_and_disconnect_report_all_active_environment_variables(
+def test_custom_provider_connect_and_disconnect_report_backend_environment_variable(
     monkeypatch: MonkeyPatch,
 ) -> None:
     store = _FakeStore()
@@ -295,8 +357,7 @@ def test_custom_provider_connect_and_disconnect_report_all_active_environment_va
 
     assert renderer.notices == [
         "Removed stored credentials for openrouter; still connected through "
-        "OPENROUTER_API_KEY, OPENAI_COMPATIBLE_API_KEY. "
-        "Unset them in your shell to disconnect."
+        "OPENROUTER_API_KEY. Unset it in your shell to disconnect."
     ]
 
 
