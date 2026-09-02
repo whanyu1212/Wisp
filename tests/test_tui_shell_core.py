@@ -12,6 +12,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
+from tests.tui_support import rpc_connection_catalog_snapshot
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore, OAuthCredential
 from wisp.events import (
     BillableTokenUsage,
@@ -25,6 +26,7 @@ from wisp.events import (
     MessageStarted,
     ProviderRetrying,
     QueueMessageInjected,
+    RpcConnectionCatalogReported,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
@@ -3300,6 +3302,78 @@ def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(
     shell._connection_catalog_error = None
     shell.connection_catalog = ()
     assert shell._current_connection_catalog() == ()
+
+
+def test_tui_shell_connect_retries_catalog_after_transient_failure(
+    tmp_path: Path,
+) -> None:
+    class RecoveringCatalogController(ScriptedController):
+        async def get_connection_catalog(self, *, command_id: str | None = None) -> str:
+            selected_id = command_id or "connection-catalog-missing-id"
+            self.connection_catalog_requests.append(selected_id)
+            if len(self.connection_catalog_requests) == 1:
+                await self._emit(
+                    [
+                        RpcCommandFinished(
+                            command_id=selected_id,
+                            command_type="get_connection_catalog",
+                            ok=False,
+                            error="temporary backend failure",
+                        )
+                    ]
+                )
+                return selected_id
+            catalog = rpc_connection_catalog_snapshot(
+                self.auth_store,
+                openai_compatible_provider="openrouter",
+            )
+            await self._emit(
+                [
+                    RpcConnectionCatalogReported(command_id=selected_id, catalog=catalog),
+                    RpcCommandFinished(
+                        command_id=selected_id,
+                        command_type="get_connection_catalog",
+                        ok=True,
+                    ),
+                ]
+            )
+            return selected_id
+
+    async def run() -> None:
+        controller = RecoveringCatalogController()
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/connect openrouter"
+            while len(controller.connection_catalog_requests) < 2:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        assert len(controller.connection_catalog_requests) == 2
+        assert shell._connection_catalog_error is None
+        assert shell.connection_catalog is not None
+        assert "openrouter" in {family.id for family in shell.connection_catalog}
+        rendered = output.getvalue()
+        assert "Connection catalog unavailable: temporary backend failure" in rendered
+        assert "Set OPENROUTER_API_KEY before starting Wisp to connect openrouter." in rendered
+        assert "Unknown provider" not in rendered
+
+    anyio.run(run)
 
 
 def test_tui_shell_disconnect_acknowledges_deletion_after_catalog_fallback(

@@ -435,6 +435,7 @@ class TuiShell:
         self._pending_connection_catalog_command_id: str | None = None
         self._pending_connection_catalog_report: RpcConnectionCatalogReported | None = None
         self._pending_connection_catalog_completion: RpcCommandFinished | None = None
+        self._pending_connection_catalog_done: anyio.Event | None = None
         self._pending_connection_mutations: dict[str, _PendingConnectionMutation] = {}
         self._connection_catalog_error: str | None = None
         self.pending_configures: dict[str, _PendingConfigure] = {}
@@ -877,17 +878,33 @@ class TuiShell:
     async def _request_connection_catalog(self) -> bool:
         if self._pending_connection_catalog_command_id is not None:
             return True
+        command_id = self._next_command_id("connection-catalog")
+        self._pending_connection_catalog_command_id = command_id
+        self._pending_connection_catalog_report = None
+        self._pending_connection_catalog_completion = None
+        self._pending_connection_catalog_done = anyio.Event()
         try:
-            command_id = await self.controller.get_connection_catalog()
+            await self.controller.get_connection_catalog(command_id=command_id)
         except Exception as extra:  # noqa: BLE001 - discovery is non-fatal
             self._connection_catalog_error = str(extra)
             self.renderer.notice(f"Connection catalog unavailable: {extra}")
             self.connection_catalog = self._safe_fallback_connection_catalog()
+            self._clear_connection_catalog_request()
             return False
-        self._pending_connection_catalog_command_id = command_id
-        self._pending_connection_catalog_report = None
-        self._pending_connection_catalog_completion = None
         return True
+
+    async def _refresh_connection_catalog_if_needed(self) -> None:
+        if self._pending_connection_catalog_command_id is not None:
+            pending_done = self._pending_connection_catalog_done
+            if pending_done is not None:
+                await pending_done.wait()
+        if self._connection_catalog_error is None and self.connection_catalog is not None:
+            return
+        if not await self._request_connection_catalog():
+            return
+        retry_done = self._pending_connection_catalog_done
+        if retry_done is not None:
+            await retry_done.wait()
 
     def _observe_connection_catalog_event(self, event: KnownWispEvent) -> bool:
         command_id = self._pending_connection_catalog_command_id
@@ -937,9 +954,13 @@ class TuiShell:
         )
 
     def _clear_connection_catalog_request(self) -> None:
+        done = self._pending_connection_catalog_done
         self._pending_connection_catalog_command_id = None
         self._pending_connection_catalog_report = None
         self._pending_connection_catalog_completion = None
+        self._pending_connection_catalog_done = None
+        if done is not None:
+            done.set()
 
     def _current_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
         if self.connection_catalog is not None:
@@ -2134,6 +2155,7 @@ class TuiShell:
     ) -> None:
         try:
             with cancel_scope:
+                await self._refresh_connection_catalog_if_needed()
                 await self._auth.connect(args)
         finally:
             if self._connect_cancel_scope is cancel_scope:
@@ -2146,6 +2168,7 @@ class TuiShell:
     ) -> None:
         try:
             with cancel_scope:
+                await self._refresh_connection_catalog_if_needed()
                 await self._auth.disconnect(args)
         finally:
             if self._connect_cancel_scope is cancel_scope:

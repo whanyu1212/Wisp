@@ -314,6 +314,12 @@ class RpcCoordinator:
                         queued = queue.popleft()
                         if command_type(queued) == "begin_device_code":
                             self._release_queued_command(queued)
+                            command_id = queued.get("id")
+                            await reject(
+                                queued,
+                                "RPC command cancelled: "
+                                f"{command_id if isinstance(command_id, str) else 'unknown'}",
+                            )
                         else:
                             retained.append(queued)
                     queue.extend(retained)

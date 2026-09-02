@@ -1418,7 +1418,7 @@ def test_coordinator_cancels_device_code_when_input_closes() -> None:
     anyio.run(scenario)
 
 
-def test_coordinator_drops_queued_device_code_when_input_closes() -> None:
+def test_coordinator_rejects_queued_device_code_when_input_closes() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         coordinator.running_command = _RpcRunningCommand(
@@ -1431,11 +1431,15 @@ def test_coordinator_drops_queued_device_code_when_input_closes() -> None:
             "type": "begin_device_code",
             "provider": "openai-codex",
         }
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
 
         await coordinator.handle_event(
             _RpcInputCommand(device_code),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=_ignore_reject,
+            reject=reject,
             command_type=_command_type,
         )
         assert list(coordinator.queued_commands) == [device_code]
@@ -1443,12 +1447,13 @@ def test_coordinator_drops_queued_device_code_when_input_closes() -> None:
         await coordinator.handle_event(
             _RpcInputClosed(),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=_ignore_reject,
+            reject=reject,
             command_type=_command_type,
         )
 
         assert list(coordinator.queued_commands) == []
         assert coordinator._queued_command_bytes == 0
+        assert rejected == [(device_code, "RPC command cancelled: device-code-1")]
 
     anyio.run(scenario)
 
