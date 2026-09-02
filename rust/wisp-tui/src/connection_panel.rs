@@ -19,7 +19,7 @@ pub enum ConnectionPanelAction {
     Close,
     Refresh,
     EnterApiKey { provider: String },
-    StoreApiKey { provider: String, api_key: ApiKey },
+    SubmitApiKey,
     Disconnect { provider: String },
     BeginDeviceCode { provider: String },
     CancelDeviceCode,
@@ -141,7 +141,7 @@ impl ConnectionPanel {
                 }
                 action
             }
-            ConnectionPanelMode::ApiKey { provider, value } => {
+            ConnectionPanelMode::ApiKey { value, .. } => {
                 if key.code == KeyCode::Esc || is_ctrl_c(key) {
                     return ConnectionPanelAction::Close;
                 }
@@ -153,13 +153,11 @@ impl ConnectionPanel {
                 }
                 match key.code {
                     KeyCode::Enter => {
-                        let api_key = std::mem::take(value).take();
-                        api_key.map_or(ConnectionPanelAction::None, |api_key| {
-                            ConnectionPanelAction::StoreApiKey {
-                                provider: provider.clone(),
-                                api_key,
-                            }
-                        })
+                        if value.can_submit() {
+                            ConnectionPanelAction::SubmitApiKey
+                        } else {
+                            ConnectionPanelAction::None
+                        }
                     }
                     KeyCode::Backspace => {
                         value.pop();
@@ -185,6 +183,24 @@ impl ConnectionPanel {
     pub fn handle_paste(&mut self, pasted: &str) {
         if let ConnectionPanelMode::ApiKey { value, .. } = &mut self.mode {
             value.push_str(pasted);
+        }
+    }
+
+    pub fn pending_api_key(&self) -> Option<(&str, &str)> {
+        match &self.mode {
+            ConnectionPanelMode::ApiKey { provider, value } if value.can_submit() => {
+                Some((provider, &value.0))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn take_api_key(&mut self) -> Option<(String, ApiKey)> {
+        match &mut self.mode {
+            ConnectionPanelMode::ApiKey { provider, value } => std::mem::take(value)
+                .take()
+                .map(|key| (provider.clone(), key)),
+            _ => None,
         }
     }
 }
@@ -252,6 +268,10 @@ fn methods(catalog: &ConnectionCatalogSnapshot) -> Vec<&ConnectionMethodSnapshot
 }
 
 impl ApiKeyInput {
+    fn can_submit(&self) -> bool {
+        !self.0.trim().is_empty()
+    }
+
     fn push_str(&mut self, source: &str) {
         for character in source.chars() {
             if self.0.len().saturating_add(character.len_utf8()) > API_KEY_MAX_BYTES {
@@ -524,10 +544,13 @@ mod tests {
         assert_eq!(value.0.len(), API_KEY_MAX_BYTES);
         assert!(value.0.starts_with("A!secret-"));
         assert!(value.masked().chars().all(|character| character == '•'));
-        let action = panel.handle_key(key(KeyCode::Enter));
-        let ConnectionPanelAction::StoreApiKey { api_key, .. } = action else {
-            panic!("API key submission expected");
-        };
+        let expected = value.0.clone();
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Enter)),
+            ConnectionPanelAction::SubmitApiKey
+        );
+        assert_eq!(panel.pending_api_key(), Some(("openai", expected.as_str())));
+        let (_, api_key) = panel.take_api_key().expect("API key submission expected");
         assert!(!format!("{api_key:?}").contains("secret-"));
     }
 

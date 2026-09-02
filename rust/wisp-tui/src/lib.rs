@@ -1463,12 +1463,8 @@ impl LiveUi {
                 self.dispatch(UiAction::LoadConnectionCatalog, writer, limit)
                     .await
             }
-            ConnectionPanelAction::StoreApiKey { provider, api_key } => {
-                if let Some(panel) = self.connection_panel.as_mut() {
-                    panel.return_to_picker();
-                }
-                self.dispatch(UiAction::StoreApiKey { provider, api_key }, writer, limit)
-                    .await
+            ConnectionPanelAction::SubmitApiKey => {
+                self.submit_connection_api_key(writer, limit).await
             }
             ConnectionPanelAction::Disconnect { provider } => {
                 self.dispatch(UiAction::DisconnectProvider { provider }, writer, limit)
@@ -1487,6 +1483,51 @@ impl LiveUi {
                     .await
             }
         }
+    }
+
+    async fn submit_connection_api_key(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.state.connection_request_active() {
+            self.notice = Some("Wait for the current connection request to finish.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let Some((provider, api_key)) = self
+            .connection_panel
+            .as_ref()
+            .and_then(ConnectionPanel::pending_api_key)
+        else {
+            return Ok(LoopControl::Continue);
+        };
+        let command = WispTypedClientRpcCommands::store_api_key(
+            &self.ids.peek_id(CommandKind::StoreApiKey),
+            provider,
+            api_key,
+        )?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len > limit {
+            self.notice = Some(format!(
+                "API key encoded RPC frame is {encoded_len} bytes, exceeding the negotiated {limit}-byte limit; the key was kept for retry."
+            ));
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let Some((provider, api_key)) = self
+            .connection_panel
+            .as_mut()
+            .and_then(ConnectionPanel::take_api_key)
+        else {
+            return Ok(LoopControl::Continue);
+        };
+        if let Some(panel) = self.connection_panel.as_mut() {
+            panel.return_to_picker();
+        }
+        self.notice = None;
+        self.dispatch(UiAction::StoreApiKey { provider, api_key }, writer, limit)
+            .await
     }
 
     async fn handle_session_picker_key(
@@ -2827,6 +2868,35 @@ mod tests {
         live_ui
     }
 
+    fn connection_catalog() -> wisp_protocol::events::ConnectionCatalogSnapshot {
+        wisp_protocol::events::ConnectionCatalogSnapshot {
+            providers: vec![wisp_protocol::events::ConnectionProviderSnapshot {
+                id: "openai".into(),
+                label: "OpenAI".into(),
+                methods: vec![
+                    wisp_protocol::events::ConnectionMethodSnapshot {
+                        provider: "openai".into(),
+                        label: "API key".into(),
+                        kind: "api_key".into(),
+                        source: "missing".into(),
+                        environment_variable: Some("OPENAI_API_KEY".into()),
+                        oauth_expires_at: None,
+                        has_stored_credential: false,
+                    },
+                    wisp_protocol::events::ConnectionMethodSnapshot {
+                        provider: "openai-codex".into(),
+                        label: "Device code".into(),
+                        kind: "device_code".into(),
+                        source: "missing".into(),
+                        environment_variable: None,
+                        oauth_expires_at: None,
+                        has_stored_credential: false,
+                    },
+                ],
+            }],
+        }
+    }
+
     fn shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
@@ -3299,33 +3369,199 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_connection_panel_masks_keys_and_cancels_device_login() {
-        let catalog = wisp_protocol::events::ConnectionCatalogSnapshot {
-            providers: vec![wisp_protocol::events::ConnectionProviderSnapshot {
-                id: "openai".into(),
-                label: "OpenAI".into(),
-                methods: vec![
-                    wisp_protocol::events::ConnectionMethodSnapshot {
-                        provider: "openai".into(),
-                        label: "API key".into(),
-                        kind: "api_key".into(),
-                        source: "missing".into(),
-                        environment_variable: Some("OPENAI_API_KEY".into()),
-                        oauth_expires_at: None,
-                        has_stored_credential: false,
-                    },
-                    wisp_protocol::events::ConnectionMethodSnapshot {
-                        provider: "openai-codex".into(),
-                        label: "Device code".into(),
-                        kind: "device_code".into(),
-                        source: "missing".into(),
-                        environment_variable: None,
-                        oauth_expires_at: None,
-                        has_stored_credential: false,
-                    },
-                ],
-            }],
+    async fn connection_api_key_frame_preflight_keeps_secret_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog;
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Paste("retry-secret".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let command =
+            WispTypedClientRpcCommands::store_api_key("store_api_key-1", "openai", "retry-secret")
+                .unwrap();
+        let encoded_len = serde_json::to_vec(&command).unwrap().len();
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert!(!live_ui.state.connection_request_active());
+        assert!(live_ui.render_pending);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("negotiated") && notice.contains("kept"))
+        );
+        assert!(
+            !live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("retry-secret"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("connection command expected");
         };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "store_api_key",
+                "id": "store_api_key-1",
+                "provider": "openai",
+                "api_key": "retry-secret",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_connection_request_keeps_api_key_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog.clone();
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("catalog command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "get_connection_catalog"
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Paste("busy-secret".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.state.connection_request_active());
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current connection request to finish.")
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "get_connection_catalog-1".into(),
+                    catalog,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_connection_catalog-1".into(),
+                    command_type: "get_connection_catalog".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("connection command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "store_api_key",
+                "id": "store_api_key-2",
+                "provider": "openai",
+                "api_key": "busy-secret",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn live_connection_panel_masks_keys_and_cancels_device_login() {
+        let catalog = connection_catalog();
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut live_ui = LiveUi::default();
         live_ui.state.connection_catalog = catalog.clone();

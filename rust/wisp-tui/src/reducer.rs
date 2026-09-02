@@ -642,6 +642,10 @@ impl UiState {
         Self::with_provider(None, None, None)
     }
 
+    pub(crate) fn connection_request_active(&self) -> bool {
+        self.connection_operation.is_some()
+    }
+
     fn with_provider(
         provider: Option<String>,
         model: Option<String>,
