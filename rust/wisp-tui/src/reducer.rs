@@ -3482,6 +3482,17 @@ fn handle_connection_backend_event(
             effects.extend(adopt_connection_catalog(state, report));
             Some(effects)
         }
+        ConnectionOperation::Catalog {
+            command_type: "store_api_key" | "disconnect_provider",
+            completion: Some(SessionCompletion { ok: true, .. }),
+            ..
+        } => {
+            effects.push(UiEffect::Notice(
+                "Credentials updated, but connection status could not be refreshed.".into(),
+            ));
+            effects.push(UiEffect::RequestRender);
+            Some(effects)
+        }
         ConnectionOperation::DeviceCode {
             completion: Some(SessionCompletion { ok: false, error }),
             cancel_requested,
@@ -3506,6 +3517,19 @@ fn handle_connection_backend_event(
             effects.push(UiEffect::FinishDeviceCode);
             effects.push(UiEffect::Notice(bounded_session_text(
                 &format!("Connected: {provider}"),
+                SESSION_NOTICE_MAX_BYTES,
+            )));
+            effects.push(UiEffect::RequestRender);
+            Some(effects)
+        }
+        ConnectionOperation::DeviceCode {
+            provider,
+            completion: Some(SessionCompletion { ok: true, .. }),
+            ..
+        } => {
+            effects.push(UiEffect::FinishDeviceCode);
+            effects.push(UiEffect::Notice(bounded_session_text(
+                &format!("Connected: {provider}. Connection status could not be refreshed."),
                 SESSION_NOTICE_MAX_BYTES,
             )));
             effects.push(UiEffect::RequestRender);
@@ -6850,6 +6874,78 @@ mod tests {
                     && command["id"] == "get_connection_catalog-2"
             })
         }));
+    }
+
+    #[test]
+    fn successful_connection_mutations_finish_without_a_catalog_report() {
+        let actions = [
+            (
+                UiAction::StoreApiKey {
+                    provider: "openai".into(),
+                    api_key: ApiKey::new("secret".into()).unwrap(),
+                },
+                "store_api_key-1",
+                "store_api_key",
+            ),
+            (
+                UiAction::DisconnectProvider {
+                    provider: "openai".into(),
+                },
+                "disconnect_provider-1",
+                "disconnect_provider",
+            ),
+        ];
+
+        for (action, command_id, command_type) in actions {
+            let mut state = UiState::unconfigured();
+            let mut ids = DeterministicIds::default();
+            reduce(&mut state, action, &mut ids).unwrap();
+
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished(command_id, command_type, true)),
+                &mut ids,
+            )
+            .unwrap();
+
+            assert!(state.connection_operation.is_none());
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                UiEffect::Notice(notice)
+                    if notice
+                        == "Credentials updated, but connection status could not be refreshed."
+            )));
+        }
+
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("begin_device_code-1", "begin_device_code", true)),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(state.connection_operation.is_none());
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::FinishDeviceCode))
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(notice)
+                if notice
+                    == "Connected: openai-codex. Connection status could not be refreshed."
+        )));
     }
 
     #[test]

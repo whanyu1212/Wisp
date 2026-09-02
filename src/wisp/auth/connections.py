@@ -235,7 +235,10 @@ def _environment_value(name: str) -> str | None:
 def _oauth_expiry_text(credential: AuthCredential | None) -> str | None:
     if not isinstance(credential, OAuthCredential):
         return None
-    expires = datetime.fromtimestamp(credential.expires / 1000, tz=UTC)
+    try:
+        expires = datetime.fromtimestamp(credential.expires / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
     return f"expires {expires.isoformat()}"
 
 

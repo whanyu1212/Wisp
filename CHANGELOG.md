@@ -13,7 +13,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 ## Unreleased
 
 - Added backend-owned connection-catalog, API-key, disconnect, and device-code RPC so Textual and
-  external frontends never read or write credential files. Protocol v1–v3 artifacts remain immutable.
+  external frontends never read or write credential files. Credential mutation completion remains
+  authoritative if the secondary status refresh fails. Protocol v1–v3 artifacts remain immutable.
 - Added the enforced live JSONL-RPC v3 handshake, bounded strict framing, immutable generated schemas,
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
 - Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,

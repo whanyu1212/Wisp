@@ -128,15 +128,21 @@ request. Completion and results arrive through `events()`.
 | `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
 | `get_model_catalog` | `(*, command_id: str \| None = None)` | `RpcModelCatalogReported` |
 | `get_connection_catalog` | `(*, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
-| `store_api_key` | `(provider: str, api_key: str, *, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
-| `disconnect_provider` | `(provider: str, *, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
-| `begin_device_code` | `(provider: str, *, command_id: str \| None = None)` | `RpcDeviceCodeReported`, zero or more `RpcDeviceCodeProgressReported`, then `RpcConnectionCatalogReported` |
+| `store_api_key` | `(provider: str, api_key: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |
+| `disconnect_provider` | `(provider: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |
+| `begin_device_code` | `(provider: str, *, command_id: str \| None = None)` | `RpcDeviceCodeReported`, zero or more `RpcDeviceCodeProgressReported`, terminal `RpcCommandFinished`, and refreshed `RpcConnectionCatalogReported` when available |
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
 | `get_skills` | `(*, command_id: str \| None = None)` | `RpcSkillsReported` |
 | `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
 | `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
+
+For credential mutations, the terminal `RpcCommandFinished` is authoritative for the mutation
+itself. A successful mutation normally emits a correlated refreshed connection catalog first. If
+that secondary refresh fails, the backend emits a sanitized `ErrorEvent` diagnostic but still
+finishes the mutation with `ok=true`; clients must not retry a completed credential write or delete
+solely because its status refresh was unavailable.
 
 `configure()` accepts `provider: str | None`, `model: str | None`, `effort: str | None`,
 `auto_compaction_enabled: bool | None`, and `mode: Literal["build", "plan"] | None`. Pass the

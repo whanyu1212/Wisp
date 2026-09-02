@@ -108,11 +108,17 @@ class AuthCommands:
             return
         try:
             await self._store_api_key(provider, normalized)
-            method = connection_method(self._get_catalog(), provider)
         except Exception as exc:  # noqa: BLE001 - show storage failure in the TUI
             self._connect_error(f"Auth storage error: {exc}")
             return
         self._call_renderer_optional("connect_completed", provider)
+        try:
+            method = connection_method(self._get_catalog(), provider)
+        except Exception:  # noqa: BLE001 - mutation succeeded; status refresh is secondary
+            self._renderer.notice(
+                f"Stored API key for {provider}; connection status refresh unavailable."
+            )
+            return
         environment_variable = (
             method.environment_variable
             if method is not None and method.source == "environment"
@@ -151,16 +157,22 @@ class AuthCommands:
     async def _disconnect_provider(self, provider: str) -> None:
         try:
             await self._on_disconnect(provider)
-            method = connection_method(self._get_catalog(), provider)
         except Exception as extra:  # noqa: BLE001 - show storage failure in the TUI
             self._renderer.command_error(f"Auth storage error: {extra}")
+            return
+        self._call_renderer_optional("connect_completed", provider)
+        try:
+            method = connection_method(self._get_catalog(), provider)
+        except Exception:  # noqa: BLE001 - mutation succeeded; status refresh is secondary
+            self._renderer.notice(
+                f"Stored credentials cleared for {provider}; connection status refresh unavailable."
+            )
             return
         environment_variable = (
             method.environment_variable
             if method is not None and method.source == "environment"
             else None
         )
-        self._call_renderer_optional("connect_completed", provider)
         if environment_variable is not None:
             self._renderer.notice(
                 f"Stored credentials cleared for {provider}; still connected through "

@@ -3284,7 +3284,6 @@ def handle_rpc_store_api_key_command(
         return
     try:
         store.set(provider, ApiKeyCredential(key=api_key.strip()))
-        catalog = rpc_connection_catalog_snapshot(runtime)
     except Exception as exc:
         write_rpc_command_error(
             command_id=command_id,
@@ -3293,7 +3292,12 @@ def handle_rpc_store_api_key_command(
             write_event=write_event,
         )
         return
-    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
+    _write_connection_catalog_after_mutation(
+        runtime=runtime,
+        command_id=command_id,
+        outcome="API key stored",
+        write_event=write_event,
+    )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
@@ -3344,7 +3348,6 @@ def handle_rpc_disconnect_provider_command(
         return
     try:
         store.delete(provider)
-        catalog = rpc_connection_catalog_snapshot(runtime)
     except Exception as exc:
         write_rpc_command_error(
             command_id=command_id,
@@ -3353,7 +3356,12 @@ def handle_rpc_disconnect_provider_command(
             write_event=write_event,
         )
         return
-    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
+    _write_connection_catalog_after_mutation(
+        runtime=runtime,
+        command_id=command_id,
+        outcome="Credentials disconnected",
+        write_event=write_event,
+    )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
@@ -3476,11 +3484,11 @@ async def run_rpc_device_code_command(
                     on_progress=show_progress,
                 )
                 store.set(provider, credential)
-                write_event(
-                    RpcConnectionCatalogReported(
-                        command_id=command_id,
-                        catalog=rpc_connection_catalog_snapshot(runtime),
-                    )
+                _write_connection_catalog_after_mutation(
+                    runtime=runtime,
+                    command_id=command_id,
+                    outcome="Device login completed",
+                    write_event=write_event,
                 )
             except anyio.get_cancelled_exc_class():
                 error = f"RPC command cancelled: {command_id}"
@@ -3507,6 +3515,25 @@ async def run_rpc_device_code_command(
                     entry_count=entry_count,
                 )
             )
+
+
+def _write_connection_catalog_after_mutation(
+    *,
+    runtime: WispRuntime,
+    command_id: str,
+    outcome: str,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report status when available without rewriting a completed mutation as failed."""
+
+    try:
+        catalog = rpc_connection_catalog_snapshot(runtime)
+    except Exception:  # noqa: BLE001 - mutation already committed; report safely
+        write_event(
+            ErrorEvent(message=f"{outcome}; connection catalog unavailable: status refresh failed")
+        )
+        return
+    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
 
 
 def _sanitized_auth_error(exc: BaseException) -> str:

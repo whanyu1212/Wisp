@@ -90,6 +90,25 @@ def test_status_reports_not_logged_in_for_missing_credential() -> None:
     assert renderer.errors == []
 
 
+def test_connection_catalog_omits_unrepresentable_oauth_expiry() -> None:
+    store = _FakeStore(
+        {
+            "openai-codex": OAuthCredential(
+                access="access",
+                refresh="refresh",
+                expires=10**1000,
+            )
+        }
+    )
+
+    catalog = connection_catalog(store, environ=lambda _name: None)
+    method = catalog[0].methods[0]
+
+    assert method.source == "stored"
+    assert method.has_stored_credential is True
+    assert method.oauth_expires_at is None
+
+
 def test_auth_notices_use_backend_catalog_instead_of_frontend_environment(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -173,6 +192,29 @@ def test_status_rejects_extra_args_and_surfaces_storage_errors() -> None:
     assert renderer.errors[-1].startswith("Auth storage error:")
 
 
+def test_connect_acknowledges_store_when_status_refresh_fails() -> None:
+    renderer = _FakeRenderer()
+    stored: list[tuple[str, str]] = []
+
+    async def store_api_key(provider: str, api_key: str) -> None:
+        stored.append((provider, api_key))
+
+    commands = AuthCommands(
+        renderer,
+        lambda: (_ for _ in ()).throw(RuntimeError("catalog unavailable")),
+        lambda: "openai",
+        store_api_key=store_api_key,
+        disconnect_provider=lambda _provider: anyio.sleep(0),
+        begin_device_code=lambda _provider: anyio.sleep(0),
+    )
+
+    anyio.run(commands.connect_api_key, "openai", "stored-key")
+
+    assert stored == [("openai", "stored-key")]
+    assert renderer.notices == ["Stored API key for openai; connection status refresh unavailable."]
+    assert renderer.errors == []
+
+
 def test_disconnect_deletes_and_reports_presence() -> None:
     store = _FakeStore({"openai": ApiKeyCredential(key="sk-1")})
     commands, renderer = _commands(store)
@@ -183,6 +225,39 @@ def test_disconnect_deletes_and_reports_presence() -> None:
 
     anyio.run(run)
     assert renderer.notices == ["Disconnected: openai", "Disconnected: openai"]
+
+
+def test_disconnect_acknowledges_mutation_when_status_refresh_fails() -> None:
+    renderer = _FakeRenderer()
+    catalog_calls = 0
+    disconnected: list[str] = []
+
+    def catalog() -> tuple[ConnectionProviderStatus, ...]:
+        nonlocal catalog_calls
+        catalog_calls += 1
+        if catalog_calls > 1:
+            raise RuntimeError("catalog unavailable")
+        return connection_catalog(_FakeStore(), environ=lambda _name: None)
+
+    async def disconnect_provider(provider: str) -> None:
+        disconnected.append(provider)
+
+    commands = AuthCommands(
+        renderer,
+        catalog,
+        lambda: "openai",
+        store_api_key=lambda _provider, _api_key: anyio.sleep(0),
+        disconnect_provider=disconnect_provider,
+        begin_device_code=lambda _provider: anyio.sleep(0),
+    )
+
+    anyio.run(commands.disconnect, ("openai",))
+
+    assert disconnected == ["openai"]
+    assert renderer.notices == [
+        "Stored credentials cleared for openai; connection status refresh unavailable."
+    ]
+    assert renderer.errors == []
 
 
 def test_connect_rejects_unknown_providers() -> None:

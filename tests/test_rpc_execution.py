@@ -21,7 +21,7 @@ from tests.rpc_support import (
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
 from wisp.auth.openai_codex import DeviceCodeInfo
-from wisp.auth.storage import OAuthCredential
+from wisp.auth.storage import ApiKeyCredential, OAuthCredential
 from wisp.coding import CodingSession
 from wisp.coding.session import _RetainedQueueState
 from wisp.config import WispConfig
@@ -34,6 +34,7 @@ from wisp.events import (
     RpcCommandsReported,
     RpcCommandStarted,
     RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
     RpcDeviceCodeProgressReported,
     RpcDeviceCodeReported,
     RpcMcpStatusReported,
@@ -1224,6 +1225,97 @@ def test_executor_stores_api_key_without_leaking_secret(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+def test_executor_keeps_api_key_success_when_catalog_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    secret = "sentinel-refresh-secret"
+
+    def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
+        raise OverflowError(secret)
+
+    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await fixture.executor(task_group=task_group, send=send).dispatch(
+                {
+                    "id": "store-1",
+                    "type": "store_api_key",
+                    "provider": "anthropic",
+                    "api_key": secret,
+                },
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert fixture.runtime.auth_store is not None
+        assert fixture.runtime.auth_store.get("anthropic") == ApiKeyCredential(key=secret)
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        warning = fixture.events[1]
+        assert isinstance(warning, ErrorEvent)
+        assert warning.message == (
+            "API key stored; connection catalog unavailable: status refresh failed"
+        )
+        dumped = json.dumps([event.model_dump(mode="json") for event in fixture.events])
+        assert secret not in dumped
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is True
+
+    anyio.run(scenario)
+
+
+def test_executor_keeps_disconnect_success_when_catalog_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
+        raise OverflowError("unsafe diagnostic")
+
+    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        assert fixture.runtime.auth_store is not None
+        fixture.runtime.auth_store.set("anthropic", ApiKeyCredential(key="stored-key"))
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await fixture.executor(task_group=task_group, send=send).dispatch(
+                {
+                    "id": "disconnect-1",
+                    "type": "disconnect_provider",
+                    "provider": "anthropic",
+                },
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert fixture.runtime.auth_store.get("anthropic") is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        warning = fixture.events[1]
+        assert isinstance(warning, ErrorEvent)
+        assert warning.message == (
+            "Credentials disconnected; connection catalog unavailable: status refresh failed"
+        )
+        assert "unsafe diagnostic" not in warning.message
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is True
+
+    anyio.run(scenario)
+
+
 def test_executor_reports_device_code_progress_and_completion(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -1259,6 +1351,51 @@ def test_executor_reports_device_code_progress_and_completion(
         progress = fixture.events[2]
         assert isinstance(progress, RpcDeviceCodeProgressReported)
         assert progress.attempt == 1
+
+    anyio.run(scenario)
+
+
+def test_executor_keeps_device_login_success_when_catalog_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    credential = OAuthCredential(access="access", refresh="refresh", expires=4_102_444_800_000)
+
+    async def fake_login(**_kwargs: object) -> OAuthCredential:
+        return credential
+
+    def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
+        raise OverflowError("unsafe diagnostic")
+
+    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
+                None,
+            )
+            await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert fixture.runtime.auth_store is not None
+        assert fixture.runtime.auth_store.get("openai-codex") == credential
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        warning = fixture.events[1]
+        assert isinstance(warning, ErrorEvent)
+        assert warning.message == (
+            "Device login completed; connection catalog unavailable: status refresh failed"
+        )
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is True
 
     anyio.run(scenario)
 
