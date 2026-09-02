@@ -23,6 +23,12 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
+    RpcConnectionMethodSnapshot,
+    RpcConnectionProviderSnapshot,
+    RpcDeviceCodeProgressReported,
+    RpcDeviceCodeReported,
     RpcMcpServerSnapshot,
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
@@ -59,13 +65,16 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.rpc import (
+    BeginDeviceCodeCommand,
     ClearQueueCommand,
     CloneSessionCommand,
     CompactCommand,
     ConfigureCommand,
+    DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
     GetCommandsCommand,
+    GetConnectionCatalogCommand,
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
@@ -87,10 +96,12 @@ from wisp.rpc import (
     SetQueueModeCommand,
     SetSessionNameCommand,
     SteerCommand,
+    StoreApiKeyCommand,
     UnrevertSessionTreeCommand,
 )
 from wisp.rpc import client as rpc_client_module
 from wisp.rpc.commands import (
+    MAX_RPC_API_KEY_CHARS,
     MAX_RPC_COMMAND_ID_CHARS,
     ApprovalCommand,
     CancelCommand,
@@ -98,7 +109,10 @@ from wisp.rpc.commands import (
     RpcCommand,
     ShutdownCommand,
     TrustCommand,
+    detach_store_api_key,
     rpc_command_from_json,
+    rpc_command_payload_size,
+    take_store_api_key,
 )
 from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 
@@ -206,6 +220,111 @@ def test_get_model_catalog_command_serializes_as_canonical_jsonl() -> None:
 
     assert command.to_json_line() == '{"id":"models-1","type":"get_model_catalog"}\n'
     assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_connection_catalog_command_serializes_as_canonical_jsonl() -> None:
+    command = GetConnectionCatalogCommand(id="connections-1")
+
+    assert command.to_json_line() == '{"id":"connections-1","type":"get_connection_catalog"}\n'
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_store_api_key_command_serializes_but_redacts_repr() -> None:
+    command = StoreApiKeyCommand(id="store-1", provider="anthropic", api_key="sentinel-secret")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "store-1",
+        "type": "store_api_key",
+        "provider": "anthropic",
+        "api_key": "sentinel-secret",
+    }
+    assert "sentinel-secret" not in repr(command)
+    assert "sentinel-secret" not in str(command)
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+    detached = detach_store_api_key(command.model_dump(exclude_none=True))
+    assert "sentinel-secret" not in repr(detached)
+    assert rpc_command_payload_size(detached) > len("sentinel-secret")
+    assert take_store_api_key(detached) == "sentinel-secret"
+    assert "_api_key" not in detached
+
+
+def test_store_api_key_validation_errors_redact_the_input() -> None:
+    secret = "sentinel-secret-" + "s" * MAX_RPC_API_KEY_CHARS
+    payload = json.dumps({"type": "store_api_key", "provider": "anthropic", "api_key": secret})
+
+    with pytest.raises(ValidationError) as direct:
+        StoreApiKeyCommand(provider="anthropic", api_key=secret)
+    with pytest.raises(ValidationError) as parsed:
+        rpc_command_from_json(payload)
+
+    for error in (direct.value, parsed.value):
+        assert secret not in str(error)
+        assert secret not in error.json()
+
+
+def test_disconnect_and_device_code_commands_serialize() -> None:
+    disconnect = DisconnectProviderCommand(id="disconnect-1", provider="anthropic")
+    begin = BeginDeviceCodeCommand(id="device-1", provider="openai-codex")
+
+    assert json.loads(disconnect.to_json_line()) == {
+        "id": "disconnect-1",
+        "type": "disconnect_provider",
+        "provider": "anthropic",
+    }
+    assert json.loads(begin.to_json_line()) == {
+        "id": "device-1",
+        "type": "begin_device_code",
+        "provider": "openai-codex",
+    }
+
+
+def test_connection_catalog_event_round_trips_and_enforces_bounds() -> None:
+    method = RpcConnectionMethodSnapshot(
+        provider="anthropic",
+        label="Anthropic API key",
+        kind="api_key",
+        source="missing",
+        environment_variable="ANTHROPIC_API_KEY",
+    )
+    provider = RpcConnectionProviderSnapshot(
+        id="anthropic",
+        label="Anthropic",
+        methods=(method,),
+    )
+    event = RpcConnectionCatalogReported(
+        command_id="connections-1",
+        catalog=RpcConnectionCatalogSnapshot(providers=(provider,)),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValidationError, match="schema_version 36"):
+        RpcConnectionCatalogReported(
+            command_id="connections-1",
+            catalog=event.catalog,
+            schema_version=35,
+        )
+    with pytest.raises(ValidationError):
+        RpcConnectionCatalogSnapshot(providers=(provider,) * 33)
+
+
+def test_device_code_event_round_trips() -> None:
+    event = RpcDeviceCodeReported(
+        command_id="device-1",
+        provider="openai-codex",
+        verification_uri="https://example.test/device",
+        user_code="ABCD-1234",
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    assert "access" not in event.model_dump_json()
+
+    progress = RpcDeviceCodeProgressReported(
+        command_id="device-1",
+        provider="openai-codex",
+        attempt=1,
+    )
+    assert wisp_event_from_json(progress.model_dump_json()) == progress
 
 
 def test_model_catalog_event_round_trips_and_enforces_bounds() -> None:
@@ -1866,22 +1985,22 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 started = {
-    "schema_version": 35,
+    "schema_version": 36,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
-    "schema_version": 35,
+    "schema_version": 36,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -1924,10 +2043,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1959,10 +2078,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1991,9 +2110,9 @@ print(json.dumps({
     "code": "protocol_version_mismatch",
     "message": "No compatible live RPC protocol version.",
     "backend_package_version": "0.1.0",
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
-    "event_schema_version": 35,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
+    "event_schema_version": 36,
 }), flush=True)
 """
         with pytest.raises(RpcHandshakeError, match="No compatible") as error:
@@ -2023,10 +2142,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2058,16 +2177,16 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "schema_version": 35,
+    "schema_version": 36,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

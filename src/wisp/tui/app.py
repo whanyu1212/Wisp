@@ -156,11 +156,6 @@ async def run_tui(
             model=options.config.model,
             effort=options.config.effort,
             auth_path=options.config.auth_path,
-            openai_compatible_provider=(
-                options.config.openai_compatible.provider_name
-                if options.config.openai_compatible is not None
-                else "openai-compatible"
-            ),
             update_checker=partial(
                 check_for_update,
                 enabled=options.config.update_check_enabled,

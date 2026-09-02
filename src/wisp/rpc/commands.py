@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import json
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from wisp.agent.mode import AgentMode
 from wisp.events import (
@@ -14,10 +25,60 @@ from wisp.events import (
     QueueKind,
     QueueMode,
 )
+from wisp.validation import redact_validation_error_inputs
 
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
 
 MAX_RPC_COMMAND_ID_CHARS = 256
+MAX_RPC_API_KEY_CHARS = 8_192
+STORE_API_KEY_SECRET_FIELD = "_api_key"
+
+
+@dataclass(frozen=True)
+class _RpcSecretValue:
+    value: object = dataclass_field(repr=False)
+
+    def __repr__(self) -> str:
+        return "<redacted>"
+
+    __str__ = __repr__
+
+
+def detach_store_api_key(command: dict[str, object]) -> dict[str, object]:
+    """Move ``api_key`` into a redacted value before queueing or logging."""
+
+    if command.get("type") != "store_api_key" or "api_key" not in command:
+        return command
+    detached = dict(command)
+    detached[STORE_API_KEY_SECRET_FIELD] = _RpcSecretValue(detached.pop("api_key"))
+    return detached
+
+
+def take_store_api_key(command: dict[str, object]) -> object | None:
+    """Remove and reveal a detached API key only at the storage boundary."""
+
+    value = command.pop("api_key", None)
+    if value is None:
+        value = command.pop(STORE_API_KEY_SECRET_FIELD, None)
+    return value.value if isinstance(value, _RpcSecretValue) else value
+
+
+def rpc_command_payload_size(command: dict[str, object]) -> int:
+    """Return the wire-size equivalent without making secrets printable."""
+
+    sized = dict(command)
+    secret = sized.get(STORE_API_KEY_SECRET_FIELD)
+    if isinstance(secret, _RpcSecretValue):
+        sized[STORE_API_KEY_SECRET_FIELD] = secret.value
+    return len(
+        json.dumps(
+            sized,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
 
 QUEUE_RPC_COMMAND_TYPES = frozenset(
     {
@@ -90,6 +151,51 @@ class GetModelCatalogCommand(RpcCommandModel):
     """Return the effective provider/model/effort catalog."""
 
     type: Literal["get_model_catalog"] = "get_model_catalog"
+
+
+class GetConnectionCatalogCommand(RpcCommandModel):
+    """Return the sanitized provider connection catalog."""
+
+    type: Literal["get_connection_catalog"] = "get_connection_catalog"
+
+
+class StoreApiKeyCommand(RpcCommandModel):
+    """Persist one provider API key through the secret-bearing command path."""
+
+    type: Literal["store_api_key"] = "store_api_key"
+    provider: str = Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS)
+    api_key: str = Field(min_length=1, max_length=MAX_RPC_API_KEY_CHARS, repr=False)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_api_key_validation_errors(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            raise redact_validation_error_inputs(exc, field="api_key") from None
+
+    def __repr__(self) -> str:
+        return (
+            f"StoreApiKeyCommand(id={self.id!r}, provider={self.provider!r}, api_key='<redacted>')"
+        )
+
+
+class DisconnectProviderCommand(RpcCommandModel):
+    """Remove stored credentials for one provider."""
+
+    type: Literal["disconnect_provider"] = "disconnect_provider"
+    provider: str = Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS)
+
+
+class BeginDeviceCodeCommand(RpcCommandModel):
+    """Start a backend-owned device-code connection flow."""
+
+    type: Literal["begin_device_code"] = "begin_device_code"
+    provider: str = Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS)
 
 
 class GetSkillsCommand(RpcCommandModel):
@@ -336,6 +442,10 @@ type RpcCommand = Annotated[
     | GetStateCommand
     | GetCommandsCommand
     | GetModelCatalogCommand
+    | GetConnectionCatalogCommand
+    | StoreApiKeyCommand
+    | DisconnectProviderCommand
+    | BeginDeviceCodeCommand
     | GetSkillsCommand
     | GetMcpStatusCommand
     | GetMessagesCommand

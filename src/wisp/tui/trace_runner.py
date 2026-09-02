@@ -529,6 +529,27 @@ class TraceController:
         # Shared traces compare Textual with Rust, whose picker is deferred to #467.
         return command_id or self._next_id("get_model_catalog")
 
+    async def get_connection_catalog(self, *, command_id: str | None = None) -> str:
+        return command_id or self._next_id("get_connection_catalog")
+
+    async def store_api_key(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        del provider, api_key
+        return command_id or self._next_id("store_api_key")
+
+    async def disconnect_provider(self, provider: str, *, command_id: str | None = None) -> str:
+        del provider
+        return command_id or self._next_id("disconnect_provider")
+
+    async def begin_device_code(self, provider: str, *, command_id: str | None = None) -> str:
+        del provider
+        return command_id or self._next_id("begin_device_code")
+
     async def get_skills(self, *, command_id: str | None = None) -> str:
         cid = command_id or self._next_id("get_skills")
         self.commands.append({"type": "get_skills", "id": cid})

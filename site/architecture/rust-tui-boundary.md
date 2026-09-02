@@ -180,16 +180,16 @@ current scaffold is exact-lockstep rather than range-compatible:
 - The Python package/runtime and `wisp-tui` crate are currently both version `0.1.0`. The launcher
   passes the Python version to Rust, Rust checks it against `CARGO_PKG_VERSION` before spawning the
   backend, and the backend repeats its package version in the handshake.
-- The only accepted live contract is RPC protocol v3 with event schema v35 and no negotiated
-  capabilities. The scaffold sends only handshake and shutdown commands, validates current live
-  event output, and displays event counts and the latest event discriminator.
+- The only accepted live contract is RPC protocol v4 with event schema v36 and no negotiated
+  capabilities. The frontend consumes current live event output, including backend-owned
+  connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
   current scaffold does not negotiate older live contracts.
 - Python retains backward parsing, migration, and replay of persisted session and event versions.
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-The committed v3 schema manifest and generated projections define the current handshake fields,
+The committed v4 schema manifest and generated projections define the current handshake fields,
 frame limits, strict event variants, and UTF-8 JSON representation. See
 [Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 

@@ -33,10 +33,24 @@ fn every_python_command_fixture_round_trips_in_rust() {
     assert_round_trips::<commands::WispTypedClientRpcCommands>(
         fixtures(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/live-rpc/v3/commands.schema.json"
+            "/../../schemas/live-rpc/v4/commands.schema.json"
         ))),
         commands::deserialize,
     );
+}
+
+#[test]
+fn secret_commands_redact_debug_output() {
+    let command = commands::WispTypedClientRpcCommands::store_api_key(
+        "store-1",
+        "anthropic",
+        "sentinel-secret",
+    )
+    .unwrap();
+    let debug = format!("{command:?}");
+
+    assert!(!debug.contains("sentinel-secret"));
+    assert!(debug.contains("<redacted>"));
 }
 
 #[test]
@@ -468,7 +482,7 @@ fn approval_builder_serializes_every_approved_scope() {
 fn every_python_event_fixture_round_trips_in_rust() {
     let fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v3/events.schema.json"
+        "/../../schemas/live-rpc/v4/events.schema.json"
     )));
     assert_round_trips::<events::WispCurrentLiveEventOutput>(fixtures, events::deserialize);
 }
@@ -477,7 +491,7 @@ fn every_python_event_fixture_round_trips_in_rust() {
 fn model_catalog_projection_is_correlated_and_bounded() {
     let fixture = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v3/events.schema.json"
+        "/../../schemas/live-rpc/v4/events.schema.json"
     )))
     .remove("rpc.model_catalog")
     .unwrap();
@@ -513,7 +527,7 @@ fn model_catalog_projection_is_correlated_and_bounded() {
     assert!(
         events::deserialize(serde_json::json!({
             "type": "rpc.model_catalog",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2025-01-02T03:04:05Z",
             "command_id": "models-oversized",
             "catalog": {
@@ -535,7 +549,7 @@ fn model_catalog_projection_is_correlated_and_bounded() {
 fn future_and_malformed_types_fail_closed() {
     assert!(commands::deserialize(serde_json::json!({"type": "future.command"})).is_err());
     assert!(
-        events::deserialize(serde_json::json!({"schema_version": 35, "type": "future.event"}))
+        events::deserialize(serde_json::json!({"schema_version": 36, "type": "future.event"}))
             .is_err()
     );
     assert!(
@@ -590,7 +604,7 @@ fn canonical_command_cross_field_constraints_fail_closed() {
 fn canonical_event_cross_field_constraints_fail_closed() {
     let mut event_fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v3/events.schema.json"
+        "/../../schemas/live-rpc/v4/events.schema.json"
     )));
     let mut invalid_events = Vec::new();
 
@@ -664,25 +678,25 @@ fn canonical_event_cross_field_constraints_fail_closed() {
 }
 
 #[test]
-fn generated_handshake_types_preserve_the_v3_contract() {
+fn generated_handshake_types_preserve_the_v4_contract() {
     let request_value = serde_json::json!({
         "type": "rpc.handshake.request",
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
-        "min_protocol_version": 3,
-        "max_protocol_version": 3,
-        "min_event_schema_version": 35,
-        "max_event_schema_version": 35,
+        "min_protocol_version": 4,
+        "max_protocol_version": 4,
+        "min_event_schema_version": 36,
+        "max_event_schema_version": 36,
         "supported_capabilities": [],
         "required_capabilities": []
     });
     let accepted_value = serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": 3,
-        "event_schema_version": 35,
-        "min_protocol_version": 3,
-        "max_protocol_version": 3,
+        "protocol_version": 4,
+        "event_schema_version": 36,
+        "min_protocol_version": 4,
+        "max_protocol_version": 4,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     });
@@ -702,21 +716,10 @@ fn handshake_cross_field_invariants_fail_closed() {
             "type": "rpc.handshake.request",
             "frontend_name": "fixture",
             "frontend_version": "0.1.0",
-            "min_protocol_version": 3,
-            "max_protocol_version": 2,
-            "min_event_schema_version": 35,
-            "max_event_schema_version": 35,
-            "supported_capabilities": [],
-            "required_capabilities": []
-        }),
-        serde_json::json!({
-            "type": "rpc.handshake.request",
-            "frontend_name": "fixture",
-            "frontend_version": "0.1.0",
-            "min_protocol_version": 3,
+            "min_protocol_version": 4,
             "max_protocol_version": 3,
             "min_event_schema_version": 36,
-            "max_event_schema_version": 35,
+            "max_event_schema_version": 36,
             "supported_capabilities": [],
             "required_capabilities": []
         }),
@@ -724,10 +727,21 @@ fn handshake_cross_field_invariants_fail_closed() {
             "type": "rpc.handshake.request",
             "frontend_name": "fixture",
             "frontend_version": "0.1.0",
-            "min_protocol_version": 3,
-            "max_protocol_version": 3,
-            "min_event_schema_version": 35,
-            "max_event_schema_version": 35,
+            "min_protocol_version": 4,
+            "max_protocol_version": 4,
+            "min_event_schema_version": 37,
+            "max_event_schema_version": 36,
+            "supported_capabilities": [],
+            "required_capabilities": []
+        }),
+        serde_json::json!({
+            "type": "rpc.handshake.request",
+            "frontend_name": "fixture",
+            "frontend_version": "0.1.0",
+            "min_protocol_version": 4,
+            "max_protocol_version": 4,
+            "min_event_schema_version": 36,
+            "max_event_schema_version": 36,
             "supported_capabilities": [],
             "required_capabilities": ["missing"]
         }),
@@ -740,10 +754,10 @@ fn handshake_cross_field_invariants_fail_closed() {
         serde_json::json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 4,
-            "event_schema_version": 35,
-            "min_protocol_version": 3,
-            "max_protocol_version": 3,
+            "protocol_version": 5,
+            "event_schema_version": 36,
+            "min_protocol_version": 4,
+            "max_protocol_version": 4,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         }),
@@ -752,9 +766,9 @@ fn handshake_cross_field_invariants_fail_closed() {
             "code": "protocol_version_mismatch",
             "message": "No compatible protocol.",
             "backend_package_version": "0.1.0",
-            "min_protocol_version": 3,
-            "max_protocol_version": 2,
-            "event_schema_version": 35
+            "min_protocol_version": 4,
+            "max_protocol_version": 3,
+            "event_schema_version": 36
         }),
     ];
     for response in invalid_responses {
@@ -787,8 +801,8 @@ fn current_helpers_match_the_embedded_manifest_and_wire_contract() {
         .expect("current request is valid")
         .into_value()
         .unwrap();
-    assert_eq!(request["min_protocol_version"], 3);
-    assert_eq!(request["max_event_schema_version"], 35);
+    assert_eq!(request["min_protocol_version"], 4);
+    assert_eq!(request["max_event_schema_version"], 36);
 
     let shutdown = commands::WispTypedClientRpcCommands::shutdown("shutdown-1")
         .expect("shutdown command is valid")
@@ -805,21 +819,21 @@ fn response_and_event_accessors_use_validated_wire_values() {
     let accepted = handshake_response::deserialize(serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": 3,
-        "event_schema_version": 35,
-        "min_protocol_version": 3,
-        "max_protocol_version": 3,
+        "protocol_version": 4,
+        "event_schema_version": 36,
+        "min_protocol_version": 4,
+        "max_protocol_version": 4,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     }))
     .unwrap();
     assert_eq!(accepted.backend_package_version(), "0.1.0");
-    assert_eq!(accepted.accepted_contract(), Some((3, 35, 1024, 2048)));
+    assert_eq!(accepted.accepted_contract(), Some((4, 36, 1024, 2048)));
     assert!(accepted.rejection().is_none());
 
     let event = events::deserialize(serde_json::json!({
         "type": "rpc.command.finished",
-        "schema_version": 35,
+        "schema_version": 36,
         "timestamp": "2026-01-02T03:04:05Z",
         "command_id": "shutdown-1",
         "command_type": "shutdown",
@@ -832,7 +846,7 @@ fn response_and_event_accessors_use_validated_wire_values() {
 
     let failed = events::deserialize(serde_json::json!({
         "type": "rpc.command.finished",
-        "schema_version": 35,
+        "schema_version": 36,
         "timestamp": "2026-01-02T03:04:05Z",
         "command_id": "shutdown-1",
         "command_type": "shutdown",

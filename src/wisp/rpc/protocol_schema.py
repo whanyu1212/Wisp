@@ -40,6 +40,7 @@ DEFAULT_SCHEMA_ROOT = Path("schemas/live-rpc")
 HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (1, "06581c7cdbed14f6af08e1e67b1e0cdf4c8a1288a64238c342a61d2f8ced5a75"),
     (2, "e84f38d40d6137fcfc2a57ebd6d9140efcddcf7b2f1535850790aa3af5e55955"),
+    (3, "3421192b01974081b8fc52537aa23a8fd44ece09b11be8ae4c791dc7d1a82c7c"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -412,7 +413,10 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "configure": {"provider": "fixture"},
     "follow_up": {"content": "follow up"},
     "fork_session": {"entry_id": "entry-1"},
+    "begin_device_code": {"provider": "openai-codex"},
+    "disconnect_provider": {"provider": "fixture"},
     "get_commands": {},
+    "get_connection_catalog": {},
     "get_mcp_status": {},
     "get_model_catalog": {},
     "get_messages": {},
@@ -432,6 +436,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "set_session_name": {"name": "Fixture"},
     "shutdown": {},
     "steer": {"content": "steer"},
+    "store_api_key": {"provider": "fixture", "api_key": "<redacted>"},
     "trust": {"request_id": "trust-1", "trusted": True},
     "unrevert_session_tree": {},
 }
@@ -503,6 +508,38 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.command.finished": {"command_id": "command-1", "command_type": "prompt", "ok": True},
     "rpc.command.started": {"command_id": "command-1", "command_type": "prompt"},
     "rpc.commands": {"command_id": "command-1"},
+    "rpc.connection_catalog": {
+        "command_id": "command-1",
+        "catalog": {
+            "providers": (
+                {
+                    "id": "fixture",
+                    "label": "Fixture",
+                    "methods": (
+                        {
+                            "provider": "fixture",
+                            "label": "Fixture API key",
+                            "kind": "api_key",
+                            "source": "missing",
+                            "environment_variable": "FIXTURE_API_KEY",
+                            "has_stored_credential": False,
+                        },
+                    ),
+                },
+            ),
+        },
+    },
+    "rpc.device_code": {
+        "command_id": "command-1",
+        "provider": "openai-codex",
+        "verification_uri": "https://example.test/device",
+        "user_code": "ABCD-1234",
+    },
+    "rpc.device_code.progress": {
+        "command_id": "command-1",
+        "provider": "openai-codex",
+        "attempt": 1,
+    },
     "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
     "rpc.model_catalog": {
         "command_id": "command-1",

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import anyio
 import pytest
 from textual.widgets import Input, OptionList
 
-from wisp.auth.storage import JsonAuthStore
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.connections import ConnectionMethodStatus, ConnectionProviderStatus
 from wisp.tui.textual_app import create_textual_tui
@@ -121,16 +118,12 @@ def test_connect_panel_api_key_uses_redacted_callback() -> None:
     assert queued == 0
 
 
-def test_explicit_connect_command_escape_cancels_device_authorization(tmp_path: Path) -> None:
-    async def scenario() -> bool:
+def test_explicit_connect_command_escape_cancels_device_authorization() -> None:
+    async def scenario() -> tuple[bool, list[str]]:
         app, renderer = create_textual_tui()
-        commands = AuthCommands(
-            renderer,
-            lambda: JsonAuthStore(tmp_path / "auth.json"),
-            lambda: "openai-codex",
-        )
         started = anyio.Event()
         cancelled = anyio.Event()
+        backend_cancellations: list[str] = []
 
         async def connect(_provider: str) -> None:
             started.set()
@@ -139,16 +132,26 @@ def test_explicit_connect_command_escape_cancels_device_authorization(tmp_path: 
             finally:
                 cancelled.set()
 
+        commands = AuthCommands(
+            renderer,
+            lambda: _CONNECTIONS,
+            lambda: "openai-codex",
+            store_api_key=lambda _provider, _api_key: anyio.sleep(0),
+            disconnect_provider=lambda _provider: anyio.sleep(0),
+            begin_device_code=connect,
+        )
         renderer.set_connect_oauth_hook(connect)
+        renderer.set_connect_cancel_hook(lambda: backend_cancellations.append("cancelled"))
         async with app.run_test(size=(80, 24)) as pilot:
             await commands.connect(("openai-codex",))
+            await pilot.press("enter")
             await started.wait()
             await pilot.press("escape")
             with anyio.fail_after(1):
                 await cancelled.wait()
-            return app.query_one("#connect-panel").display
+            return app.query_one("#connect-panel").display, backend_cancellations
 
-    assert anyio.run(scenario) is False
+    assert anyio.run(scenario) == (False, ["cancelled"])
 
 
 def test_disconnect_panel_submits_selected_provider() -> None:

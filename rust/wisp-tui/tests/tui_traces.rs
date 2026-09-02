@@ -396,11 +396,21 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::SendPostPromptSessionSync(command) => {
                     let mut value = command.to_value().map_err(|error| error.to_string())?;
                     normalize_trace_command(&mut value);
-                    commands.push(value);
+                    // Python's trace controller intentionally omits auxiliary
+                    // connection-catalog refreshes from shared command traces.
+                    if value["type"] != "get_connection_catalog" {
+                        commands.push(value);
+                    }
                 }
                 UiEffect::RestoreDraft { content, .. } => restored_drafts.push(content),
                 UiEffect::RestoreSessionDraft(content) => restored_drafts.push(content),
-                UiEffect::ShowSessionPicker { .. }
+                UiEffect::SendSecretCommand(_)
+                | UiEffect::ShowConnectionPanel(_)
+                | UiEffect::ConnectionCatalogUpdated(_)
+                | UiEffect::ShowDeviceCode(_)
+                | UiEffect::DeviceCodeProgress(_)
+                | UiEffect::FinishDeviceCode
+                | UiEffect::ShowSessionPicker { .. }
                 | UiEffect::ShowSessionTreePage { .. }
                 | UiEffect::CloseSessionTree
                 | UiEffect::ReplaceTranscript

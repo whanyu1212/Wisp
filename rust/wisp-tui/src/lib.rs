@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod connection_panel;
 mod detail_view;
 mod framing;
 pub mod history;
@@ -25,6 +26,7 @@ mod ui;
 use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
+use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use detail_view::DetailView;
 use framing::FrameReader;
@@ -418,6 +420,7 @@ struct LiveUi {
     recovered_queue_recovery: bool,
     session_picker: Option<SessionPicker>,
     session_tree_picker: Option<SessionTreePicker>,
+    connection_panel: Option<ConnectionPanel>,
 }
 
 impl Default for LiveUi {
@@ -438,6 +441,7 @@ impl Default for LiveUi {
             recovered_queue_recovery: false,
             session_picker: None,
             session_tree_picker: None,
+            connection_panel: None,
         }
     }
 }
@@ -554,6 +558,44 @@ impl LiveUi {
                         continue;
                     }
                     send_payload(writer, payload, limit).await?;
+                }
+                UiEffect::SendSecretCommand(command) => {
+                    let value = serde_json::to_value(command.into_inner())?;
+                    send_payload(writer, Bytes::from(serde_json::to_vec(&value)?), limit).await?;
+                }
+                UiEffect::ShowConnectionPanel(catalog) => {
+                    self.session_picker = None;
+                    self.session_tree_picker = None;
+                    self.connection_panel = Some(ConnectionPanel::new(catalog));
+                    self.render_pending = true;
+                }
+                UiEffect::ConnectionCatalogUpdated(catalog) => {
+                    if let Some(panel) = self.connection_panel.as_mut() {
+                        panel.update_catalog(catalog);
+                        self.render_pending = true;
+                    }
+                }
+                UiEffect::ShowDeviceCode(challenge) => {
+                    if let Some(panel) = self.connection_panel.as_mut() {
+                        panel.show_device_code(
+                            &challenge.provider,
+                            challenge.verification_uri,
+                            challenge.user_code,
+                        );
+                        self.render_pending = true;
+                    }
+                }
+                UiEffect::DeviceCodeProgress(progress) => {
+                    if let Some(panel) = self.connection_panel.as_mut() {
+                        panel.show_device_progress(&progress.provider, progress.attempt);
+                        self.render_pending = true;
+                    }
+                }
+                UiEffect::FinishDeviceCode => {
+                    if let Some(panel) = self.connection_panel.as_mut() {
+                        panel.finish_device_code();
+                        self.render_pending = true;
+                    }
                 }
                 UiEffect::RestoreDraft {
                     content,
@@ -918,7 +960,9 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            if let Some(picker) = &self.session_tree_picker {
+            if let Some(panel) = &self.connection_panel {
+                connection_panel::render(frame, frame.area(), panel);
+            } else if let Some(picker) = &self.session_tree_picker {
                 session_tree_picker::render(frame, frame.area(), picker);
             } else if let Some(picker) = &self.session_picker {
                 session_picker::render(frame, frame.area(), picker);
@@ -1395,6 +1439,102 @@ impl LiveUi {
         self.dispatch(action, writer, limit).await
     }
 
+    async fn handle_connection_panel_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(panel) = self.connection_panel.as_mut() else {
+            return Ok(LoopControl::Continue);
+        };
+        match panel.handle_key(key) {
+            ConnectionPanelAction::None | ConnectionPanelAction::EnterApiKey { .. } => {
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            ConnectionPanelAction::Close => {
+                self.connection_panel = None;
+                self.notice = Some("Connection panel closed.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            ConnectionPanelAction::Refresh => {
+                self.dispatch(UiAction::LoadConnectionCatalog, writer, limit)
+                    .await
+            }
+            ConnectionPanelAction::SubmitApiKey => {
+                self.submit_connection_api_key(writer, limit).await
+            }
+            ConnectionPanelAction::Disconnect { provider } => {
+                self.dispatch(UiAction::DisconnectProvider { provider }, writer, limit)
+                    .await
+            }
+            ConnectionPanelAction::BeginDeviceCode { provider } => {
+                if self.state.connection_request_active() {
+                    self.notice = Some("Wait for the current connection request to finish.".into());
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                if let Some(panel) = self.connection_panel.as_mut() {
+                    panel.begin_device_code(provider.clone());
+                }
+                self.dispatch(UiAction::BeginDeviceCode { provider }, writer, limit)
+                    .await
+            }
+            ConnectionPanelAction::CancelDeviceCode => {
+                self.connection_panel = None;
+                self.dispatch(UiAction::CancelDeviceCode, writer, limit)
+                    .await
+            }
+        }
+    }
+
+    async fn submit_connection_api_key(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.state.connection_request_active() {
+            self.notice = Some("Wait for the current connection request to finish.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let Some((provider, api_key)) = self
+            .connection_panel
+            .as_ref()
+            .and_then(ConnectionPanel::pending_api_key)
+        else {
+            return Ok(LoopControl::Continue);
+        };
+        let command = WispTypedClientRpcCommands::store_api_key(
+            &self.ids.peek_id(CommandKind::StoreApiKey),
+            provider,
+            api_key,
+        )?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len > limit {
+            self.notice = Some(format!(
+                "API key encoded RPC frame is {encoded_len} bytes, exceeding the negotiated {limit}-byte limit; the key was kept for retry."
+            ));
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        let Some((provider, api_key)) = self
+            .connection_panel
+            .as_mut()
+            .and_then(ConnectionPanel::take_api_key)
+        else {
+            return Ok(LoopControl::Continue);
+        };
+        if let Some(panel) = self.connection_panel.as_mut() {
+            panel.return_to_picker();
+        }
+        self.notice = None;
+        self.dispatch(UiAction::StoreApiKey { provider, api_key }, writer, limit)
+            .await
+    }
+
     async fn handle_session_picker_key(
         &mut self,
         key: KeyEvent,
@@ -1606,6 +1746,16 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match input {
+            Input::Key(key) if self.connection_panel.is_some() => {
+                self.handle_connection_panel_key(key, writer, limit).await
+            }
+            Input::Paste(pasted) if self.connection_panel.is_some() => {
+                if let Some(panel) = self.connection_panel.as_mut() {
+                    panel.handle_paste(&pasted);
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
             Input::Key(key) if self.session_tree_picker.is_some() => {
                 self.handle_session_tree_picker_key(key, writer, limit)
@@ -1756,6 +1906,10 @@ impl LiveUi {
                                 limit,
                             )
                             .await
+                        }
+                        SessionCommand::Connect => {
+                            self.dispatch(UiAction::OpenConnectionPanel, writer, limit)
+                                .await
                         }
                         SessionCommand::Invalid(usage) => {
                             self.notice = Some(usage.into());
@@ -2013,6 +2167,13 @@ async fn run(cli: Cli) -> Result<(), Error> {
         let loop_result = async {
             live_ui
                 .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
+                .await?;
+            live_ui
+                .dispatch(
+                    UiAction::LoadConnectionCatalog,
+                    &writer_tx,
+                    max_client_frame,
+                )
                 .await?;
             let mut redraw = interval(FRAME_INTERVAL);
             redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -2577,6 +2738,7 @@ enum SessionCommand {
     Clone,
     Tree,
     Unrevert,
+    Connect,
     Invalid(&'static str),
 }
 
@@ -2597,6 +2759,9 @@ fn session_command(prompt: &str) -> SessionCommand {
     if trimmed == "/unrevert" {
         return SessionCommand::Unrevert;
     }
+    if trimmed == "/connect" {
+        return SessionCommand::Connect;
+    }
     let parts = trimmed.split_whitespace().collect::<Vec<_>>();
     match parts.as_slice() {
         ["/resume", session_id] => SessionCommand::ResumeSession((*session_id).into()),
@@ -2605,6 +2770,7 @@ fn session_command(prompt: &str) -> SessionCommand {
         ["/clone", ..] => SessionCommand::Invalid("Usage: /clone"),
         ["/tree", ..] => SessionCommand::Invalid("Usage: /tree"),
         ["/unrevert", ..] => SessionCommand::Invalid("Usage: /unrevert"),
+        ["/connect", ..] => SessionCommand::Invalid("Usage: /connect"),
         ["/name", "--clear"] => SessionCommand::Name(String::new()),
         ["/name", "--clear", ..] | ["/name"] => {
             SessionCommand::Invalid("Usage: /name <display name> | /name --clear")
@@ -2681,10 +2847,10 @@ mod tests {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 3,
-            "event_schema_version": 35,
-            "min_protocol_version": 3,
-            "max_protocol_version": 3,
+            "protocol_version": 4,
+            "event_schema_version": 36,
+            "min_protocol_version": 4,
+            "max_protocol_version": 4,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })
@@ -2707,10 +2873,39 @@ mod tests {
         live_ui
     }
 
+    fn connection_catalog() -> wisp_protocol::events::ConnectionCatalogSnapshot {
+        wisp_protocol::events::ConnectionCatalogSnapshot {
+            providers: vec![wisp_protocol::events::ConnectionProviderSnapshot {
+                id: "openai".into(),
+                label: "OpenAI".into(),
+                methods: vec![
+                    wisp_protocol::events::ConnectionMethodSnapshot {
+                        provider: "openai".into(),
+                        label: "API key".into(),
+                        kind: "api_key".into(),
+                        source: "missing".into(),
+                        environment_variable: Some("OPENAI_API_KEY".into()),
+                        oauth_expires_at: None,
+                        has_stored_credential: false,
+                    },
+                    wisp_protocol::events::ConnectionMethodSnapshot {
+                        provider: "openai-codex".into(),
+                        label: "Device code".into(),
+                        kind: "device_code".into(),
+                        source: "missing".into(),
+                        environment_variable: None,
+                        oauth_expires_at: None,
+                        has_stored_credential: false,
+                    },
+                ],
+            }],
+        }
+    }
+
     fn shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -2722,7 +2917,7 @@ mod tests {
     fn shutdown_started_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.started",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown"
@@ -2732,7 +2927,7 @@ mod tests {
     fn failed_shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -2810,7 +3005,7 @@ mod tests {
         ));
         let event = json!({
             "type": "tool.result",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-large",
             "name": "bash",
@@ -3178,6 +3373,434 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn connection_api_key_frame_preflight_keeps_secret_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog;
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Paste("retry-secret".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let command =
+            WispTypedClientRpcCommands::store_api_key("store_api_key-1", "openai", "retry-secret")
+                .unwrap();
+        let encoded_len = serde_json::to_vec(&command).unwrap().len();
+
+        let control = live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len - 1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(control, LoopControl::Continue);
+        assert!(!live_ui.state.connection_request_active());
+        assert!(live_ui.render_pending);
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("negotiated") && notice.contains("kept"))
+        );
+        assert!(
+            !live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("retry-secret"))
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                encoded_len,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("connection command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "store_api_key",
+                "id": "store_api_key-1",
+                "provider": "openai",
+                "api_key": "retry-secret",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_connection_request_keeps_api_key_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog.clone();
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("catalog command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "get_connection_catalog"
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Paste("busy-secret".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.state.connection_request_active());
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current connection request to finish.")
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "get_connection_catalog-1".into(),
+                    catalog,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_connection_catalog-1".into(),
+                    command_type: "get_connection_catalog".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("connection command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "store_api_key",
+                "id": "store_api_key-2",
+                "provider": "openai",
+                "api_key": "busy-secret",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_connection_request_keeps_device_code_picker_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog.clone();
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("catalog command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "get_connection_catalog"
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.state.connection_request_active());
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current connection request to finish.")
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "get_connection_catalog-1".into(),
+                    catalog,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_connection_catalog-1".into(),
+                    command_type: "get_connection_catalog".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx
+            .try_recv()
+            .expect("device-code command should be retryable")
+        else {
+            panic!("device-code command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "begin_device_code",
+                "id": "begin_device_code-2",
+                "provider": "openai-codex",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn live_connection_panel_masks_keys_and_cancels_device_login() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog.clone();
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Paste("live-secret".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(!format!("{:?}", live_ui.connection_panel).contains("live-secret"));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("connection command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            serde_json::json!({
+                "type": "store_api_key",
+                "id": "store_api_key-1",
+                "provider": "openai",
+                "api_key": "live-secret",
+            })
+        );
+        assert!(!format!("{:?}", live_ui.state).contains("live-secret"));
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "store_api_key-1".into(),
+                    catalog: catalog.clone(),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "store_api_key-1".into(),
+                    command_type: "store_api_key".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("device command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "begin_device_code"
+        );
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::DeviceCodeProgress {
+                    command_id: "begin_device_code-2".into(),
+                    progress: wisp_protocol::events::DeviceCodeProgress {
+                        provider: "openai-codex".into(),
+                        attempt: 2,
+                    },
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("device cancellation expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            serde_json::json!({
+                "type": "cancel",
+                "id": "cancel-3",
+                "target_id": "begin_device_code-2",
+            })
+        );
+        assert!(live_ui.connection_panel.is_none());
+    }
+
     #[test]
     fn session_slash_parser_keeps_unrelated_slashes_as_prompts() {
         assert!(matches!(
@@ -3199,6 +3822,10 @@ mod tests {
         ));
         assert!(matches!(session_command("/clone"), SessionCommand::Clone));
         assert!(matches!(session_command("/tree"), SessionCommand::Tree));
+        assert!(matches!(
+            session_command("/connect"),
+            SessionCommand::Connect
+        ));
         assert!(matches!(
             session_command("/unrevert"),
             SessionCommand::Unrevert
@@ -3383,7 +4010,7 @@ mod tests {
             .send(QueuedEvent {
                 event: BackendEvent::from_live(&parsed_event(json!({
                     "type": "message.delta",
-                    "schema_version": 35,
+                    "schema_version": 36,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",
@@ -5470,7 +6097,7 @@ mod tests {
             .dispatch(
                 UiAction::BackendEvent(projected_event(json!({
                     "type": "message.delta",
-                    "schema_version": 35,
+                    "schema_version": 36,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",

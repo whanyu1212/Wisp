@@ -25,14 +25,17 @@ from wisp.events import (
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
+    BeginDeviceCodeCommand,
     CancelCommand,
     ClearQueueCommand,
     CloneSessionCommand,
     CompactCommand,
     ConfigureCommand,
+    DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
     GetCommandsCommand,
+    GetConnectionCatalogCommand,
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
@@ -53,6 +56,7 @@ from wisp.rpc.commands import (
     SetSessionNameCommand,
     ShutdownCommand,
     SteerCommand,
+    StoreApiKeyCommand,
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
@@ -153,6 +157,42 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("model-catalog")
         await self._transport.send(GetModelCatalogCommand(id=selected_id))
+        return selected_id
+
+    async def get_connection_catalog(self, *, command_id: str | None = None) -> str:
+        """Request the sanitized provider connection catalog."""
+
+        selected_id = command_id or self._command_id_factory("connection-catalog")
+        await self._transport.send(GetConnectionCatalogCommand(id=selected_id))
+        return selected_id
+
+    async def store_api_key(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        """Persist one provider API key through the secret-bearing command path."""
+
+        selected_id = command_id or self._command_id_factory("store-api-key")
+        await self._transport.send(
+            StoreApiKeyCommand(id=selected_id, provider=provider, api_key=api_key)
+        )
+        return selected_id
+
+    async def disconnect_provider(self, provider: str, *, command_id: str | None = None) -> str:
+        """Remove stored credentials for one provider."""
+
+        selected_id = command_id or self._command_id_factory("disconnect-provider")
+        await self._transport.send(DisconnectProviderCommand(id=selected_id, provider=provider))
+        return selected_id
+
+    async def begin_device_code(self, provider: str, *, command_id: str | None = None) -> str:
+        """Start a backend-owned device-code connection flow."""
+
+        selected_id = command_id or self._command_id_factory("device-code")
+        await self._transport.send(BeginDeviceCodeCommand(id=selected_id, provider=provider))
         return selected_id
 
     async def get_skills(self, *, command_id: str | None = None) -> str:

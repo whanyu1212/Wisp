@@ -627,6 +627,9 @@ class TextualTuiRenderer:
     ) -> None:
         self.app.set_connect_oauth_hook(hook)
 
+    def set_connect_cancel_hook(self, hook: Callable[[], object]) -> None:
+        self.app.set_connect_cancel_hook(hook)
+
     def connect_picker_request(
         self,
         providers: tuple[ConnectionProviderStatus, ...],

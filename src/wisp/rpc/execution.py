@@ -18,6 +18,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.messages import Message
 from wisp.agent.mode import AgentMode, is_agent_mode
 from wisp.agent.prompt import resolve_project_context_root
+from wisp.auth.connections import (
+    DEVICE_CODE_PROVIDER,
+    connection_catalog,
+    supports_api_key,
+)
+from wisp.auth.openai_codex import DeviceCodeInfo, login_openai_codex_device_code
+from wisp.auth.storage import ApiKeyCredential, AuthStorageError, JsonAuthStore
 from wisp.coding import CodingSession
 from wisp.events import (
     AgentStarted,
@@ -33,6 +40,12 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
+    RpcConnectionMethodSnapshot,
+    RpcConnectionProviderSnapshot,
+    RpcDeviceCodeProgressReported,
+    RpcDeviceCodeReported,
     RpcMcpServerSnapshot,
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
@@ -64,7 +77,12 @@ from wisp.events import (
 )
 from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
-from wisp.rpc.commands import MAX_RPC_COMMAND_ID_CHARS, QUEUE_RPC_COMMAND_TYPES, ApprovalScope
+from wisp.rpc.commands import (
+    MAX_RPC_COMMAND_ID_CHARS,
+    QUEUE_RPC_COMMAND_TYPES,
+    ApprovalScope,
+    take_store_api_key,
+)
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
 from wisp.runtime.registry import UnknownProviderError
@@ -226,6 +244,14 @@ class RpcCommandExecutor:
             return self._dispatch_commands(command, running_command)
         if command_type == "get_model_catalog":
             return self._dispatch_model_catalog(command, running_command)
+        if command_type == "get_connection_catalog":
+            return self._dispatch_connection_catalog(command, running_command)
+        if command_type == "store_api_key":
+            return self._dispatch_store_api_key(command, running_command)
+        if command_type == "disconnect_provider":
+            return self._dispatch_disconnect_provider(command, running_command)
+        if command_type == "begin_device_code":
+            return self._dispatch_begin_device_code(command, running_command)
         if command_type == "get_skills":
             return self._dispatch_skills(command, running_command)
         if command_type == "get_mcp_status":
@@ -526,6 +552,64 @@ class RpcCommandExecutor:
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_connection_catalog(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_connection_catalog_command(
+            command,
+            runtime=self.runtime,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_store_api_key(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_store_api_key_command(
+            command,
+            running_command=running_command,
+            runtime=self.runtime,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_disconnect_provider(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_disconnect_provider_command(
+            command,
+            running_command=running_command,
+            runtime=self.runtime,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_begin_device_code(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_device_code_command(
+                command,
+                running_command=running_command,
+                runtime=self.runtime,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+            or running_command
+        )
 
     def _dispatch_skills(
         self,
@@ -3066,6 +3150,409 @@ def handle_rpc_model_catalog_command(
         return
     write_event(RpcModelCatalogReported(command_id=command_id, catalog=catalog))
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
+    """Project the sanitized connection catalog without revealing secrets."""
+
+    store = runtime.auth_store
+    if store is None:
+        raise AuthStorageError("RPC connection catalog requires an auth store")
+    configured_provider = runtime.openai_compatible_provider
+    openai_compatible_provider = (
+        configured_provider
+        if (
+            configured_provider is not None
+            and runtime.openai_compatible_requires_api_key
+            and runtime.providers.is_registered(configured_provider)
+        )
+        else None
+    )
+    catalog = connection_catalog(
+        store,
+        openai_compatible_provider=openai_compatible_provider,
+    )
+    return RpcConnectionCatalogSnapshot(
+        providers=tuple(
+            RpcConnectionProviderSnapshot(
+                id=family.id,
+                label=family.label,
+                methods=tuple(
+                    RpcConnectionMethodSnapshot(
+                        provider=method.provider,
+                        label=method.label,
+                        kind=method.kind,
+                        source=method.source,
+                        environment_variable=method.environment_variable,
+                        oauth_expires_at=method.oauth_expires_at,
+                        has_stored_credential=method.has_stored_credential,
+                    )
+                    for method in family.methods
+                ),
+            )
+            for family in catalog
+        )
+    )
+
+
+def handle_rpc_connection_catalog_command(
+    command: dict[str, object],
+    *,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return one sanitized connection catalog without becoming active."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+    try:
+        catalog = rpc_connection_catalog_snapshot(runtime)
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=_sanitized_auth_error(exc),
+            write_event=write_event,
+        )
+        return
+    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_store_api_key_command(
+    command: dict[str, object],
+    *,
+    running_command: _RpcRunningCommand | None,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Persist one API key and return the refreshed connection catalog."""
+
+    api_key = take_store_api_key(command)
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+    if running_command is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="Cannot store credentials while another RPC operation is active",
+            write_event=write_event,
+        )
+        return
+    provider = command.get("provider")
+    if not isinstance(provider, str) or not provider:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC store_api_key command requires string field: provider",
+            write_event=write_event,
+        )
+        return
+    if not isinstance(api_key, str) or not api_key.strip():
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC store_api_key command requires a non-empty api_key",
+            write_event=write_event,
+        )
+        return
+    openai_compatible_provider = (
+        runtime.openai_compatible_provider if runtime.openai_compatible_requires_api_key else None
+    )
+    if not supports_api_key(
+        provider,
+        openai_compatible_provider=openai_compatible_provider,
+    ) or not runtime.providers.is_registered(provider):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"API-key connection is not supported for {provider}.",
+            write_event=write_event,
+        )
+        return
+    store = runtime.auth_store
+    if store is None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC store_api_key command requires an auth store",
+            write_event=write_event,
+        )
+        return
+    try:
+        store.set(provider, ApiKeyCredential(key=api_key.strip()))
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=_sanitized_auth_error(exc),
+            write_event=write_event,
+        )
+        return
+    _write_connection_catalog_after_mutation(
+        runtime=runtime,
+        command_id=command_id,
+        outcome="API key stored",
+        write_event=write_event,
+    )
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_disconnect_provider_command(
+    command: dict[str, object],
+    *,
+    running_command: _RpcRunningCommand | None,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Remove stored credentials and return the refreshed connection catalog."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+    if running_command is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="Cannot disconnect credentials while another RPC operation is active",
+            write_event=write_event,
+        )
+        return
+    provider = command.get("provider")
+    if not isinstance(provider, str) or not provider:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC disconnect_provider command requires string field: provider",
+            write_event=write_event,
+        )
+        return
+    store = runtime.auth_store
+    if store is None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC disconnect_provider command requires an auth store",
+            write_event=write_event,
+        )
+        return
+    try:
+        store.delete(provider)
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=_sanitized_auth_error(exc),
+            write_event=write_event,
+        )
+        return
+    _write_connection_catalog_after_mutation(
+        runtime=runtime,
+        command_id=command_id,
+        outcome="Credentials disconnected",
+        write_event=write_event,
+    )
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def start_rpc_device_code_command(
+    command: dict[str, object],
+    *,
+    running_command: _RpcRunningCommand | None,
+    runtime: WispRuntime,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    running_command_factory: RunningCommandFactory = _RpcRunningCommand,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return running_command
+    if running_command is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="Cannot start a device-code login while another RPC operation is active",
+            write_event=write_event,
+        )
+        return running_command
+    provider = command.get("provider")
+    if not isinstance(provider, str) or not provider:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC begin_device_code command requires string field: provider",
+            write_event=write_event,
+        )
+        return None
+    if provider != DEVICE_CODE_PROVIDER:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"OAuth connection is not supported for {provider}.",
+            write_event=write_event,
+        )
+        return None
+    store = runtime.auth_store
+    if store is None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC begin_device_code command requires an auth store",
+            write_event=write_event,
+        )
+        return None
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        run_rpc_device_code_command,
+        runtime,
+        store,
+        provider,
+        command_id,
+        session_state.history,
+        session_state.entry_count,
+        cancel_scope,
+        send.clone(),
+        write_event,
+        command_completed_factory,
+    )
+    return running_command_factory(
+        command_id=command_id,
+        command_type="begin_device_code",
+        cancel_scope=cancel_scope,
+    )
+
+
+async def run_rpc_device_code_command(
+    runtime: WispRuntime,
+    store: JsonAuthStore,
+    provider: str,
+    command_id: str,
+    history: tuple[Message, ...],
+    entry_count: int,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> None:
+    error: str | None = None
+    error_rendered = False
+
+    def show_device_code(info: DeviceCodeInfo) -> None:
+        write_event(
+            RpcDeviceCodeReported(
+                command_id=command_id,
+                provider=provider,
+                verification_uri=info.verification_uri,
+                user_code=info.user_code,
+            )
+        )
+
+    def show_progress(attempt: int) -> None:
+        write_event(
+            RpcDeviceCodeProgressReported(
+                command_id=command_id,
+                provider=provider,
+                attempt=attempt,
+            )
+        )
+
+    try:
+        with cancel_scope:
+            try:
+                credential = await login_openai_codex_device_code(
+                    on_device_code=show_device_code,
+                    on_progress=show_progress,
+                )
+                store.set(provider, credential)
+                _write_connection_catalog_after_mutation(
+                    runtime=runtime,
+                    command_id=command_id,
+                    outcome="Device login completed",
+                    write_event=write_event,
+                )
+            except anyio.get_cancelled_exc_class():
+                error = f"RPC command cancelled: {command_id}"
+            except Exception as exc:  # noqa: BLE001 - command failures must not stop RPC
+                error = _sanitized_auth_error(exc)
+    finally:
+        async with send:
+            if error is not None and not error_rendered:
+                write_event(ErrorEvent(message=error))
+            write_event(
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="begin_device_code",
+                    ok=error is None,
+                    error=error,
+                )
+            )
+            await send.send(
+                command_completed_factory(
+                    command_id=command_id,
+                    command_type="begin_device_code",
+                    ok=error is None,
+                    history=history,
+                    entry_count=entry_count,
+                )
+            )
+
+
+def _write_connection_catalog_after_mutation(
+    *,
+    runtime: WispRuntime,
+    command_id: str,
+    outcome: str,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report status when available without rewriting a completed mutation as failed."""
+
+    try:
+        catalog = rpc_connection_catalog_snapshot(runtime)
+    except Exception:  # noqa: BLE001 - mutation already committed; report safely
+        write_event(
+            ErrorEvent(message=f"{outcome}; connection catalog unavailable: status refresh failed")
+        )
+        return
+    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
+
+
+def _sanitized_auth_error(exc: BaseException) -> str:
+    if isinstance(exc, AuthStorageError):
+        return str(exc)
+    return "Provider connection failed"
 
 
 def handle_rpc_skills_command(

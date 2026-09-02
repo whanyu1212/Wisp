@@ -17,6 +17,8 @@ from typer.testing import CliRunner
 import wisp.tui.app as tui_app_module
 from wisp import tui as tui_module
 from wisp.agent.mode import AgentMode
+from wisp.auth.connections import connection_catalog
+from wisp.auth.storage import ApiKeyCredential, AuthCredential, OAuthCredential
 from wisp.cli import app
 from wisp.config import WispConfig
 from wisp.events import (
@@ -37,6 +39,11 @@ from wisp.events import (
     RpcCommandDescriptor,
     RpcCommandFinished,
     RpcCommandsReported,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
+    RpcConnectionMethodSnapshot,
+    RpcConnectionProviderSnapshot,
+    RpcDeviceCodeReported,
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
     RpcMessageSnapshot,
@@ -132,6 +139,59 @@ def rpc_builtin_command_descriptors() -> tuple[RpcCommandDescriptor, ...]:
     )
 
 
+class _ScriptedAuthStore:
+    def __init__(self, credentials: dict[str, AuthCredential] | None = None) -> None:
+        self.credentials = dict(credentials or {})
+        self.error: str | None = None
+
+    def get(self, provider: str) -> AuthCredential | None:
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        return self.credentials.get(provider)
+
+    def set(self, provider: str, credential: AuthCredential) -> None:
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        self.credentials[provider] = credential
+
+    def delete(self, provider: str) -> bool:
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        return self.credentials.pop(provider, None) is not None
+
+
+def rpc_connection_catalog_snapshot(
+    store: _ScriptedAuthStore | None = None,
+    *,
+    openai_compatible_provider: str | None = None,
+) -> RpcConnectionCatalogSnapshot:
+    catalog = connection_catalog(
+        store or _ScriptedAuthStore(),
+        openai_compatible_provider=openai_compatible_provider,
+    )
+    return RpcConnectionCatalogSnapshot(
+        providers=tuple(
+            RpcConnectionProviderSnapshot(
+                id=family.id,
+                label=family.label,
+                methods=tuple(
+                    RpcConnectionMethodSnapshot(
+                        provider=method.provider,
+                        label=method.label,
+                        kind=method.kind,
+                        source=method.source,
+                        environment_variable=method.environment_variable,
+                        oauth_expires_at=method.oauth_expires_at,
+                        has_stored_credential=method.has_stored_credential,
+                    )
+                    for method in family.methods
+                ),
+            )
+            for family in catalog
+        )
+    )
+
+
 def rpc_builtin_model_catalog(
     *,
     provider: str = "fake",
@@ -193,6 +253,11 @@ class ScriptedController:
         configure_events: list[ScriptedBatch] | None = None,
         model_catalog_events: list[ScriptedBatch] | None = None,
         model_catalog: RpcModelCatalogSnapshot | None = None,
+        connection_catalog_events: list[ScriptedBatch] | None = None,
+        connection_catalog: RpcConnectionCatalogSnapshot | None = None,
+        auth_credentials: dict[str, AuthCredential] | None = None,
+        auth_error: str | None = None,
+        hang_device_code: bool = False,
         commands_events: list[ScriptedBatch] | None = None,
         skills_events: list[ScriptedBatch] | None = None,
         mcp_events: list[ScriptedBatch] | None = None,
@@ -210,6 +275,12 @@ class ScriptedController:
         self.configure_events = deque(configure_events or [])
         self.model_catalog_events = deque(model_catalog_events or [])
         self.model_catalog = model_catalog or rpc_builtin_model_catalog()
+        self.auth_store = _ScriptedAuthStore(auth_credentials)
+        self.connection_catalog = connection_catalog or rpc_connection_catalog_snapshot(
+            self.auth_store
+        )
+        self.auth_store.error = auth_error
+        self.connection_catalog_events = deque(connection_catalog_events or [])
         self.commands_events = deque(commands_events or [])
         self.skills_events = deque(skills_events or [])
         self.mcp_events = deque(mcp_events or [])
@@ -231,6 +302,14 @@ class ScriptedController:
         self.agent_modes: list[AgentMode | None] = []
         self.commands_requests: list[str] = []
         self.model_catalog_requests: list[str] = []
+        self.connection_catalog_requests: list[str] = []
+        self.store_api_key_requests: list[tuple[str, str]] = []
+        self.disconnect_requests: list[str] = []
+        self.device_code_requests: list[str] = []
+        self.hang_device_code = hang_device_code
+        self._device_code_started = anyio.Event()
+        self._device_code_cancelled = anyio.Event()
+        self._pending_device_code_ids: set[str] = set()
         self.skills_requests: list[str] = []
         self.mcp_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
@@ -320,6 +399,151 @@ class ScriptedController:
                     ok=True,
                 ),
             ],
+        )
+        return selected_id
+
+    async def get_connection_catalog(self, *, command_id: str | None = None) -> str:
+        selected_id = (
+            command_id or f"connection-catalog-{len(self.connection_catalog_requests) + 1}"
+        )
+        self.connection_catalog_requests.append(selected_id)
+        if self.auth_store.error is not None:
+            await self._emit(
+                [
+                    RpcCommandFinished(
+                        command_id=selected_id,
+                        command_type="get_connection_catalog",
+                        ok=False,
+                        error=self.auth_store.error,
+                    )
+                ]
+            )
+            return selected_id
+        self.connection_catalog = rpc_connection_catalog_snapshot(self.auth_store)
+        await self._emit_scripted(
+            self.connection_catalog_events,
+            default=[
+                RpcConnectionCatalogReported(
+                    command_id=selected_id,
+                    catalog=self.connection_catalog,
+                ),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_connection_catalog",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def store_api_key(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        selected_id = command_id or f"store-api-key-{len(self.store_api_key_requests) + 1}"
+        self.store_api_key_requests.append((provider, api_key))
+        if self.auth_store.error is not None:
+            await self._emit(
+                [
+                    RpcCommandFinished(
+                        command_id=selected_id,
+                        command_type="store_api_key",
+                        ok=False,
+                        error=self.auth_store.error,
+                    )
+                ]
+            )
+            return selected_id
+        self.auth_store.set(provider, ApiKeyCredential(key=api_key))
+        catalog = rpc_connection_catalog_snapshot(self.auth_store)
+        await self._emit(
+            [
+                RpcConnectionCatalogReported(command_id=selected_id, catalog=catalog),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="store_api_key",
+                    ok=True,
+                ),
+            ]
+        )
+        return selected_id
+
+    async def disconnect_provider(self, provider: str, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"disconnect-{len(self.disconnect_requests) + 1}"
+        self.disconnect_requests.append(provider)
+        if self.auth_store.error is not None:
+            await self._emit(
+                [
+                    RpcCommandFinished(
+                        command_id=selected_id,
+                        command_type="disconnect_provider",
+                        ok=False,
+                        error=self.auth_store.error,
+                    )
+                ]
+            )
+            return selected_id
+        self.auth_store.delete(provider)
+        catalog = rpc_connection_catalog_snapshot(self.auth_store)
+        await self._emit(
+            [
+                RpcConnectionCatalogReported(command_id=selected_id, catalog=catalog),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="disconnect_provider",
+                    ok=True,
+                ),
+            ]
+        )
+        return selected_id
+
+    async def begin_device_code(self, provider: str, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"device-code-{len(self.device_code_requests) + 1}"
+        self.device_code_requests.append(provider)
+        if self.hang_device_code:
+            self._pending_device_code_ids.add(selected_id)
+            self._device_code_started.set()
+            return selected_id
+        if self.auth_store.error is not None:
+            await self._emit(
+                [
+                    RpcCommandFinished(
+                        command_id=selected_id,
+                        command_type="begin_device_code",
+                        ok=False,
+                        error=self.auth_store.error,
+                    )
+                ]
+            )
+            return selected_id
+        self.auth_store.set(
+            provider,
+            OAuthCredential(
+                access="access-token",
+                refresh="refresh-token",
+                expires=4_102_444_800_000,
+                account_id="account-id",
+            ),
+        )
+        catalog = rpc_connection_catalog_snapshot(self.auth_store)
+        await self._emit(
+            [
+                RpcDeviceCodeReported(
+                    command_id=selected_id,
+                    provider=provider,
+                    verification_uri="https://example.test/device",
+                    user_code="ABCD-1234",
+                ),
+                RpcConnectionCatalogReported(command_id=selected_id, catalog=catalog),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="begin_device_code",
+                    ok=True,
+                ),
+            ]
         )
         return selected_id
 
@@ -510,6 +734,19 @@ class ScriptedController:
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
         self.cancelled.append(target_id)
+        if target_id in self._pending_device_code_ids:
+            self._pending_device_code_ids.remove(target_id)
+            self._device_code_cancelled.set()
+            await self._emit(
+                [
+                    RpcCommandFinished(
+                        command_id=target_id,
+                        command_type="begin_device_code",
+                        ok=False,
+                        error=f"RPC command cancelled: {target_id}",
+                    )
+                ]
+            )
         await self._emit_scripted(self.cancel_events, default=[])
         return command_id or f"cancel-{len(self.cancelled)}"
 

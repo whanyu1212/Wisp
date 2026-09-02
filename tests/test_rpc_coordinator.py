@@ -10,6 +10,7 @@ import pytest
 
 from wisp.agent.messages import Message
 from wisp.events import RpcSessionSelected, WispEvent
+from wisp.rpc.commands import detach_store_api_key
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -1378,6 +1379,81 @@ def test_coordinator_ignores_stale_completion_and_closes_decisions_once() -> Non
 
         assert closed == 1
         assert coordinator.session_state.entry_count == 1
+
+    anyio.run(scenario)
+
+
+def test_secret_commands_and_cancel_results_have_redacted_reprs() -> None:
+    secret = "sentinel-secret"
+    command = detach_store_api_key({"id": "store-1", "type": "store_api_key", "api_key": secret})
+    coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+    coordinator.queued_commands.append(command)
+
+    result = coordinator.cancel("store-1")
+
+    assert secret not in repr(_RpcInputCommand(command))
+    assert secret not in repr(command)
+    assert secret not in repr(result)
+
+
+def test_coordinator_cancels_device_code_when_input_closes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        cancel_scope = anyio.CancelScope()
+        coordinator.running_command = _RpcRunningCommand(
+            "device-code-1",
+            "begin_device_code",
+            cancel_scope,
+        )
+
+        await coordinator.handle_event(
+            _RpcInputClosed(),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=_ignore_reject,
+            command_type=_command_type,
+        )
+
+        assert cancel_scope.cancel_called
+
+    anyio.run(scenario)
+
+
+def test_coordinator_rejects_queued_device_code_when_input_closes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        coordinator.running_command = _RpcRunningCommand(
+            "prompt-1",
+            "prompt",
+            anyio.CancelScope(),
+        )
+        device_code = {
+            "id": "device-code-1",
+            "type": "begin_device_code",
+            "provider": "openai-codex",
+        }
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
+        await coordinator.handle_event(
+            _RpcInputCommand(device_code),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=reject,
+            command_type=_command_type,
+        )
+        assert list(coordinator.queued_commands) == [device_code]
+
+        await coordinator.handle_event(
+            _RpcInputClosed(),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert list(coordinator.queued_commands) == []
+        assert coordinator._queued_command_bytes == 0
+        assert rejected == [(device_code, "RPC command cancelled: device-code-1")]
 
     anyio.run(scenario)
 

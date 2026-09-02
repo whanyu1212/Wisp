@@ -61,10 +61,14 @@ async def build_runtime(
         await anyio.to_thread.run_sync(effective_catalog, abandon_on_cancel=True)
     )
     mcp_runtime: McpRuntime | None = None
+    auth_store = JsonAuthStore(auth_path or default_auth_path())
+    openai_compatible_provider = (
+        openai_compatible.provider_name if openai_compatible is not None else None
+    )
     try:
         await activate_builtin_extensions(
             api,
-            auth_store=JsonAuthStore(auth_path or default_auth_path()),
+            auth_store=auth_store,
             retry_policy=retry_policy,
             process_supervisor=process_supervisor,
             openai_compatible=openai_compatible,
@@ -96,6 +100,11 @@ async def build_runtime(
         models=models,
         process_supervisor=process_supervisor,
         mcp_runtime=mcp_runtime,
+        auth_store=auth_store,
+        openai_compatible_provider=openai_compatible_provider,
+        openai_compatible_requires_api_key=(
+            openai_compatible.requires_api_key if openai_compatible is not None else True
+        ),
         startup_events=(
             tuple(ErrorEvent(message=diagnostic.message) for diagnostic in mcp_runtime.diagnostics)
             if mcp_runtime is not None

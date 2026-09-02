@@ -12,6 +12,10 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Added backend-owned connection-catalog, API-key, disconnect, and device-code RPC so Textual and
+  external frontends never read or write credential files. The catalog advertises only available
+  provider endpoints, and mutation completion remains authoritative if the secondary status refresh
+  fails. Protocol v1–v3 artifacts remain immutable.
 - Added the enforced live JSONL-RPC v3 handshake, bounded strict framing, immutable generated schemas,
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
 - Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,
@@ -207,7 +211,15 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v35 — current
+## Schema v36 — current
+
+Adds `rpc.connection_catalog`, `rpc.device_code`, and `rpc.device_code.progress` for correlated,
+backend-owned provider connection workflows. Connection catalogs expose only sanitized status;
+API keys and OAuth tokens are never returned or persisted in session JSONL. Device user codes and
+verification URLs are intentionally frontend-visible login instructions and must not be logged or
+persisted.
+
+## Schema v35
 
 Adds `rpc.model_catalog`, a correlated snapshot of the current model selection and the ordered,
 runtime-available provider/model catalog. Successful provider, model, and effort configuration emits
@@ -402,7 +414,7 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v35 remain readable.
+Events at schema v5 through v36 remain readable.
 
 ---
 

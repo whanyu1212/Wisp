@@ -1179,6 +1179,7 @@ class TextualTui(App[None]):
         self._history_detail_cards: dict[str, list[ProcessCard]] = {}
         self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
         self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
+        self._connect_cancel_hook: Callable[[], object] | None = None
         self._update_action_hook: (
             Callable[[UpdatePromptAction, UpdateAvailable], Awaitable[None]] | None
         ) = None
@@ -2036,8 +2037,13 @@ class TextualTui(App[None]):
 
     def on_connect_panel_cancelled(self, event: ConnectPanel.Cancelled) -> None:
         event.stop()
-        self.workers.cancel_group(self, "connect-oauth")
+        self._cancel_connect_panel()
         self.hide_connect_panel()
+
+    def _cancel_connect_panel(self) -> None:
+        if self._connect_cancel_hook is not None:
+            self._connect_cancel_hook()
+        self.workers.cancel_group(self, "connect-oauth")
 
     def on_model_picker_selected(self, event: ModelPicker.Selected) -> None:
         event.stop()
@@ -2885,7 +2891,7 @@ class TextualTui(App[None]):
             return
         overlays = self._overlay_controller
         if overlays is not None and overlays.active_overlay is OverlayKind.connect:
-            self.workers.cancel_group(self, "connect-oauth")
+            self._cancel_connect_panel()
         if overlays is not None and overlays.active_operation is OverlayOperation.update:
             self._signal_input(TuiCancelRequested(), action="cancel", clear_editor=False)
             return
@@ -3597,6 +3603,11 @@ class TextualTui(App[None]):
         """Install the shell-owned device-authorization callback."""
 
         self._connect_oauth_hook = hook
+
+    def set_connect_cancel_hook(self, hook: Callable[[], object]) -> None:
+        """Install the shell-owned device-authorization cancellation callback."""
+
+        self._connect_cancel_hook = hook
 
     def set_update_action_hook(
         self,

@@ -12,12 +12,12 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v3 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v3/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v4 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v4/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 3;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 4;
 /// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 35;
+pub const EVENT_SCHEMA_VERSION: u32 = 36;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -151,22 +151,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v3/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v4/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v3/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v4/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v3/commands.schema.json"
+        "../../../schemas/live-rpc/v4/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v3/events.schema.json"
+        "../../../schemas/live-rpc/v4/events.schema.json"
     ))
 });
 
@@ -376,9 +376,22 @@ where
 
 macro_rules! validated_wire_wrapper {
     ($wrapper:ident, $inner:ty) => {
-        #[derive(Clone, Debug, serde::Serialize)]
+        #[derive(Clone, serde::Serialize)]
         #[serde(transparent)]
         pub struct $wrapper($inner);
+
+        impl std::fmt::Debug for $wrapper {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+                if value["type"] == "store_api_key" {
+                    value["api_key"] = serde_json::Value::String("<redacted>".into());
+                }
+                formatter
+                    .debug_tuple(stringify!($wrapper))
+                    .field(&value)
+                    .finish()
+            }
+        }
 
         impl $wrapper {
             /// Serialize this validated protocol value for transport or inspection.
@@ -415,7 +428,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v3/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v4/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -450,7 +463,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v3/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v4/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -510,7 +523,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v3/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v4/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -557,6 +570,49 @@ pub mod commands {
         /// Request the backend-authoritative provider and model catalog.
         pub fn get_model_catalog(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_model_catalog", "id": id}))
+        }
+
+        /// Request the sanitized provider connection catalog.
+        pub fn get_connection_catalog(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_connection_catalog", "id": id}))
+        }
+
+        /// Persist one provider API key through the secret-bearing command path.
+        pub fn store_api_key(
+            id: &str,
+            provider: &str,
+            api_key: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "store_api_key",
+                "id": id,
+                "provider": provider,
+                "api_key": api_key,
+            }))
+        }
+
+        /// Remove stored credentials for one provider.
+        pub fn disconnect_provider(
+            id: &str,
+            provider: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "disconnect_provider",
+                "id": id,
+                "provider": provider,
+            }))
+        }
+
+        /// Start a backend-owned device-code connection flow.
+        pub fn begin_device_code(
+            id: &str,
+            provider: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "begin_device_code",
+                "id": id,
+                "provider": provider,
+            }))
         }
 
         /// Construct one agent-turn request.
@@ -860,7 +916,7 @@ pub mod commands {
 
 pub mod events {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v3/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v4/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -919,6 +975,47 @@ pub mod events {
         pub providers: Vec<ModelCatalogProvider>,
     }
 
+    /// One sanitized authentication method in the connection catalog.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ConnectionMethodSnapshot {
+        pub provider: String,
+        pub label: String,
+        pub kind: String,
+        pub source: String,
+        pub environment_variable: Option<String>,
+        pub oauth_expires_at: Option<String>,
+        pub has_stored_credential: bool,
+    }
+
+    /// One provider family in the connection catalog.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ConnectionProviderSnapshot {
+        pub id: String,
+        pub label: String,
+        pub methods: Vec<ConnectionMethodSnapshot>,
+    }
+
+    /// Bounded sanitized connection catalog snapshot.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ConnectionCatalogSnapshot {
+        pub providers: Vec<ConnectionProviderSnapshot>,
+    }
+
+    /// One user-visible device-code challenge for an exact command.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct DeviceCodeChallenge {
+        pub provider: String,
+        pub verification_uri: String,
+        pub user_code: String,
+    }
+
+    /// One monotonic device-code polling update for an exact command.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct DeviceCodeProgress {
+        pub provider: String,
+        pub attempt: u32,
+    }
+
     impl WispCurrentLiveEventOutput {
         fn wire_value(&self) -> serde_json::Value {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
@@ -948,6 +1045,42 @@ pub mod events {
             Some(
                 serde_json::from_value(value["catalog"].clone())
                     .expect("validated model catalog must match its public projection"),
+            )
+        }
+
+        /// Project the connection catalog reported for one exact command.
+        pub fn connection_catalog(&self, id: &str) -> Option<ConnectionCatalogSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.connection_catalog" || value["command_id"] != id {
+                return None;
+            }
+            Some(
+                serde_json::from_value(value["catalog"].clone())
+                    .expect("validated connection catalog must match its public projection"),
+            )
+        }
+
+        /// Project the device-code challenge reported for one exact command.
+        pub fn device_code(&self, id: &str) -> Option<DeviceCodeChallenge> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.device_code" || value["command_id"] != id {
+                return None;
+            }
+            Some(
+                serde_json::from_value(value.clone())
+                    .expect("validated device-code event must match its public projection"),
+            )
+        }
+
+        /// Project the device-code polling progress reported for one exact command.
+        pub fn device_code_progress(&self, id: &str) -> Option<DeviceCodeProgress> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.device_code.progress" || value["command_id"] != id {
+                return None;
+            }
+            Some(
+                serde_json::from_value(value.clone())
+                    .expect("validated device-code progress must match its public projection"),
             )
         }
 

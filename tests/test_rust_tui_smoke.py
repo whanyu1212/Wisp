@@ -153,10 +153,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -421,10 +421,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -526,7 +526,8 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and b"Type a prompt below to start." in output
-                and command_types[:2] == ["get_messages", "get_queue_state"]
+                and command_types[:3]
+                == ["get_messages", "get_connection_catalog", "get_queue_state"]
             ):
                 os.write(terminal_fd, b"prompt-kept-running\r")
                 phase = "prompt sent"
@@ -593,7 +594,11 @@ for line in sys.stdin:
         if command["type"] in {"prompt", "steer", "follow_up", "pop_queue", "cancel", "shutdown"}
     ]
     assert phase == "shutdown sent", bytes(output)
-    assert command_types[:2] == ["get_messages", "get_queue_state"]
+    assert command_types[:3] == [
+        "get_messages",
+        "get_connection_catalog",
+        "get_queue_state",
+    ]
     assert [command["type"] for command in lifecycle_commands] == [
         "prompt",
         "steer",
@@ -674,10 +679,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 3,
-    "event_schema_version": 35,
-    "min_protocol_version": 3,
-    "max_protocol_version": 3,
+    "protocol_version": 4,
+    "event_schema_version": 36,
+    "min_protocol_version": 4,
+    "max_protocol_version": 4,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -857,7 +862,8 @@ for line in sys.stdin:
             now = time.monotonic()
             if (
                 phase == "startup"
-                and command_types[:2] == ["get_messages", "get_queue_state"]
+                and command_types[:3]
+                == ["get_messages", "get_connection_catalog", "get_queue_state"]
                 and b"Type a prompt below to start." in output
             ):
                 os.write(terminal_fd, b"/name client-requested\r")

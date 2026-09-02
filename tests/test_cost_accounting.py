@@ -64,14 +64,14 @@ def _models() -> ModelRegistry:
                     pricing={
                         "model": (
                             ModelPricing(
-                                effective_until=date(2026, 8, 31),
+                                effective_until=date(9999, 12, 30),
                                 input_usd_per_million=Decimal("1"),
                                 cache_read_usd_per_million=Decimal("0.1"),
                                 cache_write_usd_per_million=Decimal("1.25"),
                                 output_usd_per_million=Decimal("5"),
                             ),
                             ModelPricing(
-                                effective_from=date(2026, 9, 1),
+                                effective_from=date.max,
                                 input_usd_per_million=Decimal("2"),
                                 cache_read_usd_per_million=Decimal("0.2"),
                                 cache_write_usd_per_million=Decimal("2.5"),
@@ -246,8 +246,8 @@ def test_estimator_keeps_anthropic_cache_categories_separate() -> None:
 def test_registry_selects_effective_dated_anthropic_rates() -> None:
     models = _models()
 
-    before = models.pricing("anthropic", "model", input_tokens=1, at=date(2026, 8, 31))
-    after = models.pricing("anthropic", "model", input_tokens=1, at=date(2026, 9, 1))
+    before = models.pricing("anthropic", "model", input_tokens=1, at=date(9999, 12, 30))
+    after = models.pricing("anthropic", "model", input_tokens=1, at=date.max)
 
     assert before is not None
     assert after is not None

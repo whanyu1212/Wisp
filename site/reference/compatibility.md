@@ -6,7 +6,7 @@ title: Compatibility & versioning
 
 Wisp has separate version domains for the Python package, streamed events, and persisted session
 records. They do not reset or advance together. In particular, a future `wisp-ai` 1.0 release may
-emit an event schema much newer than v35.
+emit an event schema much newer than v36.
 
 ## Python package versions
 
@@ -41,11 +41,11 @@ Package organization beyond `wisp-ai` remains tracked by
 
 The proposed external frontend protocol is a separate compatibility domain. Python models remain
 its semantic source of truth, and deterministic current-version artifacts are checked in under
-`schemas/live-rpc/v3/`. Ordinary command envelopes inherit the selected connection version rather
+`schemas/live-rpc/v4/`. Ordinary command envelopes inherit the selected connection version rather
 than carrying their own version. Events continue to carry the independently negotiated
 `schema_version` described below.
 
-The v3 schema bundle contains handshake request and response messages, the complete typed-client
+The v4 schema bundle contains handshake request and response messages, the complete typed-client
 command output union, the complete current live event output union, deterministic conformance
 fixtures, and validation-only projections consumed by Rust type generation. Command schemas describe payloads
 produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
@@ -96,7 +96,8 @@ Schema bundles are repository build inputs and versioned GitHub release assets n
 `wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
 models and compile-time generated Serde crate define the contract for external frontends. Protocol
 v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version,
-and v3 adds authoritative model-catalog discovery. All earlier bundles remain immutable.
+v3 adds authoritative model-catalog discovery, and v4 adds backend-owned connection
+workflows. All earlier bundles remain immutable.
 
 ## Deprecation and removal
 
@@ -121,10 +122,10 @@ replacement.
 ## Event schemas
 
 Every JSON, JSONL-RPC, and SDK `WispEvent` carries an integer `schema_version`. The installed package
-emits only `EVENT_SCHEMA_VERSION`, currently **v35**. There is no transport-level negotiation or
+emits only `EVENT_SCHEMA_VERSION`, currently **v36**. There is no transport-level negotiation or
 supported down-level emission mode.
 
-The typed parsers currently read **v5 through v35**:
+The typed parsers currently read **v5 through v36**:
 
 ```python
 from wisp.events import EVENT_SCHEMA_VERSION, wisp_event_from_json
@@ -138,7 +139,7 @@ versions. They also enforce introduction versions for many later event types and
 not a complete historical-conformance checker: some early additions are structurally valid under an
 older readable version. Wisp itself emits only the current schema, so it does not originate such
 mixed-version payloads. Consumers auditing third-party or hand-written events should use the
-[event-schema history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#schema-v35--current)
+[event-schema history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#schema-v36--current)
 as the authoritative introduction record. For example, `rpc.messages` starts at v17 and its forward
 cursor starts at v34.
 
@@ -162,7 +163,7 @@ Consumers should:
 - use `EVENT_SCHEMA_VERSION` from the installed package rather than hard-coding the current maximum;
 - handle every known event type they need and deliberately ignore known types they do not use;
 - reject a future schema and upgrade Wisp rather than guessing at its meaning; and
-- consult the [event-schema history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#schema-v35--current)
+- consult the [event-schema history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#schema-v36--current)
   for the action required by each version.
 
 Dropping a readable event version follows the public deprecation window above and must occur at a
@@ -177,7 +178,7 @@ A session file contains several independently versioned layers:
 |---|---:|---:|
 | Session entry | v6 | unversioned and v1–v6 |
 | Persisted event envelope | v1 | v1 |
-| Event payload inside the envelope | v35 | v5–v35 for typed access |
+| Event payload inside the envelope | v36 | v5–v36 for typed access |
 | Compaction record | v4 | v1–v4 |
 
 Historical session entries are normalized to current typed models in memory. Loading a session does
