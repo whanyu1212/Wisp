@@ -122,8 +122,8 @@ class AuthCommands:
             self._renderer.notice(f"Connected: {provider}")
             return
         self._renderer.notice(
-            f"Stored API key for {provider}; {environment_variable} still takes precedence. "
-            "Unset it in your shell to use the stored key."
+            f"Stored API key for {provider}; {environment_variable} currently takes precedence. "
+            f"Unset all API-key environment variables for {provider} to use the stored key."
         )
 
     async def disconnect(self, args: tuple[str, ...]) -> None:
@@ -146,15 +146,9 @@ class AuthCommands:
                 suffix = connected or "none"
                 self._renderer.notice(f"Usage: /disconnect <provider> (connected: {suffix})")
             return
-        await self._disconnect_provider(args[0], catalog)
+        await self._disconnect_provider(args[0])
 
-    async def _disconnect_provider(
-        self,
-        provider: str,
-        catalog: tuple[ConnectionProviderStatus, ...],
-    ) -> None:
-        method = connection_method(catalog, provider)
-        deleted = bool(method is not None and method.has_stored_credential)
+    async def _disconnect_provider(self, provider: str) -> None:
         try:
             await self._on_disconnect(provider)
             method = connection_method(self._get_catalog(), provider)
@@ -166,24 +160,15 @@ class AuthCommands:
             if method is not None and method.source == "environment"
             else None
         )
+        self._call_renderer_optional("connect_completed", provider)
         if environment_variable is not None:
-            if deleted:
-                self._call_renderer_optional("connect_completed", provider)
-                self._renderer.notice(
-                    f"Removed stored credentials for {provider}; still connected through "
-                    f"{environment_variable}. Unset it in your shell to disconnect."
-                )
-            else:
-                self._connect_error(
-                    f"{provider} is connected through {environment_variable}; "
-                    "unset it in your shell."
-                )
+            self._renderer.notice(
+                f"Stored credentials cleared for {provider}; still connected through "
+                f"{environment_variable}. Unset all API-key environment variables for "
+                f"{provider} to disconnect."
+            )
             return
-        if deleted:
-            self._call_renderer_optional("connect_completed", provider)
-            self._renderer.notice(f"Disconnected: {provider}")
-        else:
-            self._renderer.notice(f"Not connected: {provider}")
+        self._renderer.notice(f"Disconnected: {provider}")
 
     def _connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
         return self._get_catalog()

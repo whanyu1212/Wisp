@@ -3298,6 +3298,48 @@ def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(
     assert shell._current_connection_catalog() == ()
 
 
+def test_tui_shell_disconnect_acknowledges_deletion_after_catalog_fallback(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            auth_credentials={"openai": ApiKeyCredential(key="hidden-stored-key")},
+            auth_error="temporary catalog failure",
+        )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                controller.auth_store.error = None
+                return "/disconnect openai"
+            while not controller.disconnect_requests:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        assert controller.auth_store.credentials == {}
+        rendered = output.getvalue()
+        assert "Connection catalog unavailable: temporary catalog failure" in rendered
+        assert "Disconnected: openai" in rendered
+        assert "Not connected: openai" not in rendered
+        assert "hidden-stored-key" not in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:
     async def run() -> None:
         controller = ScriptedController(

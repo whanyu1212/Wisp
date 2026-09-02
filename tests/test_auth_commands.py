@@ -142,8 +142,8 @@ def test_auth_notices_use_backend_catalog_instead_of_frontend_environment(
 
     assert renderer.notices == [
         "openai: not logged in",
-        "Stored API key for openai; OPENAI_API_KEY still takes precedence. "
-        "Unset it in your shell to use the stored key.",
+        "Stored API key for openai; OPENAI_API_KEY currently takes precedence. "
+        "Unset all API-key environment variables for openai to use the stored key.",
         "Disconnected: openai",
     ]
     assert renderer.errors == []
@@ -182,7 +182,7 @@ def test_disconnect_deletes_and_reports_presence() -> None:
         await commands.disconnect(("openai",))
 
     anyio.run(run)
-    assert renderer.notices == ["Disconnected: openai", "Not connected: openai"]
+    assert renderer.notices == ["Disconnected: openai", "Disconnected: openai"]
 
 
 def test_connect_rejects_unknown_providers() -> None:
@@ -233,8 +233,8 @@ def test_connect_api_key_reports_environment_precedence(monkeypatch: MonkeyPatch
 
     assert store.credentials == {"anthropic": ApiKeyCredential(key="stored-key")}
     assert renderer.notices == [
-        "Stored API key for anthropic; ANTHROPIC_API_KEY still takes precedence. "
-        "Unset it in your shell to use the stored key."
+        "Stored API key for anthropic; ANTHROPIC_API_KEY currently takes precedence. "
+        "Unset all API-key environment variables for anthropic to use the stored key."
     ]
 
 
@@ -252,12 +252,12 @@ def test_disconnect_removes_stored_credentials_hidden_by_environment(
 
     assert store.credentials == {}
     assert renderer.notices == [
-        "Removed stored credentials for openai; still connected through OPENAI_API_KEY. "
-        "Unset it in your shell to disconnect."
+        "Stored credentials cleared for openai; still connected through OPENAI_API_KEY. "
+        "Unset all API-key environment variables for openai to disconnect."
     ]
 
 
-def test_disconnect_cannot_remove_environment_only_credentials(monkeypatch: MonkeyPatch) -> None:
+def test_disconnect_reports_environment_only_credentials(monkeypatch: MonkeyPatch) -> None:
     store = _FakeStore()
     commands, renderer = _commands(store)
     monkeypatch.setenv("OPENAI_API_KEY", "environment")
@@ -267,9 +267,11 @@ def test_disconnect_cannot_remove_environment_only_credentials(monkeypatch: Monk
 
     anyio.run(run)
 
-    assert renderer.errors == [
-        "openai is connected through OPENAI_API_KEY; unset it in your shell."
+    assert renderer.notices == [
+        "Stored credentials cleared for openai; still connected through OPENAI_API_KEY. "
+        "Unset all API-key environment variables for openai to disconnect."
     ]
+    assert renderer.errors == []
 
 
 def test_xai_auth_status_recognizes_xai_api_key(monkeypatch: MonkeyPatch) -> None:
@@ -356,8 +358,9 @@ def test_custom_provider_connect_and_disconnect_report_backend_environment_varia
     anyio.run(run)
 
     assert renderer.notices == [
-        "Removed stored credentials for openrouter; still connected through "
-        "OPENROUTER_API_KEY. Unset it in your shell to disconnect."
+        "Stored credentials cleared for openrouter; still connected through "
+        "OPENROUTER_API_KEY. Unset all API-key environment variables for openrouter "
+        "to disconnect."
     ]
 
 
