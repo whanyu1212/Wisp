@@ -394,7 +394,7 @@ class TuiShell:
         model: str | None = None,
         effort: str | None = None,
         auth_path: Path | None = None,
-        openai_compatible_provider: str = "openai-compatible",
+        openai_compatible_provider: str | None = None,
         settings_home_dir: Path | None = None,
         update_checker: UpdateChecker | None = None,
         update_capability_checker: UpdateCapabilityChecker = can_install_update,
@@ -437,7 +437,6 @@ class TuiShell:
         self._pending_connection_catalog_completion: RpcCommandFinished | None = None
         self._pending_connection_mutations: dict[str, _PendingConnectionMutation] = {}
         self._connection_catalog_error: str | None = None
-        self._openai_compatible_provider = openai_compatible_provider
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_context_status_command_id: str | None = None
         self.pending_context_status_received = False
@@ -951,11 +950,7 @@ class TuiShell:
 
     def _fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
         empty_store: dict[str, AuthCredential] = {}
-        return local_connection_catalog(
-            empty_store,
-            openai_compatible_provider=self._openai_compatible_provider,
-            environ=lambda _name: None,
-        )
+        return local_connection_catalog(empty_store, environ=lambda _name: None)
 
     def _safe_fallback_connection_catalog(
         self,

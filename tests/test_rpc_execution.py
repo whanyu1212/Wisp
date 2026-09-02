@@ -1184,6 +1184,8 @@ def test_executor_reports_connection_catalog_without_replacing_running_command(
         report = fixture.events[1]
         assert isinstance(report, RpcConnectionCatalogReported)
         assert report.catalog.providers
+        assert fixture.runtime.openai_compatible_provider is None
+        assert "openai-compatible" not in {provider.id for provider in report.catalog.providers}
         assert all(
             method.environment_variable is None or "KEY" in method.environment_variable
             for family in report.catalog.providers
@@ -1221,6 +1223,37 @@ def test_executor_stores_api_key_without_leaking_secret(tmp_path: Path) -> None:
         assert fixture.runtime.auth_store is not None
         credential = fixture.runtime.auth_store.get("anthropic")
         assert credential is not None
+
+    anyio.run(scenario)
+
+
+def test_executor_rejects_api_key_for_unregistered_openai_compatible_provider(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        secret = "unregistered-provider-secret"
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await fixture.executor(task_group=task_group, send=send).dispatch(
+                {
+                    "id": "store-1",
+                    "type": "store_api_key",
+                    "provider": "openai-compatible",
+                    "api_key": secret,
+                },
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert fixture.runtime.auth_store is not None
+        assert fixture.runtime.auth_store.get("openai-compatible") is None
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is False
+        assert finished.error == ("API-key connection is not supported for openai-compatible.")
+        dumped = json.dumps([event.model_dump(mode="json") for event in fixture.events])
+        assert secret not in dumped
 
     anyio.run(scenario)
 

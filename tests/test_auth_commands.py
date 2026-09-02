@@ -90,6 +90,12 @@ def test_status_reports_not_logged_in_for_missing_credential() -> None:
     assert renderer.errors == []
 
 
+def test_connection_catalog_omits_unconfigured_openai_compatible_provider() -> None:
+    catalog = connection_catalog(_FakeStore(), environ=lambda _name: None)
+
+    assert "openai-compatible" not in {family.id for family in catalog}
+
+
 def test_connection_catalog_omits_unrepresentable_oauth_expiry() -> None:
     store = _FakeStore(
         {
@@ -195,13 +201,21 @@ def test_status_rejects_extra_args_and_surfaces_storage_errors() -> None:
 def test_connect_acknowledges_store_when_status_refresh_fails() -> None:
     renderer = _FakeRenderer()
     stored: list[tuple[str, str]] = []
+    catalog_calls = 0
+
+    def catalog() -> tuple[ConnectionProviderStatus, ...]:
+        nonlocal catalog_calls
+        catalog_calls += 1
+        if catalog_calls > 1:
+            raise RuntimeError("catalog unavailable")
+        return connection_catalog(_FakeStore(), environ=lambda _name: None)
 
     async def store_api_key(provider: str, api_key: str) -> None:
         stored.append((provider, api_key))
 
     commands = AuthCommands(
         renderer,
-        lambda: (_ for _ in ()).throw(RuntimeError("catalog unavailable")),
+        catalog,
         lambda: "openai",
         store_api_key=store_api_key,
         disconnect_provider=lambda _provider: anyio.sleep(0),

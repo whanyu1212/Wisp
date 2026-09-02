@@ -128,7 +128,7 @@ class WispRuntime:
     )
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
     auth_store: JsonAuthStore | None = field(default=None, repr=False)
-    openai_compatible_provider: str = "openai-compatible"
+    openai_compatible_provider: str | None = None
     startup_events: tuple[WispEvent, ...] = ()
     unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
@@ -215,7 +215,8 @@ class WispRuntime:
         Deferred names participate as names. A candidate that has not yet constructed
         a provider still *owns* that configuration -- its auth path, retry policy, and
         endpoint -- so skipping it would silently retain the live runtime's stale
-        adapter across a refresh.
+        adapter across a refresh. A configuration-owned OpenAI-compatible endpoint
+        is removed when the candidate no longer declares that exact endpoint name.
         """
 
         candidate_names = candidate._configured_names_or_all()
@@ -227,11 +228,19 @@ class WispRuntime:
             replaces = name in remaining
             if replaces:
                 remaining.remove(name)
+            registration_unchanged = self.providers.registration_token(
+                name
+            ) is self._configured_registrations.get(name)
+            removed_configured_endpoint = (
+                self.openai_compatible_provider is not None
+                and name == self.openai_compatible_provider
+                and name != candidate.openai_compatible_provider
+                and registration_unchanged
+            )
+            if removed_configured_endpoint:
+                continue
             existing = self.providers.constructed().get(name)
             if existing is None:
-                registration_unchanged = self.providers.registration_token(
-                    name
-                ) is self._configured_registrations.get(name)
                 # A still-deferred configured registration can be refreshed from the
                 # candidate. If the token changed, a live extension replaced it with
                 # its own factory; resolve and preserve that override instead.
@@ -318,11 +327,11 @@ class WispRuntime:
         self.providers.replace_all(providers, order=order)
         if candidate.auth_store is not None:
             object.__setattr__(self, "auth_store", candidate.auth_store)
-            object.__setattr__(
-                self,
-                "openai_compatible_provider",
-                candidate.openai_compatible_provider,
-            )
+        object.__setattr__(
+            self,
+            "openai_compatible_provider",
+            candidate.openai_compatible_provider,
+        )
         self._configured_providers.clear()
         self._configured_providers.update(adopted)
         self._configured_names.clear()

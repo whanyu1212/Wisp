@@ -163,7 +163,7 @@ class _ScriptedAuthStore:
 def rpc_connection_catalog_snapshot(
     store: _ScriptedAuthStore | None = None,
     *,
-    openai_compatible_provider: str = "openai-compatible",
+    openai_compatible_provider: str | None = None,
 ) -> RpcConnectionCatalogSnapshot:
     catalog = connection_catalog(
         store or _ScriptedAuthStore(),

@@ -21,6 +21,7 @@ from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.providers.openai_compatible import OpenAICompatibleProvider
 from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
+from wisp.rpc.execution import rpc_connection_catalog_snapshot
 from wisp.runtime import (
     CommandDescriptor,
     CommandRegistry,
@@ -734,6 +735,14 @@ def test_build_runtime_registers_configured_openai_compatible_provider(tmp_path:
     async def run() -> None:
         runtime = await build_runtime(openai_compatible=settings)
         try:
+            assert runtime.providers.is_deferred("openrouter")
+            connection_catalog = rpc_connection_catalog_snapshot(runtime)
+            assert "openrouter" in {provider.id for provider in connection_catalog.providers}
+            assert "openai-compatible" not in {
+                provider.id for provider in connection_catalog.providers
+            }
+            assert runtime.providers.is_deferred("openrouter")
+
             provider = runtime.providers.get("openrouter")
             assert isinstance(provider, OpenAICompatibleProvider)
             assert provider.name == "openrouter"
@@ -744,6 +753,38 @@ def test_build_runtime_registers_configured_openai_compatible_provider(tmp_path:
                 runtime.providers.get("openai-compatible")
         finally:
             await runtime.aclose()
+
+    anyio.run(run)
+
+
+def test_configuration_refresh_removes_unconfigured_openai_compatible_provider(
+    tmp_path: Path,
+) -> None:
+    settings = OpenAICompatibleSettings(
+        base_url="https://example.test/v1",
+        default_model="custom-model",
+    )
+
+    async def run() -> None:
+        live = await build_runtime(
+            auth_path=tmp_path / "live-auth.json",
+            openai_compatible=settings,
+        )
+        candidate = await build_runtime(auth_path=tmp_path / "candidate-auth.json")
+        try:
+            assert live.openai_compatible_provider == "openai-compatible"
+            assert live.providers.is_deferred("openai-compatible")
+
+            await live.adopt_provider_configuration(candidate)
+
+            assert live.openai_compatible_provider is None
+            assert not live.providers.is_registered("openai-compatible")
+            assert "openai-compatible" not in {
+                provider.id for provider in rpc_connection_catalog_snapshot(live).providers
+            }
+        finally:
+            await candidate.aclose()
+            await live.aclose()
 
     anyio.run(run)
 

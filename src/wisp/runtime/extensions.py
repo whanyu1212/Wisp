@@ -63,7 +63,7 @@ async def build_runtime(
     mcp_runtime: McpRuntime | None = None
     auth_store = JsonAuthStore(auth_path or default_auth_path())
     openai_compatible_provider = (
-        openai_compatible.provider_name if openai_compatible is not None else "openai-compatible"
+        openai_compatible.provider_name if openai_compatible is not None else None
     )
     try:
         await activate_builtin_extensions(

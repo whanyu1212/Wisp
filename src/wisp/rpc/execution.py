@@ -3158,9 +3158,15 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
     store = runtime.auth_store
     if store is None:
         raise AuthStorageError("RPC connection catalog requires an auth store")
+    configured_provider = runtime.openai_compatible_provider
+    openai_compatible_provider = (
+        configured_provider
+        if configured_provider is not None and runtime.providers.is_registered(configured_provider)
+        else None
+    )
     catalog = connection_catalog(
         store,
-        openai_compatible_provider=runtime.openai_compatible_provider,
+        openai_compatible_provider=openai_compatible_provider,
     )
     return RpcConnectionCatalogSnapshot(
         providers=tuple(
@@ -3265,7 +3271,7 @@ def handle_rpc_store_api_key_command(
     if not supports_api_key(
         provider,
         openai_compatible_provider=runtime.openai_compatible_provider,
-    ):
+    ) or not runtime.providers.is_registered(provider):
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,

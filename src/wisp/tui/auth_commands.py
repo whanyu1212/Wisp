@@ -12,7 +12,6 @@ from wisp.auth.connections import (
     ConnectionProviderStatus,
     auth_status_line,
     connection_method,
-    supports_api_key,
 )
 from wisp.tui.rendering import TuiRenderer
 
@@ -34,15 +33,15 @@ class AuthCommands:
         store_api_key: ApiKeyStore,
         disconnect_provider: ProviderDisconnect,
         begin_device_code: DeviceCodeLogin,
-        openai_compatible_provider: str = "openai-compatible",
+        openai_compatible_provider: str | None = None,
     ) -> None:
+        del openai_compatible_provider  # Compatibility only; the backend catalog is authoritative.
         self._renderer = renderer
         self._get_catalog = get_catalog
         self._get_default_provider = get_default_provider
         self._store_api_key = store_api_key
         self._on_disconnect = disconnect_provider
         self._begin_device_code = begin_device_code
-        self._openai_compatible_provider = openai_compatible_provider
 
     def status(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
@@ -96,10 +95,12 @@ class AuthCommands:
     async def connect_api_key(self, provider: str, api_key: str) -> None:
         """Persist a key received through the renderer's redacted callback."""
 
-        if not supports_api_key(
-            provider,
-            openai_compatible_provider=self._openai_compatible_provider,
-        ):
+        try:
+            selected = connection_method(self._get_catalog(), provider)
+        except Exception as exc:  # noqa: BLE001 - show catalog failure in the TUI
+            self._connect_error(f"Auth storage error: {exc}")
+            return
+        if selected is None or selected.kind != "api_key":
             self._connect_error(f"API-key connection is not supported for {provider}.")
             return
         normalized = api_key.strip()

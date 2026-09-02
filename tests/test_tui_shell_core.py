@@ -3270,6 +3270,7 @@ def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(
     shell = TuiShell(
         ScriptedController(),
         auth_path=tmp_path / "auth.json",
+        openai_compatible_provider="openrouter",
     )
     shell._pending_connection_catalog_command_id = "connection-catalog-1"
 
@@ -3285,6 +3286,9 @@ def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(
     assert shell._connection_catalog_error == "temporary backend failure"
     assert shell.connection_catalog
     assert shell._current_connection_catalog() == shell.connection_catalog
+    assert {"openai-compatible", "openrouter"}.isdisjoint(
+        family.id for family in shell.connection_catalog
+    )
     openai = next(
         method
         for family in shell.connection_catalog

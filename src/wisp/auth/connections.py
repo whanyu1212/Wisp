@@ -64,14 +64,14 @@ class ConnectionProviderStatus:
 def connection_catalog(
     store: CredentialReader,
     *,
-    openai_compatible_provider: str = "openai-compatible",
+    openai_compatible_provider: str | None = None,
     environ: Callable[[str], str | None] | None = None,
 ) -> tuple[ConnectionProviderStatus, ...]:
-    """Return the sanitized connection catalog for the current auth store."""
+    """Return the sanitized catalog for available provider connection methods."""
 
     getenv = environ or _environment_value
     openai_codex = store.get(DEVICE_CODE_PROVIDER)
-    return (
+    providers = [
         ConnectionProviderStatus(
             id="openai",
             label="OpenAI",
@@ -86,45 +86,55 @@ def connection_catalog(
                 ),
                 _api_key_method("openai", "OpenAI API key", store.get("openai"), getenv),
             ),
-        ),
-        ConnectionProviderStatus(
-            id=openai_compatible_provider,
-            label=openai_compatible_provider,
-            methods=(
-                _api_key_method(
-                    openai_compatible_provider,
-                    f"{openai_compatible_provider} API key",
-                    store.get(openai_compatible_provider),
-                    getenv,
-                    openai_compatible_provider=openai_compatible_provider,
+        )
+    ]
+    if openai_compatible_provider is not None:
+        providers.append(
+            ConnectionProviderStatus(
+                id=openai_compatible_provider,
+                label=openai_compatible_provider,
+                methods=(
+                    _api_key_method(
+                        openai_compatible_provider,
+                        f"{openai_compatible_provider} API key",
+                        store.get(openai_compatible_provider),
+                        getenv,
+                        openai_compatible_provider=openai_compatible_provider,
+                    ),
+                ),
+            )
+        )
+    providers.extend(
+        (
+            ConnectionProviderStatus(
+                id="xai",
+                label="xAI",
+                methods=(_api_key_method("xai", "xAI API key", store.get("xai"), getenv),),
+            ),
+            ConnectionProviderStatus(
+                id="deepseek",
+                label="DeepSeek",
+                methods=(
+                    _api_key_method("deepseek", "DeepSeek API key", store.get("deepseek"), getenv),
                 ),
             ),
-        ),
-        ConnectionProviderStatus(
-            id="xai",
-            label="xAI",
-            methods=(_api_key_method("xai", "xAI API key", store.get("xai"), getenv),),
-        ),
-        ConnectionProviderStatus(
-            id="deepseek",
-            label="DeepSeek",
-            methods=(
-                _api_key_method("deepseek", "DeepSeek API key", store.get("deepseek"), getenv),
+            ConnectionProviderStatus(
+                id="anthropic",
+                label="Anthropic",
+                methods=(
+                    _api_key_method(
+                        "anthropic", "Anthropic API key", store.get("anthropic"), getenv
+                    ),
+                ),
             ),
-        ),
-        ConnectionProviderStatus(
-            id="anthropic",
-            label="Anthropic",
-            methods=(
-                _api_key_method("anthropic", "Anthropic API key", store.get("anthropic"), getenv),
+            ConnectionProviderStatus(
+                id="google",
+                label="Google",
+                methods=(_api_key_method("google", "Google API key", store.get("google"), getenv),),
             ),
-        ),
-        ConnectionProviderStatus(
-            id="google",
-            label="Google",
-            methods=(_api_key_method("google", "Google API key", store.get("google"), getenv),),
-        ),
+        )
     )
+    return tuple(providers)
 
 
 def connection_method(
@@ -140,7 +150,7 @@ def connection_method(
 
 
 def supports_api_key(
-    provider: str, *, openai_compatible_provider: str = "openai-compatible"
+    provider: str, *, openai_compatible_provider: str | None = "openai-compatible"
 ) -> bool:
     """Return whether ``provider`` accepts a stored API key."""
 
@@ -150,7 +160,7 @@ def supports_api_key(
 def api_key_environment(
     provider: str,
     *,
-    openai_compatible_provider: str = "openai-compatible",
+    openai_compatible_provider: str | None = "openai-compatible",
 ) -> tuple[str, ...]:
     """Return environment variable names that can supply ``provider``'s API key."""
 
@@ -165,7 +175,7 @@ def api_key_environment(
 def configured_environment_variables(
     provider: str,
     *,
-    openai_compatible_provider: str = "openai-compatible",
+    openai_compatible_provider: str | None = "openai-compatible",
     environ: Callable[[str], str | None] | None = None,
 ) -> tuple[str, ...]:
     """Return configured API-key environment variable names, without values."""
@@ -201,7 +211,7 @@ def _api_key_method(
     credential: AuthCredential | None,
     getenv: Callable[[str], str | None],
     *,
-    openai_compatible_provider: str = "openai-compatible",
+    openai_compatible_provider: str | None = "openai-compatible",
 ) -> ConnectionMethodStatus:
     names = api_key_environment(
         provider,
