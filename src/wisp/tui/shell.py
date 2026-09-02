@@ -356,6 +356,7 @@ class _PendingConnectionMutation:
     command_type: str
     provider: str
     wait: bool = False
+    submitted: bool = False
     report: RpcConnectionCatalogReported | None = None
     device_code: RpcDeviceCodeReported | None = None
     progress_attempt: int = 0
@@ -1029,10 +1030,11 @@ class TuiShell:
         self._pending_connection_mutations[command_id] = pending
         try:
             await sender()
-        except Exception:
+        except BaseException:
             self._pending_connection_mutations.pop(command_id, None)
             pending.done.set()
             raise
+        pending.submitted = True
         if not wait:
             return
         await pending.done.wait()
@@ -2181,7 +2183,7 @@ class TuiShell:
         pending_device_codes = tuple(
             pending.command_id
             for pending in self._pending_connection_mutations.values()
-            if pending.command_type == "begin_device_code"
+            if pending.command_type == "begin_device_code" and pending.submitted
         )
         if cancel_scope is None and not pending_device_codes:
             return False

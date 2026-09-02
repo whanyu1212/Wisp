@@ -4170,6 +4170,58 @@ def test_tui_shell_textual_cancel_requests_backend_device_cancel(tmp_path: Path)
     anyio.run(run)
 
 
+def test_tui_shell_cancel_during_device_submission_cleans_pending_without_backend_cancel(
+    tmp_path: Path,
+) -> None:
+    class BlockingDeviceController(ScriptedController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submission_started = anyio.Event()
+
+        async def begin_device_code(
+            self,
+            provider: str,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            del provider, command_id
+            self.submission_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+    async def run() -> None:
+        controller = BlockingDeviceController()
+        console, _output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            provider="openai-codex",
+            auth_path=tmp_path / "auth.json",
+        )
+        cancel_scope = anyio.CancelScope()
+
+        async def submit() -> None:
+            with cancel_scope:
+                await shell._begin_device_code("openai-codex")
+
+        async with anyio.create_task_group() as task_group:
+            shell._task_group = task_group
+            shell._connect_cancel_scope = cancel_scope
+            task_group.start_soon(submit)
+            await controller.submission_started.wait()
+            pending = next(iter(shell._pending_connection_mutations.values()))
+            assert pending.submitted is False
+
+            assert shell._cancel_connect("Provider connection cancelled.")
+            with anyio.fail_after(1):
+                await pending.done.wait()
+
+            assert pending.command_id not in shell._pending_connection_mutations
+            assert controller.cancelled == []
+
+    anyio.run(run)
+
+
 def test_tui_shell_escape_cancels_non_textual_device_authorization(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
