@@ -18,7 +18,9 @@ use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::MAX_APPLICATION_FRAME_BYTES;
 use wisp_protocol::commands::QueueKind;
-use wisp_protocol::events::WispCurrentLiveEventOutput;
+use wisp_protocol::events::{
+    ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress, WispCurrentLiveEventOutput,
+};
 
 #[derive(Debug, Error)]
 pub enum EventProjectionError {
@@ -50,7 +52,47 @@ pub enum EventProjectionError {
 impl BackendEvent {
     /// Project an already validated live event into reducer-owned semantics.
     pub fn from_live(event: &WispCurrentLiveEventOutput) -> Result<Self, EventProjectionError> {
-        Self::from_projection_value(&event.to_value()?)
+        let value = event.to_value()?;
+        let event_type = string_field(&value, "<unknown>", "type")?;
+        let command_id = match event_type.as_str() {
+            "rpc.connection_catalog" | "rpc.device_code" | "rpc.device_code.progress" => {
+                exact_string_field(&value, &event_type, "command_id", 256)?
+            }
+            _ => return Self::from_projection_value(&value),
+        };
+        match event_type.as_str() {
+            "rpc.connection_catalog" => event
+                .connection_catalog(&command_id)
+                .map(|catalog| Self::ConnectionCatalogReported {
+                    command_id,
+                    catalog,
+                })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "command_id",
+                }),
+            "rpc.device_code" => event
+                .device_code(&command_id)
+                .map(|challenge| Self::DeviceCodeReported {
+                    command_id,
+                    challenge,
+                })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "command_id",
+                }),
+            "rpc.device_code.progress" => event
+                .device_code_progress(&command_id)
+                .map(|progress| Self::DeviceCodeProgress {
+                    command_id,
+                    progress,
+                })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "command_id",
+                }),
+            _ => unreachable!("connection events were selected above"),
+        }
     }
 
     /// Project a bounded trace event. The caller owns trace-schema validation.
@@ -374,6 +416,30 @@ impl BackendEvent {
                     },
                 }
             }
+            "rpc.connection_catalog" => Self::ConnectionCatalogReported {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                catalog: connection_catalog(value, &event_type)?,
+            },
+            "rpc.device_code" => Self::DeviceCodeReported {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                challenge: DeviceCodeChallenge {
+                    provider: exact_string_field(value, &event_type, "provider", 128)?,
+                    verification_uri: exact_string_field(
+                        value,
+                        &event_type,
+                        "verification_uri",
+                        512,
+                    )?,
+                    user_code: exact_string_field(value, &event_type, "user_code", 128)?,
+                },
+            },
+            "rpc.device_code.progress" => Self::DeviceCodeProgress {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                progress: DeviceCodeProgress {
+                    provider: exact_string_field(value, &event_type, "provider", 128)?,
+                    attempt: bounded_device_attempt(value, &event_type)?,
+                },
+            },
             "rpc.command.finished" => Self::CommandFinished {
                 command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                 command_type: bounded_display_string_field(
@@ -389,6 +455,29 @@ impl BackendEvent {
         };
         Ok(projected)
     }
+}
+
+fn connection_catalog(
+    value: &Value,
+    event_type: &str,
+) -> Result<ConnectionCatalogSnapshot, EventProjectionError> {
+    serde_json::from_value(value["catalog"].clone()).map_err(|_| {
+        EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "catalog",
+        }
+    })
+}
+
+fn bounded_device_attempt(value: &Value, event_type: &str) -> Result<u32, EventProjectionError> {
+    let attempt = u64_field(value, event_type, "attempt")?;
+    if !(1..=10_000).contains(&attempt) {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "attempt",
+        });
+    }
+    Ok(attempt as u32)
 }
 
 fn bounded_entry_count(value: &Value, event_type: &str) -> Result<u32, EventProjectionError> {

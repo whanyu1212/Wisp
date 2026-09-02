@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import httpx
@@ -78,6 +78,57 @@ def test_device_code_login_shields_owned_client_cleanup_from_cancellation(
         return clients[0].close_finished.is_set()
 
     assert anyio.run(run) is True
+
+
+def test_device_code_poll_reports_progress_without_credentials(monkeypatch: MonkeyPatch) -> None:
+    responses = [
+        httpx.Response(403, json={}),
+        httpx.Response(
+            200,
+            json={"authorization_code": "authorization", "code_verifier": "verifier"},
+        ),
+    ]
+
+    class StubPollClient:
+        async def post(self, _url: str, **_kwargs: object) -> httpx.Response:
+            return responses.pop(0)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(openai_codex_auth_module.anyio, "sleep", no_sleep)
+    progress: list[int] = []
+
+    async def run() -> tuple[str, str]:
+        return await openai_codex_auth_module._poll_device_code(
+            cast(httpx.AsyncClient, StubPollClient()),
+            device_auth_id="device-id",
+            user_code="user-code",
+            interval_seconds=1,
+            on_progress=progress.append,
+        )
+
+    assert anyio.run(run) == ("authorization", "verifier")
+    assert progress == [1]
+
+
+def test_device_code_poll_has_a_bounded_timeout(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(openai_codex_auth_module, "DEVICE_CODE_TIMEOUT_SECONDS", 0)
+
+    class NeverPollClient:
+        async def post(self, _url: str, **_kwargs: object) -> httpx.Response:
+            raise AssertionError("timeout must be checked before polling")
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="timed out"):
+            await openai_codex_auth_module._poll_device_code(
+                cast(httpx.AsyncClient, NeverPollClient()),
+                device_auth_id="device-id",
+                user_code="user-code",
+                interval_seconds=1,
+            )
+
+    anyio.run(run)
 
 
 class StubOpenAICodexProvider(OpenAICodexProvider):

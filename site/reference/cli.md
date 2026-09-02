@@ -82,9 +82,9 @@ Provider and model defaults for the dedicated command come from configuration an
 `WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
 
-`rust` is an experimental, macOS/Linux-only transport scaffold, not a prompt-capable replacement for
-Textual. It requires the Python package version, Rust crate version, live RPC v3, and event schema v35
-to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls back to Textual when
+`rust` is an experimental, macOS/Linux-only frontend. It requires the Python package version, Rust
+crate version, live RPC v4, and event schema v36 to match exactly. Selecting it by flag or
+`WISP_TUI_RENDERER=rust` never falls back to Textual when
 the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
 do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)
 for source use.

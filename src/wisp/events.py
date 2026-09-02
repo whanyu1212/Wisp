@@ -27,7 +27,7 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[35] = 35
+EVENT_SCHEMA_VERSION: Literal[36] = 36
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -54,7 +54,15 @@ CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
 TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
 RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION = 34
 RPC_MODEL_CATALOG_SCHEMA_VERSION = 35
+RPC_CONNECTION_CATALOG_SCHEMA_VERSION = 36
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
+MAX_RPC_CONNECTION_PROVIDERS = 32
+MAX_RPC_CONNECTION_METHODS = 64
+MAX_RPC_CONNECTION_LABEL_CHARS = 256
+MAX_RPC_DEVICE_CODE_CHARS = 128
+MAX_RPC_DEVICE_CODE_URI_CHARS = 512
+MAX_RPC_DEVICE_CODE_ATTEMPTS = 10_000
+MAX_RPC_OAUTH_EXPIRY_CHARS = 64
 MAX_RPC_MODEL_CATALOG_MODELS_PER_PROVIDER = 512
 MAX_RPC_MODEL_CATALOG_MODELS = 4_096
 MAX_RPC_MODEL_CATALOG_EFFORT_LEVELS = 16
@@ -140,6 +148,7 @@ class WispEvent(BaseModel):
         33,
         34,
         35,
+        36,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -584,6 +593,59 @@ class RpcModelCatalogSnapshot(BaseModel):
         if sum(len(provider.models) for provider in self.providers) > MAX_RPC_MODEL_CATALOG_MODELS:
             raise ValueError(
                 f"RPC model catalogs may contain at most {MAX_RPC_MODEL_CATALOG_MODELS} models"
+            )
+        return self
+
+
+class RpcConnectionMethodSnapshot(BaseModel):
+    """Sanitized authentication method for one provider connection picker."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: RpcProviderId
+    label: Annotated[str, Field(min_length=1, max_length=MAX_RPC_CONNECTION_LABEL_CHARS)]
+    kind: Literal["api_key", "device_code"]
+    source: Literal["environment", "stored", "missing"]
+    environment_variable: Annotated[
+        str | None,
+        Field(default=None, min_length=1, max_length=MAX_RPC_CONNECTION_LABEL_CHARS),
+    ] = None
+    oauth_expires_at: Annotated[
+        str | None,
+        Field(default=None, min_length=1, max_length=MAX_RPC_OAUTH_EXPIRY_CHARS),
+    ] = None
+    has_stored_credential: bool = False
+
+
+class RpcConnectionProviderSnapshot(BaseModel):
+    """One provider family and its sanitized authentication methods."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: RpcProviderId
+    label: Annotated[str, Field(min_length=1, max_length=MAX_RPC_CONNECTION_LABEL_CHARS)]
+    methods: tuple[RpcConnectionMethodSnapshot, ...] = Field(
+        default=(),
+        min_length=1,
+        max_length=8,
+    )
+
+
+class RpcConnectionCatalogSnapshot(BaseModel):
+    """Bounded sanitized provider connection catalog."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    providers: tuple[RpcConnectionProviderSnapshot, ...] = Field(
+        default=(),
+        max_length=MAX_RPC_CONNECTION_PROVIDERS,
+    )
+
+    @model_validator(mode="after")
+    def _validate_total_methods(self) -> Self:
+        if sum(len(provider.methods) for provider in self.providers) > MAX_RPC_CONNECTION_METHODS:
+            raise ValueError(
+                f"RPC connection catalogs may contain at most {MAX_RPC_CONNECTION_METHODS} methods"
             )
         return self
 
@@ -1146,6 +1208,63 @@ class RpcModelCatalogReported(WispEvent):
         return self
 
 
+class RpcConnectionCatalogReported(WispEvent):
+    """Immediate, non-persisted provider connection catalog returned over RPC."""
+
+    type: Literal["rpc.connection_catalog"] = "rpc.connection_catalog"
+    command_id: str
+    catalog: RpcConnectionCatalogSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC connection catalog reports require schema_version "
+                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
+class RpcDeviceCodeReported(WispEvent):
+    """User-visible device-code challenge for one connection command."""
+
+    type: Literal["rpc.device_code"] = "rpc.device_code"
+    command_id: str
+    provider: RpcProviderId
+    verification_uri: Annotated[
+        str,
+        Field(min_length=1, max_length=MAX_RPC_DEVICE_CODE_URI_CHARS),
+    ]
+    user_code: Annotated[str, Field(min_length=1, max_length=MAX_RPC_DEVICE_CODE_CHARS)]
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC device-code reports require schema_version "
+                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
+class RpcDeviceCodeProgressReported(WispEvent):
+    """Sanitized progress from one backend-owned device-code poll loop."""
+
+    type: Literal["rpc.device_code.progress"] = "rpc.device_code.progress"
+    command_id: str
+    provider: RpcProviderId
+    attempt: int = Field(ge=1, le=MAX_RPC_DEVICE_CODE_ATTEMPTS)
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC device-code progress reports require schema_version "
+                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 def _validate_package_skill_schema(
     catalog: RpcSkillCatalogSnapshot,
     *,
@@ -1656,6 +1775,9 @@ type KnownWispEvent = Annotated[
     | RpcStateReported
     | RpcCommandsReported
     | RpcModelCatalogReported
+    | RpcConnectionCatalogReported
+    | RpcDeviceCodeReported
+    | RpcDeviceCodeProgressReported
     | RpcSkillsReported
     | RpcMcpStatusReported
     | SkillCatalogUpdated
@@ -1779,6 +1901,15 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC model catalog events require schema_version "
             f"{RPC_MODEL_CATALOG_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") in {
+        "rpc.connection_catalog",
+        "rpc.device_code",
+        "rpc.device_code.progress",
+    } and (version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION):
+        raise ValueError(
+            "RPC connection events require schema_version "
+            f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "rpc.mcp" and version < MCP_STATUS_SCHEMA_VERSION:
         raise ValueError(

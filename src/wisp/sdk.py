@@ -23,7 +23,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.config import WispConfig
 from wisp.events import KnownWispEvent, WispEvent
 from wisp.rpc.client import RpcController, RpcTransport
-from wisp.rpc.commands import RpcCommand
+from wisp.rpc.commands import RpcCommand, detach_store_api_key
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
@@ -338,7 +338,9 @@ class _InProcessTransport(RpcTransport):
     async def send(self, command: RpcCommand) -> None:
         """Submit one already-validated typed command to the shared host."""
 
-        raw_command = cast(dict[str, object], command.model_dump(exclude_none=True))
+        raw_command = detach_store_api_key(
+            cast(dict[str, object], command.model_dump(exclude_none=True))
+        )
         send_cancel_scope = anyio.CancelScope()
         is_shutdown = command.type == "shutdown"
         sent = False

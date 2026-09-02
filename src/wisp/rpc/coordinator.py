@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 
 import anyio
 
 from wisp.agent.messages import Message
 from wisp.events import WispEvent
-from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
+from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, rpc_command_payload_size
 from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.sessions.jsonl import JsonlSession
 
@@ -22,6 +21,7 @@ _PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init"})
 type _SequentialRpcCommandType = Literal[
     "prompt",
     "compact",
+    "begin_device_code",
     "get_session_stats",
     "get_messages",
     "get_sessions",
@@ -38,7 +38,7 @@ type _SequentialRpcCommandType = Literal[
 
 @dataclass(frozen=True)
 class _RpcInputCommand:
-    command: dict[str, object]
+    command: dict[str, object] = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class _RpcDispatchResult:
 @dataclass(frozen=True)
 class _RpcCancelResult:
     outcome: Literal["running", "queued", "missing"]
-    command: dict[str, object] | None = None
+    command: dict[str, object] | None = field(default=None, repr=False)
 
 
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady
@@ -110,6 +110,7 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "get_commands",
     "get_mcp_status",
     "get_model_catalog",
+    "get_connection_catalog",
     "get_state",
     "get_skills",
     "trust",
@@ -302,6 +303,20 @@ class RpcCoordinator:
                 self.input_closed = True
                 for handler in self._input_closed_handlers:
                     handler()
+                if (
+                    self.running_command is not None
+                    and self.running_command.command_type == "begin_device_code"
+                ):
+                    self.running_command.cancel_scope.cancel()
+                for queue in (self.pending_prompt_queue_commands, self.queued_commands):
+                    retained: deque[dict[str, object]] = deque()
+                    while queue:
+                        queued = queue.popleft()
+                        if command_type(queued) == "begin_device_code":
+                            self._release_queued_command(queued)
+                        else:
+                            retained.append(queued)
+                    queue.extend(retained)
             return False
         if isinstance(event, self._command_completed_type):
             completed = cast(_RpcCommandCompleted, event)
@@ -523,14 +538,7 @@ class RpcCoordinator:
 
     @staticmethod
     def _command_payload_size(command: dict[str, object]) -> int:
-        return len(
-            json.dumps(
-                command,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
+        return rpc_command_payload_size(command)
 
     def _outstanding_command_count(self) -> int:
         """Count queued and concurrent auxiliary work sharing the configured bound."""

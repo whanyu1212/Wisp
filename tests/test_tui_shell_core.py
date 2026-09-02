@@ -12,7 +12,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
-from wisp.auth.storage import JsonAuthStore, OAuthCredential
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore, OAuthCredential
 from wisp.events import (
     BillableTokenUsage,
     CompactionPolicyStatus,
@@ -40,7 +40,6 @@ from wisp.events import (
     UsageCostRates,
 )
 from wisp.skills.models import SkillInvocationEvidence
-from wisp.tui import auth_commands as tui_auth_commands_module
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
@@ -3765,7 +3764,8 @@ def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
 
     async def run() -> None:
         controller = ScriptedController(
-            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5")
+            model_catalog=rpc_builtin_model_catalog(provider="openai", model="gpt-5.5"),
+            auth_error="Invalid auth file JSON: auth.json",
         )
         console, output = _console()
         shell = TuiShell(
@@ -3792,7 +3792,10 @@ def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
     auth_path.chmod(0o600)
 
     async def run() -> None:
-        controller = ScriptedController(model_catalog=rpc_builtin_model_catalog(provider="openai"))
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="openai"),
+            auth_error="Invalid auth file JSON: auth.json",
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3817,15 +3820,7 @@ def test_tui_shell_connect_reports_storage_errors(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
-        return OAuthCredential(
-            access="access-token",
-            refresh="refresh-token",
-            expires=4_102_444_800_000,
-            account_id="account-id",
-        )
-
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    del monkeypatch
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
     auth_path.chmod(0o600)
@@ -3834,7 +3829,8 @@ def test_tui_shell_connect_reports_storage_errors(
         controller = ScriptedController(
             model_catalog=rpc_builtin_model_catalog(
                 provider="openai", model="gpt-5.5", effort="high"
-            )
+            ),
+            auth_error="Invalid auth file JSON: auth.json",
         )
         console, output = _console()
         shell = TuiShell(
@@ -3860,32 +3856,38 @@ def test_tui_shell_connect_and_disconnect_openai_codex(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
-        return OAuthCredential(
-            access="access-token",
-            refresh="refresh-token",
-            expires=4_102_444_800_000,
-            account_id="account-id",
-        )
-
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    del monkeypatch
 
     async def run() -> None:
         controller = ScriptedController(
             model_catalog=rpc_builtin_model_catalog(provider="anthropic")
         )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/connect openai-codex"
+            if calls == 2:
+                while not controller.device_code_requests:
+                    await anyio.sleep(0)
+                while shell._connect_cancel_scope is not None:
+                    await anyio.sleep(0)
+                return "/auth openai-codex"
+            if calls == 3:
+                return "/disconnect openai-codex"
+            while not controller.disconnect_requests:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(
-                [
-                    "/connect openai-codex",
-                    "/auth openai-codex",
-                    "/disconnect openai-codex",
-                    "/quit",
-                ]
-            ),
+            prompt_reader=reader,
             provider="openai-codex",
             auth_path=tmp_path / "auth.json",
         )
@@ -3901,22 +3903,75 @@ def test_tui_shell_connect_and_disconnect_openai_codex(
     anyio.run(run)
 
 
+def test_tui_shell_disconnect_waits_for_backend_success(tmp_path: Path) -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            auth_credentials={"anthropic": ApiKeyCredential(key="stored-key")},
+        )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                controller.auth_store.error = "write failed"
+                return "/disconnect anthropic"
+            while not controller.disconnect_requests:
+                await anyio.sleep(0)
+            while shell._connect_cancel_scope is not None:
+                await anyio.sleep(0)
+            return "/quit"
+
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            provider="anthropic",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Auth storage error: write failed" in rendered
+        assert "Disconnected: anthropic" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_textual_cancel_requests_backend_device_cancel(tmp_path: Path) -> None:
+    async def run() -> None:
+        controller = ScriptedController(hang_device_code=True)
+        console, _output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            provider="openai-codex",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        async with anyio.create_task_group() as task_group:
+            shell._task_group = task_group
+            task_group.start_soon(shell._begin_device_code, "openai-codex")
+            await controller._device_code_started.wait()
+
+            pending_id = next(iter(controller._pending_device_code_ids))
+            assert shell._connect_cancel_scope is None
+            assert shell._cancel_connect("Provider connection cancelled.")
+            with anyio.fail_after(1):
+                await controller._device_code_cancelled.wait()
+            assert controller.cancelled == [pending_id]
+            task_group.cancel_scope.cancel()
+
+    anyio.run(run)
+
+
 def test_tui_shell_escape_cancels_non_textual_device_authorization(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    started = anyio.Event()
-    cancelled = anyio.Event()
-
-    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
-        started.set()
-        try:
-            await anyio.sleep_forever()
-        finally:
-            cancelled.set()
-        raise AssertionError("unreachable")
-
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    del monkeypatch
     auth_path = tmp_path / "auth.json"
     existing_credential = OAuthCredential(
         access="existing-access",
@@ -3928,6 +3983,11 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
 
     async def run() -> None:
         calls = 0
+        controller = ScriptedController(
+            model_catalog=rpc_builtin_model_catalog(provider="anthropic"),
+            auth_credentials={"openai-codex": existing_credential},
+            hang_device_code=True,
+        )
 
         async def reader(_prompt: str) -> str:
             nonlocal calls
@@ -3935,7 +3995,7 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
             if calls == 1:
                 return "/connect openai-codex"
             if calls == 2:
-                await started.wait()
+                await controller._device_code_started.wait()
                 return "/disconnect openai-codex"
             if calls == 3:
                 return "prompt must not race reconnect"
@@ -3943,9 +4003,6 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
                 raise TuiCancelRequested
             return "/quit"
 
-        controller = ScriptedController(
-            model_catalog=rpc_builtin_model_catalog(provider="anthropic")
-        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -3957,7 +4014,7 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
 
         await shell.run()
 
-        assert cancelled.is_set()
+        assert controller._device_code_cancelled.is_set()
         assert controller.prompts == []
         assert JsonAuthStore(auth_path).get("openai-codex") == existing_credential
         rendered = output.getvalue()
@@ -3972,15 +4029,7 @@ def test_tui_shell_connects_pending_provider(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
-        return OAuthCredential(
-            access="access-token",
-            refresh="refresh-token",
-            expires=4_102_444_800_000,
-            account_id="account-id",
-        )
-
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    del monkeypatch
 
     async def run() -> None:
         controller = ScriptedController(
@@ -3997,13 +4046,28 @@ def test_tui_shell_connects_pending_provider(
                 )
             ]
         )
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/provider openai-codex"
+            if calls == 2:
+                return "/connect openai-codex"
+            if calls == 3:
+                while not controller.device_code_requests:
+                    await anyio.sleep(0)
+                while shell._connect_cancel_scope is not None:
+                    await anyio.sleep(0)
+                return "/auth"
+            return "/quit"
+
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(
-                ["/provider openai-codex", "/connect openai-codex", "/auth", "/quit"]
-            ),
+            prompt_reader=reader,
             provider="fake",
             auth_path=tmp_path / "auth.json",
         )

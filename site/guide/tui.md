@@ -36,7 +36,7 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The Rust TUI negotiates and validates live RPC v3/event schema v35, supports prompts, approvals,
+The Rust TUI negotiates and validates live RPC v4/event schema v36, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
 `/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
@@ -44,6 +44,11 @@ one exact session ID); `/new` deselects the current session and clears the local
 backend confirms it. Startup and resumed history install the newest 200-message page atomically;
 reaching an edge loads additional 75-message pages while retaining at most 1,200 logical transcript
 rows. An omission row marks history that remains outside the retained window.
+
+`/connect` opens a keyboard-only provider connection panel. Use arrow keys to select a provider,
+`Enter` to start its available API-key or device-code flow, `d` to disconnect stored credentials,
+`r` to refresh, and `Escape` to close or cancel. API-key entry is masked. Device login displays the
+short-lived user code and verification URL but never stores them in prompt or session history.
 
 The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and
 `/name --clear`, `/clone`, `/tree`, and `/unrevert`. The `/tree` picker uses `Up`/`Down`,

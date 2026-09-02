@@ -15,7 +15,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import ValidationError
 
 from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent, WispEvent
-from wisp.rpc.commands import RpcCommandAdapter
+from wisp.rpc.commands import RpcCommandAdapter, detach_store_api_key
 from wisp.rpc.framing import RpcFrameError, decode_rpc_object, pop_rpc_frame
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
@@ -310,7 +310,7 @@ class RpcStdinTransport[TControlEvent]:
                 ErrorEvent(message="RPC command does not match the negotiated schema")
             )
             return None
-        return command
+        return detach_store_api_key(command)
 
     async def _report_failure(
         self,

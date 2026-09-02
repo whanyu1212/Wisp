@@ -20,6 +20,8 @@ from tests.rpc_support import (
 )
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
+from wisp.auth.openai_codex import DeviceCodeInfo
+from wisp.auth.storage import OAuthCredential
 from wisp.coding import CodingSession
 from wisp.coding.session import _RetainedQueueState
 from wisp.config import WispConfig
@@ -31,6 +33,9 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcConnectionCatalogReported,
+    RpcDeviceCodeProgressReported,
+    RpcDeviceCodeReported,
     RpcMcpStatusReported,
     RpcMessagesReported,
     RpcModelCatalogReported,
@@ -1151,6 +1156,209 @@ def test_executor_reports_model_catalog_without_replacing_running_command(
             provider.available == fixture.runtime.providers.is_registered(provider.name)
             for provider in report.catalog.providers
         )
+
+    anyio.run(scenario)
+
+
+def test_executor_reports_connection_catalog_without_replacing_running_command(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "connections-1", "type": "get_connection_catalog"},
+                running,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcConnectionCatalogReported,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcConnectionCatalogReported)
+        assert report.catalog.providers
+        assert all(
+            method.environment_variable is None or "KEY" in method.environment_variable
+            for family in report.catalog.providers
+            for method in family.methods
+        )
+
+    anyio.run(scenario)
+
+
+def test_executor_stores_api_key_without_leaking_secret(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        secret = "sentinel-secret-key"
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                {
+                    "id": "store-1",
+                    "type": "store_api_key",
+                    "provider": "anthropic",
+                    "api_key": secret,
+                },
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is None
+        dumped = json.dumps([event.model_dump(mode="json") for event in fixture.events])
+        assert secret not in dumped
+        report = next(
+            event for event in fixture.events if isinstance(event, RpcConnectionCatalogReported)
+        )
+        anthropic = next(family for family in report.catalog.providers if family.id == "anthropic")
+        assert anthropic.methods[0].has_stored_credential is True
+        assert fixture.runtime.auth_store is not None
+        credential = fixture.runtime.auth_store.get("anthropic")
+        assert credential is not None
+
+    anyio.run(scenario)
+
+
+def test_executor_reports_device_code_progress_and_completion(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_login(
+        *, on_device_code: Callable[[DeviceCodeInfo], None], on_progress: Callable[[int], None]
+    ) -> OAuthCredential:
+        on_device_code(DeviceCodeInfo("ABCD-1234", "https://example.test/device", 1, 900))
+        on_progress(1)
+        return OAuthCredential(access="access", refresh="refresh", expires=4_102_444_800_000)
+
+    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
+                None,
+            )
+            await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcDeviceCodeReported,
+            RpcDeviceCodeProgressReported,
+            RpcConnectionCatalogReported,
+            RpcCommandFinished,
+        ]
+        progress = fixture.events[2]
+        assert isinstance(progress, RpcDeviceCodeProgressReported)
+        assert progress.attempt == 1
+
+    anyio.run(scenario)
+
+
+def test_executor_sanitizes_device_code_provider_failures(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    secret = "sentinel-provider-secret"
+
+    async def fake_login(**_kwargs: object) -> OAuthCredential:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
+                None,
+            )
+            await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        dumped = json.dumps([event.model_dump(mode="json") for event in fixture.events])
+        assert secret not in dumped
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.ok is False
+        assert finished.error == "Provider connection failed"
+
+    anyio.run(scenario)
+
+
+def test_executor_cancels_device_code_without_replacing_credentials(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = anyio.Event()
+
+    async def fake_login(**_kwargs: object) -> OAuthCredential:
+        started.set()
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        assert fixture.runtime.auth_store is not None
+        existing = OAuthCredential(access="old", refresh="old", expires=4_102_444_800_000)
+        fixture.runtime.auth_store.set("openai-codex", existing)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
+                None,
+            )
+            await started.wait()
+            assert result.running_command is not None
+            result.running_command.cancel_scope.cancel()
+            await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert fixture.runtime.auth_store.get("openai-codex") == existing
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.ok is False
+        assert finished.error == "RPC command cancelled: device-1"
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"id": "store-1", "type": "store_api_key", "provider": "anthropic", "api_key": "secret"},
+        {"id": "disconnect-1", "type": "disconnect_provider", "provider": "anthropic"},
+        {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
+    ],
+)
+def test_executor_rejects_connection_mutations_while_an_operation_is_active(
+    tmp_path: Path,
+    command: dict[str, object],
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                dict(command),
+                running,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.ok is False
+        assert "another RPC operation is active" in (finished.error or "")
 
     anyio.run(scenario)
 

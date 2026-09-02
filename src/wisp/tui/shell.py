@@ -15,6 +15,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
 from wisp.agent.mode import AgentMode
+from wisp.auth.connections import (
+    ConnectionMethodStatus,
+    ConnectionProviderStatus,
+)
+from wisp.auth.connections import (
+    connection_catalog as local_connection_catalog,
+)
 from wisp.auth.storage import (
     JsonAuthStore,
 )
@@ -36,6 +43,10 @@ from wisp.events import (
     QueueUpdated,
     RpcCommandFinished,
     RpcCommandsReported,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
+    RpcDeviceCodeProgressReported,
+    RpcDeviceCodeReported,
     RpcMcpStatusReported,
     RpcMessageSnapshot,
     RpcMessagesReported,
@@ -139,6 +150,20 @@ class TuiController(Protocol):
     async def get_commands(self, *, command_id: str | None = None) -> str: ...
 
     async def get_model_catalog(self, *, command_id: str | None = None) -> str: ...
+
+    async def get_connection_catalog(self, *, command_id: str | None = None) -> str: ...
+
+    async def store_api_key(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        command_id: str | None = None,
+    ) -> str: ...
+
+    async def disconnect_provider(self, provider: str, *, command_id: str | None = None) -> str: ...
+
+    async def begin_device_code(self, provider: str, *, command_id: str | None = None) -> str: ...
 
     async def get_skills(self, *, command_id: str | None = None) -> str: ...
 
@@ -325,6 +350,20 @@ class _PendingSessionSwitch:
 
 
 @dataclass
+class _PendingConnectionMutation:
+    command_id: str
+    command_type: str
+    provider: str
+    wait: bool = False
+    report: RpcConnectionCatalogReported | None = None
+    device_code: RpcDeviceCodeReported | None = None
+    progress_attempt: int = 0
+    completion: RpcCommandFinished | None = None
+    error: str | None = None
+    done: anyio.Event = field(default_factory=anyio.Event)
+
+
+@dataclass
 class _HistoryPagination:
     """Cursor and in-flight command state for one mounted transcript history."""
 
@@ -387,10 +426,17 @@ class TuiShell:
         self._local_queue_submissions: list[tuple[QueueKind, TuiSubmission]] = []
         self._pending_queue_restore: _PendingQueueRestore | None = None
         self.model_catalog: RpcModelCatalogSnapshot | None = None
+        self.connection_catalog: tuple[ConnectionProviderStatus, ...] | None = None
         self.current_effort = effort
         self._pending_model_catalog_command_id: str | None = None
         self._pending_model_catalog_report: RpcModelCatalogReported | None = None
         self._pending_model_catalog_completion: RpcCommandFinished | None = None
+        self._pending_connection_catalog_command_id: str | None = None
+        self._pending_connection_catalog_report: RpcConnectionCatalogReported | None = None
+        self._pending_connection_catalog_completion: RpcCommandFinished | None = None
+        self._pending_connection_mutations: dict[str, _PendingConnectionMutation] = {}
+        self._connection_catalog_error: str | None = None
+        self._openai_compatible_provider = openai_compatible_provider
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_context_status_command_id: str | None = None
         self.pending_context_status_received = False
@@ -455,13 +501,14 @@ class TuiShell:
         self._update_cancel_scope: anyio.CancelScope | None = None
         self._signal_send: MemoryObjectSendStream[_TuiSignal] | None = None
         self._exit_reason = TuiExitReason.exited
-        # Credential commands read auth_store lazily (it is rebound on a trusted-
-        # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
             self.renderer,
-            lambda: self.auth_store,
+            self._current_connection_catalog,
             self._default_auth_provider,
-            openai_compatible_provider,
+            store_api_key=self._store_api_key,
+            disconnect_provider=self._disconnect_provider,
+            begin_device_code=self._begin_device_code,
+            openai_compatible_provider=openai_compatible_provider,
         )
         self._call_renderer_optional(
             "set_connect_api_key_hook",
@@ -470,6 +517,10 @@ class TuiShell:
         self._call_renderer_optional(
             "set_connect_oauth_hook",
             self._auth.connect_oauth,
+        )
+        self._call_renderer_optional(
+            "set_connect_cancel_hook",
+            lambda: self._cancel_connect("Provider connection cancelled."),
         )
         self._call_renderer_optional(
             "set_update_action_hook",
@@ -499,6 +550,7 @@ class TuiShell:
                 if await self._hydrate_model_catalog(receive):
                     task_group.cancel_scope.cancel()
                     return self._exit_reason
+                await self._request_connection_catalog()
                 if await self._hydrate_command_catalog(receive):
                     task_group.cancel_scope.cancel()
                     return self._exit_reason
@@ -800,6 +852,214 @@ class TuiShell:
         self._pending_model_catalog_command_id = None
         self._pending_model_catalog_report = None
         self._pending_model_catalog_completion = None
+
+    async def _hydrate_connection_catalog(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
+        if not await self._request_connection_catalog():
+            return False
+        while self._pending_connection_catalog_command_id is not None:
+            signal = await receive.receive()
+            if isinstance(signal, _RpcEvent):
+                if await self._handle_rpc_event(signal.event):
+                    return True
+                continue
+            if isinstance(signal, _RpcEventsClosed):
+                return self._handle_rpc_closed(
+                    signal,
+                    pending_command_id=self._pending_connection_catalog_command_id,
+                )
+            if await self._handle_signal(signal):
+                return True
+        return False
+
+    async def _request_connection_catalog(self) -> bool:
+        if self._pending_connection_catalog_command_id is not None:
+            return True
+        try:
+            command_id = await self.controller.get_connection_catalog()
+        except Exception as extra:  # noqa: BLE001 - discovery is non-fatal
+            self._connection_catalog_error = str(extra)
+            self.renderer.notice(f"Connection catalog unavailable: {extra}")
+            self.connection_catalog = self._safe_fallback_connection_catalog()
+            return False
+        self._pending_connection_catalog_command_id = command_id
+        self._pending_connection_catalog_report = None
+        self._pending_connection_catalog_completion = None
+        return True
+
+    def _observe_connection_catalog_event(self, event: KnownWispEvent) -> bool:
+        command_id = self._pending_connection_catalog_command_id
+        if command_id is None:
+            return False
+        if isinstance(event, RpcConnectionCatalogReported) and event.command_id == command_id:
+            if self._pending_connection_catalog_report is None:
+                self._pending_connection_catalog_report = event
+        elif isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+            if self._pending_connection_catalog_completion is None:
+                self._pending_connection_catalog_completion = event
+        else:
+            return False
+        completion = self._pending_connection_catalog_completion
+        if completion is not None and not completion.ok:
+            self._connection_catalog_error = completion.error or "request failed"
+            self.renderer.notice(
+                f"Connection catalog unavailable: {self._connection_catalog_error}"
+            )
+            self.connection_catalog = self._safe_fallback_connection_catalog()
+            self._clear_connection_catalog_request()
+        elif completion is not None and self._pending_connection_catalog_report is not None:
+            self._connection_catalog_error = None
+            self._adopt_connection_catalog(self._pending_connection_catalog_report.catalog)
+            self._clear_connection_catalog_request()
+        return True
+
+    def _adopt_connection_catalog(self, catalog: RpcConnectionCatalogSnapshot) -> None:
+        self.connection_catalog = tuple(
+            ConnectionProviderStatus(
+                id=family.id,
+                label=family.label,
+                methods=tuple(
+                    ConnectionMethodStatus(
+                        provider=method.provider,
+                        label=method.label,
+                        kind=method.kind,
+                        source=method.source,
+                        environment_variable=method.environment_variable,
+                        oauth_expires_at=method.oauth_expires_at,
+                        has_stored_credential=method.has_stored_credential,
+                    )
+                    for method in family.methods
+                ),
+            )
+            for family in catalog.providers
+        )
+
+    def _clear_connection_catalog_request(self) -> None:
+        self._pending_connection_catalog_command_id = None
+        self._pending_connection_catalog_report = None
+        self._pending_connection_catalog_completion = None
+
+    def _current_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
+        if self._connection_catalog_error is not None:
+            raise RuntimeError(self._connection_catalog_error)
+        if self.connection_catalog is not None:
+            return self.connection_catalog
+        return self._fallback_connection_catalog()
+
+    def _fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
+        return local_connection_catalog(
+            self.auth_store,
+            openai_compatible_provider=self._openai_compatible_provider,
+        )
+
+    def _safe_fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
+        try:
+            return self._fallback_connection_catalog()
+        except Exception:
+            return ()
+
+    async def _store_api_key(self, provider: str, api_key: str) -> None:
+        command_id = self._next_command_id("store-api-key")
+        await self._send_connection_mutation(
+            command_id,
+            "store_api_key",
+            provider,
+            wait=True,
+            sender=lambda: self.controller.store_api_key(provider, api_key, command_id=command_id),
+        )
+
+    async def _disconnect_provider(self, provider: str) -> None:
+        command_id = self._next_command_id("disconnect-provider")
+        await self._send_connection_mutation(
+            command_id,
+            "disconnect_provider",
+            provider,
+            wait=True,
+            sender=lambda: self.controller.disconnect_provider(provider, command_id=command_id),
+        )
+
+    async def _begin_device_code(self, provider: str) -> None:
+        command_id = self._next_command_id("device-code")
+        await self._send_connection_mutation(
+            command_id,
+            "begin_device_code",
+            provider,
+            wait=True,
+            sender=lambda: self.controller.begin_device_code(provider, command_id=command_id),
+        )
+
+    async def _send_connection_mutation(
+        self,
+        command_id: str,
+        command_type: str,
+        provider: str,
+        *,
+        wait: bool,
+        sender: Callable[[], Awaitable[str]],
+    ) -> None:
+        pending = _PendingConnectionMutation(
+            command_id=command_id,
+            command_type=command_type,
+            provider=provider,
+            wait=wait,
+        )
+        self._pending_connection_mutations[command_id] = pending
+        try:
+            await sender()
+        except Exception:
+            self._pending_connection_mutations.pop(command_id, None)
+            pending.done.set()
+            raise
+        if not wait:
+            return
+        await pending.done.wait()
+        if pending.error is not None:
+            raise RuntimeError(pending.error)
+
+    def _observe_connection_mutation_event(self, event: KnownWispEvent) -> bool:
+        command_id = getattr(event, "command_id", None)
+        if not isinstance(command_id, str):
+            return False
+        pending = self._pending_connection_mutations.get(command_id)
+        if pending is None:
+            return False
+        if isinstance(event, RpcConnectionCatalogReported):
+            pending.report = event
+        elif isinstance(event, RpcDeviceCodeReported):
+            pending.device_code = event
+            self._call_renderer_optional(
+                "connect_device_code",
+                event.verification_uri,
+                event.user_code,
+            )
+            self.renderer.notice(f"Open {event.verification_uri} and enter code {event.user_code}")
+        elif isinstance(event, RpcDeviceCodeProgressReported):
+            pending.progress_attempt = event.attempt
+            self._call_renderer_optional("connect_progress", event.attempt)
+        elif isinstance(event, RpcCommandFinished):
+            pending.completion = event
+            self._finish_connection_mutation(pending)
+        else:
+            return False
+        return True
+
+    def _finish_connection_mutation(self, pending: _PendingConnectionMutation) -> None:
+        completion = pending.completion
+        if completion is None:
+            return
+        if not completion.ok:
+            pending.error = completion.error or "request failed"
+        elif pending.report is not None:
+            self._adopt_connection_catalog(pending.report.catalog)
+        if pending.command_type == "begin_device_code" and pending.error is None:
+            self._call_renderer_optional("connect_completed", pending.provider)
+            self.renderer.notice(f"Connected: {pending.provider}")
+        elif pending.error is not None and not pending.wait:
+            self.renderer.command_error(pending.error)
+        self._pending_connection_mutations.pop(pending.command_id, None)
+        pending.done.set()
 
     def _publish_command_catalog(self) -> None:
         update_catalog = getattr(self.renderer, "command_catalog_updated", None)
@@ -1366,7 +1626,7 @@ class TuiShell:
             self._start_connect(command.args)
             return False
         if command.name is TuiSlashCommandName.disconnect:
-            self._auth.disconnect(command.args)
+            self._start_disconnect(command.args)
             return False
         if command.name is TuiSlashCommandName.provider:
             await self._handle_provider_command(command.args)
@@ -1756,6 +2016,17 @@ class TuiShell:
         self._connect_cancel_scope = cancel_scope
         task_group.start_soon(self._run_connect, args, cancel_scope)
 
+    def _start_disconnect(self, args: tuple[str, ...]) -> None:
+        if self._connect_cancel_scope is not None:
+            self.renderer.command_error("A provider connection is already in progress.")
+            return
+        task_group = self._task_group
+        if task_group is None:
+            raise RuntimeError("provider disconnections require an active TUI task group")
+        cancel_scope = anyio.CancelScope()
+        self._connect_cancel_scope = cancel_scope
+        task_group.start_soon(self._run_disconnect, args, cancel_scope)
+
     async def _handle_update_prompt_action(
         self,
         action: UpdatePromptAction,
@@ -1868,13 +2139,34 @@ class TuiShell:
             if self._connect_cancel_scope is cancel_scope:
                 self._connect_cancel_scope = None
 
+    async def _run_disconnect(
+        self,
+        args: tuple[str, ...],
+        cancel_scope: anyio.CancelScope,
+    ) -> None:
+        try:
+            with cancel_scope:
+                await self._auth.disconnect(args)
+        finally:
+            if self._connect_cancel_scope is cancel_scope:
+                self._connect_cancel_scope = None
+
     def _cancel_connect(self, message: str) -> bool:
         cancel_scope = self._connect_cancel_scope
-        if cancel_scope is None:
+        pending_device_codes = tuple(
+            pending.command_id
+            for pending in self._pending_connection_mutations.values()
+            if pending.command_type == "begin_device_code"
+        )
+        if cancel_scope is None and not pending_device_codes:
             return False
-        if not cancel_scope.cancel_called:
+        if cancel_scope is not None and not cancel_scope.cancel_called:
             cancel_scope.cancel()
-            self.renderer.notice(message)
+        task_group = self._task_group
+        if task_group is not None:
+            for command_id in pending_device_codes:
+                task_group.start_soon(self.controller.cancel, command_id)
+        self.renderer.notice(message)
         return True
 
     async def _start_init(self) -> bool:
@@ -2128,6 +2420,10 @@ class TuiShell:
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
         if self._observe_model_catalog_event(event):
+            return False
+        if self._observe_connection_catalog_event(event):
+            return False
+        if self._observe_connection_mutation_event(event):
             return False
         if isinstance(event, RpcModelCatalogReported):
             pending_configure = self.pending_configures.get(event.command_id)
@@ -2417,6 +2713,8 @@ class TuiShell:
             # ProjectConfigApplied.effort's docstring explains in more detail.
             self.current_effort = event.effort
             self.auth_store = JsonAuthStore(event.auth_path)
+            self.connection_catalog = None
+            await self._request_connection_catalog()
             # The credential file just moved, so the `@`-picker's startup policy
             # snapshot is now stale and would keep offering the new auth file for
             # mention while the agent's tool context protects it. Hand the renderer

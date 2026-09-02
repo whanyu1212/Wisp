@@ -72,7 +72,7 @@ def test_handshake_capabilities_must_be_unique_and_required_must_be_supported() 
     ("protocol_range", "event_range", "message"),
     [
         ((2, 1), (EVENT_SCHEMA_VERSION, EVENT_SCHEMA_VERSION), "minimum protocol version"),
-        ((1, 1), (35, 34), "minimum event schema version"),
+        ((1, 1), (36, 35), "minimum event schema version"),
     ],
 )
 def test_client_hello_rejects_inverted_ranges(
@@ -142,8 +142,8 @@ def test_server_hello_requires_and_reports_the_complete_contract() -> None:
     with pytest.raises(ValidationError, match="protocol_version"):
         RpcHandshakeResponseAdapter.validate_json(
             '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
-            '"event_schema_version":35,"min_protocol_version":3,'
-            '"max_protocol_version":3,"capabilities":[],"limits":'
+            '"event_schema_version":36,"min_protocol_version":4,'
+            '"max_protocol_version":4,"capabilities":[],"limits":'
             '{"max_client_frame_bytes":1024,"max_server_frame_bytes":1024}}'
         )
 
@@ -173,12 +173,12 @@ def test_negotiation_selects_highest_common_versions_and_capability_intersection
     ("client", "backend_capabilities", "expected_code"),
     [
         (
-            _client_hello(min_protocol_version=4, max_protocol_version=4),
+            _client_hello(min_protocol_version=5, max_protocol_version=5),
             ("streaming.text",),
             "protocol_version_mismatch",
         ),
         (
-            _client_hello(min_event_schema_version=36, max_event_schema_version=36),
+            _client_hello(min_event_schema_version=37, max_event_schema_version=37),
             ("streaming.text",),
             "event_schema_version_mismatch",
         ),
@@ -213,8 +213,8 @@ def test_negotiation_returns_bounded_structured_rejections(
 def test_server_handshake_adapter_parses_complete_success_and_rejection() -> None:
     success = RpcHandshakeResponseAdapter.validate_json(
         '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
-        '"protocol_version":3,"event_schema_version":35,'
-        '"min_protocol_version":3,"max_protocol_version":3,'
+        '"protocol_version":4,"event_schema_version":36,'
+        '"min_protocol_version":4,"max_protocol_version":4,'
         '"capabilities":[],"limits":{"max_client_frame_bytes":1024,'
         '"max_server_frame_bytes":2048}}'
     )
@@ -222,7 +222,7 @@ def test_server_handshake_adapter_parses_complete_success_and_rejection() -> Non
         '{"type":"rpc.handshake.rejected","code":"protocol_version_mismatch",'
         '"message":"No compatible live RPC protocol version.",'
         '"backend_package_version":"0.1.0","min_protocol_version":1,'
-        '"max_protocol_version":1,"event_schema_version":35}'
+        '"max_protocol_version":1,"event_schema_version":36}'
     )
 
     assert isinstance(success, RpcHandshakeAccepted)

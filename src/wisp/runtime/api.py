@@ -7,6 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from wisp.auth.storage import JsonAuthStore
 from wisp.events import WispEvent
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry
@@ -126,6 +127,8 @@ class WispRuntime:
         repr=False,
     )
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
+    auth_store: JsonAuthStore | None = field(default=None, repr=False)
+    openai_compatible_provider: str = "openai-compatible"
     startup_events: tuple[WispEvent, ...] = ()
     unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
@@ -313,6 +316,13 @@ class WispRuntime:
             ),
         ]
         self.providers.replace_all(providers, order=order)
+        if candidate.auth_store is not None:
+            object.__setattr__(self, "auth_store", candidate.auth_store)
+            object.__setattr__(
+                self,
+                "openai_compatible_provider",
+                candidate.openai_compatible_provider,
+            )
         self._configured_providers.clear()
         self._configured_providers.update(adopted)
         self._configured_names.clear()

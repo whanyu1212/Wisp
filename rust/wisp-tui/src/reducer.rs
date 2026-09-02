@@ -3,6 +3,7 @@
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
+use wisp_protocol::events::{ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress};
 
 use crate::tool_cards::{BoundedText, ToolCallInput, ToolResultInput, bounded_identity};
 pub use crate::tool_detail::ToolDetailSource;
@@ -27,6 +28,7 @@ const SESSION_LABEL_MAX_BYTES: usize = 512;
 const SESSION_UPDATED_AT_MAX_BYTES: usize = 128;
 const SESSION_ENTRY_COUNT_MAX: u32 = 1_000_000_000;
 const SESSION_NOTICE_MAX_BYTES: usize = 1024;
+pub const API_KEY_MAX_BYTES: usize = 8_192;
 pub const QUEUE_MESSAGE_LIMIT: usize = 100;
 pub const QUEUE_CONTENT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 
@@ -183,6 +185,58 @@ enum HistoryRequestKind {
 pub struct SessionCompletion {
     pub ok: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ApiKey(String);
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ApiKey(<redacted>)")
+    }
+}
+
+impl ApiKey {
+    pub fn new(value: String) -> Option<Self> {
+        (!value.trim().is_empty() && value.len() <= API_KEY_MAX_BYTES).then_some(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub struct SecretCommand(WispTypedClientRpcCommands);
+
+impl std::fmt::Debug for SecretCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretCommand(<redacted>)")
+    }
+}
+
+impl SecretCommand {
+    pub(crate) fn into_inner(self) -> WispTypedClientRpcCommands {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ConnectionOperation {
+    Catalog {
+        command_id: String,
+        command_type: &'static str,
+        report: Option<ConnectionCatalogSnapshot>,
+        completion: Option<SessionCompletion>,
+    },
+    DeviceCode {
+        command_id: String,
+        provider: String,
+        report: Option<ConnectionCatalogSnapshot>,
+        challenge: Option<DeviceCodeChallenge>,
+        progress: Option<DeviceCodeProgress>,
+        completion: Option<SessionCompletion>,
+        cancel_requested: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -559,6 +613,8 @@ pub struct UiState {
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
     pub session_operation: Option<SessionOperation>,
+    pub connection_catalog: ConnectionCatalogSnapshot,
+    connection_operation: Option<ConnectionOperation>,
     pub queue: QueueState,
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
@@ -601,6 +657,10 @@ impl UiState {
             last_session: None,
             selected_session: None,
             session_operation: None,
+            connection_catalog: ConnectionCatalogSnapshot {
+                providers: Vec::new(),
+            },
+            connection_operation: None,
             queue: QueueState::default(),
             current_command: None,
             pending_approval: None,
@@ -751,6 +811,10 @@ pub enum CommandKind {
     GetSessionTree,
     NavigateSessionTree,
     UnrevertSessionTree,
+    GetConnectionCatalog,
+    StoreApiKey,
+    DisconnectProvider,
+    BeginDeviceCode,
 }
 
 impl CommandKind {
@@ -775,6 +839,10 @@ impl CommandKind {
             Self::GetSessionTree => "get_session_tree",
             Self::NavigateSessionTree => "navigate_session_tree",
             Self::UnrevertSessionTree => "unrevert_session_tree",
+            Self::GetConnectionCatalog => "get_connection_catalog",
+            Self::StoreApiKey => "store_api_key",
+            Self::DisconnectProvider => "disconnect_provider",
+            Self::BeginDeviceCode => "begin_device_code",
         }
     }
 }
@@ -821,6 +889,18 @@ pub enum BackendEvent {
         provider: String,
         model: Option<String>,
         effort: Option<String>,
+    },
+    ConnectionCatalogReported {
+        command_id: String,
+        catalog: ConnectionCatalogSnapshot,
+    },
+    DeviceCodeReported {
+        command_id: String,
+        challenge: DeviceCodeChallenge,
+    },
+    DeviceCodeProgress {
+        command_id: String,
+        progress: DeviceCodeProgress,
     },
     QueueUpdated {
         steering: Vec<String>,
@@ -897,6 +977,19 @@ pub enum UiAction {
     RestoreNewestQueueDraft,
     RefreshQueueState,
     StartupHydration,
+    OpenConnectionPanel,
+    LoadConnectionCatalog,
+    StoreApiKey {
+        provider: String,
+        api_key: ApiKey,
+    },
+    DisconnectProvider {
+        provider: String,
+    },
+    BeginDeviceCode {
+        provider: String,
+    },
+    CancelDeviceCode,
     LoadSessionCatalog,
     SelectSession {
         session_id: String,
@@ -954,6 +1047,12 @@ pub enum UiAction {
 #[derive(Debug)]
 pub enum UiEffect {
     SendCommand(WispTypedClientRpcCommands),
+    SendSecretCommand(SecretCommand),
+    ShowConnectionPanel(ConnectionCatalogSnapshot),
+    ConnectionCatalogUpdated(ConnectionCatalogSnapshot),
+    ShowDeviceCode(DeviceCodeChallenge),
+    DeviceCodeProgress(DeviceCodeProgress),
+    FinishDeviceCode,
     RestoreDraft {
         content: String,
         local_order: Option<u64>,
@@ -1007,6 +1106,15 @@ pub fn reduce(
         UiAction::RestoreNewestQueueDraft => restore_newest_queue_draft(state, ids),
         UiAction::RefreshQueueState => refresh_queue_state(ids),
         UiAction::StartupHydration => start_startup_hydration(state, ids),
+        UiAction::OpenConnectionPanel => Ok(vec![
+            UiEffect::ShowConnectionPanel(state.connection_catalog.clone()),
+            UiEffect::RequestRender,
+        ]),
+        UiAction::LoadConnectionCatalog => load_connection_catalog(state, ids),
+        UiAction::StoreApiKey { provider, api_key } => store_api_key(state, provider, api_key, ids),
+        UiAction::DisconnectProvider { provider } => disconnect_provider(state, provider, ids),
+        UiAction::BeginDeviceCode { provider } => begin_device_code(state, provider, ids),
+        UiAction::CancelDeviceCode => cancel_device_code(state, ids),
         UiAction::LoadSessionCatalog => load_session_catalog(state, ids),
         UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
         UiAction::NewSession => new_session(state, ids),
@@ -1228,6 +1336,180 @@ fn start_startup_hydration(
         report: None,
         completion: None,
     });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn connection_busy() -> Vec<UiEffect> {
+    vec![
+        UiEffect::Notice("Wait for the current connection request to finish.".into()),
+        UiEffect::RequestRender,
+    ]
+}
+
+fn valid_connection_provider(provider: &str) -> bool {
+    !provider.is_empty() && provider.len() <= 128
+}
+
+fn connection_provider_error() -> Vec<UiEffect> {
+    vec![
+        UiEffect::Notice("Provider ID is empty or exceeds the 128-byte limit.".into()),
+        UiEffect::RequestRender,
+    ]
+}
+
+fn start_connection_catalog(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<UiEffect, ProtocolDecodeError> {
+    let id = ids.next_id(CommandKind::GetConnectionCatalog);
+    let command = WispTypedClientRpcCommands::get_connection_catalog(&id)?;
+    state.connection_operation = Some(ConnectionOperation::Catalog {
+        command_id: id,
+        command_type: "get_connection_catalog",
+        report: None,
+        completion: None,
+    });
+    Ok(UiEffect::SendCommand(command))
+}
+
+fn load_connection_catalog(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.connection_operation.is_some() {
+        return Ok(connection_busy());
+    }
+    Ok(vec![
+        start_connection_catalog(state, ids)?,
+        UiEffect::RequestRender,
+    ])
+}
+
+fn reload_connection_catalog_after_configuration(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let empty = ConnectionCatalogSnapshot {
+        providers: Vec::new(),
+    };
+    state.connection_catalog = empty.clone();
+    Ok(vec![
+        start_connection_catalog(state, ids)?,
+        UiEffect::ConnectionCatalogUpdated(empty),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn store_api_key(
+    state: &mut UiState,
+    provider: String,
+    api_key: ApiKey,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.connection_operation.is_some() {
+        return Ok(connection_busy());
+    }
+    if !valid_connection_provider(&provider) {
+        return Ok(connection_provider_error());
+    }
+    let id = ids.next_id(CommandKind::StoreApiKey);
+    let command = WispTypedClientRpcCommands::store_api_key(&id, &provider, api_key.as_str())?;
+    drop(api_key);
+    state.connection_operation = Some(ConnectionOperation::Catalog {
+        command_id: id,
+        command_type: "store_api_key",
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendSecretCommand(SecretCommand(command)),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn disconnect_provider(
+    state: &mut UiState,
+    provider: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.connection_operation.is_some() {
+        return Ok(connection_busy());
+    }
+    if !valid_connection_provider(&provider) {
+        return Ok(connection_provider_error());
+    }
+    let id = ids.next_id(CommandKind::DisconnectProvider);
+    let command = WispTypedClientRpcCommands::disconnect_provider(&id, &provider)?;
+    state.connection_operation = Some(ConnectionOperation::Catalog {
+        command_id: id,
+        command_type: "disconnect_provider",
+        report: None,
+        completion: None,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn begin_device_code(
+    state: &mut UiState,
+    provider: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.connection_operation.is_some() {
+        return Ok(connection_busy());
+    }
+    if !valid_connection_provider(&provider) {
+        return Ok(connection_provider_error());
+    }
+    let id = ids.next_id(CommandKind::BeginDeviceCode);
+    let command = WispTypedClientRpcCommands::begin_device_code(&id, &provider)?;
+    state.connection_operation = Some(ConnectionOperation::DeviceCode {
+        command_id: id,
+        provider,
+        report: None,
+        challenge: None,
+        progress: None,
+        completion: None,
+        cancel_requested: false,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn cancel_device_code(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    let Some(target_id) =
+        state
+            .connection_operation
+            .as_ref()
+            .and_then(|operation| match operation {
+                ConnectionOperation::DeviceCode {
+                    command_id,
+                    cancel_requested: false,
+                    ..
+                } => Some(command_id.clone()),
+                _ => None,
+            })
+    else {
+        return Ok(Vec::new());
+    };
+    let id = ids.next_id(CommandKind::Cancel);
+    let command = WispTypedClientRpcCommands::cancel(&id, &target_id)?;
+    if let Some(ConnectionOperation::DeviceCode {
+        cancel_requested, ..
+    }) = state.connection_operation.as_mut()
+    {
+        *cancel_requested = true;
+    }
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -3027,6 +3309,208 @@ fn handle_queue_command_finished(
     Some(finish_pending_queue_restore(state))
 }
 
+fn connection_failure(operation: &str, error: Option<String>) -> Vec<UiEffect> {
+    let detail = error.unwrap_or_else(|| "backend reported failure".into());
+    vec![
+        UiEffect::Notice(bounded_session_text(
+            &format!("{operation} failed: {detail}"),
+            SESSION_NOTICE_MAX_BYTES,
+        )),
+        UiEffect::RequestRender,
+    ]
+}
+
+fn adopt_connection_catalog(
+    state: &mut UiState,
+    catalog: ConnectionCatalogSnapshot,
+) -> Vec<UiEffect> {
+    state.connection_catalog = catalog;
+    vec![
+        UiEffect::ConnectionCatalogUpdated(state.connection_catalog.clone()),
+        UiEffect::RequestRender,
+    ]
+}
+
+fn handle_connection_backend_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+) -> Option<Vec<UiEffect>> {
+    let operation = state.connection_operation.as_ref()?;
+    let belongs_to_operation = match (operation, event) {
+        (
+            ConnectionOperation::Catalog { command_id, .. }
+            | ConnectionOperation::DeviceCode { command_id, .. },
+            BackendEvent::ConnectionCatalogReported {
+                command_id: received,
+                ..
+            }
+            | BackendEvent::DeviceCodeReported {
+                command_id: received,
+                ..
+            }
+            | BackendEvent::DeviceCodeProgress {
+                command_id: received,
+                ..
+            },
+        ) => received == command_id,
+        (
+            ConnectionOperation::Catalog {
+                command_id,
+                command_type,
+                ..
+            },
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type: received_type,
+                ..
+            },
+        ) => received == command_id && received_type == command_type,
+        (
+            ConnectionOperation::DeviceCode { command_id, .. },
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ..
+            },
+        ) => received == command_id && command_type == "begin_device_code",
+        _ => false,
+    };
+    if !belongs_to_operation {
+        return None;
+    }
+    let mut operation = state.connection_operation.take().expect("checked above");
+    let mut effects = Vec::new();
+    match &mut operation {
+        ConnectionOperation::Catalog {
+            command_id,
+            command_type,
+            report,
+            completion,
+        } => match event {
+            BackendEvent::ConnectionCatalogReported {
+                command_id: received,
+                catalog,
+            } if received == command_id && report.is_none() => *report = Some(catalog.clone()),
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type: received_type,
+                ok,
+                error,
+            } if received == command_id
+                && received_type == command_type
+                && completion.is_none() =>
+            {
+                *completion = Some(SessionCompletion {
+                    ok: *ok,
+                    error: error.clone(),
+                });
+            }
+            _ => {}
+        },
+        ConnectionOperation::DeviceCode {
+            command_id,
+            provider,
+            report,
+            challenge,
+            progress,
+            completion,
+            ..
+        } => match event {
+            BackendEvent::ConnectionCatalogReported {
+                command_id: received,
+                catalog,
+            } if received == command_id && report.is_none() => *report = Some(catalog.clone()),
+            BackendEvent::DeviceCodeReported {
+                command_id: received,
+                challenge: received_challenge,
+            } if received == command_id
+                && received_challenge.provider == *provider
+                && challenge.is_none() =>
+            {
+                *challenge = Some(received_challenge.clone());
+                effects.push(UiEffect::ShowDeviceCode(received_challenge.clone()));
+                effects.push(UiEffect::RequestRender);
+            }
+            BackendEvent::DeviceCodeProgress {
+                command_id: received,
+                progress: received_progress,
+            } if received == command_id
+                && received_progress.provider == *provider
+                && progress
+                    .as_ref()
+                    .is_none_or(|previous| received_progress.attempt > previous.attempt) =>
+            {
+                *progress = Some(received_progress.clone());
+                effects.push(UiEffect::DeviceCodeProgress(received_progress.clone()));
+                effects.push(UiEffect::RequestRender);
+            }
+            BackendEvent::CommandFinished {
+                command_id: received,
+                command_type,
+                ok,
+                error,
+            } if received == command_id
+                && command_type == "begin_device_code"
+                && completion.is_none() =>
+            {
+                *completion = Some(SessionCompletion {
+                    ok: *ok,
+                    error: error.clone(),
+                });
+            }
+            _ => {}
+        },
+    }
+
+    match operation {
+        ConnectionOperation::Catalog {
+            completion: Some(SessionCompletion { ok: false, error }),
+            ..
+        } => Some(connection_failure("Connection request", error)),
+        ConnectionOperation::Catalog {
+            report: Some(report),
+            completion: Some(SessionCompletion { ok: true, .. }),
+            ..
+        } => {
+            effects.extend(adopt_connection_catalog(state, report));
+            Some(effects)
+        }
+        ConnectionOperation::DeviceCode {
+            completion: Some(SessionCompletion { ok: false, error }),
+            cancel_requested,
+            ..
+        } => {
+            effects.push(UiEffect::FinishDeviceCode);
+            if cancel_requested {
+                effects.push(UiEffect::Notice("Device login cancelled.".into()));
+                effects.push(UiEffect::RequestRender);
+            } else {
+                effects.extend(connection_failure("Device login", error));
+            }
+            Some(effects)
+        }
+        ConnectionOperation::DeviceCode {
+            provider,
+            report: Some(report),
+            completion: Some(SessionCompletion { ok: true, .. }),
+            ..
+        } => {
+            effects.extend(adopt_connection_catalog(state, report));
+            effects.push(UiEffect::FinishDeviceCode);
+            effects.push(UiEffect::Notice(bounded_session_text(
+                &format!("Connected: {provider}"),
+                SESSION_NOTICE_MAX_BYTES,
+            )));
+            effects.push(UiEffect::RequestRender);
+            Some(effects)
+        }
+        operation => {
+            state.connection_operation = Some(operation);
+            Some(effects)
+        }
+    }
+}
+
 fn handle_backend_event(
     state: &mut UiState,
     event: BackendEvent,
@@ -3042,6 +3526,9 @@ fn handle_backend_event(
         return Ok(effects);
     }
     if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
+        return Ok(effects);
+    }
+    if let Some(effects) = handle_connection_backend_event(state, &event) {
         return Ok(effects);
     }
     match event {
@@ -3142,7 +3629,7 @@ fn handle_backend_event(
             state.provider = Some(provider);
             state.model = model;
             state.effort = effort;
-            Ok(vec![UiEffect::RequestRender])
+            reload_connection_catalog_after_configuration(state, ids)
         }
         BackendEvent::QueueUpdated {
             steering,
@@ -3165,7 +3652,10 @@ fn handle_backend_event(
             state.queue.remove_first(kind, &content);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::SessionsReported { .. }
+        BackendEvent::ConnectionCatalogReported { .. }
+        | BackendEvent::DeviceCodeReported { .. }
+        | BackendEvent::DeviceCodeProgress { .. }
+        | BackendEvent::SessionsReported { .. }
         | BackendEvent::SessionSelected { .. }
         | BackendEvent::SessionNameChanged { .. }
         | BackendEvent::SessionCloned { .. }
@@ -3254,7 +3744,13 @@ mod tests {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
             UiEffect::SendCommittedHydration { command, .. } => Some(command.to_value().unwrap()),
             UiEffect::SendPostPromptSessionSync(command) => Some(command.to_value().unwrap()),
-            UiEffect::RestoreDraft { .. }
+            UiEffect::SendSecretCommand(_)
+            | UiEffect::ShowConnectionPanel(_)
+            | UiEffect::ConnectionCatalogUpdated(_)
+            | UiEffect::ShowDeviceCode(_)
+            | UiEffect::DeviceCodeProgress(_)
+            | UiEffect::FinishDeviceCode
+            | UiEffect::RestoreDraft { .. }
             | UiEffect::ShowSessionPicker { .. }
             | UiEffect::ShowSessionTreePage { .. }
             | UiEffect::CloseSessionTree
@@ -3684,7 +4180,7 @@ mod tests {
     fn live_event_projection_uses_validated_wire_fields() {
         let value = serde_json::json!({
             "type": "message.delta",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "turn": 1,
             "role": "assistant",
@@ -3700,6 +4196,56 @@ mod tests {
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
             }
+        );
+    }
+
+    #[test]
+    fn connection_events_project_sanitized_catalog_and_monotonic_progress() {
+        let catalog = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.connection_catalog",
+            "command_id": "connection-1",
+            "catalog": {"providers": [{
+                "id": "openai",
+                "label": "OpenAI",
+                "methods": [{
+                    "provider": "openai",
+                    "label": "API key",
+                    "kind": "api_key",
+                    "source": "environment",
+                    "environment_variable": "OPENAI_API_KEY",
+                    "oauth_expires_at": null,
+                    "has_stored_credential": false
+                }]
+            }]}
+        }))
+        .unwrap();
+        assert!(matches!(
+            catalog,
+            BackendEvent::ConnectionCatalogReported { command_id, ref catalog }
+            if command_id == "connection-1" && catalog.providers[0].methods[0].environment_variable.as_deref() == Some("OPENAI_API_KEY")
+        ));
+        let live = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.device_code.progress",
+            "schema_version": 36,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "command_id": "device-1",
+            "provider": "openai-codex",
+            "attempt": 2
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&live).unwrap(),
+            BackendEvent::DeviceCodeProgress { command_id, progress }
+            if command_id == "device-1" && progress.attempt == 2
+        ));
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.device_code.progress",
+                "command_id": "device-1",
+                "provider": "openai-codex",
+                "attempt": 10_001
+            }))
+            .is_err()
         );
     }
 
@@ -4193,7 +4739,7 @@ mod tests {
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-7",
             "name": "bash",
@@ -4531,7 +5077,7 @@ mod tests {
     fn live_trust_request_projection_preserves_request_identity() {
         let value = serde_json::json!({
             "type": "trust.requested",
-            "schema_version": 35,
+            "schema_version": 36,
             "timestamp": "2026-01-02T03:04:05Z",
             "request_id": "trust-7",
             "project_path": "/workspace"
@@ -4565,7 +5111,15 @@ mod tests {
         assert_eq!(state.provider.as_deref(), Some("anthropic"));
         assert_eq!(state.model.as_deref(), Some("claude-test"));
         assert_eq!(state.effort.as_deref(), Some("high"));
-        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+        assert!(state.connection_catalog.providers.is_empty());
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                UiEffect::SendCommand(_),
+                UiEffect::ConnectionCatalogUpdated(_),
+                UiEffect::RequestRender
+            ]
+        ));
     }
 
     #[test]
@@ -6167,6 +6721,254 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
         }));
+    }
+
+    fn connection_catalog(label: &str, source: &str) -> ConnectionCatalogSnapshot {
+        ConnectionCatalogSnapshot {
+            providers: vec![wisp_protocol::events::ConnectionProviderSnapshot {
+                id: "openai".into(),
+                label: label.into(),
+                methods: vec![wisp_protocol::events::ConnectionMethodSnapshot {
+                    provider: "openai".into(),
+                    label: "API key".into(),
+                    kind: "api_key".into(),
+                    source: source.into(),
+                    environment_variable: Some("OPENAI_API_KEY".into()),
+                    oauth_expires_at: None,
+                    has_stored_credential: source == "stored",
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn startup_and_refresh_commit_only_matching_connection_reports_and_finishes() {
+        let old = connection_catalog("Old", "missing");
+        let fresh = connection_catalog("Fresh", "environment");
+        let mut startup = UiState::unconfigured();
+        startup.connection_catalog = old.clone();
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut startup, UiAction::StartupHydration, &mut ids).unwrap();
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| command["type"] == "get_messages")
+        }));
+        let effects = reduce(&mut startup, UiAction::LoadConnectionCatalog, &mut ids).unwrap();
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| command["type"] == "get_connection_catalog")
+        }));
+
+        for finish_first in [false, true] {
+            let mut state = UiState::unconfigured();
+            state.connection_catalog = old.clone();
+            let mut ids = DeterministicIds::default();
+            reduce(&mut state, UiAction::LoadConnectionCatalog, &mut ids).unwrap();
+            let report = BackendEvent::ConnectionCatalogReported {
+                command_id: "get_connection_catalog-1".into(),
+                catalog: fresh.clone(),
+            };
+            let finished = finished("get_connection_catalog-1", "get_connection_catalog", true);
+            let events = if finish_first {
+                [finished, report]
+            } else {
+                [report, finished]
+            };
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "stale".into(),
+                    catalog: connection_catalog("Stale", "stored"),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.connection_catalog, old);
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(events[0].clone()),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.connection_catalog, old);
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(events[1].clone()),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.connection_catalog, fresh);
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                UiEffect::ConnectionCatalogUpdated(catalog) if catalog == &fresh
+            )));
+        }
+
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::LoadConnectionCatalog, &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                command_id: "get_connection_catalog-1".into(),
+                catalog: fresh,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "get_connection_catalog-1",
+                "get_connection_catalog",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ProjectConfigApplied {
+                provider: "openai".into(),
+                model: None,
+                effort: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| {
+                command["type"] == "get_connection_catalog"
+                    && command["id"] == "get_connection_catalog-2"
+            })
+        }));
+    }
+
+    #[test]
+    fn connection_secrets_are_redacted_and_device_progress_is_monotonic() {
+        let secret = "key-do-not-retain";
+        let action = UiAction::StoreApiKey {
+            provider: "openai".into(),
+            api_key: ApiKey::new(secret.into()).unwrap(),
+        };
+        assert!(!format!("{action:?}").contains(secret));
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, action, &mut ids).unwrap();
+        assert!(matches!(
+            effects.first(),
+            Some(UiEffect::SendSecretCommand(_))
+        ));
+        assert!(!format!("{state:?}").contains(secret));
+        assert!(!format!("{effects:?}").contains(secret));
+        assert!(state.transcript.entries().is_empty());
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::Notice(_)))
+        );
+
+        let mut device = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut device,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let challenge = DeviceCodeChallenge {
+            provider: "openai-codex".into(),
+            verification_uri: "https://example.test/device".into(),
+            user_code: "ABCD".into(),
+        };
+        let effects = reduce(
+            &mut device,
+            UiAction::BackendEvent(BackendEvent::DeviceCodeReported {
+                command_id: "begin_device_code-1".into(),
+                challenge: challenge.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::ShowDeviceCode(received) if received == &challenge
+        )));
+        let progress = DeviceCodeProgress {
+            provider: "openai-codex".into(),
+            attempt: 2,
+        };
+        assert!(reduce(
+            &mut device,
+            UiAction::BackendEvent(BackendEvent::DeviceCodeProgress {
+                command_id: "begin_device_code-1".into(),
+                progress: progress.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap()
+        .iter()
+        .any(|effect| matches!(effect, UiEffect::DeviceCodeProgress(received) if received == &progress)));
+        assert!(
+            reduce(
+                &mut device,
+                UiAction::BackendEvent(BackendEvent::DeviceCodeProgress {
+                    command_id: "begin_device_code-1".into(),
+                    progress,
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut device,
+                UiAction::BackendEvent(BackendEvent::DeviceCodeProgress {
+                    command_id: "stale".into(),
+                    progress: DeviceCodeProgress {
+                        provider: "openai-codex".into(),
+                        attempt: 3,
+                    },
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let effects = reduce(&mut device, UiAction::CancelDeviceCode, &mut ids).unwrap();
+        assert_eq!(
+            command_value(&effects[0]).unwrap(),
+            serde_json::json!({
+                "type": "cancel",
+                "id": "cancel-1",
+                "target_id": "begin_device_code-1",
+            })
+        );
+        let effects = reduce(
+            &mut device,
+            UiAction::BackendEvent(finished("begin_device_code-1", "begin_device_code", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::FinishDeviceCode))
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(notice) if notice == "Device login cancelled."
+        )));
     }
 
     #[test]

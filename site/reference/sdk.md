@@ -127,6 +127,10 @@ request. Completion and results arrive through `events()`.
 | `compact` | `(instructions: str \| None = None, *, command_id: str \| None = None)` | Compaction events |
 | `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
 | `get_model_catalog` | `(*, command_id: str \| None = None)` | `RpcModelCatalogReported` |
+| `get_connection_catalog` | `(*, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
+| `store_api_key` | `(provider: str, api_key: str, *, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
+| `disconnect_provider` | `(provider: str, *, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
+| `begin_device_code` | `(provider: str, *, command_id: str \| None = None)` | `RpcDeviceCodeReported`, zero or more `RpcDeviceCodeProgressReported`, then `RpcConnectionCatalogReported` |
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
@@ -150,6 +154,11 @@ current setting untouched; use `clear_effort=True` to restore the provider defau
 | `pop_queue` | `(kind: QueueKind, *, command_id: str \| None = None)` |
 | `clear_queue` | `(kind: QueueKind \| None = None, *, command_id: str \| None = None)` |
 | `cancel` | `(target_id: str, *, command_id: str \| None = None)` |
+
+Connection catalogs and progress events contain sanitized status only. API keys and OAuth tokens are
+write-only inputs and never appear in results, events, or session JSONL. `RpcDeviceCodeReported`
+intentionally exposes the short-lived user code and verification URL needed to complete login;
+clients must display them without logging or persistence.
 
 `QueueKind` is `"steering" | "follow_up"`. `QueueMode` is `"one_at_a_time" | "all"`.
 `cancel()` targets a running prompt or compaction command ID.

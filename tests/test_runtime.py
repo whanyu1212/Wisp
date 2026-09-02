@@ -7,7 +7,7 @@ import anyio
 import pytest
 
 import wisp.runtime.extensions as runtime_extensions
-from wisp.auth.storage import JsonAuthStore
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.events import AgentStarted
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
@@ -145,6 +145,28 @@ def test_configuration_refresh_adopts_a_candidate_that_never_built_its_provider(
         }
 
         assert adopted["anthropic"] is not stale
+
+    anyio.run(scenario)
+
+
+def test_configuration_refresh_adopts_the_authoritative_auth_store(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from wisp.runtime.extensions import build_runtime
+
+        startup_auth = tmp_path / "startup-auth.json"
+        trusted_auth = tmp_path / "trusted-auth.json"
+        live = await build_runtime(auth_path=startup_auth)
+        candidate = await build_runtime(auth_path=trusted_auth)
+
+        await live.adopt_provider_configuration(candidate)
+        assert live.auth_store is not None
+        live.auth_store.set("anthropic", ApiKeyCredential(key="trusted-key"))
+
+        assert live.auth_store.path == trusted_auth
+        assert JsonAuthStore(startup_auth).get("anthropic") is None
+        assert JsonAuthStore(trusted_auth).get("anthropic") == ApiKeyCredential(key="trusted-key")
+        await candidate.aclose()
+        await live.aclose()
 
     anyio.run(scenario)
 

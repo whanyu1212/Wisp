@@ -36,11 +36,13 @@ class DeviceCodeInfo:
 
 
 type DeviceCodeCallback = Callable[[DeviceCodeInfo], None]
+type DeviceCodeProgressCallback = Callable[[int], None]
 
 
 async def login_openai_codex_device_code(
     *,
     on_device_code: DeviceCodeCallback | None = None,
+    on_progress: DeviceCodeProgressCallback | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> OAuthCredential:
     owns_client = client is None
@@ -78,6 +80,7 @@ async def login_openai_codex_device_code(
             device_auth_id=device_auth_id,
             user_code=user_code,
             interval_seconds=interval_seconds,
+            on_progress=on_progress,
         )
         return await _exchange_authorization_code(
             authorization_code,
@@ -128,10 +131,13 @@ async def _poll_device_code(
     device_auth_id: str,
     user_code: str,
     interval_seconds: float,
+    on_progress: DeviceCodeProgressCallback | None = None,
 ) -> tuple[str, str]:
     deadline = time.monotonic() + DEVICE_CODE_TIMEOUT_SECONDS
     interval = max(1.0, interval_seconds)
+    attempt = 0
     while time.monotonic() < deadline:
+        attempt += 1
         response = await client.post(
             DEVICE_TOKEN_URL,
             json={"device_auth_id": device_auth_id, "user_code": user_code},
@@ -155,6 +161,8 @@ async def _poll_device_code(
                     f"OpenAI Codex device auth failed with status {response.status_code}: "
                     f"{response.text}"
                 )
+        if on_progress is not None:
+            on_progress(attempt)
         await anyio.sleep(interval)
     raise RuntimeError("OpenAI Codex device code login timed out")
 
