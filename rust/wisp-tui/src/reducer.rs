@@ -615,6 +615,7 @@ pub struct UiState {
     pub session_operation: Option<SessionOperation>,
     pub connection_catalog: ConnectionCatalogSnapshot,
     connection_operation: Option<ConnectionOperation>,
+    connection_catalog_reload_pending: bool,
     pub queue: QueueState,
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
@@ -661,6 +662,7 @@ impl UiState {
                 providers: Vec::new(),
             },
             connection_operation: None,
+            connection_catalog_reload_pending: false,
             queue: QueueState::default(),
             current_command: None,
             pending_approval: None,
@@ -1392,6 +1394,11 @@ fn reload_connection_catalog_after_configuration(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.connection_operation.is_some() {
+        state.connection_catalog_reload_pending = true;
+        return Ok(vec![UiEffect::RequestRender]);
+    }
+    state.connection_catalog_reload_pending = false;
     let empty = ConnectionCatalogSnapshot {
         providers: Vec::new(),
     };
@@ -3528,7 +3535,10 @@ fn handle_backend_event(
     if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
         return Ok(effects);
     }
-    if let Some(effects) = handle_connection_backend_event(state, &event) {
+    if let Some(mut effects) = handle_connection_backend_event(state, &event) {
+        if state.connection_operation.is_none() && state.connection_catalog_reload_pending {
+            effects.extend(reload_connection_catalog_after_configuration(state, ids)?);
+        }
         return Ok(effects);
     }
     match event {
@@ -6838,6 +6848,80 @@ mod tests {
             command_value(effect).is_some_and(|command| {
                 command["type"] == "get_connection_catalog"
                     && command["id"] == "get_connection_catalog-2"
+            })
+        }));
+    }
+
+    #[test]
+    fn project_config_applied_defers_catalog_reload_during_device_login() {
+        let mut state = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ProjectConfigApplied {
+                provider: "openai".into(),
+                model: None,
+                effort: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.connection_catalog_reload_pending);
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
+        );
+
+        let challenge = DeviceCodeChallenge {
+            provider: "openai-codex".into(),
+            verification_uri: "https://example.test/device".into(),
+            user_code: "ABCD".into(),
+        };
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::DeviceCodeReported {
+                command_id: "begin_device_code-1".into(),
+                challenge: challenge.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::ShowDeviceCode(received) if received == &challenge
+        )));
+
+        let effects = reduce(&mut state, UiAction::CancelDeviceCode, &mut ids).unwrap();
+        assert_eq!(
+            command_value(&effects[0]).unwrap(),
+            serde_json::json!({
+                "type": "cancel",
+                "id": "cancel-1",
+                "target_id": "begin_device_code-1",
+            })
+        );
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("begin_device_code-1", "begin_device_code", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(!state.connection_catalog_reload_pending);
+        assert!(effects.iter().any(|effect| {
+            command_value(effect).is_some_and(|command| {
+                command["type"] == "get_connection_catalog"
+                    && command["id"] == "get_connection_catalog-1"
             })
         }));
     }
