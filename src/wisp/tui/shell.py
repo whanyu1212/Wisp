@@ -942,10 +942,10 @@ class TuiShell:
         self._pending_connection_catalog_completion = None
 
     def _current_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
-        if self._connection_catalog_error is not None:
-            raise RuntimeError(self._connection_catalog_error)
         if self.connection_catalog is not None:
             return self.connection_catalog
+        if self._connection_catalog_error is not None:
+            raise RuntimeError(self._connection_catalog_error)
         return self._fallback_connection_catalog()
 
     def _fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
@@ -954,11 +954,13 @@ class TuiShell:
             openai_compatible_provider=self._openai_compatible_provider,
         )
 
-    def _safe_fallback_connection_catalog(self) -> tuple[ConnectionProviderStatus, ...]:
+    def _safe_fallback_connection_catalog(
+        self,
+    ) -> tuple[ConnectionProviderStatus, ...] | None:
         try:
             return self._fallback_connection_catalog()
         except Exception:
-            return ()
+            return None
 
     async def _store_api_key(self, provider: str, api_key: str) -> None:
         command_id = self._next_command_id("store-api-key")

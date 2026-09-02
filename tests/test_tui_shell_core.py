@@ -3262,6 +3262,31 @@ def test_tui_shell_requests_and_renders_mcp_status() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_connection_catalog_failure_keeps_fallback_usable(tmp_path: Path) -> None:
+    shell = TuiShell(
+        ScriptedController(),
+        auth_path=tmp_path / "auth.json",
+    )
+    shell._pending_connection_catalog_command_id = "connection-catalog-1"
+
+    assert shell._observe_connection_catalog_event(
+        RpcCommandFinished(
+            command_id="connection-catalog-1",
+            command_type="get_connection_catalog",
+            ok=False,
+            error="temporary backend failure",
+        )
+    )
+
+    assert shell._connection_catalog_error == "temporary backend failure"
+    assert shell.connection_catalog
+    assert shell._current_connection_catalog() == shell.connection_catalog
+
+    shell._connection_catalog_error = None
+    shell.connection_catalog = ()
+    assert shell._current_connection_catalog() == ()
+
+
 def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:
     async def run() -> None:
         controller = ScriptedController(
