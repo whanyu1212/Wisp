@@ -526,7 +526,8 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and b"Type a prompt below to start." in output
-                and command_types[:2] == ["get_messages", "get_queue_state"]
+                and command_types[:3]
+                == ["get_messages", "get_connection_catalog", "get_queue_state"]
             ):
                 os.write(terminal_fd, b"prompt-kept-running\r")
                 phase = "prompt sent"
@@ -593,7 +594,11 @@ for line in sys.stdin:
         if command["type"] in {"prompt", "steer", "follow_up", "pop_queue", "cancel", "shutdown"}
     ]
     assert phase == "shutdown sent", bytes(output)
-    assert command_types[:2] == ["get_messages", "get_queue_state"]
+    assert command_types[:3] == [
+        "get_messages",
+        "get_connection_catalog",
+        "get_queue_state",
+    ]
     assert [command["type"] for command in lifecycle_commands] == [
         "prompt",
         "steer",
@@ -857,7 +862,8 @@ for line in sys.stdin:
             now = time.monotonic()
             if (
                 phase == "startup"
-                and command_types[:2] == ["get_messages", "get_queue_state"]
+                and command_types[:3]
+                == ["get_messages", "get_connection_catalog", "get_queue_state"]
                 and b"Type a prompt below to start." in output
             ):
                 os.write(terminal_fd, b"/name client-requested\r")
