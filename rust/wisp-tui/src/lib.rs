@@ -1471,6 +1471,11 @@ impl LiveUi {
                     .await
             }
             ConnectionPanelAction::BeginDeviceCode { provider } => {
+                if self.state.connection_request_active() {
+                    self.notice = Some("Wait for the current connection request to finish.".into());
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
                 if let Some(panel) = self.connection_panel.as_mut() {
                     panel.begin_device_code(provider.clone());
                 }
@@ -3555,6 +3560,108 @@ mod tests {
                 "id": "store_api_key-2",
                 "provider": "openai",
                 "api_key": "busy-secret",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_connection_request_keeps_device_code_picker_retryable() {
+        let catalog = connection_catalog();
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.connection_catalog = catalog.clone();
+        live_ui
+            .dispatch(
+                UiAction::OpenConnectionPanel,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("catalog command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
+            "get_connection_catalog"
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.state.connection_request_active());
+        assert_eq!(
+            live_ui.notice.as_deref(),
+            Some("Wait for the current connection request to finish.")
+        );
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                    command_id: "get_connection_catalog-1".into(),
+                    catalog,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_connection_catalog-1".into(),
+                    command_type: "get_connection_catalog".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx
+            .try_recv()
+            .expect("device-code command should be retryable")
+        else {
+            panic!("device-code command expected");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "begin_device_code",
+                "id": "begin_device_code-2",
+                "provider": "openai-codex",
             })
         );
     }
