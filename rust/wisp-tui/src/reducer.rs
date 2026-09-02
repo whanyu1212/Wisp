@@ -3487,6 +3487,12 @@ fn handle_connection_backend_event(
             completion: Some(SessionCompletion { ok: true, .. }),
             ..
         } => {
+            effects.extend(adopt_connection_catalog(
+                state,
+                ConnectionCatalogSnapshot {
+                    providers: Vec::new(),
+                },
+            ));
             effects.push(UiEffect::Notice(
                 "Credentials updated, but connection status could not be refreshed.".into(),
             ));
@@ -3527,6 +3533,12 @@ fn handle_connection_backend_event(
             completion: Some(SessionCompletion { ok: true, .. }),
             ..
         } => {
+            effects.extend(adopt_connection_catalog(
+                state,
+                ConnectionCatalogSnapshot {
+                    providers: Vec::new(),
+                },
+            ));
             effects.push(UiEffect::FinishDeviceCode);
             effects.push(UiEffect::Notice(bounded_session_text(
                 &format!("Connected: {provider}. Connection status could not be refreshed."),
@@ -6898,6 +6910,7 @@ mod tests {
 
         for (action, command_id, command_type) in actions {
             let mut state = UiState::unconfigured();
+            state.connection_catalog = connection_catalog("Stale", "stored");
             let mut ids = DeterministicIds::default();
             reduce(&mut state, action, &mut ids).unwrap();
 
@@ -6909,6 +6922,11 @@ mod tests {
             .unwrap();
 
             assert!(state.connection_operation.is_none());
+            assert!(state.connection_catalog.providers.is_empty());
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                UiEffect::ConnectionCatalogUpdated(catalog) if catalog.providers.is_empty()
+            )));
             assert!(effects.iter().any(|effect| matches!(
                 effect,
                 UiEffect::Notice(notice)
@@ -6918,6 +6936,7 @@ mod tests {
         }
 
         let mut state = UiState::unconfigured();
+        state.connection_catalog = connection_catalog("Stale", "stored");
         let mut ids = DeterministicIds::default();
         reduce(
             &mut state,
@@ -6935,6 +6954,11 @@ mod tests {
         .unwrap();
 
         assert!(state.connection_operation.is_none());
+        assert!(state.connection_catalog.providers.is_empty());
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::ConnectionCatalogUpdated(catalog) if catalog.providers.is_empty()
+        )));
         assert!(
             effects
                 .iter()
