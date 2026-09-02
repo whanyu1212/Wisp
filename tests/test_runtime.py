@@ -757,6 +757,34 @@ def test_build_runtime_registers_configured_openai_compatible_provider(tmp_path:
     anyio.run(run)
 
 
+def test_build_runtime_omits_keyless_openai_compatible_provider_from_connection_catalog(
+    tmp_path: Path,
+) -> None:
+    settings = OpenAICompatibleSettings(
+        provider_name="local-models",
+        base_url="http://localhost:11434/v1",
+        default_model="local-model",
+        requires_api_key=False,
+    )
+
+    async def run() -> None:
+        runtime = await build_runtime(
+            auth_path=tmp_path / "auth.json",
+            openai_compatible=settings,
+        )
+        try:
+            assert runtime.providers.is_deferred("local-models")
+            assert runtime.openai_compatible_provider == "local-models"
+            assert runtime.openai_compatible_requires_api_key is False
+            connection_catalog = rpc_connection_catalog_snapshot(runtime)
+            assert "local-models" not in {provider.id for provider in connection_catalog.providers}
+            assert runtime.providers.is_deferred("local-models")
+        finally:
+            await runtime.aclose()
+
+    anyio.run(run)
+
+
 def test_configuration_refresh_removes_unconfigured_openai_compatible_provider(
     tmp_path: Path,
 ) -> None:
@@ -780,6 +808,43 @@ def test_configuration_refresh_removes_unconfigured_openai_compatible_provider(
             assert live.openai_compatible_provider is None
             assert not live.providers.is_registered("openai-compatible")
             assert "openai-compatible" not in {
+                provider.id for provider in rpc_connection_catalog_snapshot(live).providers
+            }
+        finally:
+            await candidate.aclose()
+            await live.aclose()
+
+    anyio.run(run)
+
+
+def test_configuration_refresh_adopts_keyless_openai_compatible_auth_policy(
+    tmp_path: Path,
+) -> None:
+    authenticated = OpenAICompatibleSettings(
+        provider_name="local-models",
+        base_url="http://localhost:11434/v1",
+        default_model="local-model",
+    )
+    keyless = authenticated.model_copy(update={"requires_api_key": False})
+
+    async def run() -> None:
+        live = await build_runtime(
+            auth_path=tmp_path / "live-auth.json",
+            openai_compatible=authenticated,
+        )
+        candidate = await build_runtime(
+            auth_path=tmp_path / "candidate-auth.json",
+            openai_compatible=keyless,
+        )
+        try:
+            assert "local-models" in {
+                provider.id for provider in rpc_connection_catalog_snapshot(live).providers
+            }
+
+            await live.adopt_provider_configuration(candidate)
+
+            assert live.openai_compatible_requires_api_key is False
+            assert "local-models" not in {
                 provider.id for provider in rpc_connection_catalog_snapshot(live).providers
             }
         finally:

@@ -102,6 +102,9 @@ async def build_runtime(
         mcp_runtime=mcp_runtime,
         auth_store=auth_store,
         openai_compatible_provider=openai_compatible_provider,
+        openai_compatible_requires_api_key=(
+            openai_compatible.requires_api_key if openai_compatible is not None else True
+        ),
         startup_events=(
             tuple(ErrorEvent(message=diagnostic.message) for diagnostic in mcp_runtime.diagnostics)
             if mcp_runtime is not None

@@ -55,6 +55,7 @@ from wisp.events import (
     ToolExecutionEnded,
     WispEvent,
 )
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
@@ -66,7 +67,11 @@ from wisp.rpc.coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
-from wisp.rpc.execution import RpcCommandExecutor, rpc_selected_session_state
+from wisp.rpc.execution import (
+    RpcCommandExecutor,
+    handle_rpc_store_api_key_command,
+    rpc_selected_session_state,
+)
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.event_bus import EventBus
@@ -1254,6 +1259,48 @@ def test_executor_rejects_api_key_for_unregistered_openai_compatible_provider(
         assert finished.error == ("API-key connection is not supported for openai-compatible.")
         dumped = json.dumps([event.model_dump(mode="json") for event in fixture.events])
         assert secret not in dumped
+
+    anyio.run(scenario)
+
+
+def test_executor_rejects_api_key_for_keyless_openai_compatible_provider(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        runtime = await build_runtime(
+            auth_path=tmp_path / "auth.json",
+            openai_compatible=OpenAICompatibleSettings(
+                provider_name="local-models",
+                base_url="http://localhost:11434/v1",
+                default_model="local-model",
+                requires_api_key=False,
+            ),
+        )
+        events: list[WispEvent] = []
+        secret = "irrelevant-secret"
+        try:
+            handle_rpc_store_api_key_command(
+                {
+                    "id": "store-1",
+                    "type": "store_api_key",
+                    "provider": "local-models",
+                    "api_key": secret,
+                },
+                running_command=None,
+                runtime=runtime,
+                write_event=events.append,
+            )
+
+            assert runtime.auth_store is not None
+            assert runtime.auth_store.get("local-models") is None
+            finished = events[-1]
+            assert isinstance(finished, RpcCommandFinished)
+            assert finished.ok is False
+            assert finished.error == "API-key connection is not supported for local-models."
+            dumped = json.dumps([event.model_dump(mode="json") for event in events])
+            assert secret not in dumped
+        finally:
+            await runtime.aclose()
 
     anyio.run(scenario)
 

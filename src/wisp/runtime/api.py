@@ -129,6 +129,7 @@ class WispRuntime:
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
     auth_store: JsonAuthStore | None = field(default=None, repr=False)
     openai_compatible_provider: str | None = None
+    openai_compatible_requires_api_key: bool = True
     startup_events: tuple[WispEvent, ...] = ()
     unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
@@ -331,6 +332,11 @@ class WispRuntime:
             self,
             "openai_compatible_provider",
             candidate.openai_compatible_provider,
+        )
+        object.__setattr__(
+            self,
+            "openai_compatible_requires_api_key",
+            candidate.openai_compatible_requires_api_key,
         )
         self._configured_providers.clear()
         self._configured_providers.update(adopted)

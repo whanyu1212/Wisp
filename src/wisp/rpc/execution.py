@@ -3161,7 +3161,11 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
     configured_provider = runtime.openai_compatible_provider
     openai_compatible_provider = (
         configured_provider
-        if configured_provider is not None and runtime.providers.is_registered(configured_provider)
+        if (
+            configured_provider is not None
+            and runtime.openai_compatible_requires_api_key
+            and runtime.providers.is_registered(configured_provider)
+        )
         else None
     )
     catalog = connection_catalog(
@@ -3268,9 +3272,12 @@ def handle_rpc_store_api_key_command(
             write_event=write_event,
         )
         return
+    openai_compatible_provider = (
+        runtime.openai_compatible_provider if runtime.openai_compatible_requires_api_key else None
+    )
     if not supports_api_key(
         provider,
-        openai_compatible_provider=runtime.openai_compatible_provider,
+        openai_compatible_provider=openai_compatible_provider,
     ) or not runtime.providers.is_registered(provider):
         write_rpc_command_error(
             command_id=command_id,
