@@ -50,25 +50,24 @@ def resolve_coding_session_configuration(
     """Resolve one authoritative configuration for a coding session operation.
 
     Explicit in-session provider, model, and effort choices outrank the supplied
-    config. Persisted/default effort remains scoped to its effective provider and
-    model; explicit effort is intentionally permissive for catalog-unknown models.
+    config. Every effort remains scoped to its effective provider and model while
+    catalog-unknown models stay permissive.
     """
 
     provider = providers.get(provider_name or config.provider)
     selected_model = model if has_model else config.model
-    if has_effort:
-        selected_effort = effort
-    elif models is None:
+    requested_effort = effort if has_effort else config.effort
+    if models is None:
         # Embedders may construct a CodingSession without catalog metadata. Keep
         # their configured value rather than rejecting a tier we cannot validate.
-        selected_effort = config.effort
+        selected_effort = requested_effort
     else:
         selected_effort = startup_effort(
             models,
             provider_name=provider.name,
             model=selected_model,
             default_model=provider.default_model,
-            effort=config.effort,
+            effort=requested_effort,
         )
     return CodingSessionConfiguration(
         provider=provider,

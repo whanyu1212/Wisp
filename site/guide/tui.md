@@ -36,7 +36,7 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The Rust TUI negotiates and validates live RPC v2/event schema v34, supports prompts, approvals,
+The Rust TUI negotiates and validates live RPC v3/event schema v35, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
 `/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
@@ -57,6 +57,12 @@ prompts that exceed the editor limit are rejected explicitly rather than truncat
 This is still experimental and source-build only: current Python distributions do not include the Rust
 binary, and it intentionally omits Textual features such as transcript search and mouse controls.
 Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
+Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
+enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
+persists the selection reported by the backend. If discovery fails, prompts and typed `/model`
+commands remain available while the bare picker reports the catalog as unavailable. Rust validates
+the same model-catalog contract but leaves picker interaction to
+[#467](https://github.com/whanyu1212/Wisp/issues/467).
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See

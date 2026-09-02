@@ -126,6 +126,7 @@ request. Completion and results arrive through `events()`.
 | `init` | `(*, command_id: str \| None = None)` | Initialize project guidance |
 | `compact` | `(instructions: str \| None = None, *, command_id: str \| None = None)` | Compaction events |
 | `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
+| `get_model_catalog` | `(*, command_id: str \| None = None)` | `RpcModelCatalogReported` |
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |

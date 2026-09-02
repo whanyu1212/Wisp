@@ -39,6 +39,8 @@ from wisp.events import (
     RpcMcpStatusReported,
     RpcMessageSnapshot,
     RpcMessagesReported,
+    RpcModelCatalogReported,
+    RpcModelCatalogSnapshot,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSkillCatalogSnapshot,
@@ -49,13 +51,6 @@ from wisp.events import (
     SkillInvoked,
     ToolApprovalRequested,
     TrustRequested,
-)
-from wisp.providers.catalog import (
-    AmbiguousModelError,
-    ModelRegistry,
-    UnknownModelError,
-    effective_catalog,
-    startup_effort,
 )
 from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_model_selection
@@ -142,6 +137,8 @@ class TuiController(Protocol):
     async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
 
     async def get_commands(self, *, command_id: str | None = None) -> str: ...
+
+    async def get_model_catalog(self, *, command_id: str | None = None) -> str: ...
 
     async def get_skills(self, *, command_id: str | None = None) -> str: ...
 
@@ -235,6 +232,8 @@ class _PendingConfigure:
     auto_compaction_enabled: bool | None = None
     has_auto_compaction_enabled: bool = False
     mode: AgentMode | None = None
+    catalog: RpcModelCatalogSnapshot | None = None
+    completion: RpcCommandFinished | None = None
 
 
 @dataclass
@@ -340,15 +339,6 @@ class _HistoryPagination:
     latest_reload_pending: bool = False
 
 
-def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
-    """Return ``provider_name``'s catalog ``default_model``, or ``None`` if unknown."""
-
-    for entry in models.providers():
-        if entry.name == provider_name:
-            return entry.default_model
-    return None
-
-
 class TuiShell:
     """Small prompt/event shell that drives Wisp through `RpcController`."""
 
@@ -396,23 +386,11 @@ class TuiShell:
         self._pending_queue_submissions: dict[str, _PendingQueueSubmission] = {}
         self._local_queue_submissions: list[tuple[QueueKind, TuiSubmission]] = []
         self._pending_queue_restore: _PendingQueueRestore | None = None
-        self.models = ModelRegistry(effective_catalog())
-        # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
-        # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
-        # the TUI resolves its own config.effort independently via its own
-        # WispConfig.from_env() call in the same process launch, so a stale
-        # tier from a different provider/model's vocabulary must be dropped
-        # here too -- otherwise the picker would seed it into the "current"
-        # row (see ModelPicker.show) and an untouched Enter could re-submit an
-        # incompatible tier the RPC side had already filtered out at its own
-        # startup.
-        self.current_effort = startup_effort(
-            self.models,
-            provider_name=provider,
-            model=model,
-            default_model=_default_model_for(self.models, provider),
-            effort=effort,
-        )
+        self.model_catalog: RpcModelCatalogSnapshot | None = None
+        self.current_effort = effort
+        self._pending_model_catalog_command_id: str | None = None
+        self._pending_model_catalog_report: RpcModelCatalogReported | None = None
+        self._pending_model_catalog_completion: RpcCommandFinished | None = None
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_context_status_command_id: str | None = None
         self.pending_context_status_received = False
@@ -516,6 +494,9 @@ class TuiShell:
             try:
                 task_group.start_soon(self._read_rpc_events, send.clone())
                 if await self._hydrate_session_history(receive):
+                    task_group.cancel_scope.cancel()
+                    return self._exit_reason
+                if await self._hydrate_model_catalog(receive):
                     task_group.cancel_scope.cancel()
                     return self._exit_reason
                 if await self._hydrate_command_catalog(receive):
@@ -747,6 +728,78 @@ class TuiShell:
                 return self._handle_rpc_closed(signal, pending_command_id=command_id)
             if await self._handle_signal(signal):
                 return True
+
+    async def _hydrate_model_catalog(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
+        """Load the backend-authoritative model catalog before accepting input."""
+
+        if not await self._request_model_catalog():
+            return False
+        while self._pending_model_catalog_command_id is not None:
+            signal = await receive.receive()
+            if isinstance(signal, _RpcEvent):
+                if await self._handle_rpc_event(signal.event):
+                    return True
+                continue
+            if isinstance(signal, _RpcEventsClosed):
+                return self._handle_rpc_closed(
+                    signal,
+                    pending_command_id=self._pending_model_catalog_command_id,
+                )
+            if await self._handle_signal(signal):
+                return True
+        return False
+
+    async def _request_model_catalog(self) -> bool:
+        if self._pending_model_catalog_command_id is not None:
+            return True
+        try:
+            command_id = await self.controller.get_model_catalog()
+        except Exception as exc:  # noqa: BLE001 - discovery is non-fatal
+            self.renderer.notice(f"Model catalog unavailable: {exc}")
+            return False
+        self._pending_model_catalog_command_id = command_id
+        self._pending_model_catalog_report = None
+        self._pending_model_catalog_completion = None
+        return True
+
+    def _observe_model_catalog_event(self, event: KnownWispEvent) -> bool:
+        command_id = self._pending_model_catalog_command_id
+        if command_id is None:
+            return False
+        if isinstance(event, RpcModelCatalogReported) and event.command_id == command_id:
+            if self._pending_model_catalog_report is None:
+                self._pending_model_catalog_report = event
+        elif isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+            if self._pending_model_catalog_completion is None:
+                self._pending_model_catalog_completion = event
+        else:
+            return False
+
+        completion = self._pending_model_catalog_completion
+        if completion is not None and not completion.ok:
+            self.renderer.notice(
+                f"Model catalog unavailable: {completion.error or 'request failed'}"
+            )
+            self._clear_model_catalog_request()
+        elif completion is not None and self._pending_model_catalog_report is not None:
+            self._adopt_model_catalog(self._pending_model_catalog_report.catalog)
+            self._clear_model_catalog_request()
+        return True
+
+    def _adopt_model_catalog(self, catalog: RpcModelCatalogSnapshot) -> None:
+        self.model_catalog = catalog
+        self.current_provider = catalog.selection.provider
+        self.current_model = catalog.selection.model
+        self.current_effort = catalog.selection.effort
+        self._sync_view()
+
+    def _clear_model_catalog_request(self) -> None:
+        self._pending_model_catalog_command_id = None
+        self._pending_model_catalog_report = None
+        self._pending_model_catalog_completion = None
 
     def _publish_command_catalog(self) -> None:
         update_catalog = getattr(self.renderer, "command_catalog_updated", None)
@@ -1499,15 +1552,19 @@ class TuiShell:
             self.renderer.command_error("Usage: /model [model] [effort]")
             return
         if not args:
+            if self.model_catalog is None:
+                self.renderer.command_error("Model catalog is unavailable; use /model <model>.")
+                return
             self.renderer.model_picker_request(
-                tuple(
-                    entry
-                    for entry in self.models.providers()
-                    if entry.name not in _MODEL_PICKER_HIDDEN_PROVIDERS
-                ),
-                current_provider=self.current_provider,
-                current_model=self.current_model,
-                current_effort=self.current_effort,
+                self.model_catalog.model_copy(
+                    update={
+                        "providers": tuple(
+                            entry
+                            for entry in self.model_catalog.providers
+                            if entry.name not in _MODEL_PICKER_HIDDEN_PROVIDERS
+                        )
+                    }
+                )
             )
             return
         # ModelPicker qualifies its selection as "provider::model" (see
@@ -1522,8 +1579,6 @@ class TuiShell:
         raw_effort = args[1] if len(args) > 1 else None
         clear_effort = raw_effort == MODEL_COMMAND_CLEAR_EFFORT_TOKEN
         effort = None if clear_effort else raw_effort
-        if effort is not None:
-            effort = self._validated_effort(provider=provider, model=model, effort=effort)
         try:
             command_id = await self.controller.configure(
                 provider=provider, model=model, effort=effort, clear_effort=clear_effort
@@ -1549,43 +1604,6 @@ class TuiShell:
         self._update_view(status="configuring")
         detail = f", effort {effort or 'provider default'}" if raw_effort is not None else ""
         self.renderer.notice(f"Configuring model: {model}{detail}")
-
-    def _validated_effort(self, *, provider: str | None, model: str, effort: str) -> str | None:
-        """Return ``effort`` if valid for ``model``'s resolved provider, else warn and drop it.
-
-        The picker only ever offers effort tiers a model's catalog entry
-        actually lists (see ``ModelPicker.show``'s seeding filter), but a
-        typed ``/model <id> <effort>`` bypasses the picker entirely -- without
-        this check, an unsupported tier (e.g. a tier valid for one provider's
-        vocabulary but not another's, or a model the catalog deliberately
-        omits from ``effort_levels`` like claude-haiku-4-5) would reach the
-        RPC agent and, eventually, that provider's API unvalidated. Permissive
-        like the rest of ``/model``'s validation -- an unresolvable model
-        (unknown to the catalog, or ambiguous when ``provider`` isn't given)
-        skips the check entirely rather than blocking the command, since a
-        brand-new model ahead of a catalog update must still work. This
-        applies equally to an explicitly provider-qualified unknown model
-        (``/model openai::gpt-6 high``) as to a bare one -- ``knows_model`` is
-        checked regardless of whether ``provider`` came from the caller or
-        from ``resolve()``, since ``supports_effort`` alone can't distinguish
-        "model known, tier not listed" from "model unknown to this provider."
-        """
-
-        target_provider = provider
-        if target_provider is None:
-            try:
-                target_provider, _entry = self.models.resolve(model, prefer=self.current_provider)
-            except (UnknownModelError, AmbiguousModelError):
-                return effort
-        if not self.models.knows_model(target_provider, model):
-            return effort
-        if self.models.supports_effort(target_provider, model, effort):
-            return effort
-        self.renderer.command_error(
-            f"Effort {effort!r} is not supported by {model} on {target_provider}; "
-            "configuring model without it."
-        )
-        return None
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self._disarm_quit()
@@ -2109,6 +2127,17 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        if self._observe_model_catalog_event(event):
+            return False
+        if isinstance(event, RpcModelCatalogReported):
+            pending_configure = self.pending_configures.get(event.command_id)
+            if pending_configure is not None and pending_configure.catalog is None:
+                self.pending_configures[event.command_id] = replace(
+                    pending_configure,
+                    catalog=event.catalog,
+                )
+                await self._maybe_finish_pending_configure(event.command_id)
+            return False
         if (
             isinstance(event, RpcMessagesReported)
             and event.command_id in self._ignored_history_page_commands
@@ -2399,6 +2428,8 @@ class TuiShell:
                 f"{f', model {event.model}' if event.model else ''}."
             )
             self._sync_view()
+            self.model_catalog = None
+            await self._request_model_catalog()
             return False
 
         if isinstance(event, SkillCatalogUpdated):
@@ -2411,15 +2442,13 @@ class TuiShell:
             return False
 
         if isinstance(event, ModelProviderAutoSwitched):
-            # A model-only /model <id> resolved to a different provider server-side
-            # (see auto_switch_provider_for_model in wisp.rpc.execution). Record the
-            # provider on the still-pending configure so _finish_pending_configure
-            # adopts it exactly like an explicit /provider request would, instead of
-            # only updating current_model and leaving current_provider stale.
+            # Retain the compatibility notice while the catalog result remains
+            # authoritative for the committed selection.
             pending = self.pending_configures.get(event.command_id)
             if pending is not None:
                 self.pending_configures[event.command_id] = replace(
-                    pending, provider=event.provider
+                    pending,
+                    provider=event.provider,
                 )
             return False
 
@@ -2536,7 +2565,13 @@ class TuiShell:
                 await self._finish_new_session(event)
                 return False
             if event.command_id in self.pending_configures:
-                await self._finish_pending_configure(event)
+                pending_configure = self.pending_configures[event.command_id]
+                if pending_configure.completion is None:
+                    self.pending_configures[event.command_id] = replace(
+                        pending_configure,
+                        completion=event,
+                    )
+                await self._maybe_finish_pending_configure(event.command_id)
                 return False
             if event.command_id == self.pending_context_status_command_id:
                 received = self.pending_context_status_received
@@ -2747,24 +2782,43 @@ class TuiShell:
         self._call_renderer_optional("session_switch_finished")
         self._sync_view()
 
-    async def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
-        pending = self.pending_configures.pop(event.command_id)
+    async def _maybe_finish_pending_configure(self, command_id: str) -> None:
+        pending = self.pending_configures[command_id]
+        event = pending.completion
+        if event is None:
+            return
+        changes_selection = pending.provider is not None or pending.model is not None
+        self.pending_configures.pop(command_id)
         if event.ok:
-            if pending.provider is not None:
-                self.current_provider = pending.provider
-                if pending.reset_model:
-                    self.current_model = None
+            catalog = pending.catalog
+            if catalog is not None:
+                requested_effort = pending.effort
+                self._adopt_model_catalog(catalog)
+                if (
+                    pending.has_effort
+                    and requested_effort is not None
+                    and requested_effort != catalog.selection.effort
+                ):
                     self.renderer.notice(
-                        f"Provider set to {pending.provider}; model reset to provider default."
+                        f"Effort '{requested_effort}' is not supported by "
+                        f"{catalog.selection.effective_model}; using provider default."
+                    )
+            elif changes_selection:
+                self.model_catalog = None
+                self.renderer.notice(
+                    "Configuration applied, but the authoritative model catalog is unavailable; "
+                    "the displayed selection was not changed."
+                )
+            if pending.provider is not None and catalog is not None:
+                if pending.reset_model:
+                    self.renderer.notice(
+                        f"Provider set to {self.current_provider}; model reset to provider default."
                     )
                 else:
-                    self.renderer.notice(f"Provider set to {pending.provider}")
-            if pending.model is not None:
-                self.current_model = pending.model
-                self.renderer.notice(f"Model set to {pending.model}")
-            if pending.has_effort:
-                self.current_effort = pending.effort
-            if pending.provider is not None or pending.model is not None:
+                    self.renderer.notice(f"Provider set to {self.current_provider}")
+            if pending.model is not None and catalog is not None:
+                self.renderer.notice(f"Model set to {self.current_model}")
+            if changes_selection and catalog is not None:
                 persist_user_model_selection(
                     self.current_provider,
                     self.current_model,

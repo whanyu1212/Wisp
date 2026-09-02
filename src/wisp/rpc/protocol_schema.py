@@ -39,6 +39,7 @@ DEFAULT_SCHEMA_ROOT = Path("schemas/live-rpc")
 # The manifest transitively pins all schemas and version metadata in that immutable bundle.
 HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (1, "06581c7cdbed14f6af08e1e67b1e0cdf4c8a1288a64238c342a61d2f8ced5a75"),
+    (2, "e84f38d40d6137fcfc2a57ebd6d9140efcddcf7b2f1535850790aa3af5e55955"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -413,6 +414,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "fork_session": {"entry_id": "entry-1"},
     "get_commands": {},
     "get_mcp_status": {},
+    "get_model_catalog": {},
     "get_messages": {},
     "get_queue_state": {},
     "get_session_stats": {},
@@ -502,6 +504,33 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.command.started": {"command_id": "command-1", "command_type": "prompt"},
     "rpc.commands": {"command_id": "command-1"},
     "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
+    "rpc.model_catalog": {
+        "command_id": "command-1",
+        "catalog": {
+            "selection": {
+                "provider": "fixture",
+                "model": "fixture-model",
+                "effective_model": "fixture-model",
+                "catalog_model": "fixture-model",
+                "effort": "high",
+            },
+            "providers": (
+                {
+                    "name": "fixture",
+                    "display_name": "Fixture",
+                    "default_model": "fixture-model",
+                    "available": True,
+                    "models": (
+                        {
+                            "id": "fixture-model",
+                            "lifecycle": "stable",
+                            "effort_levels": ("low", "high"),
+                        },
+                    ),
+                },
+            ),
+        },
+    },
     "rpc.messages": {"command_id": "command-1"},
     "rpc.session.cloned": {
         "command_id": "command-1",

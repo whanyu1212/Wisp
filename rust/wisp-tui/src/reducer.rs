@@ -3684,7 +3684,7 @@ mod tests {
     fn live_event_projection_uses_validated_wire_fields() {
         let value = serde_json::json!({
             "type": "message.delta",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "turn": 1,
             "role": "assistant",
@@ -4193,7 +4193,7 @@ mod tests {
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-7",
             "name": "bash",
@@ -4531,7 +4531,7 @@ mod tests {
     fn live_trust_request_projection_preserves_request_identity() {
         let value = serde_json::json!({
             "type": "trust.requested",
-            "schema_version": 34,
+            "schema_version": 35,
             "timestamp": "2026-01-02T03:04:05Z",
             "request_id": "trust-7",
             "project_path": "/workspace"

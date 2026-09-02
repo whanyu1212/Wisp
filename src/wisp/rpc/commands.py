@@ -7,7 +7,13 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from wisp.agent.mode import AgentMode
-from wisp.events import QueueKind, QueueMode
+from wisp.events import (
+    MAX_RPC_MODEL_EFFORT_CHARS,
+    MAX_RPC_MODEL_ID_CHARS,
+    MAX_RPC_PROVIDER_ID_CHARS,
+    QueueKind,
+    QueueMode,
+)
 
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
 
@@ -78,6 +84,12 @@ class GetCommandsCommand(RpcCommandModel):
     """Return an immediate in-memory command registry snapshot."""
 
     type: Literal["get_commands"] = "get_commands"
+
+
+class GetModelCatalogCommand(RpcCommandModel):
+    """Return the effective provider/model/effort catalog."""
+
+    type: Literal["get_model_catalog"] = "get_model_catalog"
 
 
 class GetSkillsCommand(RpcCommandModel):
@@ -272,9 +284,21 @@ class ConfigureCommand(RpcCommandModel):
     """Update configuration in sequence, rejecting unresolved model-provider ambiguity."""
 
     type: Literal["configure"] = "configure"
-    provider: str | None = None
-    model: str | None = None
-    effort: str | None = None
+    provider: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_PROVIDER_ID_CHARS,
+    )
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_MODEL_ID_CHARS,
+    )
+    effort: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_MODEL_EFFORT_CHARS,
+    )
     auto_compaction_enabled: bool | None = None
     mode: AgentMode | None = None
     # `to_json_line()` uses `exclude_none=True`, so a bare `effort=None` is
@@ -311,6 +335,7 @@ type RpcCommand = Annotated[
     | GetSessionStatsCommand
     | GetStateCommand
     | GetCommandsCommand
+    | GetModelCatalogCommand
     | GetSkillsCommand
     | GetMcpStatusCommand
     | GetMessagesCommand

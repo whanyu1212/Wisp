@@ -37,6 +37,11 @@ from wisp.events import (
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
     RpcMessagesReported,
+    RpcModelCatalogEntry,
+    RpcModelCatalogReported,
+    RpcModelCatalogSnapshot,
+    RpcModelProviderSnapshot,
+    RpcModelSelectionSnapshot,
     RpcSessionCloned,
     RpcSessionForked,
     RpcSessionNameChanged,
@@ -58,7 +63,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import Provider
-from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
+from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import MAX_RPC_COMMAND_ID_CHARS, QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
@@ -219,6 +224,8 @@ class RpcCommandExecutor:
             return self._dispatch_state(command, running_command)
         if command_type == "get_commands":
             return self._dispatch_commands(command, running_command)
+        if command_type == "get_model_catalog":
+            return self._dispatch_model_catalog(command, running_command)
         if command_type == "get_skills":
             return self._dispatch_skills(command, running_command)
         if command_type == "get_mcp_status":
@@ -502,6 +509,19 @@ class RpcCommandExecutor:
     ) -> _RpcDispatchResult:
         handle_rpc_commands_command(
             command,
+            runtime=self.runtime,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_model_catalog(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_model_catalog_command(
+            command,
+            agent=self.agent,
             runtime=self.runtime,
             write_event=self.write_event,
         )
@@ -2967,6 +2987,87 @@ def handle_rpc_commands_command(
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
+def rpc_model_catalog_snapshot(
+    *,
+    runtime: WispRuntime,
+    provider: Provider,
+    model: str | None,
+    effort: str | None,
+) -> RpcModelCatalogSnapshot:
+    """Project the effective catalog without constructing deferred providers."""
+
+    providers = tuple(
+        RpcModelProviderSnapshot(
+            name=entry.name,
+            display_name=entry.display_name,
+            default_model=entry.default_model,
+            available=runtime.providers.is_registered(entry.name),
+            models=tuple(
+                RpcModelCatalogEntry(
+                    id=model_id,
+                    lifecycle=entry.model_lifecycle.get(model_id),
+                    effort_levels=entry.effort_levels.get(model_id, ()),
+                )
+                for model_id in entry.models
+            ),
+        )
+        for entry in runtime.models.providers()
+    )
+    effective_model = model or provider.default_model
+    return RpcModelCatalogSnapshot(
+        selection=RpcModelSelectionSnapshot(
+            provider=provider.name,
+            model=model,
+            effective_model=effective_model,
+            catalog_model=(
+                runtime.models.canonical_model(provider.name, effective_model)
+                if effective_model is not None
+                else None
+            ),
+            effort=effort,
+        ),
+        providers=providers,
+    )
+
+
+def handle_rpc_model_catalog_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return one coherent effective model catalog without becoming active."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+    try:
+        catalog = rpc_model_catalog_snapshot(
+            runtime=runtime,
+            provider=agent.provider,
+            model=agent.model,
+            effort=agent.effort,
+        )
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+    write_event(RpcModelCatalogReported(command_id=command_id, catalog=catalog))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
 def handle_rpc_skills_command(
     command: dict[str, object],
     *,
@@ -3427,6 +3528,7 @@ def handle_rpc_configure_command(
     selected_model = configuration.model
     selected_effort = configuration.effort
     selected_auto_compaction_enabled = configuration.auto_compaction_enabled
+    auto_switched_provider: str | None = None
     if has_auto_compaction_enabled:
         selected_auto_compaction_enabled = cast(bool, auto_compaction_enabled)
     if isinstance(provider, str):
@@ -3440,28 +3542,19 @@ def handle_rpc_configure_command(
                 write_event=write_event,
             )
             return
-        if configure_overrides is not None:
-            configure_overrides.provider = provider
         if not has_model:
             selected_model = None
-            if configure_overrides is not None:
-                configure_overrides.model = None
-                configure_overrides.has_model = True
         if not has_effort:
             selected_effort = None
-            if configure_overrides is not None:
-                configure_overrides.effort = None
-                configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
         try:
             selected_provider = auto_switch_provider_for_model(
                 model,
-                command_id=command_id,
                 current_provider=selected_provider,
                 runtime=runtime,
-                configure_overrides=configure_overrides,
-                write_event=write_event,
             )
+            if selected_provider.name != configuration.provider.name:
+                auto_switched_provider = selected_provider.name
         except AmbiguousModelError as exc:
             write_rpc_command_error(
                 command_id=command_id,
@@ -3482,19 +3575,33 @@ def handle_rpc_configure_command(
             return
         if not has_effort:
             selected_effort = None
-            if configure_overrides is not None:
-                configure_overrides.effort = None
-                configure_overrides.has_effort = True
     if has_model:
         selected_model = model
-        if configure_overrides is not None:
-            configure_overrides.model = model
-            configure_overrides.has_model = True
     if has_effort:
         selected_effort = None if clear_effort else effort
-        if configure_overrides is not None:
-            configure_overrides.effort = None if clear_effort else effort
-            configure_overrides.has_effort = True
+    selected_effort = startup_effort(
+        runtime.models,
+        provider_name=selected_provider.name,
+        model=selected_model,
+        default_model=selected_provider.default_model,
+        effort=selected_effort,
+    )
+    selection_changed = (
+        has_provider or has_model or has_effort or (selected_effort != configuration.effort)
+    )
+    model_catalog: RpcModelCatalogSnapshot | None = None
+    model_catalog_error: str | None = None
+    if selection_changed:
+        try:
+            model_catalog = rpc_model_catalog_snapshot(
+                runtime=runtime,
+                provider=selected_provider,
+                model=selected_model,
+                effort=selected_effort,
+            )
+        except Exception as exc:
+            # Catalog bounds protect RPC consumers, not provider configuration.
+            model_catalog_error = str(exc)
     try:
         agent.reconfigure(
             replace(
@@ -3516,20 +3623,42 @@ def handle_rpc_configure_command(
         return
     if has_mode:
         agent.set_mode(cast(AgentMode, mode))
-    if configure_overrides is not None and has_auto_compaction_enabled:
-        configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
-        configure_overrides.has_auto_compaction_enabled = True
+    if auto_switched_provider is not None:
+        write_event(
+            ModelProviderAutoSwitched(
+                command_id=command_id,
+                provider=auto_switched_provider,
+                model=cast(str, model),
+            )
+        )
+    if configure_overrides is not None:
+        if has_provider or selected_provider.name != configuration.provider.name:
+            configure_overrides.provider = selected_provider.name
+        if has_model or has_provider:
+            configure_overrides.model = selected_model
+            configure_overrides.has_model = True
+        if has_effort or selected_effort != configuration.effort:
+            configure_overrides.effort = selected_effort
+            configure_overrides.has_effort = True
+        if has_auto_compaction_enabled:
+            configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
+            configure_overrides.has_auto_compaction_enabled = True
+    if model_catalog is not None:
+        write_event(RpcModelCatalogReported(command_id=command_id, catalog=model_catalog))
+    elif model_catalog_error is not None:
+        write_event(
+            ErrorEvent(
+                message=f"Configuration applied; model catalog unavailable: {model_catalog_error}"
+            )
+        )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def auto_switch_provider_for_model(
     model: str,
     *,
-    command_id: str,
     current_provider: Provider,
     runtime: WispRuntime,
-    configure_overrides: _RpcConfigureOverrides | None,
-    write_event: RpcEventWriter,
 ) -> Provider:
     try:
         resolved_provider, _entry = runtime.models.resolve(model, prefer=current_provider.name)
@@ -3537,13 +3666,7 @@ def auto_switch_provider_for_model(
         return current_provider
     if resolved_provider == current_provider.name:
         return current_provider
-    new_provider = runtime.providers.get(resolved_provider)
-    write_event(
-        ModelProviderAutoSwitched(command_id=command_id, provider=resolved_provider, model=model)
-    )
-    if configure_overrides is not None:
-        configure_overrides.provider = resolved_provider
-    return new_provider
+    return runtime.providers.get(resolved_provider)
 
 
 def handle_rpc_approval_command(

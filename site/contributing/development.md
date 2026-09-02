@@ -46,7 +46,7 @@ The Python packages do not currently bundle this executable. A relative
 working directory.
 
 The scaffold is exact-lockstep with the Python runtime. The current package and crate versions are
-both `0.1.0`; the only accepted transport is live RPC v2 with event schema v34. Python's models and
+both `0.1.0`; the only accepted transport is live RPC v3 with event schema v35. Python's models and
 committed schemas remain authoritative, and `wisp-protocol` generates its private Rust projections
 from those schemas at compile time. Package, protocol, event-schema, or generated-schema drift must
 fail a check or the startup handshake rather than degrade to another contract.

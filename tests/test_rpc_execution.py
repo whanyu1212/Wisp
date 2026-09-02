@@ -33,6 +33,7 @@ from wisp.events import (
     RpcCommandStarted,
     RpcMcpStatusReported,
     RpcMessagesReported,
+    RpcModelCatalogReported,
     RpcSessionCloned,
     RpcSessionForked,
     RpcSessionNameChanged,
@@ -49,6 +50,8 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import ToolSpec
+from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
+from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -58,8 +61,11 @@ from wisp.rpc.coordinator import (
     _RpcSessionState,
 )
 from wisp.rpc.execution import RpcCommandExecutor, rpc_selected_session_state
+from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
+from wisp.runtime.event_bus import EventBus
 from wisp.runtime.extensions import build_runtime
+from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 from wisp.skills.models import SkillCatalog, SkillDiagnostic, SkillEntry
@@ -1113,6 +1119,166 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         assert finished.ok is True
 
     anyio.run(scenario)
+
+
+def test_executor_reports_model_catalog_without_replacing_running_command(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "models-1", "type": "get_model_catalog"},
+                running,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcModelCatalogReported,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcModelCatalogReported)
+        assert report.catalog.selection.provider == "fake"
+        assert tuple(provider.name for provider in report.catalog.providers) == tuple(
+            provider.name for provider in fixture.runtime.models.providers()
+        )
+        assert all(
+            provider.available == fixture.runtime.providers.is_registered(provider.name)
+            for provider in report.catalog.providers
+        )
+
+    anyio.run(scenario)
+
+
+def test_model_catalog_marks_unregistered_providers_without_constructing_deferred_ones() -> None:
+    providers = ProviderRegistry()
+    current = FakeProvider()
+    providers.register(current)
+    constructed = False
+
+    def construct_deferred() -> FakeProvider:
+        nonlocal constructed
+        constructed = True
+        return FakeProvider()
+
+    providers.register_factory("deferred", construct_deferred)
+    models = ModelRegistry(
+        ModelCatalog(
+            schema_version=2,
+            providers=tuple(
+                ModelCatalogProviderEntry(
+                    name=name,
+                    display_name=name.title(),
+                    default_model=model,
+                    docs_url=f"https://example.test/{name}",
+                    models=(model,),
+                )
+                for name, model in (
+                    ("fake", "fake"),
+                    ("catalog-only", "catalog-model"),
+                    ("deferred", "deferred-model"),
+                )
+            ),
+        )
+    )
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(
+            providers=providers,
+            tools=tools,
+            events=events,
+        ),
+        models=models,
+    )
+
+    snapshot = rpc_execution_module.rpc_model_catalog_snapshot(
+        runtime=runtime,
+        provider=current,
+        model="custom-model",
+        effort="custom-effort",
+    )
+
+    assert [(provider.name, provider.available) for provider in snapshot.providers] == [
+        ("fake", True),
+        ("catalog-only", False),
+        ("deferred", True),
+    ]
+    assert snapshot.selection.catalog_model is None
+    assert snapshot.selection.effort == "custom-effort"
+    assert constructed is False
+
+
+def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Path) -> None:
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    model_ids = ("fake", *(f"model-{index}" for index in range(512)))
+    models = ModelRegistry(
+        ModelCatalog(
+            schema_version=2,
+            providers=(
+                ModelCatalogProviderEntry(
+                    name="fake",
+                    display_name="Fake",
+                    default_model="fake",
+                    docs_url="https://example.test/fake",
+                    models=model_ids,
+                ),
+            ),
+        )
+    )
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=models,
+    )
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    overrides = _RpcConfigureOverrides()
+    discovery_events: list[WispEvent] = []
+    rpc_execution_module.handle_rpc_model_catalog_command(
+        {"type": "get_model_catalog", "id": "catalog-1"},
+        agent=agent,
+        runtime=runtime,
+        write_event=discovery_events.append,
+    )
+    assert not any(isinstance(event, RpcModelCatalogReported) for event in discovery_events)
+    assert isinstance(discovery_events[-1], RpcCommandFinished)
+    assert discovery_events[-1].ok is False
+
+    emitted: list[WispEvent] = []
+
+    rpc_execution_module.handle_rpc_configure_command(
+        {"model": "custom-model", "effort": "custom-effort"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+        write_event=emitted.append,
+    )
+
+    assert agent.model == "custom-model"
+    assert agent.effort == "custom-effort"
+    assert overrides.model == "custom-model"
+    assert overrides.effort == "custom-effort"
+    assert not any(isinstance(event, RpcModelCatalogReported) for event in emitted)
+    assert isinstance(emitted[-2], ErrorEvent)
+    assert "Configuration applied; model catalog unavailable" in emitted[-2].message
+    assert isinstance(emitted[-1], RpcCommandFinished)
+    assert emitted[-1].ok is True
 
 
 def test_executor_reports_active_skill_catalog_without_replacing_running_command(

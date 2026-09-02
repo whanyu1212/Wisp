@@ -27,7 +27,7 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[34] = 34
+EVENT_SCHEMA_VERSION: Literal[35] = 35
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -53,6 +53,15 @@ PACKAGE_SKILLS_SCHEMA_VERSION = 31
 CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
 TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
 RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION = 34
+RPC_MODEL_CATALOG_SCHEMA_VERSION = 35
+MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
+MAX_RPC_MODEL_CATALOG_MODELS_PER_PROVIDER = 512
+MAX_RPC_MODEL_CATALOG_MODELS = 4_096
+MAX_RPC_MODEL_CATALOG_EFFORT_LEVELS = 16
+MAX_RPC_PROVIDER_ID_CHARS = 128
+MAX_RPC_MODEL_ID_CHARS = 256
+MAX_RPC_MODEL_DISPLAY_CHARS = 256
+MAX_RPC_MODEL_EFFORT_CHARS = 64
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -130,6 +139,7 @@ class WispEvent(BaseModel):
         32,
         33,
         34,
+        35,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -499,6 +509,83 @@ class RpcMcpStatusSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     servers: tuple[RpcMcpServerSnapshot, ...] = ()
+
+
+RpcProviderId = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS),
+]
+RpcModelId = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_RPC_MODEL_ID_CHARS),
+]
+RpcModelEffort = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_RPC_MODEL_EFFORT_CHARS),
+]
+
+
+class RpcModelCatalogEntry(BaseModel):
+    """Picker-relevant metadata for one canonical provider model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: RpcModelId
+    lifecycle: Literal["stable", "preview", "legacy"] | None = None
+    effort_levels: tuple[RpcModelEffort, ...] = Field(
+        default=(),
+        max_length=MAX_RPC_MODEL_CATALOG_EFFORT_LEVELS,
+    )
+
+
+class RpcModelProviderSnapshot(BaseModel):
+    """Bounded model metadata and runtime availability for one provider."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: RpcProviderId
+    display_name: Annotated[
+        str,
+        Field(min_length=1, max_length=MAX_RPC_MODEL_DISPLAY_CHARS),
+    ]
+    default_model: RpcModelId
+    available: bool
+    models: tuple[RpcModelCatalogEntry, ...] = Field(
+        default=(),
+        max_length=MAX_RPC_MODEL_CATALOG_MODELS_PER_PROVIDER,
+    )
+
+
+class RpcModelSelectionSnapshot(BaseModel):
+    """Backend-authoritative current provider, model, and effort selection."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: RpcProviderId
+    model: RpcModelId | None = None
+    effective_model: RpcModelId | None = None
+    catalog_model: RpcModelId | None = None
+    effort: RpcModelEffort | None = None
+
+
+class RpcModelCatalogSnapshot(BaseModel):
+    """Bounded effective model catalog plus the current backend selection."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    selection: RpcModelSelectionSnapshot
+    providers: tuple[RpcModelProviderSnapshot, ...] = Field(
+        default=(),
+        max_length=MAX_RPC_MODEL_CATALOG_PROVIDERS,
+    )
+
+    @model_validator(mode="after")
+    def _validate_total_models(self) -> Self:
+        if sum(len(provider.models) for provider in self.providers) > MAX_RPC_MODEL_CATALOG_MODELS:
+            raise ValueError(
+                f"RPC model catalogs may contain at most {MAX_RPC_MODEL_CATALOG_MODELS} models"
+            )
+        return self
 
 
 class RpcMessageToolCallSnapshot(BaseModel):
@@ -1042,6 +1129,23 @@ class RpcCommandsReported(WispEvent):
         return self
 
 
+class RpcModelCatalogReported(WispEvent):
+    """Immediate, non-persisted effective model catalog returned over RPC."""
+
+    type: Literal["rpc.model_catalog"] = "rpc.model_catalog"
+    command_id: str
+    catalog: RpcModelCatalogSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_MODEL_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC model catalog reports require schema_version "
+                f"{RPC_MODEL_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 def _validate_package_skill_schema(
     catalog: RpcSkillCatalogSnapshot,
     *,
@@ -1504,10 +1608,8 @@ class SkillInvoked(WispEvent):
 class ModelProviderAutoSwitched(WispEvent):
     """A model-only ``configure`` command's resolved model belonged to another provider.
 
-    Emitted by the RPC process immediately before the ``configure`` command's
-    ``RpcCommandFinished`` when the model-registry-backed auto-switch in
-    ``handle_rpc_configure_command`` changes ``agent.provider`` as a side effect
-    of a model-only ``/model <id>`` request. Without this, an out-of-process
+    Emitted by the RPC process after a successful model-registry-backed
+    auto-switch for a model-only ``/model <id>`` request. Without this, an out-of-process
     front-end (the TUI) that only tracks provider changes it explicitly
     requested would keep displaying and using its old provider while the RPC
     agent has actually moved to a different one.
@@ -1553,6 +1655,7 @@ type KnownWispEvent = Annotated[
     | SessionStatsReported
     | RpcStateReported
     | RpcCommandsReported
+    | RpcModelCatalogReported
     | RpcSkillsReported
     | RpcMcpStatusReported
     | SkillCatalogUpdated
@@ -1671,6 +1774,11 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC command report events require schema_version "
             f"{RPC_COMMANDS_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.model_catalog" and version < RPC_MODEL_CATALOG_SCHEMA_VERSION:
+        raise ValueError(
+            "RPC model catalog events require schema_version "
+            f"{RPC_MODEL_CATALOG_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "rpc.mcp" and version < MCP_STATUS_SCHEMA_VERSION:
         raise ValueError(
