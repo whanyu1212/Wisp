@@ -12,6 +12,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Recorded the #470 renderer decision: Textual remains the default TUI; the Rust frontend stays
+  experimental source-build opt-in on macOS and Linux. Explicit Rust selection does not fall back to
+  Textual, and Python distributions still do not bundle the binary.
 - Added backend-owned connection-catalog, API-key, disconnect, and device-code RPC so Textual and
   external frontends never read or write credential files. The catalog advertises only available
   provider endpoints, and mutation completion remains authoritative if the secondary status refresh

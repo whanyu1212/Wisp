@@ -43,8 +43,12 @@ experiment changes presentation ownership, not runtime authority: Python continu
 tools, trust, approvals, sessions, configuration, and every durable or safety-sensitive decision.
 
 The [Rust terminal frontend boundary](./rust-tui-boundary) records the process topology, subsystem
-ownership, migration map, compatibility rules, failure ownership, and evidence gates. Rust is not a
-shipped or default interface until later implementation and rollout decisions satisfy those gates.
+ownership, migration map, compatibility rules, failure ownership, and the closed [#470](https://github.com/whanyu1212/Wisp/issues/470)
+renderer decision. Textual remains the default and supported frontend. Rust is an experimental
+opt-in, not a shipped or default interface. Supported opt-in (stage 3) requires
+[#467](https://github.com/whanyu1212/Wisp/issues/467),
+[#468](https://github.com/whanyu1212/Wisp/issues/468), and
+[#469](https://github.com/whanyu1212/Wisp/issues/469).
 
 ## Resumed transcript hydration
 

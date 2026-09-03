@@ -13,7 +13,7 @@ The `wisp` executable selects an interface from its arguments and terminal state
 |---|---|
 | `wisp` | Launch the Textual TUI when stdin and stdout are interactive |
 | `wisp tui` | Launch the dedicated Textual TUI command |
-| `wisp tui --renderer rust` | Launch the experimental Rust transport-diagnostic scaffold |
+| `wisp tui --renderer rust` | Launch the experimental Rust frontend (source-build, macOS/Linux) |
 | `wisp tui --line` | Launch the simple line renderer |
 | `wisp -p "PROMPT"` | Run one prompt and print assistant text |
 | `wisp -p "PROMPT" --mode json` | Emit one typed `WispEvent` JSON object per line |
@@ -82,12 +82,16 @@ Provider and model defaults for the dedicated command come from configuration an
 `WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
 
-`rust` is an experimental, macOS/Linux-only frontend. It requires the Python package version, Rust
-crate version, live RPC v4, and event schema v36 to match exactly. Selecting it by flag or
-`WISP_TUI_RENDERER=rust` never falls back to Textual when
+`rust` is an experimental, macOS/Linux-only frontend. [#470](https://github.com/whanyu1212/Wisp/issues/470)
+closed with Textual as the default; Rust remains opt-in and is not a supported or shipped product
+path. It requires the Python package version, Rust crate version, live RPC v4, and event schema v36
+to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls back to Textual when
 the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
 do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)
-for source use.
+for source use. Stage 3 (supported opt-in with binaries) remains blocked on
+[#467](https://github.com/whanyu1212/Wisp/issues/467),
+[#468](https://github.com/whanyu1212/Wisp/issues/468), and
+[#469](https://github.com/whanyu1212/Wisp/issues/469).
 
 `WISP_TUI_RENDERER` participates in top-level TUI selection, including bare interactive `wisp` and
 the compatibility `--mode tui` form. The dedicated `wisp tui` command uses its `--renderer` option.
