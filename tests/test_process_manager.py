@@ -425,7 +425,7 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
             process_id = await supervisor.start(
                 _python_command("import time; time.sleep(10)"),
                 cwd=tmp_path,
-                timeout=0.05,
+                timeout=0.25,
             )
             return (await _poll_until_terminal(supervisor, process_id))[-1]
         finally:
