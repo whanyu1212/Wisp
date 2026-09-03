@@ -13,16 +13,39 @@ whether the RPC command layer correctly sets `agent.effort`.
 
 from __future__ import annotations
 
-from functools import partial
+import json
+from collections.abc import Callable
 
 from tests.cli_support import *
 from tests.cli_support import _test_model_registry
 from tests.test_coding_session import CapturingProvider
 from wisp.events import ErrorEvent, RpcCommandFinished, WispEvent
+from wisp.rpc.commands import ConfigureCommand, RpcCommandAdapter
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.execution import handle_rpc_configure_command
 
-_configure_rpc = partial(handle_rpc_configure_command, write_event=lambda _event: None)
+
+def _configure_rpc(
+    payload: dict[str, object],
+    *,
+    command_id: str,
+    agent: CodingSession,
+    runtime: WispRuntime,
+    configure_overrides: _RpcConfigureOverrides | None = None,
+    write_event: Callable[[WispEvent], None] = lambda _event: None,
+) -> None:
+    submitted = {"id": command_id, "type": "configure", **payload}
+    command = RpcCommandAdapter.validate_json(json.dumps(submitted))
+    assert isinstance(command, ConfigureCommand)
+    handle_rpc_configure_command(
+        command,
+        command_id=command_id,
+        provided_fields=frozenset(submitted),
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=configure_overrides,
+        write_event=write_event,
+    )
 
 
 def _runtime_with_capturing_provider(provider: CapturingProvider) -> WispRuntime:
@@ -49,7 +72,6 @@ def test_configure_effort_sets_agent_effort(tmp_path: Path) -> None:
     _configure_rpc(
         {"provider": "capturing", "effort": "high"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -65,7 +87,6 @@ def test_configure_auto_compaction_sets_agent_policy(tmp_path: Path) -> None:
     _configure_rpc(
         {"auto_compaction_enabled": False},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -76,12 +97,31 @@ def test_configure_auto_compaction_sets_agent_policy(tmp_path: Path) -> None:
     _configure_rpc(
         {"auto_compaction_enabled": True},
         command_id="configure-2",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
 
     assert agent.auto_compaction_enabled is True
+
+
+def test_configure_explicit_null_effort_resets_with_another_mutation(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path),
+        effort="high",
+    )
+
+    _configure_rpc(
+        {"effort": None, "auto_compaction_enabled": False},
+        command_id="configure-1",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.effort is None
+    assert agent.auto_compaction_enabled is False
 
 
 def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: Path) -> None:
@@ -94,7 +134,6 @@ def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: 
     _configure_rpc(
         {"effort": "medium"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -115,7 +154,6 @@ def test_configure_model_change_without_effort_resets_agent_effort(tmp_path: Pat
     _configure_rpc(
         {"model": "some-model"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -133,7 +171,6 @@ def test_configure_effort_only_command_leaves_it_alone_when_touched(tmp_path: Pa
     _configure_rpc(
         {"effort": "high"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -149,32 +186,11 @@ def test_configure_model_change_with_explicit_effort_keeps_the_new_value(tmp_pat
     _configure_rpc(
         {"model": "some-model", "effort": "high"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
 
     assert agent.effort == "high"
-
-
-def test_configure_rejects_non_string_effort(tmp_path: Path) -> None:
-    provider = CapturingProvider()
-    runtime = _runtime_with_capturing_provider(provider)
-    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
-
-    # _write_rpc_command_error writes a JSON event to stdout as a side effect;
-    # the observable contract under test here is that agent.effort is left
-    # untouched when validation rejects the command, not the emitted event
-    # shape (already covered for provider/model by existing tests).
-    _configure_rpc(
-        {"effort": 5},
-        command_id="configure-1",
-        command_type="configure",
-        agent=agent,
-        runtime=runtime,
-    )
-
-    assert agent.effort is None
 
 
 def test_configure_overrides_records_effort(tmp_path: Path) -> None:
@@ -187,7 +203,6 @@ def test_configure_overrides_records_effort(tmp_path: Path) -> None:
     _configure_rpc(
         {"effort": "xhigh"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -217,7 +232,6 @@ def test_model_only_configure_does_not_override_provider_without_auto_switch(
     _configure_rpc(
         {"model": "custom-model"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -240,7 +254,7 @@ def test_ambiguous_model_configure_is_atomic_across_agent_and_overrides(tmp_path
     overrides = _RpcConfigureOverrides()
     events: list[WispEvent] = []
 
-    handle_rpc_configure_command(
+    _configure_rpc(
         {
             "model": "gpt-5.6",
             "effort": "high",
@@ -248,7 +262,6 @@ def test_ambiguous_model_configure_is_atomic_across_agent_and_overrides(tmp_path
             "mode": "plan",
         },
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -285,10 +298,9 @@ def test_model_only_configure_rejects_catalog_provider_missing_from_runtime(
     overrides = _RpcConfigureOverrides()
     events: list[WispEvent] = []
 
-    handle_rpc_configure_command(
+    _configure_rpc(
         {"model": "gpt-5.5-pro"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -320,7 +332,6 @@ def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> N
     _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -338,7 +349,6 @@ def test_configure_clear_effort_alone_is_accepted_without_model_or_provider(
     _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -356,7 +366,6 @@ def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
     _configure_rpc(
         {"clear_effort": True},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -393,7 +402,6 @@ def test_configure_switching_provider_resets_stale_effort(tmp_path: Path) -> Non
     _configure_rpc(
         {"provider": "capturing-2"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -424,7 +432,6 @@ def test_configure_switching_provider_with_explicit_effort_keeps_the_new_value(
     _configure_rpc(
         {"provider": "capturing-2", "effort": "medium"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )
@@ -473,7 +480,6 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
     _configure_rpc(
         {"model": "gpt-5.5-pro"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,
@@ -506,7 +512,6 @@ def test_configure_model_only_auto_switch_filters_unsupported_explicit_effort(
     _configure_rpc(
         {"model": "gpt-5.5-pro", "effort": "medium"},
         command_id="configure-1",
-        command_type="configure",
         agent=agent,
         runtime=runtime,
     )

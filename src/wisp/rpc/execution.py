@@ -16,7 +16,6 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.messages import Message
-from wisp.agent.mode import AgentMode, is_agent_mode
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.auth.connections import (
     DEVICE_CODE_PROVIDER,
@@ -82,6 +81,7 @@ from wisp.rpc.commands import (
     QUEUE_RPC_COMMAND_TYPES,
     ApprovalScope,
     ClearQueueCommand,
+    ConfigureCommand,
     FollowUpCommand,
     ParsedRpcCommand,
     PopQueueCommand,
@@ -208,6 +208,24 @@ class RpcCommandExecutor:
         self.running_command_factory = running_command_factory
         self.command_completed_factory = command_completed_factory
         self.defer_until_after_flush = defer_until_after_flush
+
+    async def dispatch_parsed(
+        self,
+        command: ParsedRpcCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        known = command.known
+        if isinstance(known, ConfigureCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_configure(
+                known,
+                provided_fields=command.provided_fields,
+                running_command=running_command,
+            )
+        return await self.dispatch(command.to_legacy_dict(), running_command)
+
+    def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
+        self.reject(command.to_legacy_dict(), message)
 
     async def dispatch(
         self,
@@ -643,6 +661,35 @@ class RpcCommandExecutor:
         )
         return _RpcDispatchResult(running_command=running_command)
 
+    def _dispatch_configure(
+        self,
+        command: ConfigureCommand,
+        *,
+        provided_fields: frozenset[str],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        command_id = command.id or uuid4().hex
+        write_command_type = "configure"
+        self.write_event(RpcCommandStarted(command_id=command_id, command_type=write_command_type))
+        if running_command is not None:
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=write_command_type,
+                message="Cannot configure while another RPC operation is active",
+                write_event=self.write_event,
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        handle_rpc_configure_command(
+            command,
+            command_id=command_id,
+            provided_fields=provided_fields,
+            agent=self.agent,
+            runtime=self.runtime,
+            configure_overrides=self.configure_overrides,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
     def _dispatch_control(
         self,
         command: dict[str, object],
@@ -652,10 +699,7 @@ class RpcCommandExecutor:
             command,
             running_command=running_command,
             approval_policy=self.approval_policy,
-            agent=self.agent,
-            runtime=self.runtime,
             trust_gate=self.trust_gate,
-            configure_overrides=self.configure_overrides,
             coordinator=self.coordinator,
             write_event=self.write_event,
             defer_until_after_flush=self.defer_until_after_flush,
@@ -3832,10 +3876,7 @@ def handle_rpc_control_command(
     running_command: _RpcRunningCommand | None,
     approval_policy: RpcApprovalResolver,
     write_event: RpcEventWriter,
-    agent: CodingSession | None = None,
-    runtime: WispRuntime | None = None,
     trust_gate: RpcTrustResolver | None = None,
-    configure_overrides: _RpcConfigureOverrides | None = None,
     coordinator: RpcCoordinator | None = None,
     defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
@@ -3891,33 +3932,6 @@ def handle_rpc_control_command(
             defer_resolution=defer_until_after_flush,
         )
         return False
-    if command_type == "configure":
-        if running_command is not None:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message="Cannot configure while another RPC operation is active",
-                write_event=write_event,
-            )
-            return False
-        if agent is None or runtime is None:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message="RPC configure command requires an active agent runtime",
-                write_event=write_event,
-            )
-            return False
-        handle_rpc_configure_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            agent=agent,
-            runtime=runtime,
-            configure_overrides=configure_overrides,
-            write_event=write_event,
-        )
-        return False
     message = f"Unknown RPC command: {command_type}"
     write_rpc_command_error(
         command_id=command_id,
@@ -3929,68 +3943,28 @@ def handle_rpc_control_command(
 
 
 def handle_rpc_configure_command(
-    command: dict[str, object],
+    command: ConfigureCommand,
     *,
     command_id: str,
-    command_type: str,
+    provided_fields: frozenset[str],
     agent: CodingSession,
     runtime: WispRuntime,
     write_event: RpcEventWriter,
     configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
-    provider = command.get("provider")
-    model = command.get("model")
-    effort = command.get("effort")
-    auto_compaction_enabled = command.get("auto_compaction_enabled")
-    mode = command.get("mode")
-    clear_effort = command.get("clear_effort") is True
-    has_provider = "provider" in command
-    has_model = "model" in command
-    has_effort = "effort" in command or clear_effort
-    has_auto_compaction_enabled = "auto_compaction_enabled" in command
-    has_mode = "mode" in command
-    if (
-        not has_provider
-        and not has_model
-        and not has_effort
-        and not has_auto_compaction_enabled
-        and not has_mode
-    ):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=(
-                "RPC configure command requires provider, model, effort, "
-                "auto_compaction_enabled, or mode"
-            ),
-            write_event=write_event,
-        )
-        return
-    if provider is not None and not isinstance(provider, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field provider must be a string",
-            write_event=write_event,
-        )
-        return
-    if model is not None and not isinstance(model, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field model must be a string",
-            write_event=write_event,
-        )
-        return
-    if effort is not None and not isinstance(effort, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field effort must be a string",
-            write_event=write_event,
-        )
-        return
-    if has_mode and not is_agent_mode(mode):
+    command_type = "configure"
+    provider = command.provider
+    model = command.model
+    effort = command.effort
+    auto_compaction_enabled = command.auto_compaction_enabled
+    mode = command.mode
+    clear_effort = command.clear_effort
+    has_provider = "provider" in provided_fields
+    has_model = "model" in provided_fields
+    has_effort = "effort" in provided_fields or clear_effort
+    has_auto_compaction_enabled = "auto_compaction_enabled" in provided_fields
+    has_mode = "mode" in provided_fields
+    if has_mode and mode is None:
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -3998,7 +3972,7 @@ def handle_rpc_configure_command(
             write_event=write_event,
         )
         return
-    if has_auto_compaction_enabled and not isinstance(auto_compaction_enabled, bool):
+    if has_auto_compaction_enabled and auto_compaction_enabled is None:
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -4012,9 +3986,9 @@ def handle_rpc_configure_command(
     selected_effort = configuration.effort
     selected_auto_compaction_enabled = configuration.auto_compaction_enabled
     auto_switched_provider: str | None = None
-    if has_auto_compaction_enabled:
-        selected_auto_compaction_enabled = cast(bool, auto_compaction_enabled)
-    if isinstance(provider, str):
+    if auto_compaction_enabled is not None:
+        selected_auto_compaction_enabled = auto_compaction_enabled
+    if provider is not None:
         try:
             selected_provider = runtime.providers.get(provider)
         except UnknownProviderError as exc:
@@ -4029,7 +4003,7 @@ def handle_rpc_configure_command(
             selected_model = None
         if not has_effort:
             selected_effort = None
-    if has_model and provider is None and isinstance(model, str):
+    if has_model and provider is None and model is not None:
         try:
             selected_provider = auto_switch_provider_for_model(
                 model,
@@ -4104,8 +4078,8 @@ def handle_rpc_configure_command(
             write_event=write_event,
         )
         return
-    if has_mode:
-        agent.set_mode(cast(AgentMode, mode))
+    if mode is not None:
+        agent.set_mode(mode)
     if auto_switched_provider is not None:
         write_event(
             ModelProviderAutoSwitched(

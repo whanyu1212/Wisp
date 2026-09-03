@@ -553,6 +553,16 @@ class ParsedRpcCommand:
     def allows_prompt_read(self) -> bool:
         return isinstance(self.value, GetMessagesCommand) and self.value.allow_during_prompt is True
 
+    @property
+    def provided_fields(self) -> frozenset[str]:
+        """Return submitted payload field names without exposing their values."""
+
+        fields = set(self._payload)
+        if STORE_API_KEY_SECRET_FIELD in fields:
+            fields.remove(STORE_API_KEY_SECRET_FIELD)
+            fields.add("api_key")
+        return frozenset(fields)
+
     def without_id(self) -> ParsedRpcCommand:
         payload = dict(self._payload)
         payload.pop("id", None)
