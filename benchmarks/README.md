@@ -360,6 +360,10 @@ uv run python -m benchmarks.context_estimation --messages 100,1000 --iterations 
 Fixture construction is outside the measured operations. The combined measurement represents the
 two production scans occurring together.
 
+Running the module directly also reports `accuracy` samples measuring fallback-estimator error
+against checked-in `cl100k_base` token counts across representative workloads (source code, JSON
+schema, large tool results, CJK, emoji, and mixed conversation).
+
 ## RPC Streaming Codec
 
 Measure event construction, JSON serialization, validation, and their complete round trip while
@@ -368,6 +372,7 @@ holding response size constant and varying provider delta size:
 ```bash
 uv run python -m benchmarks.rpc_streaming
 uv run python -m benchmarks.rpc_streaming --response-bytes 65536 --chunk-sizes 1,32,256
+uv run python -m benchmarks.rpc_streaming --response-bytes 65536 --chunk-sizes 1,32,1024 --iterations 2
 ```
 
 This isolates codec overhead from subprocess pipes and Textual rendering, making event-count and
