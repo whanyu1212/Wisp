@@ -27,7 +27,7 @@ from wisp.events import (
     TrustResolved,
     WispEvent,
 )
-from wisp.rpc.commands import ApprovalScope
+from wisp.rpc.commands import ApprovalScope, ParsedRpcCommand
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     _MAX_QUEUED_RPC_COMMANDS,
@@ -42,7 +42,6 @@ from wisp.rpc.coordinator import (
 )
 from wisp.rpc.execution import (
     RpcCommandExecutor,
-    rpc_command_type,
     rpc_session_state,
     rpc_skill_catalog_snapshot,
 )
@@ -540,7 +539,7 @@ class RpcHost:
         """Serve a bidirectional control stream until it is closed or shut down."""
 
         async def dispatch(
-            command: dict[str, object],
+            command: ParsedRpcCommand,
             running_command: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
             buffered_events: list[WispEvent] = []
@@ -570,7 +569,7 @@ class RpcHost:
                 defer_until_after_flush=after_flush.append,
             )
             try:
-                result = await executor.dispatch(command, running_command)
+                result = await executor.dispatch(command.to_legacy_dict(), running_command)
                 if result.should_shutdown and self._on_shutdown_dispatched is not None:
                     self._on_shutdown_dispatched()
                 shutdown_abandoned = any(
@@ -591,7 +590,7 @@ class RpcHost:
             finally:
                 start_gate.set()
 
-        async def reject(command: dict[str, object], message: str) -> None:
+        async def reject(command: ParsedRpcCommand, message: str) -> None:
             buffered_events: list[WispEvent] = []
             executor = RpcCommandExecutor(
                 agent=self.agent,
@@ -607,11 +606,11 @@ class RpcHost:
                 write_event=buffered_events.append,
                 render_events=self._render_event_stream,
             )
-            executor.reject(command, message)
+            executor.reject(command.to_legacy_dict(), message)
             if buffered_events:
                 await self._render_event_batch(tuple(buffered_events))
                 buffered_events.clear()
-            if rpc_command_type(command) == "shutdown" and self._on_shutdown_abandoned is not None:
+            if command.command_type == "shutdown" and self._on_shutdown_abandoned is not None:
                 self._on_shutdown_abandoned()
 
         previous_event_task_group = self._event_task_group
@@ -621,7 +620,6 @@ class RpcHost:
                 receive,
                 dispatch=dispatch,
                 reject=reject,
-                command_type=rpc_command_type,
             )
         finally:
             await self._wait_for_published_events()

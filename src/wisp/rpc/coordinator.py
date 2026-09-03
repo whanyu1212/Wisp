@@ -11,7 +11,7 @@ import anyio
 
 from wisp.agent.messages import Message
 from wisp.events import WispEvent
-from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, rpc_command_payload_size
+from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ParsedRpcCommand
 from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.sessions.jsonl import JsonlSession
 
@@ -38,7 +38,7 @@ type _SequentialRpcCommandType = Literal[
 
 @dataclass(frozen=True)
 class _RpcInputCommand:
-    command: dict[str, object] = field(repr=False)
+    command: ParsedRpcCommand = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -90,16 +90,15 @@ class _RpcDispatchResult:
 @dataclass(frozen=True)
 class _RpcCancelResult:
     outcome: Literal["running", "queued", "missing"]
-    command: dict[str, object] | None = field(default=None, repr=False)
+    command: ParsedRpcCommand | None = field(default=None, repr=False)
 
 
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady
 type RpcDispatch = Callable[
-    [dict[str, object], _RpcRunningCommand | None],
+    [ParsedRpcCommand, _RpcRunningCommand | None],
     Awaitable[_RpcDispatchResult],
 ]
-type RpcReject = Callable[[dict[str, object], str], Awaitable[None]]
-type RpcCommandType = Callable[[dict[str, object]], str]
+type RpcReject = Callable[[ParsedRpcCommand, str], Awaitable[None]]
 type RpcCompletionEventWriter = Callable[[WispEvent], None]
 type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
 
@@ -115,7 +114,6 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "get_skills",
     "trust",
 }
-_ACTIVE_PROMPT_READ_COMMAND_TYPES = frozenset({"get_messages"})
 
 
 def _bypasses_active_command(command_type: str) -> bool:
@@ -155,8 +153,8 @@ class RpcCoordinator:
         self.running_command: _RpcRunningCommand | None = None
         self.auxiliary_commands: dict[str, _RpcRunningCommand] = {}
         self._auxiliary_command_bytes: dict[str, int] = {}
-        self.queued_commands: deque[dict[str, object]] = deque()
-        self.pending_prompt_queue_commands: deque[dict[str, object]] = deque()
+        self.queued_commands: deque[ParsedRpcCommand] = deque()
+        self.pending_prompt_queue_commands: deque[ParsedRpcCommand] = deque()
         self.input_closed = False
         self._input_closed_handlers = input_closed_handlers
         self._max_queued_commands = max_queued_commands
@@ -170,7 +168,7 @@ class RpcCoordinator:
         self._completion_event_renderer = completion_event_renderer
 
     def _shutdown_is_next(self) -> bool:
-        return bool(self.queued_commands) and self.queued_commands[0].get("type") == "shutdown"
+        return bool(self.queued_commands) and self.queued_commands[0].command_type == "shutdown"
 
     def cancel(self, target_id: str) -> _RpcCancelResult:
         """Cancel an active command or remove the first queued command with this id."""
@@ -184,7 +182,7 @@ class RpcCoordinator:
             return _RpcCancelResult("running")
         for queue in (self.pending_prompt_queue_commands, self.queued_commands):
             queued_target = next(
-                (queued for queued in queue if queued.get("id") == target_id),
+                (queued for queued in queue if queued.command_id == target_id),
                 None,
             )
             if queued_target is not None:
@@ -199,7 +197,6 @@ class RpcCoordinator:
         *,
         dispatch: RpcDispatch,
         reject: RpcReject,
-        command_type: RpcCommandType,
     ) -> bool:
         """Async-dispatch variant used when event delivery applies backpressure."""
 
@@ -213,7 +210,6 @@ class RpcCoordinator:
                     receive,
                     dispatch=dispatch,
                     reject=reject,
-                    command_type=command_type,
                 ):
                     return True
             if (
@@ -250,7 +246,6 @@ class RpcCoordinator:
                 event,
                 dispatch=dispatch,
                 reject=reject,
-                command_type=command_type,
             ):
                 return True
 
@@ -260,7 +255,6 @@ class RpcCoordinator:
         *,
         dispatch: RpcDispatch,
         reject: RpcReject,
-        command_type: RpcCommandType,
     ) -> bool:
         while self._shutdown_is_next():
             try:
@@ -276,14 +270,13 @@ class RpcCoordinator:
                         f"RPC command id is already outstanding: {duplicate_id}",
                     )
                     continue
-                if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
+                if command.command_type not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
                     await reject(command, "RPC command rejected because shutdown is pending")
                     continue
             if await self.handle_event(
                 event,
                 dispatch=dispatch,
                 reject=reject,
-                command_type=command_type,
             ):
                 return True
         return False
@@ -294,7 +287,6 @@ class RpcCoordinator:
         *,
         dispatch: RpcDispatch,
         reject: RpcReject,
-        command_type: RpcCommandType,
     ) -> bool:
         """Apply one event while allowing dispatch to await output capacity."""
 
@@ -309,16 +301,14 @@ class RpcCoordinator:
                 ):
                     self.running_command.cancel_scope.cancel()
                 for queue in (self.pending_prompt_queue_commands, self.queued_commands):
-                    retained: deque[dict[str, object]] = deque()
+                    retained: deque[ParsedRpcCommand] = deque()
                     while queue:
                         queued = queue.popleft()
-                        if command_type(queued) == "begin_device_code":
+                        if queued.command_type == "begin_device_code":
                             self._release_queued_command(queued)
-                            command_id = queued.get("id")
                             await reject(
                                 queued,
-                                "RPC command cancelled: "
-                                f"{command_id if isinstance(command_id, str) else 'unknown'}",
+                                f"RPC command cancelled: {queued.command_id or 'unknown'}",
                             )
                         else:
                             retained.append(queued)
@@ -376,7 +366,7 @@ class RpcCoordinator:
                 f"RPC command id is already outstanding: {duplicate_id}",
             )
             return False
-        selected_type = command_type(command)
+        selected_type = command.command_type
         running = self.running_command
         if running is None and selected_type == "shutdown":
             await self._enqueue_command(
@@ -401,8 +391,7 @@ class RpcCoordinator:
         if (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES
-            and selected_type in _ACTIVE_PROMPT_READ_COMMAND_TYPES
-            and command.get("allow_during_prompt") is True
+            and command.allows_prompt_read
         ):
             if self._outstanding_command_count() >= self._max_queued_commands:
                 await reject(
@@ -449,7 +438,7 @@ class RpcCoordinator:
 
     async def _dispatch(
         self,
-        command: dict[str, object],
+        command: ParsedRpcCommand,
         *,
         dispatch: RpcDispatch,
     ) -> bool:
@@ -464,16 +453,16 @@ class RpcCoordinator:
             self.session_state.session = result.selected_session
         return result.should_shutdown
 
-    def _duplicate_outstanding_id(self, command: dict[str, object]) -> str | None:
-        command_id = command.get("id")
-        if not isinstance(command_id, str) or not command_id:
+    def _duplicate_outstanding_id(self, command: ParsedRpcCommand) -> str | None:
+        command_id = command.command_id
+        if command_id is None:
             return None
         if self.running_command is not None and self.running_command.command_id == command_id:
             return command_id
         if command_id in self.auxiliary_commands:
             return command_id
         if any(
-            queued.get("id") == command_id
+            queued.command_id == command_id
             for queue in (self.pending_prompt_queue_commands, self.queued_commands)
             for queued in queue
         ):
@@ -481,12 +470,10 @@ class RpcCoordinator:
         return None
 
     @staticmethod
-    def _duplicate_rejection_command(command: dict[str, object]) -> dict[str, object]:
+    def _duplicate_rejection_command(command: ParsedRpcCommand) -> ParsedRpcCommand:
         """Return a rejection command whose lifecycle cannot reuse the conflicting id."""
 
-        rejected = dict(command)
-        rejected.pop("id", None)
-        return rejected
+        return command.without_id()
 
     def _reset_session_state(self) -> None:
         self.session_state.session = None
@@ -507,9 +494,9 @@ class RpcCoordinator:
 
     async def _enqueue_command(
         self,
-        command: dict[str, object],
+        command: ParsedRpcCommand,
         *,
-        queue: deque[dict[str, object]],
+        queue: deque[ParsedRpcCommand],
         reject: RpcReject,
     ) -> None:
         if self._outstanding_command_count() >= self._max_queued_commands:
@@ -527,13 +514,13 @@ class RpcCoordinator:
 
     def _pop_queued_command(
         self,
-        queue: deque[dict[str, object]],
-    ) -> dict[str, object]:
+        queue: deque[ParsedRpcCommand],
+    ) -> ParsedRpcCommand:
         command = queue.popleft()
         self._release_queued_command(command)
         return command
 
-    def _release_queued_command(self, command: dict[str, object]) -> None:
+    def _release_queued_command(self, command: ParsedRpcCommand) -> None:
         self._release_command_bytes(self._command_payload_size(command))
 
     def _release_command_bytes(self, command_bytes: int) -> None:
@@ -543,8 +530,8 @@ class RpcCoordinator:
         )
 
     @staticmethod
-    def _command_payload_size(command: dict[str, object]) -> int:
-        return rpc_command_payload_size(command)
+    def _command_payload_size(command: ParsedRpcCommand) -> int:
+        return command.payload_size
 
     def _outstanding_command_count(self) -> int:
         """Count queued and concurrent auxiliary work sharing the configured bound."""

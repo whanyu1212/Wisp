@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -30,6 +32,7 @@ from wisp.validation import redact_validation_error_inputs
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
 
 MAX_RPC_COMMAND_ID_CHARS = 256
+MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
 STORE_API_KEY_SECRET_FIELD = "_api_key"
 
@@ -63,7 +66,7 @@ def take_store_api_key(command: dict[str, object]) -> object | None:
     return value.value if isinstance(value, _RpcSecretValue) else value
 
 
-def rpc_command_payload_size(command: dict[str, object]) -> int:
+def rpc_command_payload_size(command: Mapping[str, object]) -> int:
     """Return the wire-size equivalent without making secrets printable."""
 
     sized = dict(command)
@@ -472,6 +475,96 @@ type RpcCommand = Annotated[
     Field(discriminator="type"),
 ]
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)
+
+
+def rpc_command_type(command: Mapping[str, object]) -> str:
+    """Return a bounded command discriminator for lifecycle reporting."""
+
+    command_type = command.get("type")
+    return (
+        command_type
+        if isinstance(command_type, str) and 0 < len(command_type) <= MAX_RPC_COMMAND_TYPE_CHARS
+        else "unknown"
+    )
+
+
+@dataclass(frozen=True)
+class UnknownCommandEnvelope:
+    """Metadata for a forward-compatible command unknown to this Wisp version."""
+
+    command_type: str
+
+
+@dataclass(frozen=True)
+class ParsedRpcCommand:
+    """Validated known command or bounded unknown command plus its legacy payload."""
+
+    value: RpcCommand | UnknownCommandEnvelope = dataclass_field(repr=False)
+    _payload: Mapping[str, object] = dataclass_field(repr=False)
+    payload_size: int
+
+    @classmethod
+    def from_known(
+        cls,
+        command: RpcCommand,
+        *,
+        payload: Mapping[str, object] | None = None,
+    ) -> ParsedRpcCommand:
+        legacy = dict(command.model_dump(exclude_none=True) if payload is None else payload)
+        return cls._from_parts(command, legacy)
+
+    @classmethod
+    def from_unknown(cls, payload: Mapping[str, object]) -> ParsedRpcCommand:
+        legacy = dict(payload)
+        return cls._from_parts(
+            UnknownCommandEnvelope(command_type=rpc_command_type(legacy)),
+            legacy,
+        )
+
+    @classmethod
+    def _from_parts(
+        cls,
+        value: RpcCommand | UnknownCommandEnvelope,
+        payload: dict[str, object],
+    ) -> ParsedRpcCommand:
+        detached = detach_store_api_key(payload)
+        return cls(
+            value=value,
+            _payload=MappingProxyType(detached),
+            payload_size=rpc_command_payload_size(detached),
+        )
+
+    @property
+    def command_type(self) -> str:
+        if isinstance(self.value, UnknownCommandEnvelope):
+            return self.value.command_type
+        return self.value.type
+
+    @property
+    def command_id(self) -> str | None:
+        command_id = self._payload.get("id")
+        return command_id if isinstance(command_id, str) and command_id else None
+
+    @property
+    def known(self) -> RpcCommand | None:
+        return None if isinstance(self.value, UnknownCommandEnvelope) else self.value
+
+    @property
+    def allows_prompt_read(self) -> bool:
+        return isinstance(self.value, GetMessagesCommand) and self.value.allow_during_prompt is True
+
+    def without_id(self) -> ParsedRpcCommand:
+        payload = dict(self._payload)
+        payload.pop("id", None)
+        value = self.value
+        if not isinstance(value, UnknownCommandEnvelope):
+            value = value.model_copy(update={"id": None})
+        return self._from_parts(value, payload)
+
+    def to_legacy_dict(self) -> dict[str, object]:
+        """Return a fresh secret-detached payload for the legacy executor."""
+
+        return dict(self._payload)
 
 
 def rpc_command_from_json(line: str) -> RpcCommand:

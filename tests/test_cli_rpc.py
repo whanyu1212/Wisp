@@ -2785,6 +2785,30 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
     assert completed.entry_count > 0
 
 
+def test_rpc_mode_preserves_unknown_command_lifecycle(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"future-1","type":"future_command","payload":"kept"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "error",
+        "rpc.command.finished",
+    ]
+    assert records[0]["command_id"] == "future-1"
+    assert records[0]["command_type"] == "future_command"
+    assert records[1]["message"] == "Unknown RPC command: future_command"
+    assert records[2]["command_id"] == "future-1"
+    assert records[2]["command_type"] == "future_command"
+    assert records[2]["ok"] is False
+    assert records[2]["error"] == "Unknown RPC command: future_command"
+
+
 def test_rpc_mode_cancel_reports_unknown_target(tmp_path: Path) -> None:
     runner = CliRunner()
 

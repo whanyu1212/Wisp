@@ -13,10 +13,16 @@ from tests.cli_support import *
 from tests.cli_support import _read_rpc_test_handshake, _test_model_registry
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
 from wisp.providers.fake import ScriptedProvider
+from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.execution import run_rpc_prompt_command
 from wisp.rpc.host import RpcTrustGate
 from wisp.skills.tool import SkillTool
+
+
+def _parsed_input(payload: dict[str, object]) -> ParsedRpcCommand:
+    command = RpcCommandAdapter.validate_python(payload)
+    return ParsedRpcCommand.from_known(command, payload=payload)
 
 
 def test_rpc_prompt_in_undecided_project_emits_trust_request(tmp_path: Path) -> None:
@@ -108,7 +114,11 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
         async with send:
-            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(
+                rpc._RpcInputCommand(
+                    _parsed_input({"id": "p1", "type": "prompt", "prompt": "hello"})
+                )
+            )
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
@@ -177,7 +187,9 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
         async with send:
-            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hi"}))
+            await send.send(
+                rpc._RpcInputCommand(_parsed_input({"id": "p1", "type": "prompt", "prompt": "hi"}))
+            )
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
@@ -279,8 +291,12 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
         async with send:
-            await send.send(rpc._RpcInputCommand(configure_command))
-            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(rpc._RpcInputCommand(_parsed_input(configure_command)))
+            await send.send(
+                rpc._RpcInputCommand(
+                    _parsed_input({"id": "p1", "type": "prompt", "prompt": "hello"})
+                )
+            )
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
@@ -352,8 +368,12 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
         async with send:
-            await send.send(rpc._RpcInputCommand(configure_command))
-            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(rpc._RpcInputCommand(_parsed_input(configure_command)))
+            await send.send(
+                rpc._RpcInputCommand(
+                    _parsed_input({"id": "p1", "type": "prompt", "prompt": "hello"})
+                )
+            )
             await send.send(rpc._RpcInputClosed())
 
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)

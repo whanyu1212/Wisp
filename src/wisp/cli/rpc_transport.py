@@ -15,7 +15,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import ValidationError
 
 from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent, WispEvent
-from wisp.rpc.commands import RpcCommandAdapter, detach_store_api_key
+from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.framing import RpcFrameError, decode_rpc_object, pop_rpc_frame
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
@@ -106,7 +106,7 @@ class RpcStdinTransport[TControlEvent]:
         *,
         stdin: RpcTextInput,
         write_event: RpcEventWriter,
-        input_command_factory: Callable[[dict[str, object]], TControlEvent],
+        input_command_factory: Callable[[ParsedRpcCommand], TControlEvent],
         input_closed_factory: Callable[[], TControlEvent],
         queue_factory: QueueFactory = lambda maxsize: Queue(maxsize=maxsize),
         thread_factory: ThreadFactory = Thread,
@@ -290,27 +290,27 @@ class RpcStdinTransport[TControlEvent]:
             return False
         return await self.send_line(send, raw_line)
 
-    def parse_command(self, frame: bytes) -> dict[str, object] | None:
+    def parse_command(self, frame: bytes) -> ParsedRpcCommand | None:
         try:
-            command = decode_rpc_object(frame, max_frame_bytes=self._max_frame_bytes)
+            payload = decode_rpc_object(frame, max_frame_bytes=self._max_frame_bytes)
         except RpcFrameError as exc:
             self._write_event(ErrorEvent(message=str(exc)))
             return None
         try:
-            RpcCommandAdapter.validate_json(frame)
+            command = RpcCommandAdapter.validate_json(frame)
         except ValidationError as exc:
-            command_type = command.get("type")
+            command_type = payload.get("type")
             unknown_discriminator = isinstance(command_type, str) and any(
                 error["type"] == "union_tag_invalid"
                 for error in exc.errors(include_input=False, include_url=False)
             )
             if unknown_discriminator:
-                return command
+                return ParsedRpcCommand.from_unknown(payload)
             self._write_event(
                 ErrorEvent(message="RPC command does not match the negotiated schema")
             )
             return None
-        return detach_store_api_key(command)
+        return ParsedRpcCommand.from_known(command, payload=payload)
 
     async def _report_failure(
         self,
