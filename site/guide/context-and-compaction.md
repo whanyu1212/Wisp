@@ -29,8 +29,9 @@ settings and future extensions. See [Tools & safety](./tools-and-safety#project-
 ## Accounting
 
 Before each request Wisp emits `context.estimated`, a deterministic approximation of the system
-prompt, active messages, pending tool results, and tool schemas (a conservative `ceil(chars / 4)`
-heuristic). When the catalog provides a context window, the event also reports the reserve, estimated
+prompt, active messages, pending tool results, and tool schemas using the Unicode-aware
+`utf8_bytes_div_4_v2` method (an approximate `ceil(len(utf8_bytes) / 4)` heuristic computed over
+JSON-serialized payloads that may undercount tokenizer-specific inputs). When the catalog provides a context window, the event also reports the reserve, estimated
 percentage, remaining budget, and whether the estimate crossed it. Unknown models remain permissive.
 
 Provider-reported `usage.total_tokens` is kept separately as the authoritative observation for a

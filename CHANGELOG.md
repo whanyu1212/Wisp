@@ -19,7 +19,7 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   external frontends never read or write credential files. The catalog advertises only available
   provider endpoints, and mutation completion remains authoritative if the secondary status refresh
   fails. Protocol v1–v3 artifacts remain immutable.
-- Added the enforced live JSONL-RPC v3 handshake, bounded strict framing, immutable generated schemas,
+- Added the enforced live JSONL-RPC v4 handshake, bounded strict framing, immutable generated schemas,
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
 - Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,
   model, availability, lifecycle, and effort discovery. Protocol v1 and v2 artifacts remain immutable.
