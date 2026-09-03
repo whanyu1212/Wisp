@@ -12,6 +12,7 @@ from pytest import MonkeyPatch
 
 import wisp.sdk as sdk_module
 from wisp.agent.messages import Message
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
@@ -29,6 +30,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
+from wisp.rpc.commands import StoreApiKeyCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -969,7 +971,7 @@ def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
 
         class DelayedShutdownSend:
             async def send(self, event: _RpcInputCommand | _RpcInputClosed) -> None:
-                if isinstance(event, _RpcInputCommand) and event.command.get("type") == "shutdown":
+                if isinstance(event, _RpcInputCommand) and event.command.command_type == "shutdown":
                     shutdown_send_started.set()
                     await anyio.Event().wait()
                 await original_control_send.send(event)
@@ -999,6 +1001,64 @@ def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
                 assert prompt_id == "prompt-1"
         finally:
             await controller.aclose()
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_preserves_typed_secret_command_until_storage(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        secret = "sentinel-secret-key"
+        auth_path = tmp_path / "auth.json"
+        controller = await InProcessWisp.start(
+            WispConfig(
+                provider="fake",
+                session_dir=tmp_path / "sessions",
+                auth_path=auth_path,
+            ),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        transport = controller._in_process_transport
+        original_control_send = transport._control_send
+        captured: list[_RpcInputCommand] = []
+
+        class InspectingSend:
+            async def send(self, event: _RpcInputCommand | _RpcInputClosed) -> None:
+                if isinstance(event, _RpcInputCommand):
+                    captured.append(event)
+                await original_control_send.send(event)
+
+            async def aclose(self) -> None:
+                await original_control_send.aclose()
+
+        transport._control_send = cast(Any, InspectingSend())
+
+        try:
+            command_id = await controller.store_api_key(
+                "anthropic",
+                secret,
+                command_id="store-1",
+            )
+            events = []
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    break
+        finally:
+            await controller.aclose()
+
+        assert len(captured) == 1
+        parsed = captured[0].command
+        assert isinstance(parsed.known, StoreApiKeyCommand)
+        assert parsed.known.api_key == secret
+        assert secret not in repr(captured[0])
+        assert secret not in repr(parsed)
+        assert secret not in repr(parsed.to_legacy_dict())
+        assert JsonAuthStore(auth_path).get("anthropic") == ApiKeyCredential(key=secret)
+        assert all(secret not in repr(event) for event in events)
+        assert isinstance(events[-1], RpcCommandFinished)
+        assert events[-1].ok is True
 
     anyio.run(scenario)
 

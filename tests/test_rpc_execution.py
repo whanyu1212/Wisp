@@ -9,6 +9,7 @@ from typing import Literal
 
 import anyio
 import pytest
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from tests.rpc_support import (
@@ -16,7 +17,6 @@ from tests.rpc_support import (
     build_rpc_executor_fixture,
     preserve_running_command,
     reject_unexpected_command,
-    rpc_command_type,
 )
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
@@ -60,6 +60,11 @@ from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
+from wisp.rpc.commands import (
+    MAX_RPC_COMMAND_TYPE_CHARS,
+    ParsedRpcCommand,
+    RpcCommandAdapter,
+)
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     RpcCoordinator,
@@ -100,6 +105,14 @@ class _TrustResolver:
         return False
 
 
+def _parsed_command(payload: dict[str, object]) -> ParsedRpcCommand:
+    try:
+        command = RpcCommandAdapter.validate_json(json.dumps(payload))
+    except ValidationError:
+        return ParsedRpcCommand.from_unknown(payload)
+    return ParsedRpcCommand.from_known(command, payload=payload)
+
+
 def _enable_project_init(fixture: RpcExecutorFixture, project_root: Path) -> None:
     fixture.agent = CodingSession(
         provider=fixture.runtime.providers.get("fake"),
@@ -122,7 +135,7 @@ def test_rpc_command_identity_replaces_oversized_ids_before_lifecycle_events() -
 
 def test_rpc_control_bounds_oversized_types_before_lifecycle_events() -> None:
     events: list[WispEvent] = []
-    oversized_type = "x" * (rpc_execution_module._MAX_RPC_COMMAND_TYPE_CHARS + 1)
+    oversized_type = "x" * (MAX_RPC_COMMAND_TYPE_CHARS + 1)
 
     should_shutdown = rpc_execution_module.handle_rpc_control_command(
         {"id": "command-1", "type": oversized_type},
@@ -993,7 +1006,8 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
             {"id": "clear", "type": "clear_queue", "kind": "follow_up"},
             {"id": "invalid", "type": "follow_up"},
         ]
-        fixture.coordinator.pending_prompt_queue_commands.extend(buffered_commands)
+        parsed_commands = [_parsed_command(command) for command in buffered_commands]
+        fixture.coordinator.pending_prompt_queue_commands.extend(parsed_commands)
         running = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
@@ -1008,7 +1022,10 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
         assert report.state.pending_follow_up_count == 0
         assert report.state.steering_mode == "all"
         assert report.state.follow_up_mode == "one_at_a_time"
-        assert list(fixture.coordinator.pending_prompt_queue_commands) == buffered_commands
+        assert [
+            command.to_legacy_dict()
+            for command in fixture.coordinator.pending_prompt_queue_commands
+        ] == buffered_commands
 
     anyio.run(scenario)
 
@@ -2382,7 +2399,6 @@ def test_executor_select_session_updates_coordinator_state(tmp_path: Path) -> No
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2431,7 +2447,6 @@ def test_executor_set_session_name_updates_selected_cached_state(tmp_path: Path)
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             await executor.dispatch({"id": "state", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
@@ -2490,7 +2505,6 @@ def test_executor_set_session_name_with_explicit_id_does_not_switch_selection(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2545,7 +2559,6 @@ def test_executor_set_session_name_with_explicit_path_requires_same_selected_pat
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2596,7 +2609,6 @@ def test_executor_set_session_name_matches_selected_session_by_normalized_path(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2668,7 +2680,6 @@ def test_executor_select_session_reports_validation_and_load_failures(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2726,7 +2737,6 @@ def test_executor_clone_session_applies_target_before_reporting_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2789,7 +2799,6 @@ def test_executor_clone_session_reports_name_from_inherited_clone_snapshot(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2841,7 +2850,6 @@ def test_executor_fork_session_returns_prompt_and_selects_parent_path(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2899,7 +2907,6 @@ def test_executor_fork_session_reports_source_name_from_branch_snapshot(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2941,7 +2948,6 @@ def test_executor_first_message_fork_selects_reserved_empty_session(tmp_path: Pa
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -2978,7 +2984,6 @@ def test_executor_fork_rejects_a_reserved_empty_session(tmp_path: Path) -> None:
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3029,7 +3034,6 @@ def test_executor_session_derivation_reports_validation_failures(tmp_path: Path)
                 clone_completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3099,7 +3103,6 @@ def test_executor_clone_rejects_concurrent_source_leaf_change(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3145,7 +3148,6 @@ def test_executor_fork_rejects_non_user_and_missing_entries(tmp_path: Path) -> N
                     completed,
                     dispatch=preserve_running_command,
                     reject=reject_unexpected_command,
-                    command_type=rpc_command_type,
                 )
             task_group.cancel_scope.cancel()
 
@@ -3181,7 +3183,6 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
                 empty_completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
 
             session = fixture.sessions.create()
@@ -3196,7 +3197,6 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
                 reserved_completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             first = await session.append_message(Message(role="user", content="first"))
             await session.append_message(Message(role="assistant", content="answer"))
@@ -3269,7 +3269,6 @@ def test_executor_navigation_applies_history_before_reporting_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3334,7 +3333,6 @@ def test_executor_unrevert_applies_history_before_reporting_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3443,7 +3441,6 @@ def test_executor_unrevert_rejects_concurrent_leaf_change(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3492,7 +3489,6 @@ def test_executor_unrevert_cancellation_before_commit_preserves_leaf(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3554,7 +3550,6 @@ def test_executor_unrevert_cancellation_after_commit_reports_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3617,7 +3612,6 @@ def test_executor_unrevert_reports_committed_leaf_after_concurrent_navigation(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3668,7 +3662,6 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
                 no_session_cursor_completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             session = fixture.sessions.create()
             await session.append_message(Message(role="user", content="one"))
@@ -3689,7 +3682,6 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
                 cursor_completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             await executor.dispatch(
                 {
@@ -3771,7 +3763,6 @@ def test_executor_navigation_rejects_concurrent_leaf_change(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3820,7 +3811,6 @@ def test_executor_navigation_cancellation_before_commit_preserves_leaf(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3884,7 +3874,6 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -3961,7 +3950,6 @@ def test_executor_navigation_cancellation_during_no_op_reports_cancelled(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -4000,7 +3988,6 @@ def test_executor_clone_cancellation_before_commit_preserves_source(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -4058,7 +4045,6 @@ def test_executor_clone_cancellation_after_commit_reports_success(
                 completed,
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
-                command_type=rpc_command_type,
             )
             task_group.cancel_scope.cancel()
 
@@ -4276,7 +4262,7 @@ def test_executor_routes_queued_cancellation_through_coordinator(tmp_path: Path)
         agent = CodingSession(provider=runtime.providers.get("fake"), sessions=sessions)
         state = _RpcSessionState(None, (), 0)
         coordinator = RpcCoordinator(state)
-        coordinator.queued_commands.append({"id": "queued", "type": "prompt"})
+        coordinator.queued_commands.append(_parsed_command({"id": "queued", "type": "prompt"}))
         events: list[WispEvent] = []
 
         async def render_events(stream: AsyncIterator[WispEvent]) -> None:

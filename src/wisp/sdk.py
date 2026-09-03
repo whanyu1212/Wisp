@@ -23,7 +23,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.config import WispConfig
 from wisp.events import KnownWispEvent, WispEvent
 from wisp.rpc.client import RpcController, RpcTransport
-from wisp.rpc.commands import RpcCommand, detach_store_api_key
+from wisp.rpc.commands import ParsedRpcCommand, RpcCommand
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
@@ -338,9 +338,7 @@ class _InProcessTransport(RpcTransport):
     async def send(self, command: RpcCommand) -> None:
         """Submit one already-validated typed command to the shared host."""
 
-        raw_command = detach_store_api_key(
-            cast(dict[str, object], command.model_dump(exclude_none=True))
-        )
+        parsed_command = ParsedRpcCommand.from_known(command)
         send_cancel_scope = anyio.CancelScope()
         is_shutdown = command.type == "shutdown"
         sent = False
@@ -361,7 +359,7 @@ class _InProcessTransport(RpcTransport):
                     if not self._pending_sends:
                         self._pending_sends_drained = anyio.Event()
                     self._pending_sends[send_cancel_scope] = False
-                await self._control_send.send(_RpcInputCommand(command=raw_command))
+                await self._control_send.send(_RpcInputCommand(command=parsed_command))
                 # There is no checkpoint between send returning and this assignment,
                 # so shutdown never cancels a submission after it has been enqueued.
                 sent = True

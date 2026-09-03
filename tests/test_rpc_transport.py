@@ -12,6 +12,12 @@ import pytest
 from wisp.cli.rpc_transport import RpcStdinTransport, read_rpc_stdin_handshake
 from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
 from wisp.rpc import framing as rpc_framing
+from wisp.rpc.commands import (
+    ConfigureCommand,
+    ShutdownCommand,
+    StoreApiKeyCommand,
+    UnknownCommandEnvelope,
+)
 from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
@@ -252,7 +258,8 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert isinstance(command.command.known, ShutdownCommand)
+        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC frame is not valid JSON"
         ]
@@ -283,7 +290,8 @@ def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert isinstance(command.command.known, ShutdownCommand)
+        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC command does not match the negotiated schema"
         ]
@@ -306,7 +314,12 @@ def test_transport_forwards_unknown_command_discriminators() -> None:
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command == {"id": "future", "type": "future_command"}
+        assert isinstance(command.command.value, UnknownCommandEnvelope)
+        assert command.command.known is None
+        assert command.command.command_type == "future_command"
+        assert command.command.command_id == "future"
+        assert command.command.to_legacy_dict() == {"id": "future", "type": "future_command"}
+        assert "future_command" not in repr(command)
         assert events == []
 
     anyio.run(scenario)
@@ -327,7 +340,51 @@ def test_transport_validates_commands_with_json_semantics() -> None:
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command == {"id": "mode", "type": "configure", "mode": "plan"}
+        assert isinstance(command.command.known, ConfigureCommand)
+        assert command.command.known.mode == "plan"
+        assert command.command.to_legacy_dict() == {
+            "id": "mode",
+            "type": "configure",
+            "mode": "plan",
+        }
+        assert command.command.payload_size == len(
+            b'{"id":"mode","type":"configure","mode":"plan"}'
+        )
+        assert events == []
+
+    anyio.run(scenario)
+
+
+def test_transport_redacts_store_api_key_after_parsing() -> None:
+    async def scenario() -> None:
+        secret = "sentinel-secret"
+        events: list[object] = []
+        transport = RpcStdinTransport(
+            stdin=_Input([]),
+            write_event=events.append,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            await transport.send_line(
+                send,
+                f'{{"id":"store","type":"store_api_key","provider":"anthropic",'
+                f'"api_key":"{secret}"}}',
+            )
+            event = await receive.receive()
+
+        assert isinstance(event, _RpcInputCommand)
+        assert isinstance(event.command.known, StoreApiKeyCommand)
+        assert event.command.known.api_key == secret
+        assert secret not in repr(event)
+        assert secret not in repr(event.command)
+        legacy = event.command.to_legacy_dict()
+        assert secret not in repr(legacy)
+        assert event.command.payload_size == len(
+            f'{{"id":"store","type":"store_api_key","provider":"anthropic",'
+            f'"_api_key":"{secret}"}}'.encode()
+        )
         assert events == []
 
     anyio.run(scenario)
@@ -360,7 +417,8 @@ def test_transport_recovers_when_json_nesting_exhausts_parser(
             command = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command == {"id": "ok", "type": "shutdown"}
+        assert isinstance(command.command.known, ShutdownCommand)
+        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC frame is not valid JSON"
         ]
@@ -399,7 +457,7 @@ def test_fd_transport_delivers_valid_command_before_later_source_failure() -> No
             closed = await receive.receive()
 
         assert isinstance(command, _RpcInputCommand)
-        assert command.command["id"] == "ok"
+        assert command.command.command_id == "ok"
         assert isinstance(closed, _RpcInputClosed)
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "Failed to read RPC stdin: pipe failed"
@@ -482,8 +540,8 @@ def test_transport_dispatches_buffered_pipe_lines() -> None:
                     second = await receive.receive()
                 assert isinstance(first, _RpcInputCommand)
                 assert isinstance(second, _RpcInputCommand)
-                assert first.command["id"] == "cancel-1"
-                assert second.command["id"] == "shutdown-1"
+                assert first.command.command_id == "cancel-1"
+                assert second.command.command_id == "shutdown-1"
                 stop_reader.set()
                 task_group.cancel_scope.cancel()
 
@@ -580,8 +638,8 @@ def test_transport_uses_thread_reader_for_windows_pipe() -> None:
                     second = await receive.receive()
                 assert isinstance(first, _RpcInputCommand)
                 assert isinstance(second, _RpcInputCommand)
-                assert first.command["id"] == "prompt-1"
-                assert second.command["id"] == "shutdown-1"
+                assert first.command.command_id == "prompt-1"
+                assert second.command.command_id == "shutdown-1"
                 stop_reader.set()
                 task_group.cancel_scope.cancel()
 
@@ -620,8 +678,8 @@ def test_transport_handles_regular_file_stdin(tmp_path: Path) -> None:
                 assert isinstance(first, _RpcInputCommand)
                 assert isinstance(second, _RpcInputCommand)
                 assert isinstance(closed, _RpcInputClosed)
-                assert first.command["id"] == "prompt-1"
-                assert second.command["id"] == "shutdown-1"
+                assert first.command.command_id == "prompt-1"
+                assert second.command.command_id == "shutdown-1"
                 stop_reader.set()
                 task_group.cancel_scope.cancel()
 
