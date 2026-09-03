@@ -111,7 +111,7 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 
 | Mode | Command | Output | Best for |
 |------|---------|--------|----------|
-| **TUI** | `wisp` (or `wisp tui`) | Fullscreen Textual UI | Interactive development |
+| **TUI** | `wisp` (or `wisp tui`) | Fullscreen Textual UI | Interactive development. Experimental `wisp tui --renderer rust` is source-build only and is not the default. |
 | **Print** | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and scripts |
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |

@@ -173,6 +173,64 @@ def test_explicit_rust_failure_does_not_fall_back(monkeypatch: MonkeyPatch) -> N
     assert "Rust TUI exited with status 23" in result.output
 
 
+def test_cli_missing_rust_binary_does_not_fall_back(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-wisp-tui"
+    result = CliRunner().invoke(
+        app,
+        ["tui", "--renderer", "rust"],
+        env={**_cli_env(), "WISP_RUST_TUI_BINARY": str(missing)},
+    )
+
+    assert result.exit_code == 1
+    assert "was not found" in result.output
+    assert "Rust TUI exited with status" not in result.output
+
+
+def test_cli_missing_rust_binary_does_not_import_python_tui_app(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-wisp-tui"
+    script = """
+import sys
+from typer.testing import CliRunner
+
+from wisp.cli import app
+
+result = CliRunner().invoke(app, ["tui", "--renderer", "rust"])
+assert result.exit_code == 1, result.output
+assert "was not found" in result.output
+assert "wisp.tui.app" not in sys.modules
+assert "wisp.tui.textual_app" not in sys.modules
+"""
+    environment = {
+        **os.environ,
+        **_cli_env(),
+        "WISP_RUST_TUI_BINARY": str(missing),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_cli_nonexecutable_rust_binary_does_not_fall_back(tmp_path: Path) -> None:
+    binary = tmp_path / "wisp-tui"
+    binary.write_bytes(b"binary")
+    binary.chmod(0o600)
+    result = CliRunner().invoke(
+        app,
+        ["tui", "--renderer", "rust"],
+        env={**_cli_env(), "WISP_RUST_TUI_BINARY": str(binary)},
+    )
+
+    assert result.exit_code == 1
+    assert "is not executable" in result.output
+    assert "Rust TUI exited with status" not in result.output
+
+
 def test_binary_override_must_be_absolute(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("WISP_RUST_TUI_BINARY", "target/debug/wisp-tui")
 

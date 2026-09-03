@@ -46,6 +46,12 @@ the cold-mount timing.
 The CPU worker runs until it is cancelled immediately after the scroll measurement,
 with a 60-second safety timeout. Streaming metrics therefore run without its load.
 
+## Rust TUI acceptance (#470)
+
+The renderer decision and the measurements that could not run are recorded in
+`benchmarks/rust_tui_acceptance_evidence.md`. Refresh the in-process transcript snapshot below when
+repeating that gate. Do not treat Textual-only input-latency numbers as a Rust comparison.
+
 ## Rust TUI Transcript
 
 Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,

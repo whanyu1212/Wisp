@@ -27,8 +27,11 @@ compact billing and context fields.
 
 ## Experimental Rust TUI
 
-Textual remains Wisp's default and full-featured TUI. An experimental Rust frontend is available as
-an explicit opt-in on macOS and Linux:
+Textual remains Wisp's default and full-featured TUI. [#470](https://github.com/whanyu1212/Wisp/issues/470)
+closed with that default: Rust stays an experimental opt-in on macOS and Linux, source-build only,
+with no fallback and no stage-3 supported-opt-in claim. [#467](https://github.com/whanyu1212/Wisp/issues/467),
+[#468](https://github.com/whanyu1212/Wisp/issues/468), and
+[#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage.
 
 ```bash
 wisp tui --renderer rust

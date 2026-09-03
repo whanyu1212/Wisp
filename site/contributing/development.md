@@ -27,11 +27,13 @@ The project uses strict mypy checking and Ruff with a 100-character line length 
 `E`, `F`, `I`, `UP`, and `B` rule sets. Prefer async-first APIs with `anyio`, frozen dataclasses for
 internal value objects, and Pydantic models for serialized boundaries.
 
-## Rust TUI scaffold
+## Experimental Rust TUI {#rust-tui-scaffold}
 
-The experimental Rust transport scaffold is a Cargo workspace member and is supported for source
-development on macOS and Linux. The repository pins Rust 1.85.0 in `rust-toolchain.toml`, and every
-workspace crate declares `rust-version = "1.85"` through the workspace package settings.
+The experimental Rust frontend is a Cargo workspace member and is supported for source development
+on macOS and Linux. It is not the default renderer and is not bundled in Python distributions;
+[#470](https://github.com/whanyu1212/Wisp/issues/470) closed that way. The repository pins Rust
+1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
+the workspace package settings.
 
 Build and launch it with an absolute binary override:
 
@@ -45,11 +47,12 @@ The Python packages do not currently bundle this executable. A relative
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 
-The scaffold is exact-lockstep with the Python runtime. The current package and crate versions are
-both `0.1.0`; the only accepted transport is live RPC v4 with event schema v36. Python's models and
-committed schemas remain authoritative, and `wisp-protocol` generates its private Rust projections
-from those schemas at compile time. Package, protocol, event-schema, or generated-schema drift must
-fail a check or the startup handshake rather than degrade to another contract.
+The experimental frontend is exact-lockstep with the Python runtime. The current package and crate
+versions are both `0.1.0`; the only accepted transport is live RPC v4 with event schema v36.
+Python's models and committed schemas remain authoritative, and `wisp-protocol` generates its
+private Rust projections from those schemas at compile time. Package, protocol, event-schema, or
+generated-schema drift must fail a check or the startup handshake rather than degrade to another
+contract.
 
 Run the Rust quality gates with the pinned toolchain:
 
