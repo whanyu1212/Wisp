@@ -14,6 +14,7 @@ from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
 from wisp.rpc import framing as rpc_framing
 from wisp.rpc.commands import (
     ConfigureCommand,
+    GetMessagesCommand,
     ParsedRpcCommand,
     ShutdownCommand,
     StoreApiKeyCommand,
@@ -277,6 +278,19 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
         '{"id":"bad","type":"configure","effort":5}',
         '{"id":"bad","type":"configure","auto_compaction_enabled":0}',
         '{"id":"bad","type":"configure","effort":"high","clear_effort":true}',
+        '{"id":"bad","type":"get_messages","limit":true}',
+        '{"id":"bad","type":"get_messages","limit":0}',
+        '{"id":"bad","type":"get_messages","session_id":""}',
+        '{"id":"bad","type":"get_messages","before_entry_id":"one","after_entry_id":"two"}',
+        '{"id":"bad","type":"get_messages","entry_ids":["entry","entry"]}',
+        '{"id":"bad","type":"get_messages","full_content":true}',
+        '{"id":"bad","type":"get_messages","complete_structure":"yes"}',
+        '{"id":"bad","type":"get_sessions","limit":true}',
+        '{"id":"bad","type":"get_sessions","limit":-1}',
+        '{"id":"bad","type":"get_sessions","limit":201}',
+        '{"id":"bad","type":"get_session_tree","limit":true}',
+        '{"id":"bad","type":"get_session_tree","limit":0}',
+        '{"id":"bad","type":"get_session_tree","after_entry_id":""}',
     ],
 )
 def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None:
@@ -399,6 +413,47 @@ def test_sdk_style_configure_omits_none_fields_from_presence_metadata() -> None:
     )
 
     assert parsed.provided_fields == {"id", "type", "model", "clear_effort"}
+
+
+def test_message_read_preserves_null_presence_and_sdk_omission() -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+    explicit_null = transport.parse_command(
+        b'{"id":"null","type":"get_messages","entry_ids":null,'
+        b'"complete_structure":null,"full_content":null}'
+    )
+    sdk_style = ParsedRpcCommand.from_known(
+        GetMessagesCommand(
+            id="sdk",
+            session_id=None,
+            before_entry_id=None,
+            after_entry_id=None,
+            entry_ids=None,
+            complete_structure=None,
+            full_content=None,
+            allow_during_prompt=None,
+        )
+    )
+
+    assert explicit_null is not None
+    assert isinstance(explicit_null.known, GetMessagesCommand)
+    assert explicit_null.known.entry_ids is None
+    assert explicit_null.known.complete_structure is None
+    assert explicit_null.known.full_content is None
+    assert {
+        "entry_ids",
+        "complete_structure",
+        "full_content",
+    } < explicit_null.provided_fields
+    assert "entry_ids" not in sdk_style.provided_fields
+    assert "complete_structure" not in sdk_style.provided_fields
+    assert "full_content" not in sdk_style.provided_fields
+    assert events == []
 
 
 def test_transport_redacts_store_api_key_after_parsing() -> None:
