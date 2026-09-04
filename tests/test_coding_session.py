@@ -418,7 +418,7 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
     ]
     assert "You are Wisp" in records[0]["message"]["content"]
     assert "[WISP PROJECT CONTEXT]" in records[1]["message"]["content"]
-    assert records[2]["message"]["content"].startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert records[2]["message"]["content"].startswith("[WISP TRUST BOUNDARY]")
     assert [record["message"]["content"] for record in records[3:]] == [
         "hello",
         "fake response to: hello",
@@ -1854,7 +1854,7 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     ]
     assert "You are Wisp" in provider.seen_messages[0].content
     assert provider.seen_messages[1].content.startswith("[WISP PROJECT CONTEXT]")
-    assert provider.seen_messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert provider.seen_messages[2].content.startswith("[WISP TRUST BOUNDARY]")
     assert provider.seen_messages[3].content == "previous question"
     payload = json.loads(provider.seen_messages[4].content)
     assert payload["type"] == "wisp.portable_tool_exchange"
@@ -1909,7 +1909,7 @@ def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     ]
     assert "You are Wisp" in provider.seen_messages[0].content
     assert "allowed tools:\n  - lookup: Look something up." in provider.seen_messages[1].content
-    assert provider.seen_messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert provider.seen_messages[2].content.startswith("[WISP TRUST BOUNDARY]")
     assert provider.seen_messages[3].content == "hello"
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
