@@ -30,10 +30,16 @@ oversized metadata is rejected.
 Project locations are not scanned until project trust is granted; user locations remain available in
 untrusted projects.
 
-Wisp ships a read-only `wisp-development` skill with current architecture, extension API, safety,
-authoring, and verification guidance. It is available from source checkouts and installed wheels,
-including in untrusted projects. Higher-precedence project or user skills may shadow it using the
-same deterministic conflict rules.
+Wisp ships two read-only package skills:
+
+| Skill | Purpose |
+|---|---|
+| `wisp-development` | Wisp architecture, implementation, extension surfaces, safety, and local verification |
+| `github-pr-delivery` | Focused GitHub PR packaging, current-head CI, review threads, re-review, and merge readiness |
+
+They are available from source checkouts and installed wheels, including in untrusted projects.
+Package skills have the lowest precedence; higher-precedence project or user skills may shadow them
+using the same deterministic conflict rules.
 
 ## The `skill` tool
 
