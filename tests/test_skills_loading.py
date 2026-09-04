@@ -8,6 +8,7 @@ import anyio
 import pytest
 
 import wisp.skills.loading as loading_module
+from wisp.runtime.api import ExtensionAPI
 from wisp.skills.discovery import discover_skills
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog, SkillEntry
@@ -87,6 +88,36 @@ def test_loads_all_bundled_skill_resources(
         )
         assert resource.text
         assert resource.truncated is False
+
+
+def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts() -> None:
+    root = bundled_skills_root()
+    extension_api = (root / "wisp-development" / "references" / "extension-api.md").read_text(
+        encoding="utf-8"
+    )
+    architecture = (root / "wisp-development" / "references" / "architecture.md").read_text(
+        encoding="utf-8"
+    )
+    skills_guide = (Path(__file__).parents[1] / "site" / "guide" / "skills.md").read_text(
+        encoding="utf-8"
+    )
+
+    for method in (
+        "register_provider",
+        "register_provider_factory",
+        "register_tool",
+        "register_command",
+        "on",
+    ):
+        assert hasattr(ExtensionAPI, method)
+        assert f"`{method}(" in extension_api
+
+    assert "execution=None" in extension_api
+    assert "Textual remains the default supported" in architecture
+    assert "Rust failures do not select it automatically" in architecture
+    assert "Textual remains a supported fallback" not in architecture
+    assert "`wisp-development`" in skills_guide
+    assert "`github-pr-delivery`" in skills_guide
 
 
 def test_loads_nested_relative_resource(tmp_path: Path) -> None:

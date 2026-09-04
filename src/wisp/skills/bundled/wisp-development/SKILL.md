@@ -5,7 +5,7 @@ license: MIT
 compatibility: Wisp source checkouts and installed wisp-ai packages.
 metadata:
   author: Wisp
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Wisp Development

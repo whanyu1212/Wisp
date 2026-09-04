@@ -53,5 +53,6 @@ within a fixed deadline when Rust panics, aborts, or is killed. Backend stdin re
 destructors are not fail-safe cleanup mechanisms.
 
 Keep untrusted output bounded and terminal-safe. A frontend may choose presentation, but it must not
-reconstruct runtime or safety policy from formatted output. Textual remains a supported fallback;
-making Rust the default or removing Textual requires a later evidence-backed decision.
+reconstruct runtime or safety policy from formatted output. Textual remains the default supported
+frontend and can be selected explicitly; Rust failures do not select it automatically. Making Rust
+the default or removing Textual requires a later evidence-backed decision.
