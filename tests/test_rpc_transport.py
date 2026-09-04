@@ -295,6 +295,7 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
         '{"id":"bad","type":"select_session","session_id":""}',
         '{"id":"bad","type":"select_session","session_id":null}',
         '{"id":"bad","type":"clone_session","extra":true}',
+        '{"id":"bad","type":"new_session","extra":true}',
         '{"id":"bad","type":"fork_session"}',
         '{"id":"bad","type":"fork_session","entry_id":""}',
         '{"id":"bad","type":"fork_session","entry_id":null}',

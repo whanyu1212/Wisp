@@ -89,6 +89,7 @@ from wisp.rpc.commands import (
     GetSessionsCommand,
     GetSessionTreeCommand,
     NavigateSessionTreeCommand,
+    NewSessionCommand,
     ParsedRpcCommand,
     PopQueueCommand,
     SelectSessionCommand,
@@ -255,6 +256,9 @@ class RpcCommandExecutor:
         if isinstance(known, SetSessionNameCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_set_session_name(known)
+        if isinstance(known, NewSessionCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_new_session(known, running_command)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -277,8 +281,6 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
-        if command_type == "new_session":
-            return self._dispatch_new_session(command, running_command)
         if command_type == "get_state":
             return self._dispatch_state(command, running_command)
         if command_type == "get_commands":
@@ -427,7 +429,7 @@ class RpcCommandExecutor:
 
     def _dispatch_new_session(
         self,
-        command: dict[str, object],
+        command: NewSessionCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         reset_session = handle_rpc_new_session_command(
@@ -738,23 +740,16 @@ class RpcCommandExecutor:
 
 
 def handle_rpc_new_session_command(
-    command: dict[str, object],
+    command: NewSessionCommand,
     *,
     running_command: _RpcRunningCommand | None,
     write_event: RpcEventWriter,
 ) -> bool:
-    """Validate and synchronously reset the selected-session state."""
+    """Synchronously reset the selected-session state."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = "new_session"
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return False
     if running_command is not None:
         write_rpc_command_error(
             command_id=command_id,
