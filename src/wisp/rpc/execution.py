@@ -83,6 +83,9 @@ from wisp.rpc.commands import (
     ClearQueueCommand,
     ConfigureCommand,
     FollowUpCommand,
+    GetMessagesCommand,
+    GetSessionsCommand,
+    GetSessionTreeCommand,
     ParsedRpcCommand,
     PopQueueCommand,
     SetQueueModeCommand,
@@ -98,10 +101,6 @@ from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.entries import MessageSessionEntry, SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import (
-    DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
-    DEFAULT_SESSION_TREE_PAGE_LIMIT,
-    MAX_SESSION_MESSAGE_PAGE_LIMIT,
-    MAX_SESSION_TREE_PAGE_LIMIT,
     JsonlSession,
     JsonlSessionStore,
     SessionError,
@@ -133,8 +132,6 @@ type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
-DEFAULT_RPC_SESSION_CATALOG_LIMIT = 50
-MAX_RPC_SESSION_CATALOG_LIMIT = 200
 _PROJECT_INIT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "write"})
 
 
@@ -222,6 +219,18 @@ class RpcCommandExecutor:
                 provided_fields=command.provided_fields,
                 running_command=running_command,
             )
+        if isinstance(known, GetMessagesCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_messages(
+                known,
+                provided_fields=command.provided_fields,
+            )
+        if isinstance(known, GetSessionsCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_sessions(known)
+        if isinstance(known, GetSessionTreeCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_session_tree(known)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -244,10 +253,6 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
-        if command_type == "get_messages":
-            return self._dispatch_messages(command)
-        if command_type == "get_sessions":
-            return self._dispatch_sessions(command)
         if command_type == "new_session":
             return self._dispatch_new_session(command, running_command)
         if command_type == "select_session":
@@ -256,8 +261,6 @@ class RpcCommandExecutor:
             return self._dispatch_clone_session(command)
         if command_type == "fork_session":
             return self._dispatch_fork_session(command)
-        if command_type == "get_session_tree":
-            return self._dispatch_session_tree(command)
         if command_type == "navigate_session_tree":
             return self._dispatch_navigate_session_tree(command)
         if command_type == "unrevert_session_tree":
@@ -376,10 +379,16 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_messages(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_messages(
+        self,
+        command: GetMessagesCommand,
+        *,
+        provided_fields: frozenset[str],
+    ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_messages_command(
                 command,
+                provided_fields=provided_fields,
                 sessions=self.sessions,
                 session_state=self.session_state,
                 task_group=self.task_group,
@@ -390,7 +399,7 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_sessions(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_sessions(self, command: GetSessionsCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_sessions_command(
                 command,
@@ -463,7 +472,10 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_session_tree(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_session_tree(
+        self,
+        command: GetSessionTreeCommand,
+    ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_session_tree_command(
                 command,
@@ -1059,8 +1071,9 @@ def start_rpc_session_stats_command(
 
 
 def start_rpc_messages_command(
-    command: dict[str, object],
+    command: GetMessagesCommand,
     *,
+    provided_fields: frozenset[str],
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -1069,65 +1082,10 @@ def start_rpc_messages_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "get_messages"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-
-    limit = _rpc_message_limit(command)
-    if isinstance(limit, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=limit,
-            write_event=write_event,
-        )
-        return None
-    session_id = _optional_non_empty_string(command, "session_id", command_type)
-    if isinstance(session_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(session_id),
-            write_event=write_event,
-        )
-        return None
-    before_entry_id = _optional_non_empty_string(command, "before_entry_id", command_type)
-    if isinstance(before_entry_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(before_entry_id),
-            write_event=write_event,
-        )
-        return None
-    after_entry_id = _optional_non_empty_string(command, "after_entry_id", command_type)
-    if isinstance(after_entry_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(after_entry_id),
-            write_event=write_event,
-        )
-        return None
-    if before_entry_id is not None and after_entry_id is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages cursors are mutually exclusive",
-            write_event=write_event,
-        )
-        return None
-    entry_ids_value = command.get("entry_ids", ())
-    if not isinstance(entry_ids_value, (list, tuple)) or any(
-        not isinstance(entry_id, str) or not entry_id for entry_id in entry_ids_value
-    ):
+    if "entry_ids" in provided_fields and command.entry_ids is None:
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -1135,34 +1093,12 @@ def start_rpc_messages_command(
             write_event=write_event,
         )
         return None
-    entry_ids = tuple(entry_ids_value)
-    if len(entry_ids) > 16:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages command field entry_ids cannot exceed 16 entries",
-            write_event=write_event,
-        )
-        return None
-    if len(set(entry_ids)) != len(entry_ids):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages command field entry_ids must be unique",
-            write_event=write_event,
-        )
-        return None
-    if entry_ids and (before_entry_id is not None or after_entry_id is not None):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages exact entry IDs cannot be combined with page cursors",
-            write_event=write_event,
-        )
-        return None
-    complete_structure = command.get("complete_structure", False)
-    full_content = command.get("full_content", False)
-    if type(complete_structure) is not bool or type(full_content) is not bool:
+    if (
+        "complete_structure" in provided_fields
+        and command.complete_structure is None
+        or "full_content" in provided_fields
+        and command.full_content is None
+    ):
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -1172,23 +1108,14 @@ def start_rpc_messages_command(
             write_event=write_event,
         )
         return None
-    if full_content and not entry_ids:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages full content requires exact entry IDs",
-            write_event=write_event,
-        )
-        return None
-    if full_content and len(entry_ids) != 1:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages full content requires exactly one entry ID",
-            write_event=write_event,
-        )
-        return None
 
+    limit = command.limit
+    session_id = command.session_id
+    before_entry_id = command.before_entry_id
+    after_entry_id = command.after_entry_id
+    entry_ids = command.entry_ids or ()
+    complete_structure = command.complete_structure is True
+    full_content = command.full_content is True
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_messages_command,
@@ -1216,7 +1143,7 @@ def start_rpc_messages_command(
 
 
 def start_rpc_sessions_command(
-    command: dict[str, object],
+    command: GetSessionsCommand,
     *,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -1225,35 +1152,16 @@ def start_rpc_sessions_command(
     write_event: RpcEventWriter,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
-) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-
-    limit = _rpc_session_catalog_limit(command)
-    if isinstance(limit, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=limit,
-            write_event=write_event,
-        )
-        return None
-
+) -> _RpcRunningCommand:
+    command_id = command.id or uuid4().hex
+    write_event(RpcCommandStarted(command_id=command_id, command_type="get_sessions"))
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_sessions_command,
         sessions,
         session_state.session,
         session_state.entry_count,
-        limit,
+        command.limit,
         command_id,
         cancel_scope,
         send.clone(),
@@ -1427,7 +1335,7 @@ def start_rpc_fork_session_command(
 
 
 def start_rpc_session_tree_command(
-    command: dict[str, object],
+    command: GetSessionTreeCommand,
     *,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -1435,44 +1343,16 @@ def start_rpc_session_tree_command(
     write_event: RpcEventWriter,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
-) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-
-    limit = _rpc_session_tree_limit(command)
-    if isinstance(limit, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=limit,
-            write_event=write_event,
-        )
-        return None
-    after_entry_id = _optional_non_empty_string(command, "after_entry_id", command_type)
-    if isinstance(after_entry_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(after_entry_id),
-            write_event=write_event,
-        )
-        return None
-
+) -> _RpcRunningCommand:
+    command_id = command.id or uuid4().hex
+    write_event(RpcCommandStarted(command_id=command_id, command_type="get_session_tree"))
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_session_tree_command,
         session_state.session,
         session_state.entry_count,
-        limit,
-        after_entry_id,
+        command.limit,
+        command.after_entry_id,
         command_id,
         cancel_scope,
         send.clone(),
@@ -3777,42 +3657,6 @@ def _project_buffered_prompt_queue_commands(
             "pending_follow_up_count": follow_up_count,
         }
     )
-
-
-def _rpc_message_limit(command: dict[str, object]) -> int | str:
-    limit = command.get("limit", DEFAULT_SESSION_MESSAGE_PAGE_LIMIT)
-    if type(limit) is not int:
-        return "RPC get_messages command field limit must be an integer"
-    if limit < 1 or limit > MAX_SESSION_MESSAGE_PAGE_LIMIT:
-        return (
-            "RPC get_messages command field limit must be between "
-            f"1 and {MAX_SESSION_MESSAGE_PAGE_LIMIT}"
-        )
-    return limit
-
-
-def _rpc_session_catalog_limit(command: dict[str, object]) -> int | str:
-    limit = command.get("limit", DEFAULT_RPC_SESSION_CATALOG_LIMIT)
-    if type(limit) is not int:
-        return "RPC get_sessions command field limit must be an integer"
-    if limit < 0 or limit > MAX_RPC_SESSION_CATALOG_LIMIT:
-        return (
-            "RPC get_sessions command field limit must be between "
-            f"0 and {MAX_RPC_SESSION_CATALOG_LIMIT}"
-        )
-    return limit
-
-
-def _rpc_session_tree_limit(command: dict[str, object]) -> int | str:
-    limit = command.get("limit", DEFAULT_SESSION_TREE_PAGE_LIMIT)
-    if type(limit) is not int:
-        return "RPC get_session_tree command field limit must be an integer"
-    if limit < 1 or limit > MAX_SESSION_TREE_PAGE_LIMIT:
-        return (
-            "RPC get_session_tree command field limit must be between "
-            f"1 and {MAX_SESSION_TREE_PAGE_LIMIT}"
-        )
-    return limit
 
 
 def _required_non_empty_string(

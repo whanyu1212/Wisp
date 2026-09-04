@@ -70,6 +70,7 @@ from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
+    _RpcDispatchResult,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -112,6 +113,14 @@ def _parsed_command(payload: dict[str, object]) -> ParsedRpcCommand:
     except ValidationError:
         return ParsedRpcCommand.from_unknown(payload)
     return ParsedRpcCommand.from_known(command, payload=payload)
+
+
+async def _dispatch_parsed(
+    executor: RpcCommandExecutor,
+    payload: dict[str, object],
+    running: _RpcRunningCommand | None = None,
+) -> _RpcDispatchResult:
+    return await executor.dispatch_parsed(_parsed_command(payload), running)
 
 
 def _enable_project_init(fixture: RpcExecutorFixture, project_root: Path) -> None:
@@ -1912,7 +1921,7 @@ def test_executor_messages_reports_empty_without_selected_session(tmp_path: Path
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "messages", "type": "get_messages"}, None)
+            result = await _dispatch_parsed(executor, {"id": "messages", "type": "get_messages"})
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -1949,7 +1958,7 @@ def test_executor_messages_cancelled_before_publish_reports_failed_without_paylo
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "messages", "type": "get_messages"}, None)
+            result = await _dispatch_parsed(executor, {"id": "messages", "type": "get_messages"})
             assert result.running_command is not None
             result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
@@ -1987,18 +1996,18 @@ def test_executor_messages_reads_selected_and_explicit_sessions(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            selected_result = await executor.dispatch(
+            selected_result = await _dispatch_parsed(
+                executor,
                 {"id": "selected", "type": "get_messages", "limit": 2},
-                None,
             )
             selected_completed = await receive.receive()
-            explicit_result = await executor.dispatch(
+            explicit_result = await _dispatch_parsed(
+                executor,
                 {
                     "id": "explicit",
                     "type": "get_messages",
                     "session_id": other.session_id,
                 },
-                None,
             )
             explicit_completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2042,14 +2051,14 @@ def test_executor_messages_reads_forward_after_cursor(tmp_path: Path) -> None:
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch(
+            await _dispatch_parsed(
+                executor,
                 {
                     "id": "newer",
                     "type": "get_messages",
                     "limit": 2,
                     "after_entry_id": entries[1].id,
                 },
-                None,
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2078,7 +2087,8 @@ def test_executor_messages_reads_one_exact_full_content_row(tmp_path: Path) -> N
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch(
+            result = await _dispatch_parsed(
+                executor,
                 {
                     "id": "detail",
                     "type": "get_messages",
@@ -2086,7 +2096,6 @@ def test_executor_messages_reads_one_exact_full_content_row(tmp_path: Path) -> N
                     "complete_structure": True,
                     "full_content": True,
                 },
-                None,
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2134,14 +2143,14 @@ def test_executor_messages_historical_page_refreshes_selected_session_after_exte
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch(
+            result = await _dispatch_parsed(
+                executor,
                 {
                     "id": "older",
                     "type": "get_messages",
                     "limit": 2,
                     "before_entry_id": newest.next_before_entry_id,
                 },
-                None,
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2190,47 +2199,23 @@ def test_updated_rpc_session_state_reads_entries_once(
     assert read_count == 1
 
 
-def test_executor_messages_reports_validation_and_read_failures(
-    tmp_path: Path,
-) -> None:
+def test_executor_messages_reports_read_failures(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
         selected = fixture.sessions.create()
         await selected.append_message(Message(role="user", content="hello"))
         fixture.session_state.session = selected
-        invalid_commands: list[dict[str, object]] = [
-            {"id": [], "type": "get_messages"},
-            {"id": "limit-bool", "type": "get_messages", "limit": True},
-            {"id": "limit-low", "type": "get_messages", "limit": 0},
-            {"id": "limit-high", "type": "get_messages", "limit": 501},
-            {"id": "session-empty", "type": "get_messages", "session_id": ""},
-            {"id": "cursor-container", "type": "get_messages", "before_entry_id": []},
-            {"id": "entry-ids-string", "type": "get_messages", "entry_ids": "entry"},
-            {
-                "id": "entry-ids-duplicate",
-                "type": "get_messages",
-                "entry_ids": ["entry", "entry"],
-            },
-            {"id": "full-without-entry", "type": "get_messages", "full_content": True},
-            {
-                "id": "structure-string",
-                "type": "get_messages",
-                "complete_structure": "yes",
-            },
-        ]
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            for command in invalid_commands:
-                assert (await executor.dispatch(command, None)).running_command is None
-            missing = await executor.dispatch(
+            missing = await _dispatch_parsed(
+                executor,
                 {"id": "missing", "type": "get_messages", "session_id": "missing"},
-                None,
             )
             missing_completed = await receive.receive()
-            bad_cursor = await executor.dispatch(
+            bad_cursor = await _dispatch_parsed(
+                executor,
                 {"id": "cursor", "type": "get_messages", "before_entry_id": "missing"},
-                None,
             )
             cursor_completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2241,51 +2226,84 @@ def test_executor_messages_reports_validation_and_read_failures(
         assert cursor_completed.ok is False
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
         assert [(event.command_type, event.ok, event.error) for event in finished] == [
-            ("get_messages", False, "RPC command id must be a non-empty string"),
-            ("get_messages", False, "RPC get_messages command field limit must be an integer"),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field limit must be between 1 and 500",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field limit must be between 1 and 500",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field session_id must be a non-empty string",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field before_entry_id must be a non-empty string",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field entry_ids must contain non-empty strings",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages command field entry_ids must be unique",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages full content requires exact entry IDs",
-            ),
-            (
-                "get_messages",
-                False,
-                "RPC get_messages complete_structure and full_content fields must be booleans",
-            ),
             ("get_messages", False, "Session not found: missing"),
             ("get_messages", False, "Session message cursor not found: missing"),
         ]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        (
+            "entry_ids",
+            "RPC get_messages command field entry_ids must contain non-empty strings",
+        ),
+        (
+            "complete_structure",
+            "RPC get_messages complete_structure and full_content fields must be booleans",
+        ),
+        (
+            "full_content",
+            "RPC get_messages complete_structure and full_content fields must be booleans",
+        ),
+    ],
+)
+def test_executor_messages_preserves_explicit_null_rejections(
+    tmp_path: Path,
+    field: str,
+    message: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
+                {"id": "messages-null", "type": "get_messages", field: None},
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == "messages-null"
+        assert finished.ok is False
+        assert finished.error == message
+
+    anyio.run(scenario)
+
+
+def test_executor_messages_accepts_explicit_null_optional_fields(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
+                {
+                    "id": "messages-null",
+                    "type": "get_messages",
+                    "session_id": None,
+                    "before_entry_id": None,
+                    "after_entry_id": None,
+                    "allow_during_prompt": None,
+                },
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert completed.ok is True
+        report = fixture.events[1]
+        assert isinstance(report, RpcMessagesReported)
+        assert report.messages == ()
 
     anyio.run(scenario)
 
@@ -2297,7 +2315,7 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            result = await _dispatch_parsed(executor, {"id": "sessions", "type": "get_sessions"})
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -2343,7 +2361,7 @@ def test_executor_sessions_cancel_abandons_blocked_catalog_read(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            result = await _dispatch_parsed(executor, {"id": "sessions", "type": "get_sessions"})
             assert result.running_command is not None
 
             try:
@@ -2396,9 +2414,9 @@ def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch(
+            result = await _dispatch_parsed(
+                executor,
                 {"id": "sessions", "type": "get_sessions", "limit": 1},
-                None,
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -2417,41 +2435,6 @@ def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
         assert report.selected_session_path == first.path
         assert report.selected_session_name == "Selected"
         assert fixture.session_state.session is first
-
-    anyio.run(scenario)
-
-
-def test_executor_sessions_reports_validation_failures(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        invalid_commands: list[dict[str, object]] = [
-            {"id": [], "type": "get_sessions"},
-            {"id": "limit-bool", "type": "get_sessions", "limit": True},
-            {"id": "limit-low", "type": "get_sessions", "limit": -1},
-            {"id": "limit-high", "type": "get_sessions", "limit": 201},
-        ]
-        send, receive = anyio.create_memory_object_stream(10)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-            for command in invalid_commands:
-                assert (await executor.dispatch(command, None)).running_command is None
-            task_group.cancel_scope.cancel()
-
-        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
-        assert [(event.command_type, event.ok, event.error) for event in finished] == [
-            ("get_sessions", False, "RPC command id must be a non-empty string"),
-            ("get_sessions", False, "RPC get_sessions command field limit must be an integer"),
-            (
-                "get_sessions",
-                False,
-                "RPC get_sessions command field limit must be between 0 and 200",
-            ),
-            (
-                "get_sessions",
-                False,
-                "RPC get_sessions command field limit must be between 0 and 200",
-            ),
-        ]
 
     anyio.run(scenario)
 
@@ -3251,9 +3234,9 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            empty = await executor.dispatch(
+            empty = await _dispatch_parsed(
+                executor,
                 {"id": "tree-empty", "type": "get_session_tree"},
-                None,
             )
             empty_completed = await receive.receive()
             fixture.coordinator.running_command = empty.running_command
@@ -3265,9 +3248,9 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
 
             session = fixture.sessions.create()
             fixture.session_state.session = session
-            reserved = await executor.dispatch(
+            reserved = await _dispatch_parsed(
+                executor,
                 {"id": "tree-reserved", "type": "get_session_tree"},
-                None,
             )
             reserved_completed = await receive.receive()
             fixture.coordinator.running_command = reserved.running_command
@@ -3280,9 +3263,9 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
             await session.append_message(Message(role="assistant", content="answer"))
             fixture.session_state.history = session.read_context_messages()
             fixture.session_state.entry_count = 2
-            selected = await executor.dispatch(
+            selected = await _dispatch_parsed(
+                executor,
                 {"id": "tree-selected", "type": "get_session_tree", "limit": 1},
-                None,
             )
             selected_completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -3712,11 +3695,6 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
         invalid_commands: list[dict[str, object]] = [
-            {"id": [], "type": "get_session_tree"},
-            {"id": "limit-bool", "type": "get_session_tree", "limit": True},
-            {"id": "limit-low", "type": "get_session_tree", "limit": 0},
-            {"id": "limit-high", "type": "get_session_tree", "limit": 501},
-            {"id": "cursor", "type": "get_session_tree", "after_entry_id": ""},
             {"id": "navigate-empty", "type": "navigate_session_tree", "entry_id": ""},
             {"id": "navigate-none", "type": "navigate_session_tree", "entry_id": "entry"},
         ]
@@ -3726,13 +3704,13 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
             for command in invalid_commands:
                 assert (await executor.dispatch(command, None)).running_command is None
 
-            no_session_cursor = await executor.dispatch(
+            no_session_cursor = await _dispatch_parsed(
+                executor,
                 {
                     "id": "no-session-cursor",
                     "type": "get_session_tree",
                     "after_entry_id": "missing",
                 },
-                None,
             )
             no_session_cursor_completed = await receive.receive()
             fixture.coordinator.running_command = no_session_cursor.running_command
@@ -3746,13 +3724,13 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
             fixture.session_state.session = session
             fixture.session_state.history = session.read_context_messages()
             fixture.session_state.entry_count = 1
-            unknown_cursor = await executor.dispatch(
+            unknown_cursor = await _dispatch_parsed(
+                executor,
                 {
                     "id": "unknown-cursor",
                     "type": "get_session_tree",
                     "after_entry_id": "missing",
                 },
-                None,
             )
             cursor_completed = await receive.receive()
             fixture.coordinator.running_command = unknown_cursor.running_command
@@ -3778,11 +3756,6 @@ def test_executor_session_tree_reports_validation_and_lookup_failures(
         assert fixture.session_state.history == session.read_context_messages()
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
         assert [event.error for event in finished] == [
-            "RPC command id must be a non-empty string",
-            "RPC get_session_tree command field limit must be an integer",
-            "RPC get_session_tree command field limit must be between 1 and 500",
-            "RPC get_session_tree command field limit must be between 1 and 500",
-            ("RPC get_session_tree command field after_entry_id must be a non-empty string"),
             ("RPC navigate_session_tree command field entry_id must be a non-empty string"),
             ("RPC navigate_session_tree command requires an existing persisted session"),
             "Session tree cursor not found: missing",
