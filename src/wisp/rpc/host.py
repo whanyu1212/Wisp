@@ -569,7 +569,7 @@ class RpcHost:
                 defer_until_after_flush=after_flush.append,
             )
             try:
-                result = await executor.dispatch(command.to_legacy_dict(), running_command)
+                result = await executor.dispatch_parsed(command, running_command)
                 if result.should_shutdown and self._on_shutdown_dispatched is not None:
                     self._on_shutdown_dispatched()
                 shutdown_abandoned = any(
@@ -606,7 +606,7 @@ class RpcHost:
                 write_event=buffered_events.append,
                 render_events=self._render_event_stream,
             )
-            executor.reject(command.to_legacy_dict(), message)
+            executor.reject_parsed(command, message)
             if buffered_events:
                 await self._render_event_batch(tuple(buffered_events))
                 buffered_events.clear()

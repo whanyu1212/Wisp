@@ -62,6 +62,7 @@ from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
+    ConfigureCommand,
     ParsedRpcCommand,
     RpcCommandAdapter,
 )
@@ -867,12 +868,14 @@ def test_executor_rejects_runtime_configuration_while_busy(tmp_path: Path) -> No
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch(
-                {
-                    "id": "configure-1",
-                    "type": "configure",
-                    "auto_compaction_enabled": False,
-                },
+            result = await executor.dispatch_parsed(
+                _parsed_command(
+                    {
+                        "id": "configure-1",
+                        "type": "configure",
+                        "auto_compaction_enabled": False,
+                    }
+                ),
                 running,
             )
             task_group.cancel_scope.cancel()
@@ -946,8 +949,8 @@ def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) 
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch(
-                {"id": "configure-1", "type": "configure", "mode": "plan"},
+            await executor.dispatch_parsed(
+                _parsed_command({"id": "configure-1", "type": "configure", "mode": "plan"}),
                 None,
             )
             await executor.dispatch({"id": "state-1", "type": "get_state"}, None)
@@ -960,21 +963,86 @@ def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) 
     anyio.run(scenario)
 
 
-def test_executor_rejects_invalid_agent_mode_without_changing_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("mode", "RPC configure command field mode must be 'build' or 'plan'"),
+        (
+            "auto_compaction_enabled",
+            "RPC configure command field auto_compaction_enabled must be a boolean",
+        ),
+    ],
+)
+def test_executor_preserves_explicit_null_configure_rejections(
+    tmp_path: Path,
+    field: str,
+    message: str,
+) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch(
-                {"id": "configure-1", "type": "configure", "mode": "invalid"},
+            await executor.dispatch_parsed(
+                _parsed_command(
+                    {
+                        "id": "configure-1",
+                        "type": "configure",
+                        "model": "custom-model",
+                        field: None,
+                    }
+                ),
                 None,
             )
             task_group.cancel_scope.cancel()
 
-        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert fixture.agent.model is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == "configure-1"
         assert finished.ok is False
-        assert fixture.agent.mode == "build"
+        assert finished.error == message
+
+    anyio.run(scenario)
+
+
+def test_executor_parsed_entry_delegates_non_configure_and_unknown_commands(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            await executor.dispatch_parsed(
+                _parsed_command({"id": "state-1", "type": "get_state"}),
+                None,
+            )
+            await executor.dispatch_parsed(
+                ParsedRpcCommand.from_unknown({"id": "future-1", "type": "future_command"}),
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcStateReported,
+            RpcCommandFinished,
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        future_finished = fixture.events[-1]
+        assert isinstance(future_finished, RpcCommandFinished)
+        assert future_finished.command_id == "future-1"
+        assert future_finished.command_type == "future_command"
+        assert future_finished.ok is False
+        assert future_finished.error == "Unknown RPC command: future_command"
 
     anyio.run(scenario)
 
@@ -1702,10 +1770,20 @@ def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Pa
 
     emitted: list[WispEvent] = []
 
+    parsed = _parsed_command(
+        {
+            "id": "configure-1",
+            "type": "configure",
+            "model": "custom-model",
+            "effort": "custom-effort",
+        }
+    )
+    command = parsed.known
+    assert isinstance(command, ConfigureCommand)
     rpc_execution_module.handle_rpc_configure_command(
-        {"model": "custom-model", "effort": "custom-effort"},
+        command,
         command_id="configure-1",
-        command_type="configure",
+        provided_fields=parsed.provided_fields,
         agent=agent,
         runtime=runtime,
         configure_overrides=overrides,

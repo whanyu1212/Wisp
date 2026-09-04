@@ -14,6 +14,7 @@ from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
 from wisp.rpc import framing as rpc_framing
 from wisp.rpc.commands import (
     ConfigureCommand,
+    ParsedRpcCommand,
     ShutdownCommand,
     StoreApiKeyCommand,
     UnknownCommandEnvelope,
@@ -271,6 +272,10 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
     "bad_frame",
     [
         '{"id":"bad","type":"shutdown","extra":true}',
+        '{"id":"bad","type":"configure"}',
+        '{"id":"bad","type":"configure","mode":"invalid"}',
+        '{"id":"bad","type":"configure","effort":5}',
+        '{"id":"bad","type":"configure","auto_compaction_enabled":0}',
         '{"id":"bad","type":"configure","effort":"high","clear_effort":true}',
     ],
 )
@@ -350,9 +355,50 @@ def test_transport_validates_commands_with_json_semantics() -> None:
         assert command.command.payload_size == len(
             b'{"id":"mode","type":"configure","mode":"plan"}'
         )
+        assert command.command.provided_fields == {"id", "type", "mode"}
         assert events == []
 
     anyio.run(scenario)
+
+
+def test_transport_preserves_explicit_null_field_presence() -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+
+    omitted = transport.parse_command(b'{"id":"omitted","type":"configure","model":"gpt-5.5-pro"}')
+    explicit_null = transport.parse_command(
+        b'{"id":"null","type":"configure","provider":null,"model":"gpt-5.5-pro"}'
+    )
+
+    assert omitted is not None
+    assert explicit_null is not None
+    assert isinstance(omitted.known, ConfigureCommand)
+    assert isinstance(explicit_null.known, ConfigureCommand)
+    assert omitted.known.provider is None
+    assert explicit_null.known.provider is None
+    assert "provider" not in omitted.provided_fields
+    assert "provider" in explicit_null.provided_fields
+    assert events == []
+
+
+def test_sdk_style_configure_omits_none_fields_from_presence_metadata() -> None:
+    parsed = ParsedRpcCommand.from_known(
+        ConfigureCommand(
+            id="sdk",
+            provider=None,
+            model="gpt-5.5-pro",
+            effort=None,
+            auto_compaction_enabled=None,
+            mode=None,
+        )
+    )
+
+    assert parsed.provided_fields == {"id", "type", "model", "clear_effort"}
 
 
 def test_transport_redacts_store_api_key_after_parsing() -> None:
@@ -379,6 +425,8 @@ def test_transport_redacts_store_api_key_after_parsing() -> None:
         assert event.command.known.api_key == secret
         assert secret not in repr(event)
         assert secret not in repr(event.command)
+        assert "api_key" in event.command.provided_fields
+        assert "_api_key" not in event.command.provided_fields
         legacy = event.command.to_legacy_dict()
         assert secret not in repr(legacy)
         assert event.command.payload_size == len(
