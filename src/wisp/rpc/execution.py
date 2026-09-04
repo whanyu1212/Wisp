@@ -81,15 +81,21 @@ from wisp.rpc.commands import (
     QUEUE_RPC_COMMAND_TYPES,
     ApprovalScope,
     ClearQueueCommand,
+    CloneSessionCommand,
     ConfigureCommand,
     FollowUpCommand,
+    ForkSessionCommand,
     GetMessagesCommand,
     GetSessionsCommand,
     GetSessionTreeCommand,
+    NavigateSessionTreeCommand,
     ParsedRpcCommand,
     PopQueueCommand,
+    SelectSessionCommand,
     SetQueueModeCommand,
+    SetSessionNameCommand,
     SteerCommand,
+    UnrevertSessionTreeCommand,
     take_store_api_key,
 )
 from wisp.rpc.commands import (
@@ -231,6 +237,24 @@ class RpcCommandExecutor:
         if isinstance(known, GetSessionTreeCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_session_tree(known)
+        if isinstance(known, SelectSessionCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_select_session(known)
+        if isinstance(known, CloneSessionCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_clone_session(known)
+        if isinstance(known, ForkSessionCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_fork_session(known)
+        if isinstance(known, NavigateSessionTreeCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_navigate_session_tree(known)
+        if isinstance(known, UnrevertSessionTreeCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_unrevert_session_tree(known)
+        if isinstance(known, SetSessionNameCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_set_session_name(known)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -255,18 +279,6 @@ class RpcCommandExecutor:
             return self._dispatch_session_stats(command)
         if command_type == "new_session":
             return self._dispatch_new_session(command, running_command)
-        if command_type == "select_session":
-            return self._dispatch_select_session(command)
-        if command_type == "clone_session":
-            return self._dispatch_clone_session(command)
-        if command_type == "fork_session":
-            return self._dispatch_fork_session(command)
-        if command_type == "navigate_session_tree":
-            return self._dispatch_navigate_session_tree(command)
-        if command_type == "unrevert_session_tree":
-            return self._dispatch_unrevert_session_tree(command)
-        if command_type == "set_session_name":
-            return self._dispatch_set_session_name(command)
         if command_type == "get_state":
             return self._dispatch_state(command, running_command)
         if command_type == "get_commands":
@@ -430,7 +442,7 @@ class RpcCommandExecutor:
             reset_session=reset_session,
         )
 
-    def _dispatch_select_session(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_select_session(self, command: SelectSessionCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_select_session_command(
                 command,
@@ -444,7 +456,7 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_clone_session(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_clone_session(self, command: CloneSessionCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_clone_session_command(
                 command,
@@ -458,7 +470,7 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_fork_session(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_fork_session(self, command: ForkSessionCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_fork_session_command(
                 command,
@@ -490,7 +502,7 @@ class RpcCommandExecutor:
 
     def _dispatch_navigate_session_tree(
         self,
-        command: dict[str, object],
+        command: NavigateSessionTreeCommand,
     ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_navigate_session_tree_command(
@@ -506,7 +518,7 @@ class RpcCommandExecutor:
 
     def _dispatch_unrevert_session_tree(
         self,
-        command: dict[str, object],
+        command: UnrevertSessionTreeCommand,
     ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_unrevert_session_tree_command(
@@ -522,7 +534,7 @@ class RpcCommandExecutor:
 
     def _dispatch_set_session_name(
         self,
-        command: dict[str, object],
+        command: SetSessionNameCommand,
     ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_set_session_name_command(
@@ -1176,7 +1188,7 @@ def start_rpc_sessions_command(
 
 
 def start_rpc_select_session_command(
-    command: dict[str, object],
+    command: SelectSessionCommand,
     *,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -1185,28 +1197,10 @@ def start_rpc_select_session_command(
     write_event: RpcEventWriter,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
-) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-
-    session_id = _required_non_empty_string(command, "session_id", command_type)
-    if isinstance(session_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(session_id),
-            write_event=write_event,
-        )
-        return None
-
+) -> _RpcRunningCommand:
+    command_id = command.id or uuid4().hex
+    write_event(RpcCommandStarted(command_id=command_id, command_type="select_session"))
+    session_id = command.session_id
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_select_session_command,
@@ -1227,7 +1221,7 @@ def start_rpc_select_session_command(
 
 
 def start_rpc_clone_session_command(
-    command: dict[str, object],
+    command: CloneSessionCommand,
     *,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -1237,16 +1231,9 @@ def start_rpc_clone_session_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "clone_session"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
     if session_state.session is None:
         write_rpc_command_error(
             command_id=command_id,
@@ -1276,7 +1263,7 @@ def start_rpc_clone_session_command(
 
 
 def start_rpc_fork_session_command(
-    command: dict[str, object],
+    command: ForkSessionCommand,
     *,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -1286,25 +1273,10 @@ def start_rpc_fork_session_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "fork_session"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-    entry_id = _required_non_empty_string(command, "entry_id", command_type)
-    if isinstance(entry_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(entry_id),
-            write_event=write_event,
-        )
-        return None
+    entry_id = command.entry_id
     if session_state.session is None:
         write_rpc_command_error(
             command_id=command_id,
@@ -1367,7 +1339,7 @@ def start_rpc_session_tree_command(
 
 
 def start_rpc_navigate_session_tree_command(
-    command: dict[str, object],
+    command: NavigateSessionTreeCommand,
     *,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -1376,25 +1348,10 @@ def start_rpc_navigate_session_tree_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "navigate_session_tree"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-    entry_id = _required_non_empty_string(command, "entry_id", command_type)
-    if isinstance(entry_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(entry_id),
-            write_event=write_event,
-        )
-        return None
+    entry_id = command.entry_id
     session = session_state.session
     if session is None or not session.path.is_file():
         write_rpc_command_error(
@@ -1425,7 +1382,7 @@ def start_rpc_navigate_session_tree_command(
 
 
 def start_rpc_unrevert_session_tree_command(
-    command: dict[str, object],
+    command: UnrevertSessionTreeCommand,
     *,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -1434,16 +1391,9 @@ def start_rpc_unrevert_session_tree_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "unrevert_session_tree"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
     session = session_state.session
     if session is None or not session.path.is_file():
         write_rpc_command_error(
@@ -1473,7 +1423,7 @@ def start_rpc_unrevert_session_tree_command(
 
 
 def start_rpc_set_session_name_command(
-    command: dict[str, object],
+    command: SetSessionNameCommand,
     *,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -1483,34 +1433,11 @@ def start_rpc_set_session_name_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = "set_session_name"
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-    name = command.get("name")
-    if not isinstance(name, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC set_session_name command requires string field: name",
-            write_event=write_event,
-        )
-        return None
-    session_id = _optional_non_empty_string(command, "session_id", command_type)
-    if isinstance(session_id, ValueError):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(session_id),
-            write_event=write_event,
-        )
-        return None
+    name = command.name
+    session_id = command.session_id
     selected_session = session_state.session
     if session_id is None and selected_session is None:
         write_rpc_command_error(
@@ -3657,30 +3584,6 @@ def _project_buffered_prompt_queue_commands(
             "pending_follow_up_count": follow_up_count,
         }
     )
-
-
-def _required_non_empty_string(
-    command: dict[str, object],
-    field: str,
-    command_type: str,
-) -> str | ValueError:
-    value = command.get(field)
-    if isinstance(value, str) and value:
-        return value
-    return ValueError(f"RPC {command_type} command field {field} must be a non-empty string")
-
-
-def _optional_non_empty_string(
-    command: dict[str, object],
-    field: str,
-    command_type: str,
-) -> str | None | ValueError:
-    value = command.get(field)
-    if value is None:
-        return None
-    if isinstance(value, str) and value:
-        return value
-    return ValueError(f"RPC {command_type} command field {field} must be a non-empty string")
 
 
 def require_rpc_queue_kind(
