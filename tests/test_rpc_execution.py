@@ -918,13 +918,14 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
             executor = fixture.executor(task_group=task_group, send=send)
             busy = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
 
-            rejected = await executor.dispatch(
+            rejected = await _dispatch_parsed(
+                executor,
                 {"id": "new-busy", "type": "new_session"},
                 busy,
             )
-            accepted = await executor.dispatch(
+            accepted = await _dispatch_parsed(
+                executor,
                 {"id": "new-1", "type": "new_session"},
-                None,
             )
             assert rejected.reset_session is False
             assert accepted.reset_session is True
