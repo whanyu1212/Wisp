@@ -123,6 +123,7 @@ def test_default_prompt_sets_conservative_mutation_and_delivery_defaults(tmp_pat
     assert "Invoke only tools exposed for this turn and follow their declared schemas" in prompt
     assert "Never invent tool output, edits, command results, tests, remote state" in prompt
     assert "Respect runtime tool availability, sandboxing, protected paths" in prompt
+    assert "permissions, approvals, and the current working directory" in prompt
     assert "listed order from general to specific" in prompt
     assert "Do not reveal credentials, tokens, private keys, or other secrets" in prompt
     assert "Do not run destructive operations or alter unrelated user work" in prompt
