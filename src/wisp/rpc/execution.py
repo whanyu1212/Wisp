@@ -85,9 +85,15 @@ from wisp.rpc.commands import (
     ConfigureCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetCommandsCommand,
+    GetConnectionCatalogCommand,
+    GetMcpStatusCommand,
     GetMessagesCommand,
+    GetModelCatalogCommand,
     GetSessionsCommand,
     GetSessionTreeCommand,
+    GetSkillsCommand,
+    GetStateCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     ParsedRpcCommand,
@@ -259,6 +265,24 @@ class RpcCommandExecutor:
         if isinstance(known, NewSessionCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_new_session(known, running_command)
+        if isinstance(known, GetStateCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_state(known, running_command)
+        if isinstance(known, GetCommandsCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_commands(known, running_command)
+        if isinstance(known, GetModelCatalogCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_model_catalog(known, running_command)
+        if isinstance(known, GetConnectionCatalogCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_connection_catalog(known, running_command)
+        if isinstance(known, GetSkillsCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_skills(known, running_command)
+        if isinstance(known, GetMcpStatusCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_mcp_status(known, running_command)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -281,24 +305,12 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
-        if command_type == "get_state":
-            return self._dispatch_state(command, running_command)
-        if command_type == "get_commands":
-            return self._dispatch_commands(command, running_command)
-        if command_type == "get_model_catalog":
-            return self._dispatch_model_catalog(command, running_command)
-        if command_type == "get_connection_catalog":
-            return self._dispatch_connection_catalog(command, running_command)
         if command_type == "store_api_key":
             return self._dispatch_store_api_key(command, running_command)
         if command_type == "disconnect_provider":
             return self._dispatch_disconnect_provider(command, running_command)
         if command_type == "begin_device_code":
             return self._dispatch_begin_device_code(command, running_command)
-        if command_type == "get_skills":
-            return self._dispatch_skills(command, running_command)
-        if command_type == "get_mcp_status":
-            return self._dispatch_mcp_status(command, running_command)
         return self._dispatch_control(command, running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
@@ -566,7 +578,7 @@ class RpcCommandExecutor:
 
     def _dispatch_state(
         self,
-        command: dict[str, object],
+        command: GetStateCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_state_command(
@@ -582,7 +594,7 @@ class RpcCommandExecutor:
 
     def _dispatch_commands(
         self,
-        command: dict[str, object],
+        command: GetCommandsCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_commands_command(
@@ -594,7 +606,7 @@ class RpcCommandExecutor:
 
     def _dispatch_model_catalog(
         self,
-        command: dict[str, object],
+        command: GetModelCatalogCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_model_catalog_command(
@@ -607,7 +619,7 @@ class RpcCommandExecutor:
 
     def _dispatch_connection_catalog(
         self,
-        command: dict[str, object],
+        command: GetConnectionCatalogCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_connection_catalog_command(
@@ -665,7 +677,7 @@ class RpcCommandExecutor:
 
     def _dispatch_skills(
         self,
-        command: dict[str, object],
+        command: GetSkillsCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_skills_command(
@@ -677,7 +689,7 @@ class RpcCommandExecutor:
 
     def _dispatch_mcp_status(
         self,
-        command: dict[str, object],
+        command: GetMcpStatusCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_mcp_status_command(
@@ -2836,7 +2848,7 @@ async def handle_rpc_queue_command(
 
 
 def handle_rpc_state_command(
-    command: dict[str, object],
+    command: GetStateCommand,
     *,
     agent: CodingSession,
     session: JsonlSession | None,
@@ -2847,16 +2859,9 @@ def handle_rpc_state_command(
 ) -> None:
     """Return one coherent in-memory state snapshot without becoming active."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
 
     try:
         core_state = _project_buffered_prompt_queue_commands(
@@ -2890,23 +2895,16 @@ def handle_rpc_state_command(
 
 
 def handle_rpc_commands_command(
-    command: dict[str, object],
+    command: GetCommandsCommand,
     *,
     runtime: WispRuntime,
     write_event: RpcEventWriter,
 ) -> None:
     """Return one coherent in-memory command registry snapshot without becoming active."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
 
     try:
         commands = tuple(
@@ -2969,7 +2967,7 @@ def rpc_model_catalog_snapshot(
 
 
 def handle_rpc_model_catalog_command(
-    command: dict[str, object],
+    command: GetModelCatalogCommand,
     *,
     agent: CodingSession,
     runtime: WispRuntime,
@@ -2977,16 +2975,9 @@ def handle_rpc_model_catalog_command(
 ) -> None:
     """Return one coherent effective model catalog without becoming active."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
     try:
         catalog = rpc_model_catalog_snapshot(
             runtime=runtime,
@@ -3050,23 +3041,16 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
 
 
 def handle_rpc_connection_catalog_command(
-    command: dict[str, object],
+    command: GetConnectionCatalogCommand,
     *,
     runtime: WispRuntime,
     write_event: RpcEventWriter,
 ) -> None:
     """Return one sanitized connection catalog without becoming active."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
     try:
         catalog = rpc_connection_catalog_snapshot(runtime)
     except Exception as exc:
@@ -3410,46 +3394,32 @@ def _sanitized_auth_error(exc: BaseException) -> str:
 
 
 def handle_rpc_skills_command(
-    command: dict[str, object],
+    command: GetSkillsCommand,
     *,
     agent: CodingSession,
     write_event: RpcEventWriter,
 ) -> None:
     """Return the active immutable skill catalog without performing discovery."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
 
     write_event(RpcSkillsReported(command_id=command_id, catalog=rpc_skill_catalog_snapshot(agent)))
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def handle_rpc_mcp_status_command(
-    command: dict[str, object],
+    command: GetMcpStatusCommand,
     *,
     runtime: WispRuntime,
     write_event: RpcEventWriter,
 ) -> None:
     """Return sanitized startup status without reconnecting MCP servers."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_id = command.id or uuid4().hex
+    command_type = command.type
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
 
     mcp_runtime = runtime.mcp_runtime
     servers: tuple[RpcMcpServerSnapshot, ...] = ()
