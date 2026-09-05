@@ -80,9 +80,11 @@ from wisp.rpc.commands import (
     MAX_RPC_COMMAND_ID_CHARS,
     QUEUE_RPC_COMMAND_TYPES,
     ApprovalScope,
+    BeginDeviceCodeCommand,
     ClearQueueCommand,
     CloneSessionCommand,
     ConfigureCommand,
+    DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
     GetCommandsCommand,
@@ -102,8 +104,8 @@ from wisp.rpc.commands import (
     SetQueueModeCommand,
     SetSessionNameCommand,
     SteerCommand,
+    StoreApiKeyCommand,
     UnrevertSessionTreeCommand,
-    take_store_api_key,
 )
 from wisp.rpc.commands import (
     rpc_command_type as normalized_rpc_command_type,
@@ -283,6 +285,15 @@ class RpcCommandExecutor:
         if isinstance(known, GetMcpStatusCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_mcp_status(known, running_command)
+        if isinstance(known, StoreApiKeyCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_store_api_key(known, running_command)
+        if isinstance(known, DisconnectProviderCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_disconnect_provider(known, running_command)
+        if isinstance(known, BeginDeviceCodeCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_begin_device_code(known, running_command)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -305,12 +316,6 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
-        if command_type == "store_api_key":
-            return self._dispatch_store_api_key(command, running_command)
-        if command_type == "disconnect_provider":
-            return self._dispatch_disconnect_provider(command, running_command)
-        if command_type == "begin_device_code":
-            return self._dispatch_begin_device_code(command, running_command)
         return self._dispatch_control(command, running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
@@ -631,7 +636,7 @@ class RpcCommandExecutor:
 
     def _dispatch_store_api_key(
         self,
-        command: dict[str, object],
+        command: StoreApiKeyCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_store_api_key_command(
@@ -644,7 +649,7 @@ class RpcCommandExecutor:
 
     def _dispatch_disconnect_provider(
         self,
-        command: dict[str, object],
+        command: DisconnectProviderCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         handle_rpc_disconnect_provider_command(
@@ -657,7 +662,7 @@ class RpcCommandExecutor:
 
     def _dispatch_begin_device_code(
         self,
-        command: dict[str, object],
+        command: BeginDeviceCodeCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
@@ -3066,7 +3071,7 @@ def handle_rpc_connection_catalog_command(
 
 
 def handle_rpc_store_api_key_command(
-    command: dict[str, object],
+    command: StoreApiKeyCommand,
     *,
     running_command: _RpcRunningCommand | None,
     runtime: WispRuntime,
@@ -3074,17 +3079,9 @@ def handle_rpc_store_api_key_command(
 ) -> None:
     """Persist one API key and return the refreshed connection catalog."""
 
-    api_key = take_store_api_key(command)
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
     if running_command is not None:
         write_rpc_command_error(
             command_id=command_id,
@@ -3093,16 +3090,9 @@ def handle_rpc_store_api_key_command(
             write_event=write_event,
         )
         return
-    provider = command.get("provider")
-    if not isinstance(provider, str) or not provider:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC store_api_key command requires string field: provider",
-            write_event=write_event,
-        )
-        return
-    if not isinstance(api_key, str) or not api_key.strip():
+    provider = command.provider
+    api_key = command.api_key
+    if not api_key.strip():
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -3153,7 +3143,7 @@ def handle_rpc_store_api_key_command(
 
 
 def handle_rpc_disconnect_provider_command(
-    command: dict[str, object],
+    command: DisconnectProviderCommand,
     *,
     running_command: _RpcRunningCommand | None,
     runtime: WispRuntime,
@@ -3161,16 +3151,9 @@ def handle_rpc_disconnect_provider_command(
 ) -> None:
     """Remove stored credentials and return the refreshed connection catalog."""
 
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return
     if running_command is not None:
         write_rpc_command_error(
             command_id=command_id,
@@ -3179,15 +3162,7 @@ def handle_rpc_disconnect_provider_command(
             write_event=write_event,
         )
         return
-    provider = command.get("provider")
-    if not isinstance(provider, str) or not provider:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC disconnect_provider command requires string field: provider",
-            write_event=write_event,
-        )
-        return
+    provider = command.provider
     store = runtime.auth_store
     if store is None:
         write_rpc_command_error(
@@ -3217,7 +3192,7 @@ def handle_rpc_disconnect_provider_command(
 
 
 def start_rpc_device_code_command(
-    command: dict[str, object],
+    command: BeginDeviceCodeCommand,
     *,
     running_command: _RpcRunningCommand | None,
     runtime: WispRuntime,
@@ -3228,16 +3203,9 @@ def start_rpc_device_code_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return running_command
     if running_command is not None:
         write_rpc_command_error(
             command_id=command_id,
@@ -3246,15 +3214,7 @@ def start_rpc_device_code_command(
             write_event=write_event,
         )
         return running_command
-    provider = command.get("provider")
-    if not isinstance(provider, str) or not provider:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC begin_device_code command requires string field: provider",
-            write_event=write_event,
-        )
-        return None
+    provider = command.provider
     if provider != DEVICE_CODE_PROVIDER:
         write_rpc_command_error(
             command_id=command_id,
