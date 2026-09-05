@@ -63,6 +63,7 @@ from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
     ConfigureCommand,
+    GetModelCatalogCommand,
     ParsedRpcCommand,
     RpcCommandAdapter,
 )
@@ -839,7 +840,9 @@ def test_executor_reports_state_without_replacing_running_command(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "state-1", "type": "get_state"}, running)
+            result = await _dispatch_parsed(
+                executor, {"id": "state-1", "type": "get_state"}, running
+            )
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -963,7 +966,7 @@ def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) 
                 _parsed_command({"id": "configure-1", "type": "configure", "mode": "plan"}),
                 None,
             )
-            await executor.dispatch({"id": "state-1", "type": "get_state"}, None)
+            await _dispatch_parsed(executor, {"id": "state-1", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert fixture.agent.mode == "plan"
@@ -1021,7 +1024,68 @@ def test_executor_preserves_explicit_null_configure_rejections(
     anyio.run(scenario)
 
 
-def test_executor_parsed_entry_delegates_non_configure_and_unknown_commands(
+@pytest.mark.parametrize(
+    ("command_type", "report_type"),
+    [
+        ("get_state", RpcStateReported),
+        ("get_commands", RpcCommandsReported),
+        ("get_model_catalog", RpcModelCatalogReported),
+        ("get_connection_catalog", RpcConnectionCatalogReported),
+        ("get_skills", RpcSkillsReported),
+        ("get_mcp_status", RpcMcpStatusReported),
+    ],
+)
+@pytest.mark.parametrize("id_fields", [{}, {"id": None}, {"id": "inspection-1"}])
+@pytest.mark.parametrize("active", [False, True])
+def test_executor_typed_inspection_preserves_identity_and_lifecycle(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    command_type: str,
+    report_type: type[WispEvent],
+    id_fields: dict[str, object],
+    active: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope()) if active else None
+        parsed = _parsed_command({"type": command_type, **id_fields})
+        assert parsed.known is not None
+
+        def fail_legacy(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Typed inspection must not enter legacy execution")
+
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            monkeypatch.setattr(executor, "dispatch", fail_legacy)
+            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
+            result = await executor.dispatch_parsed(parsed, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert fixture.coordinator.running_command is running
+        assert result.selected_session is None
+        assert not result.reset_session
+        assert not result.should_shutdown
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            report_type,
+            RpcCommandFinished,
+        ]
+        started, report, finished = fixture.events
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(finished, RpcCommandFinished)
+        assert started.command_type == finished.command_type == command_type
+        assert started.command_id
+        assert report.model_dump()["command_id"] == started.command_id == finished.command_id
+        if id_fields.get("id") is not None:
+            assert started.command_id == id_fields["id"]
+        assert finished.ok is True
+
+    anyio.run(scenario)
+
+
+def test_executor_parsed_entry_delegates_unmigrated_and_unknown_commands(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -1030,7 +1094,7 @@ def test_executor_parsed_entry_delegates_non_configure_and_unknown_commands(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             await executor.dispatch_parsed(
-                _parsed_command({"id": "state-1", "type": "get_state"}),
+                _parsed_command({"id": "queue-1", "type": "get_queue_state"}),
                 None,
             )
             await executor.dispatch_parsed(
@@ -1041,7 +1105,7 @@ def test_executor_parsed_entry_delegates_non_configure_and_unknown_commands(
 
         assert [type(event) for event in fixture.events] == [
             RpcCommandStarted,
-            RpcStateReported,
+            QueueUpdated,
             RpcCommandFinished,
             RpcCommandStarted,
             ErrorEvent,
@@ -1091,7 +1155,9 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "state-1", "type": "get_state"}, running)
+            result = await _dispatch_parsed(
+                executor, {"id": "state-1", "type": "get_state"}, running
+            )
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1118,18 +1184,16 @@ def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            idle = await executor.dispatch({"id": "idle", "type": "get_state"}, None)
-            malformed = await executor.dispatch({"id": [], "type": "get_state"}, None)
+            idle = await _dispatch_parsed(executor, {"id": "idle", "type": "get_state"}, None)
 
             def fail_snapshot(_session: object = None) -> object:
                 raise RuntimeError("snapshot failed")
 
             monkeypatch.setattr(fixture.agent, "state_snapshot", fail_snapshot)
-            failed = await executor.dispatch({"id": "failed", "type": "get_state"}, None)
+            failed = await _dispatch_parsed(executor, {"id": "failed", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert idle.running_command is None
-        assert malformed.running_command is None
         assert failed.running_command is None
         report = next(event for event in fixture.events if isinstance(event, RpcStateReported))
         assert report.state.session_id is None
@@ -1140,7 +1204,6 @@ def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
         assert [(event.command_type, event.ok, event.error) for event in finished] == [
             ("get_state", True, None),
-            ("get_state", False, "RPC command id must be a non-empty string"),
             ("get_state", False, "snapshot failed"),
         ]
 
@@ -1175,7 +1238,9 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "commands-1", "type": "get_commands"}, running)
+            result = await _dispatch_parsed(
+                executor, {"id": "commands-1", "type": "get_commands"}, running
+            )
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1235,7 +1300,8 @@ def test_executor_reports_model_catalog_without_replacing_running_command(
         running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "models-1", "type": "get_model_catalog"},
                 running,
             )
@@ -1269,7 +1335,8 @@ def test_executor_reports_connection_catalog_without_replacing_running_command(
         running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "connections-1", "type": "get_connection_catalog"},
                 running,
             )
@@ -1291,6 +1358,53 @@ def test_executor_reports_connection_catalog_without_replacing_running_command(
             for family in report.catalog.providers
             for method in family.methods
         )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("fail_catalog", [False, True])
+def test_executor_typed_connection_catalog_never_reports_credentials(
+    tmp_path: Path, monkeypatch: MonkeyPatch, fail_catalog: bool
+) -> None:
+    secret = "sentinel-inspection-secret"
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        store.set("anthropic", ApiKeyCredential(key=secret))
+        if fail_catalog:
+
+            def fail_snapshot(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
+                raise RuntimeError(secret)
+
+            monkeypatch.setattr(
+                rpc_execution_module, "rpc_connection_catalog_snapshot", fail_snapshot
+            )
+
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
+                {"type": "get_connection_catalog", "id": "connections-1"},
+                running,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent if fail_catalog else RpcConnectionCatalogReported,
+            RpcCommandFinished,
+        ]
+        assert secret not in "\n".join(event.model_dump_json() for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == "connections-1"
+        assert finished.command_type == "get_connection_catalog"
+        assert finished.ok is not fail_catalog
+        assert finished.error == ("Provider connection failed" if fail_catalog else None)
 
     anyio.run(scenario)
 
@@ -1769,7 +1883,7 @@ def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Pa
     overrides = _RpcConfigureOverrides()
     discovery_events: list[WispEvent] = []
     rpc_execution_module.handle_rpc_model_catalog_command(
-        {"type": "get_model_catalog", "id": "catalog-1"},
+        GetModelCatalogCommand(id="catalog-1"),
         agent=agent,
         runtime=runtime,
         write_event=discovery_events.append,
@@ -1840,7 +1954,9 @@ def test_executor_reports_active_skill_catalog_without_replacing_running_command
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "skills-1", "type": "get_skills"}, running)
+            result = await _dispatch_parsed(
+                executor, {"id": "skills-1", "type": "get_skills"}, running
+            )
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1869,7 +1985,9 @@ def test_executor_reports_empty_mcp_status_without_replacing_running_command(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await executor.dispatch({"id": "mcp-1", "type": "get_mcp_status"}, running)
+            result = await _dispatch_parsed(
+                executor, {"id": "mcp-1", "type": "get_mcp_status"}, running
+            )
             task_group.cancel_scope.cancel()
 
         assert result.running_command is running
@@ -1885,7 +2003,7 @@ def test_executor_reports_empty_mcp_status_without_replacing_running_command(
     anyio.run(scenario)
 
 
-def test_executor_commands_reports_malformed_id_and_registry_failures(
+def test_executor_commands_reports_registry_failures(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1895,20 +2013,18 @@ def test_executor_commands_reports_malformed_id_and_registry_failures(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            malformed = await executor.dispatch({"id": [], "type": "get_commands"}, None)
-
             def fail_commands() -> object:
                 raise RuntimeError("registry failed")
 
             monkeypatch.setattr(fixture.runtime.commands, "all", fail_commands)
-            failed = await executor.dispatch({"id": "commands-1", "type": "get_commands"}, None)
+            failed = await _dispatch_parsed(
+                executor, {"id": "commands-1", "type": "get_commands"}, None
+            )
             task_group.cancel_scope.cancel()
 
-        assert malformed.running_command is None
         assert failed.running_command is None
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
         assert [(event.command_type, event.ok, event.error) for event in finished] == [
-            ("get_commands", False, "RPC command id must be a non-empty string"),
             ("get_commands", False, "registry failed"),
         ]
 
@@ -2515,7 +2631,7 @@ def test_executor_set_session_name_updates_selected_cached_state(tmp_path: Path)
                 dispatch=preserve_running_command,
                 reject=reject_unexpected_command,
             )
-            await executor.dispatch({"id": "state", "type": "get_state"}, None)
+            await _dispatch_parsed(executor, {"id": "state", "type": "get_state"}, None)
             task_group.cancel_scope.cancel()
 
         assert completed.ok is True

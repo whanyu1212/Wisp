@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from collections import deque
 from pathlib import Path
@@ -273,6 +274,24 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
     "bad_frame",
     [
         '{"id":"bad","type":"shutdown","extra":true}',
+        *[
+            json.dumps({"id": "inspection-1", "type": command_type, **invalid_fields})
+            for command_type in (
+                "get_state",
+                "get_commands",
+                "get_model_catalog",
+                "get_connection_catalog",
+                "get_skills",
+                "get_mcp_status",
+            )
+            for invalid_fields in (
+                {"extra": True},
+                {"id": []},
+                {"id": ""},
+                {"id": 1},
+                {"id": "x" * 257},
+            )
+        ],
         '{"id":"bad","type":"configure"}',
         '{"id":"bad","type":"configure","mode":"invalid"}',
         '{"id":"bad","type":"configure","effort":5}',
