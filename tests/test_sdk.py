@@ -30,7 +30,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
-from wisp.rpc.commands import StoreApiKeyCommand
+from wisp.rpc.commands import ParsedRpcCommand, StoreApiKeyCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -1007,6 +1007,7 @@ def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
 
 def test_in_process_sdk_preserves_typed_secret_command_until_storage(
     tmp_path: Path,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         secret = "sentinel-secret-key"
@@ -1035,16 +1036,23 @@ def test_in_process_sdk_preserves_typed_secret_command_until_storage(
         transport._control_send = cast(Any, InspectingSend())
 
         try:
-            command_id = await controller.store_api_key(
-                "anthropic",
-                secret,
-                command_id="store-1",
-            )
-            events = []
-            async for event in controller.events():
-                events.append(event)
-                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
-                    break
+
+            def fail_legacy(*_args: object, **_kwargs: object) -> None:
+                pytest.fail("SDK credential storage must use typed execution")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", fail_legacy)
+                patch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
+                command_id = await controller.store_api_key(
+                    "anthropic",
+                    secret,
+                    command_id="store-1",
+                )
+                events = []
+                async for event in controller.events():
+                    events.append(event)
+                    if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                        break
         finally:
             await controller.aclose()
 

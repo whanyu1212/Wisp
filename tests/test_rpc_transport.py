@@ -292,6 +292,43 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
                 {"id": "x" * 257},
             )
         ],
+        *[
+            json.dumps(
+                {
+                    "type": command_type,
+                    "id": "connection-1",
+                    "provider": "anthropic",
+                    **({"api_key": "sentinel-key"} if command_type == "store_api_key" else {}),
+                    **bad_fields,
+                }
+            )
+            for command_type in ("store_api_key", "disconnect_provider", "begin_device_code")
+            for bad_fields in (
+                {"id": []},
+                {"id": ""},
+                {"id": "x" * 257},
+                {"provider": None},
+                {"provider": ""},
+                {"provider": 1},
+                {"provider": "x" * 257},
+                {"extra": True},
+            )
+        ],
+        *[
+            json.dumps({"type": "store_api_key", "provider": "anthropic", **key_fields})
+            for key_fields in (
+                {},
+                {"api_key": None},
+                {"api_key": ""},
+                {"api_key": 1},
+                {"api_key": "sentinel-" + "x" * 8192},
+            )
+        ],
+        *[
+            json.dumps({"type": command_type})
+            for command_type in ("disconnect_provider", "begin_device_code")
+        ],
+        '{"type":"store_api_key","api_key":"sentinel-key"}',
         '{"id":"bad","type":"configure"}',
         '{"id":"bad","type":"configure","mode":"invalid"}',
         '{"id":"bad","type":"configure","effort":5}',
@@ -350,6 +387,23 @@ def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None
         ]
 
     anyio.run(scenario)
+
+
+def test_transport_preserves_whitespace_api_key_for_execution_validation() -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+    parsed = transport.parse_command(
+        json.dumps({"type": "store_api_key", "provider": "anthropic", "api_key": " \t\n"}).encode()
+    )
+    assert parsed is not None
+    assert isinstance(parsed.known, StoreApiKeyCommand)
+    assert parsed.known.api_key == " \t\n"
+    assert events == []
 
 
 def test_transport_forwards_unknown_command_discriminators() -> None:

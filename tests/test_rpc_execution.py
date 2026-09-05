@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -66,6 +67,7 @@ from wisp.rpc.commands import (
     GetModelCatalogCommand,
     ParsedRpcCommand,
     RpcCommandAdapter,
+    StoreApiKeyCommand,
 )
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -1409,13 +1411,198 @@ def test_executor_typed_connection_catalog_never_reports_credentials(
     anyio.run(scenario)
 
 
+@pytest.mark.parametrize(
+    "command_type", ["store_api_key", "disconnect_provider", "begin_device_code"]
+)
+@pytest.mark.parametrize("id_fields", [{}, {"id": None}, {"id": "connection-1"}])
+def test_typed_connection_commands_preserve_lifecycle_without_legacy_conversion(
+    tmp_path: Path, monkeypatch: MonkeyPatch, command_type: str, id_fields: dict[str, object]
+) -> None:
+    async def fake_login(
+        *, on_device_code: Callable[[DeviceCodeInfo], None], on_progress: Callable[[int], None]
+    ) -> OAuthCredential:
+        on_device_code(DeviceCodeInfo("CODE-123", "https://example.test/device", 1, 900))
+        on_progress(1)
+        return OAuthCredential(
+            access="sentinel-access", refresh="sentinel-refresh", expires=4_102_444_800_000
+        )
+
+    def fail_legacy(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Connection execution must not convert to legacy dictionaries")
+
+    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        store.set("anthropic", ApiKeyCredential(key="old-key"))
+        payload: dict[str, object] = {
+            "type": command_type,
+            "provider": "openai-codex" if command_type == "begin_device_code" else "anthropic",
+            **id_fields,
+        }
+        if command_type == "store_api_key":
+            payload["api_key"] = "  sentinel-new-key \t"
+        parsed = _parsed_command(payload)
+        assert parsed.known is not None
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            monkeypatch.setattr(executor, "dispatch", fail_legacy)
+            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
+            result = await executor.dispatch_parsed(parsed, None)
+            if command_type == "begin_device_code":
+                with anyio.fail_after(2):
+                    completed = await receive.receive()
+                assert isinstance(completed, _RpcCommandCompleted)
+                assert result.running_command is not None
+                assert completed.command_id == result.running_command.command_id
+                assert completed.history == fixture.session_state.history
+                assert completed.entry_count == fixture.session_state.entry_count
+                assert completed.ok is True
+            else:
+                assert result.running_command is None
+            task_group.cancel_scope.cancel()
+        expected: list[type[WispEvent]] = [RpcCommandStarted]
+        if command_type == "begin_device_code":
+            expected.extend([RpcDeviceCodeReported, RpcDeviceCodeProgressReported])
+        expected.extend([RpcConnectionCatalogReported, RpcCommandFinished])
+        assert [type(event) for event in fixture.events] == expected
+        started = fixture.events[0]
+        finished = fixture.events[-1]
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(finished, RpcCommandFinished)
+        assert started.command_id
+        assert started.command_type == finished.command_type == command_type
+        assert all(
+            event.model_dump()["command_id"] == started.command_id for event in fixture.events
+        )
+        if id_fields.get("id") is not None:
+            assert started.command_id == id_fields["id"]
+        assert finished.ok is True
+        if command_type == "store_api_key":
+            assert store.get("anthropic") == ApiKeyCredential(key="sentinel-new-key")
+        elif command_type == "disconnect_provider":
+            assert store.get("anthropic") is None
+        else:
+            assert store.get("openai-codex") == OAuthCredential(
+                access="sentinel-access", refresh="sentinel-refresh", expires=4_102_444_800_000
+            )
+        rendered = repr(parsed) + "".join(event.model_dump_json() for event in fixture.events)
+        assert all(
+            secret not in rendered
+            for secret in ("sentinel-new-key", "sentinel-access", "sentinel-refresh")
+        )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "command_type", ["store_api_key", "disconnect_provider", "begin_device_code"]
+)
+@pytest.mark.parametrize("failure", ["missing-store", "storage-error"])
+def test_typed_connection_storage_failures_preserve_credentials(
+    tmp_path: Path, monkeypatch: MonkeyPatch, command_type: str, failure: str
+) -> None:
+    async def fake_login(**_kwargs: object) -> OAuthCredential:
+        return OAuthCredential(
+            access="sentinel-new-access", refresh="sentinel-new-refresh", expires=4_102_444_800_000
+        )
+
+    def fail_mutation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("sentinel-storage-secret")
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        provider = "openai-codex" if command_type == "begin_device_code" else "anthropic"
+        existing = ApiKeyCredential(key="sentinel-old-key")
+        store.set(provider, existing)
+        if failure == "missing-store":
+            fixture.runtime = replace(fixture.runtime, auth_store=None)
+        else:
+            monkeypatch.setattr(
+                store, "delete" if command_type == "disconnect_provider" else "set", fail_mutation
+            )
+        monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+        payload: dict[str, object] = {"type": command_type, "provider": provider, "id": "failure-1"}
+        if command_type == "store_api_key":
+            payload["api_key"] = "sentinel-new-key"
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send), payload
+            )
+            if result.running_command is not None:
+                with anyio.fail_after(2):
+                    await receive.receive()
+            task_group.cancel_scope.cancel()
+        assert store.get(provider) == existing
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == "failure-1"
+        assert finished.ok is False
+        assert finished.error == (
+            f"RPC {command_type} command requires an auth store"
+            if failure == "missing-store"
+            else "Provider connection failed"
+        )
+        assert "sentinel-" not in "".join(event.model_dump_json() for event in fixture.events)
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "unsupported-provider"])
+def test_typed_store_rejects_whitespace_before_provider_checks(
+    tmp_path: Path, provider: str
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        existing = ApiKeyCredential(key="old-key")
+        store.set(provider, existing)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
+                {
+                    "type": "store_api_key",
+                    "id": "blank-1",
+                    "provider": provider,
+                    "api_key": " \t\n",
+                },
+            )
+            task_group.cancel_scope.cancel()
+        assert store.get(provider) == existing
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error == "RPC store_api_key command requires a non-empty api_key"
+        assert finished.ok is False
+
+    anyio.run(scenario)
+
+
 def test_executor_stores_api_key_without_leaking_secret(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         secret = "sentinel-secret-key"
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {
                     "id": "store-1",
                     "type": "store_api_key",
@@ -1441,6 +1628,53 @@ def test_executor_stores_api_key_without_leaking_secret(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+@pytest.mark.parametrize("command_type", ["store_api_key", "begin_device_code"])
+def test_typed_connection_rejects_unsupported_provider_without_side_effects(
+    tmp_path: Path, monkeypatch: MonkeyPatch, command_type: str
+) -> None:
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Unsupported providers must not start login or write credentials")
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        monkeypatch.setattr(store, "set", unexpected)
+        monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", unexpected)
+        payload: dict[str, object] = {
+            "type": command_type,
+            "provider": "unsupported",
+            "id": "unsupported-1",
+        }
+        if command_type == "store_api_key":
+            payload["api_key"] = "sentinel-unsupported-key"
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send), payload
+            )
+            task_group.cancel_scope.cancel()
+        assert result.running_command is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is False
+        assert finished.error == (
+            "API-key connection is not supported for unsupported."
+            if command_type == "store_api_key"
+            else "OAuth connection is not supported for unsupported."
+        )
+        assert "sentinel-unsupported-key" not in "".join(
+            event.model_dump_json() for event in fixture.events
+        )
+
+    anyio.run(scenario)
+
+
 def test_executor_rejects_api_key_for_unregistered_openai_compatible_provider(
     tmp_path: Path,
 ) -> None:
@@ -1449,7 +1683,8 @@ def test_executor_rejects_api_key_for_unregistered_openai_compatible_provider(
         secret = "unregistered-provider-secret"
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {
                     "id": "store-1",
                     "type": "store_api_key",
@@ -1489,12 +1724,7 @@ def test_executor_rejects_api_key_for_keyless_openai_compatible_provider(
         secret = "irrelevant-secret"
         try:
             handle_rpc_store_api_key_command(
-                {
-                    "id": "store-1",
-                    "type": "store_api_key",
-                    "provider": "local-models",
-                    "api_key": secret,
-                },
+                StoreApiKeyCommand(id="store-1", provider="local-models", api_key=secret),
                 running_command=None,
                 runtime=runtime,
                 write_event=events.append,
@@ -1529,7 +1759,8 @@ def test_executor_keeps_api_key_success_when_catalog_refresh_fails(
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {
                     "id": "store-1",
                     "type": "store_api_key",
@@ -1576,7 +1807,8 @@ def test_executor_keeps_disconnect_success_when_catalog_refresh_fails(
         fixture.runtime.auth_store.set("anthropic", ApiKeyCredential(key="stored-key"))
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {
                     "id": "disconnect-1",
                     "type": "disconnect_provider",
@@ -1622,7 +1854,8 @@ def test_executor_reports_device_code_progress_and_completion(
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
                 None,
             )
@@ -1663,7 +1896,8 @@ def test_executor_keeps_device_login_success_when_catalog_refresh_fails(
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
                 None,
             )
@@ -1704,7 +1938,8 @@ def test_executor_sanitizes_device_code_provider_failures(
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
                 None,
             )
@@ -1740,7 +1975,8 @@ def test_executor_cancels_device_code_without_replacing_credentials(
         fixture.runtime.auth_store.set("openai-codex", existing)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
                 None,
             )
@@ -1762,6 +1998,7 @@ def test_executor_cancels_device_code_without_replacing_credentials(
     "command",
     [
         {"id": "store-1", "type": "store_api_key", "provider": "anthropic", "api_key": "secret"},
+        {"id": "store-blank", "type": "store_api_key", "provider": "unsupported", "api_key": "   "},
         {"id": "disconnect-1", "type": "disconnect_provider", "provider": "anthropic"},
         {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
     ],
@@ -1769,18 +2006,34 @@ def test_executor_cancels_device_code_without_replacing_credentials(
 def test_executor_rejects_connection_mutations_while_an_operation_is_active(
     tmp_path: Path,
     command: dict[str, object],
+    monkeypatch: MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        existing = ApiKeyCredential(key="old-key")
+        store.set(str(command["provider"]), existing)
+
+        def unexpected_side_effect(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Busy connection commands must not mutate credentials or start login")
+
+        monkeypatch.setattr(store, "set", unexpected_side_effect)
+        monkeypatch.setattr(store, "delete", unexpected_side_effect)
+        monkeypatch.setattr(
+            rpc_execution_module, "login_openai_codex_device_code", unexpected_side_effect
+        )
         running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 dict(command),
                 running,
             )
             task_group.cancel_scope.cancel()
 
+        assert store.get(str(command["provider"])) == existing
         assert result.running_command is running
         finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
         assert finished.ok is False
