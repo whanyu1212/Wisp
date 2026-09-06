@@ -63,6 +63,7 @@ from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
+from wisp.rpc import lifecycle as rpc_lifecycle_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
     ApprovalCommand,
@@ -88,6 +89,7 @@ from wisp.rpc.execution import (
     rpc_selected_session_state,
 )
 from wisp.rpc.host import RpcHost
+from wisp.rpc.lifecycle import _MAX_RPC_COMMAND_ERROR_CHARS
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.event_bus import EventBus
@@ -176,7 +178,7 @@ def test_executor_bounds_unknown_types_before_lifecycle_events(tmp_path: Path) -
 
 def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
     events: list[WispEvent] = []
-    oversized_reference = "x" * (rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS + 1)
+    oversized_reference = "x" * (_MAX_RPC_COMMAND_ERROR_CHARS + 1)
 
     rpc_execution_module.handle_rpc_approval_command(
         ApprovalCommand(id="approval-1", call_id=oversized_reference, approved=True),
@@ -190,7 +192,7 @@ def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
     error, finished = events
     assert isinstance(error, ErrorEvent)
     assert isinstance(finished, RpcCommandFinished)
-    assert len(error.message) == rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS
+    assert len(error.message) == _MAX_RPC_COMMAND_ERROR_CHARS
     assert error.message.endswith("...")
     assert finished.error == error.message
 
@@ -5502,14 +5504,14 @@ def test_parsed_rejection_preserves_id_rules_and_error_precedence(
         fixture = await build_rpc_executor_fixture(tmp_path)
         running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
         generated: list[str] = []
-        original_uuid4 = rpc_execution_module.uuid4
+        original_uuid4 = rpc_lifecycle_module.uuid4
 
         def generate_id():
             result = original_uuid4()
             generated.append(result.hex)
             return result
 
-        monkeypatch.setattr(rpc_execution_module, "uuid4", generate_id)
+        monkeypatch.setattr(rpc_lifecycle_module, "uuid4", generate_id)
         parsed = ParsedRpcCommand.from_unknown({"type": "future_command", **id_fields})
         assert parsed.command_id_error == id_error
         raw_id = id_fields.get("id")
@@ -5645,10 +5647,7 @@ def test_rejecting_credential_command_preserves_secrets_identity_and_store(
         message = (
             "RPC command id is already outstanding: original"
             if detach_id
-            else (
-                "RPC command queue byte limit exceeded "
-                + "x" * rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS
-            )
+            else ("RPC command queue byte limit exceeded " + "x" * _MAX_RPC_COMMAND_ERROR_CHARS)
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
@@ -5664,11 +5663,7 @@ def test_rejecting_credential_command_preserves_secrets_identity_and_store(
         assert isinstance(finished, RpcCommandFinished)
         assert started.command_id == finished.command_id
         assert (finished.command_id != "original") is detach_id
-        expected = (
-            message
-            if detach_id
-            else message[: rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
-        )
+        expected = message if detach_id else message[: _MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
         assert finished.error == error.message == expected
         assert all(secret not in repr(event) for event in fixture.events)
         assert store.get("anthropic") == ApiKeyCredential(key="existing-key")
