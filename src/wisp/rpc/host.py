@@ -43,8 +43,8 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.execution import (
     RpcCommandExecutor,
     rpc_session_state,
-    rpc_skill_catalog_snapshot,
 )
+from wisp.rpc.inspection import rpc_skill_catalog_snapshot
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
