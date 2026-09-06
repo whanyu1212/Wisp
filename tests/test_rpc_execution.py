@@ -52,6 +52,7 @@ from wisp.events import (
     RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    SessionStatsReported,
     ToolCallSnapshot,
     ToolExecutionEnded,
     WispEvent,
@@ -310,38 +311,6 @@ def test_active_cancellation_waits_for_lifecycle_flush() -> None:
     assert cancel_scope.cancelled is True
 
 
-def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-
-            invalid = await executor.dispatch({"id": "bad", "type": "prompt"}, None)
-            shutdown = await _dispatch_parsed(executor, {"id": "bye", "type": "shutdown"}, None)
-
-            assert invalid.running_command is None
-            assert invalid.should_shutdown is False
-            assert shutdown.should_shutdown is True
-            task_group.cancel_scope.cancel()
-
-        assert [type(event) for event in fixture.events] == [
-            RpcCommandStarted,
-            ErrorEvent,
-            RpcCommandFinished,
-            RpcCommandStarted,
-            RpcCommandFinished,
-        ]
-        error_event = fixture.events[1]
-        finished_event = fixture.events[-1]
-        assert isinstance(error_event, ErrorEvent)
-        assert isinstance(finished_event, RpcCommandFinished)
-        assert error_event.message == "RPC prompt command requires string field: prompt"
-        assert finished_event.command_id == "bye"
-
-    anyio.run(scenario)
-
-
 def test_init_dispatches_repository_specific_create_only_prompt(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -427,7 +396,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch({"id": "init-1", "type": "init"}, None)
+            result = await _dispatch_parsed(executor, {"id": "init-1", "type": "init"}, None)
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
@@ -555,7 +524,8 @@ def test_init_fails_when_agent_does_not_create_guidance(
         monkeypatch.setattr(fixture.agent, "run", no_op_run)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -596,7 +566,8 @@ def test_init_does_not_accept_a_concurrently_created_file(
         monkeypatch.setattr(fixture.agent, "run", raced_run)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
-            await fixture.executor(task_group=task_group, send=send).dispatch(
+            await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -628,7 +599,8 @@ def test_init_refuses_existing_project_guidance(
         _enable_project_init(fixture, project)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -667,7 +639,8 @@ def test_init_refuses_non_file_guidance_entries(tmp_path: Path, entry_kind: str)
         _enable_project_init(fixture, project)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            result = await fixture.executor(task_group=task_group, send=send).dispatch(
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
                 {"id": "init-1", "type": "init"},
                 None,
             )
@@ -691,9 +664,13 @@ def test_init_requires_build_mode_and_write_tool(tmp_path: Path) -> None:
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            plan_result = await executor.dispatch({"id": "plan-init", "type": "init"}, None)
+            plan_result = await _dispatch_parsed(
+                executor, {"id": "plan-init", "type": "init"}, None
+            )
             fixture.agent.mode = "build"
-            no_write_result = await executor.dispatch({"id": "no-write-init", "type": "init"}, None)
+            no_write_result = await _dispatch_parsed(
+                executor, {"id": "no-write-init", "type": "init"}, None
+            )
             task_group.cancel_scope.cancel()
 
         assert plan_result.running_command is None
@@ -721,9 +698,8 @@ def test_prompt_worker_converts_unexpected_exception_to_failed_completion(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch(
-                {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
-                None,
+            result = await _dispatch_parsed(
+                executor, {"id": "prompt-1", "type": "prompt", "prompt": "hello"}, None
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -765,9 +741,8 @@ def test_prompt_worker_converts_unexpected_renderer_exception_to_failed_completi
                 write_event=fixture.writer,
                 render_events=fail_render,
             )
-            result = await executor.dispatch(
-                {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
-                None,
+            result = await _dispatch_parsed(
+                executor, {"id": "prompt-1", "type": "prompt", "prompt": "hello"}, None
             )
             completed = await receive.receive()
             task_group.cancel_scope.cancel()
@@ -1089,7 +1064,7 @@ def test_executor_typed_inspection_preserves_identity_and_lifecycle(
     anyio.run(scenario)
 
 
-def test_executor_parsed_entry_delegates_unmigrated_and_unknown_commands(
+def test_executor_parsed_entry_preserves_unknown_fallback(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -1097,11 +1072,6 @@ def test_executor_parsed_entry_delegates_unmigrated_and_unknown_commands(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch_parsed(
-                _parsed_command({"id": "stats-1", "type": "get_session_stats"}),
-                None,
-            )
-            await receive.receive()
             await executor.dispatch_parsed(
                 ParsedRpcCommand.from_unknown({"id": "future-1", "type": "future_command"}),
                 None,
@@ -5222,6 +5192,309 @@ def test_unknown_rejection_preserves_invalid_id_precedence(
                 if isinstance(invalid_id, str) and len(invalid_id) > 256
                 else "RPC command id must be a non-empty string"
             )
+        )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("id_fields", [{}, {"id": None}, {"id": "run-1"}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "prompt", "prompt": ""},
+        {"type": "prompt", "prompt": " \t"},
+        {"type": "prompt", "prompt": "你好 🌸"},
+        {"type": "init"},
+        *[
+            {"type": "compact", **fields}
+            for fields in (
+                {},
+                {"instructions": None},
+                {"instructions": ""},
+                {"instructions": " \t"},
+                {"instructions": "  retain 日本語  "},
+            )
+        ],
+        {"type": "get_session_stats"},
+    ],
+)
+def test_run_commands_stay_typed_through_completion(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    id_fields: dict[str, object],
+    payload: dict[str, object],
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        if payload["type"] == "init":
+            project = tmp_path / "project"
+            project.mkdir()
+            _enable_project_init(fixture, project)
+        selected = fixture.sessions.create()
+        selected.path.parent.mkdir(parents=True, exist_ok=True)
+        selected.path.touch()
+        fixture.session_state.session = selected
+        calls: list[object] = []
+
+        async def run(prompt: str, **kwargs: object) -> AsyncIterator[WispEvent]:
+            calls.append((prompt, kwargs["operation_id"]))
+            yield MessageCompleted(turn=1, content="done", finish_reason="stop")
+
+        async def compact(
+            session: JsonlSession, *, instructions: str | None = None
+        ) -> AsyncIterator[WispEvent]:
+            assert session is selected
+            calls.append(instructions)
+            if False:
+                yield MessageCompleted(turn=1, content="done", finish_reason="stop")
+
+        def fail_legacy(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Run commands must stay typed")
+
+        monkeypatch.setattr(fixture.agent, "run", run)
+        monkeypatch.setattr(fixture.agent, "compact", compact)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            monkeypatch.setattr(executor, "dispatch", fail_legacy)
+            monkeypatch.setattr(executor, "reject", fail_legacy)
+            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
+            command = RpcCommandAdapter.validate_python({**payload, **id_fields})
+            result = await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), None)
+            with anyio.fail_after(2):
+                completed = await receive.receive()
+                while not isinstance(completed, _RpcCommandCompleted):
+                    completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+        started = fixture.events[0]
+        finished = fixture.events[-1]
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(finished, RpcCommandFinished)
+        assert result.running_command is not None
+        assert (
+            started.command_id
+            == result.running_command.command_id
+            == completed.command_id
+            == finished.command_id
+        )
+        assert (
+            started.command_type
+            == result.running_command.command_type
+            == completed.command_type
+            == finished.command_type
+            == payload["type"]
+        )
+        assert started.command_id
+        if id_fields.get("id") is not None:
+            assert started.command_id == id_fields["id"]
+        # The fake init run creates no guidance; retain its init completion failure.
+        assert finished.ok is completed.ok is (payload["type"] != "init")
+        if payload["type"] in {"prompt", "init"}:
+            assert calls == [(payload.get("prompt", "/init"), started.command_id)]
+            assert result.selected_session is selected
+        elif payload["type"] == "compact":
+            raw = payload.get("instructions")
+            assert calls == [raw.strip() or None if isinstance(raw, str) else None]
+        else:
+            assert [type(event) for event in fixture.events] == [
+                RpcCommandStarted,
+                SessionStatsReported,
+                RpcCommandFinished,
+            ]
+            assert fixture.events[1].command_id == started.command_id
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("id_fields", [{}, {"id": None}, {"id": "rejected-1"}])
+@pytest.mark.parametrize("command_type", ["init", "compact"])
+def test_typed_run_preflight_failure_does_not_start_work(
+    tmp_path: Path, monkeypatch: MonkeyPatch, id_fields: dict[str, object], command_type: str
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+
+        def fail(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Preflight rejection must neither convert nor launch work")
+
+        monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail)
+        monkeypatch.setattr(fixture.sessions, "create", fail)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            monkeypatch.setattr(executor, "dispatch", fail)
+            monkeypatch.setattr(executor, "reject", fail)
+            monkeypatch.setattr(task_group, "start_soon", fail)
+            command = RpcCommandAdapter.validate_python({"type": command_type, **id_fields})
+            result = await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), None)
+            assert result.running_command is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        first, _, last = fixture.events
+        assert first.command_id == last.command_id
+        assert first.command_type == last.command_type == command_type
+        assert last.ok is False
+        if id_fields.get("id") is not None:
+            assert first.command_id == id_fields["id"]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("has_session", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+def test_typed_statistics_worker_outcomes(
+    tmp_path: Path, monkeypatch: MonkeyPatch, has_session: bool, outcome: str
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create() if has_session else None
+        if selected is not None:
+            selected.path.touch()
+        fixture.session_state.session = selected
+        entered = anyio.Event()
+        original = fixture.agent.get_session_stats
+
+        async def stats(session: JsonlSession | None = None) -> object:
+            assert session is selected
+            entered.set()
+            if outcome == "failure":
+                raise RuntimeError("stats failed")
+            if outcome == "cancel":
+                await anyio.sleep_forever()
+            return await original(session)
+
+        monkeypatch.setattr(fixture.agent, "get_session_stats", stats)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = await _dispatch_parsed(executor, {"type": "get_session_stats", "id": "stats"})
+            assert result.running_command is not None
+            await entered.wait()
+            if outcome == "cancel":
+                result.running_command.cancel_scope.cancel()
+            with anyio.fail_after(2):
+                completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.command_id == "stats"
+        assert completed.ok is (outcome == "success")
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            *([SessionStatsReported] if outcome == "success" else []),
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert (
+            finished.error
+            == {
+                "success": None,
+                "failure": "stats failed",
+                "cancel": "RPC get_session_stats command cancelled",
+            }[outcome]
+        )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("command_type", ["prompt", "init", "compact", "get_session_stats"])
+def test_run_workers_wait_for_started_event_flush(
+    tmp_path: Path, monkeypatch: MonkeyPatch, command_type: str
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        if command_type == "init":
+            project = tmp_path / "project"
+            project.mkdir()
+            _enable_project_init(fixture, project)
+        selected = fixture.sessions.create()
+        selected.path.touch()
+        fixture.session_state.session = selected
+        rendered: list[WispEvent] = []
+        entered = anyio.Event()
+
+        async def worker(*args: object) -> None:
+            assert len(rendered) == 1
+            assert isinstance(rendered[0], RpcCommandStarted)
+            assert rendered[0].command_type == command_type
+            entered.set()
+            # The starter clones the completion stream; this fake worker owns that clone.
+            for arg in args:
+                if isinstance(arg, anyio.streams.memory.MemoryObjectSendStream):
+                    await arg.aclose()
+
+        async def render(events: AsyncIterator[WispEvent]) -> None:
+            async for event in events:
+                assert not entered.is_set()
+                await anyio.lowlevel.checkpoint()
+                assert not entered.is_set()
+                rendered.append(event)
+
+        worker_name = {
+            "prompt": "prompt",
+            "init": "prompt",
+            "compact": "compact",
+            "get_session_stats": "session_stats",
+        }[command_type]
+        monkeypatch.setattr(rpc_execution_module, f"run_rpc_{worker_name}_command", worker)
+        payload = {"type": command_type, **({"prompt": "text"} if command_type == "prompt" else {})}
+
+        async def run(_receive: object, *, dispatch: object, reject: object) -> bool:
+            result = await dispatch(
+                ParsedRpcCommand.from_known(RpcCommandAdapter.validate_python(payload)), None
+            )
+            assert result.running_command is not None
+            with anyio.fail_after(2):
+                await entered.wait()
+            return False
+
+        monkeypatch.setattr(fixture.coordinator, "run", run)
+        host = RpcHost(
+            runtime=fixture.runtime,
+            sessions=fixture.sessions,
+            agent=fixture.agent,
+            approval_policy=fixture.approval_policy,
+            trust_gate=fixture.trust_gate,
+            configure_overrides=fixture.configure_overrides,
+            coordinator=fixture.coordinator,
+            write_event=fixture.events.append,
+            render_events=render,
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            await host.run_with_streams(receive, send=send, task_group=task_group)
+            task_group.cancel_scope.cancel()
+        assert entered.is_set()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "directory"])
+def test_typed_compact_rejects_non_file_session(
+    tmp_path: Path, monkeypatch: MonkeyPatch, path_kind: str
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        if path_kind == "directory":
+            selected.path.mkdir()
+        fixture.session_state.session = selected
+
+        def fail(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Invalid persisted session must not launch a worker")
+
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            monkeypatch.setattr(task_group, "start_soon", fail)
+            result = await _dispatch_parsed(
+                fixture.executor(task_group=task_group, send=send),
+                {"type": "compact", "id": "compact"},
+            )
+            assert result.running_command is None
+        assert (
+            fixture.events[-1].error == "RPC compact command requires an existing persisted session"
         )
 
     anyio.run(scenario)

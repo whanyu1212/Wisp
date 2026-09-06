@@ -1956,13 +1956,20 @@ def test_sdk_and_host_do_not_depend_on_cli_modules() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _guard_typed_control_dispatch(monkeypatch: MonkeyPatch) -> None:
+def _guard_typed_command_dispatch(monkeypatch: MonkeyPatch) -> None:
     original = rpc_execution_module.RpcCommandExecutor.dispatch
 
     async def guarded(self: object, command: dict[str, object], running: object) -> object:
-        assert command.get("type") not in {"cancel", "approval", "trust", "shutdown"}, (
-            "Control commands must execute through typed handlers"
-        )
+        assert command.get("type") not in {
+            "cancel",
+            "approval",
+            "trust",
+            "shutdown",
+            "prompt",
+            "init",
+            "compact",
+            "get_session_stats",
+        }, "Known commands must execute through typed handlers"
         return await original(self, command, running)
 
     monkeypatch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", guarded)

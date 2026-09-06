@@ -82,6 +82,7 @@ from wisp.rpc.commands import (
     CancelCommand,
     ClearQueueCommand,
     CloneSessionCommand,
+    CompactCommand,
     ConfigureCommand,
     DisconnectProviderCommand,
     FollowUpCommand,
@@ -93,13 +94,16 @@ from wisp.rpc.commands import (
     GetModelCatalogCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
+    GetSessionStatsCommand,
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
+    InitCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     ParsedRpcCommand,
     PopQueueCommand,
+    PromptCommand,
     SelectSessionCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
@@ -323,6 +327,18 @@ class RpcCommandExecutor:
         if isinstance(known, (CancelCommand, ApprovalCommand, TrustCommand, ShutdownCommand)):
             self.coordinator.running_command = running_command
             return self._dispatch_control(known, running_command)
+        if isinstance(known, PromptCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_prompt(known)
+        if isinstance(known, InitCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_init(known)
+        if isinstance(known, CompactCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_compact(known)
+        if isinstance(known, GetSessionStatsCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_session_stats(known)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -335,18 +351,10 @@ class RpcCommandExecutor:
     ) -> _RpcDispatchResult:
         self.coordinator.running_command = running_command
         command_type = rpc_command_type(command)
-        if command_type == "prompt":
-            return self._dispatch_prompt(command)
-        if command_type == "init":
-            return self._dispatch_init(command)
-        if command_type == "compact":
-            return self._dispatch_compact(command)
-        if command_type == "get_session_stats":
-            return self._dispatch_session_stats(command)
         self.reject(command, f"Unknown RPC command: {command_type}")
         return _RpcDispatchResult(running_command=running_command)
 
-    def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_prompt(self, command: PromptCommand) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
             command,
             agent=self.agent,
@@ -365,11 +373,18 @@ class RpcCommandExecutor:
             selected_session=new_session,
         )
 
-    def _dispatch_init(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_init(self, command: InitCommand) -> _RpcDispatchResult:
         try:
             instructions, target = _project_init_request(self.agent)
         except ValueError as exc:
-            self.reject(command, str(exc))
+            command_id = command.id or uuid4().hex
+            self.write_event(RpcCommandStarted(command_id=command_id, command_type=command.type))
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=command.type,
+                message=str(exc),
+                write_event=self.write_event,
+            )
             return _RpcDispatchResult(
                 running_command=None,
                 selected_session=self.session_state.session,
@@ -381,7 +396,7 @@ class RpcCommandExecutor:
             receipt=receipt,
         )
         new_running_command, new_session = start_rpc_prompt_command(
-            {**command, "prompt": "/init"},
+            command,
             agent=self.agent,
             sessions=self.sessions,
             session_state=self.session_state,
@@ -408,7 +423,7 @@ class RpcCommandExecutor:
             selected_session=new_session,
         )
 
-    def _dispatch_compact(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_compact(self, command: CompactCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_compact_command(
                 command,
@@ -424,7 +439,7 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_session_stats(self, command: dict[str, object]) -> _RpcDispatchResult:
+    def _dispatch_session_stats(self, command: GetSessionStatsCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_session_stats_command(
                 command,
@@ -939,7 +954,7 @@ class _ProjectInitCompletion:
 
 
 def start_rpc_prompt_command(
-    command: dict[str, object],
+    command: PromptCommand | InitCommand,
     *,
     agent: CodingSession,
     sessions: JsonlSessionStore,
@@ -957,27 +972,11 @@ def start_rpc_prompt_command(
     completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
-) -> tuple[_RpcRunningCommand | None, JsonlSession | None]:
-    command_type, command_id, id_error = rpc_command_identity(command)
+) -> tuple[_RpcRunningCommand, JsonlSession]:
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None, session_state.session
-
-    prompt = command.get("prompt")
-    if not isinstance(prompt, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC prompt command requires string field: prompt",
-            write_event=write_event,
-        )
-        return None, session_state.session
+    prompt = command.prompt if isinstance(command, PromptCommand) else "/init"
 
     selected_session = session_state.session or sessions.create()
     cancel_scope = anyio.CancelScope()
@@ -1014,7 +1013,7 @@ def start_rpc_prompt_command(
 
 
 def start_rpc_compact_command(
-    command: dict[str, object],
+    command: CompactCommand,
     *,
     agent: CodingSession,
     session_state: _RpcSessionState,
@@ -1026,27 +1025,12 @@ def start_rpc_compact_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
-
-    raw_instructions = command.get("instructions")
-    if raw_instructions is not None and not isinstance(raw_instructions, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC compact command field instructions must be a string",
-            write_event=write_event,
-        )
-        return None
-    instructions = raw_instructions.strip() or None if isinstance(raw_instructions, str) else None
+    instructions = (
+        command.instructions.strip() or None if command.instructions is not None else None
+    )
 
     session = session_state.session
     if session is None or not session.path.is_file():
@@ -1082,7 +1066,7 @@ def start_rpc_compact_command(
 
 
 def start_rpc_session_stats_command(
-    command: dict[str, object],
+    command: GetSessionStatsCommand,
     *,
     agent: CodingSession,
     session_state: _RpcSessionState,
@@ -1091,17 +1075,10 @@ def start_rpc_session_stats_command(
     write_event: RpcEventWriter,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
-) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = rpc_command_identity(command)
+) -> _RpcRunningCommand:
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return None
 
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
