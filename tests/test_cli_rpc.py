@@ -967,6 +967,20 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
+    original_legacy = rpc_execution_module.ParsedRpcCommand.to_legacy_dict
+
+    def guard_queue_legacy(command: rpc_execution_module.ParsedRpcCommand) -> dict[str, object]:
+        assert command.command_type not in {
+            "steer",
+            "follow_up",
+            "get_queue_state",
+            "set_queue_mode",
+            "pop_queue",
+            "clear_queue",
+        }, "Queue commands must not enter legacy execution"
+        return original_legacy(command)
+
+    monkeypatch.setattr(rpc_execution_module.ParsedRpcCommand, "to_legacy_dict", guard_queue_legacy)
     provider = BlockingOperationProvider()
 
     async def build_runtime() -> WispRuntime:
