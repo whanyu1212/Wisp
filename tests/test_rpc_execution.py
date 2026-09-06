@@ -64,6 +64,7 @@ from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, Mode
 from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
+from wisp.rpc import session_mutation as rpc_session_mutation_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
     ApprovalCommand,
@@ -86,10 +87,10 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.execution import (
     RpcCommandExecutor,
     handle_rpc_store_api_key_command,
-    rpc_selected_session_state,
 )
 from wisp.rpc.host import RpcHost
 from wisp.rpc.lifecycle import _MAX_RPC_COMMAND_ERROR_CHARS
+from wisp.rpc.session_state import rpc_selected_session_state
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.event_bus import EventBus
@@ -3886,7 +3887,7 @@ def test_executor_unrevert_cancellation_after_commit_reports_success(
         fixture.session_state.session = session
         fixture.session_state.history = session.read_context_messages()
         fixture.session_state.entry_count = 5
-        original_selected_state = rpc_execution_module.rpc_selected_session_state
+        original_selected_state = rpc_session_mutation_module.rpc_selected_session_state
         committed = threading.Event()
         release = threading.Event()
 
@@ -3896,7 +3897,7 @@ def test_executor_unrevert_cancellation_after_commit_reports_success(
             return original_selected_state(selected_session)
 
         monkeypatch.setattr(
-            rpc_execution_module,
+            rpc_session_mutation_module,
             "rpc_selected_session_state",
             pause_after_unrevert,
         )
@@ -3948,7 +3949,7 @@ def test_executor_unrevert_reports_committed_leaf_after_concurrent_navigation(
         fixture.session_state.session = session
         fixture.session_state.history = session.read_context_messages()
         fixture.session_state.entry_count = 5
-        original_selected_state = rpc_execution_module.rpc_selected_session_state
+        original_selected_state = rpc_session_mutation_module.rpc_selected_session_state
         concurrent_session = JsonlSession(session_id=session.session_id, path=session.path)
 
         async def supersede_unrevert() -> None:
@@ -3962,7 +3963,7 @@ def test_executor_unrevert_reports_committed_leaf_after_concurrent_navigation(
             return original_selected_state(selected_session)
 
         monkeypatch.setattr(
-            rpc_execution_module,
+            rpc_session_mutation_module,
             "rpc_selected_session_state",
             navigate_after_unrevert,
         )
@@ -4192,7 +4193,7 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
         fixture.session_state.session = session
         fixture.session_state.history = session.read_context_messages()
         fixture.session_state.entry_count = 2
-        original_selected_state = rpc_execution_module.rpc_selected_session_state
+        original_selected_state = rpc_session_mutation_module.rpc_selected_session_state
         committed = threading.Event()
         release = threading.Event()
 
@@ -4204,7 +4205,7 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
             return original_selected_state(selected_session)
 
         monkeypatch.setattr(
-            rpc_execution_module,
+            rpc_session_mutation_module,
             "rpc_selected_session_state",
             pause_after_navigation,
         )
