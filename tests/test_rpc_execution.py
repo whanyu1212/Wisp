@@ -62,7 +62,9 @@ from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
+from wisp.rpc import configure as rpc_configure_module
 from wisp.rpc import connections as rpc_connections_module
+from wisp.rpc import control as rpc_control_module
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import inspection as rpc_inspection_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
@@ -183,7 +185,7 @@ def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
     events: list[WispEvent] = []
     oversized_reference = "x" * (_MAX_RPC_COMMAND_ERROR_CHARS + 1)
 
-    rpc_execution_module.handle_rpc_approval_command(
+    rpc_control_module.handle_rpc_approval_command(
         ApprovalCommand(id="approval-1", call_id=oversized_reference, approved=True),
         command_id="approval-1",
         command_type="approval",
@@ -213,7 +215,7 @@ def test_approval_resolution_waits_for_lifecycle_flush() -> None:
             resolved.append(kwargs)
             return True
 
-    rpc_execution_module.handle_rpc_approval_command(
+    rpc_control_module.handle_rpc_approval_command(
         ApprovalCommand(id="approval-1", call_id="call-1", approved=True),
         command_id="approval-1",
         command_type="approval",
@@ -253,7 +255,7 @@ def test_approval_resolution_runs_without_post_flush_callback() -> None:
             resolved.append(kwargs)
             return True
 
-    rpc_execution_module.handle_rpc_approval_command(
+    rpc_control_module.handle_rpc_approval_command(
         ApprovalCommand(id="approval-1", call_id="call-1", approved=True),
         command_id="approval-1",
         command_type="approval",
@@ -290,7 +292,7 @@ def test_active_cancellation_waits_for_lifecycle_flush() -> None:
         command_type="prompt",
         cancel_scope=cancel_scope,
     )
-    rpc_execution_module.handle_rpc_cancel_command(
+    rpc_control_module.handle_rpc_cancel_command(
         CancelCommand(id="cancel-1", target_id="prompt-1"),
         command_id="cancel-1",
         command_type="cancel",
@@ -2120,7 +2122,7 @@ def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Pa
     )
     command = parsed.known
     assert isinstance(command, ConfigureCommand)
-    rpc_execution_module.handle_rpc_configure_command(
+    rpc_configure_module.handle_rpc_configure_command(
         command,
         command_id="configure-1",
         provided_fields=parsed.provided_fields,
@@ -4928,7 +4930,7 @@ def test_typed_approval_defaults_and_resolution(
             decisions.append(kwargs)
             return True
 
-    rpc_execution_module.handle_rpc_control_command(
+    rpc_control_module.handle_rpc_control_command(
         command,
         running_command=None,
         approval_policy=Approval(),
@@ -4968,7 +4970,7 @@ def test_typed_approval_missing_or_lost_decision(
             resolutions.append(True)
             return resolve_ok
 
-    rpc_execution_module.handle_rpc_control_command(
+    rpc_control_module.handle_rpc_control_command(
         ApprovalCommand(call_id="missing", approved=True),
         running_command=None,
         approval_policy=Approval(),
@@ -5007,7 +5009,7 @@ def test_typed_trust_decision_and_release_order(
     command = TrustCommand.model_validate(
         {"request_id": "request", "trusted": trusted, "reason": " reason ", **transient_fields}
     )
-    rpc_execution_module.handle_rpc_control_command(
+    rpc_control_module.handle_rpc_control_command(
         command,
         running_command=None,
         approval_policy=_ApprovalResolver(),
@@ -5035,7 +5037,7 @@ def test_typed_trust_decision_and_release_order(
 def test_typed_trust_rejects_missing_gate_or_request(has_gate: bool) -> None:
     events: list[WispEvent] = []
     deferred: list[Callable[[], None]] = []
-    rpc_execution_module.handle_rpc_control_command(
+    rpc_control_module.handle_rpc_control_command(
         TrustCommand(request_id="missing", trusted=True),
         running_command=None,
         approval_policy=_ApprovalResolver(),
@@ -5054,7 +5056,7 @@ def test_typed_trust_rejects_missing_gate_or_request(has_gate: bool) -> None:
 
 def test_typed_cancellation_requires_coordinator_without_deferred_active_target() -> None:
     with pytest.raises(RuntimeError, match="requires the shared coordinator"):
-        rpc_execution_module.handle_rpc_control_command(
+        rpc_control_module.handle_rpc_control_command(
             CancelCommand(target_id="missing"),
             running_command=None,
             approval_policy=_ApprovalResolver(),

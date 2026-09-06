@@ -28,9 +28,9 @@ from wisp.providers.events import (
     ProviderUsage,
 )
 from wisp.rpc.commands import ApprovalCommand
+from wisp.rpc.control import handle_rpc_control_command
 from wisp.rpc.coordinator import _RpcPromptReady
 from wisp.rpc.execution import (
-    handle_rpc_control_command,
     rpc_has_durable_completion,
     run_rpc_prompt_command,
 )
