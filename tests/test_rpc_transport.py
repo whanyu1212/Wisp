@@ -329,6 +329,38 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
             for command_type in ("disconnect_provider", "begin_device_code")
         ],
         '{"type":"store_api_key","api_key":"sentinel-key"}',
+        '{"id": "steer", "type": "steer"}',
+        '{"id": "mode-kind", "type": "set_queue_mode", "kind": "unknown", "mode": "all"}',
+        '{"id": "mode-value", "type": "set_queue_mode", "kind": "steering", "mode": "invalid"}',
+        '{"id": "pop", "type": "pop_queue"}',
+        '{"id": "clear", "type": "clear_queue", "kind": "unknown"}',
+        '{"id": "mode-kind-container", "type": "set_queue_mode", "kind": [], "mode": "all"}',
+        '{"id": "mode-value-container", "type": "set_queue_mode", "kind": "steering", "mode": {}}',
+        '{"id": "pop-container", "type": "pop_queue", "kind": []}',
+        '{"id": "clear-container", "type": "clear_queue", "kind": {}}',
+        *[
+            json.dumps({**payload, **bad_fields})
+            for payload in (
+                {"type": "steer", "content": "text"},
+                {"type": "follow_up", "content": "text"},
+                {"type": "get_queue_state"},
+                {"type": "set_queue_mode", "kind": "steering", "mode": "all"},
+                {"type": "pop_queue", "kind": "steering"},
+                {"type": "clear_queue"},
+            )
+            for bad_fields in ({"id": []}, {"id": ""}, {"id": "x" * 257}, {"extra": True})
+        ],
+        *[
+            json.dumps({"type": kind, "content": value})
+            for kind in ("steer", "follow_up")
+            for value in (None, 1, [], {})
+        ],
+        '{"type":"follow_up"}',
+        '{"type":"set_queue_mode","kind":null,"mode":"all"}',
+        '{"type":"set_queue_mode","kind":"steering","mode":null}',
+        '{"type":"set_queue_mode","kind":"steering"}',
+        '{"type":"set_queue_mode","mode":"all"}',
+        '{"type":"pop_queue","kind":null}',
         '{"id":"bad","type":"configure"}',
         '{"id":"bad","type":"configure","mode":"invalid"}',
         '{"id":"bad","type":"configure","effort":5}',
