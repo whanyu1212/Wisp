@@ -262,7 +262,7 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
 
         assert isinstance(command, _RpcInputCommand)
         assert isinstance(command.command.known, ShutdownCommand)
-        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
+        assert command.command.known == ShutdownCommand(id="ok")
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC frame is not valid JSON"
         ]
@@ -477,7 +477,7 @@ def test_transport_rejects_schema_invalid_known_commands(bad_frame: str) -> None
 
         assert isinstance(command, _RpcInputCommand)
         assert isinstance(command.command.known, ShutdownCommand)
-        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
+        assert command.command.known == ShutdownCommand(id="ok")
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC command does not match the negotiated schema"
         ]
@@ -521,11 +521,39 @@ def test_transport_forwards_unknown_command_discriminators() -> None:
         assert command.command.known is None
         assert command.command.command_type == "future_command"
         assert command.command.command_id == "future"
-        assert command.command.to_legacy_dict() == {"id": "future", "type": "future_command"}
+        assert command.command.provided_fields == {"id", "type"}
         assert "future_command" not in repr(command)
         assert events == []
 
     anyio.run(scenario)
+
+
+@pytest.mark.parametrize("command_type", ["", " ", " future ", "界" * 64, "界" * 65])
+@pytest.mark.parametrize("command_id", [None, "", [], "界" * 256, "界" * 257])
+def test_transport_retains_unknown_metadata_for_executor_rejection(
+    command_type: str, command_id: object
+) -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+    parsed = transport.parse_command(json.dumps({"type": command_type, "id": command_id}).encode())
+    assert parsed is not None
+    assert parsed.known is None
+    assert parsed.command_type == (command_type if 0 < len(command_type) <= 64 else "unknown")
+    assert parsed.command_id == (command_id if isinstance(command_id, str) and command_id else None)
+    assert events == []
+
+    # A recognized discriminator must validate its model, even with the same ID.
+    assert (
+        transport.parse_command(json.dumps({"type": "prompt", "id": command_id}).encode()) is None
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], ErrorEvent)
+    assert events[0].message == "RPC command does not match the negotiated schema"
 
 
 def test_transport_validates_commands_with_json_semantics() -> None:
@@ -545,11 +573,7 @@ def test_transport_validates_commands_with_json_semantics() -> None:
         assert isinstance(command, _RpcInputCommand)
         assert isinstance(command.command.known, ConfigureCommand)
         assert command.command.known.mode == "plan"
-        assert command.command.to_legacy_dict() == {
-            "id": "mode",
-            "type": "configure",
-            "mode": "plan",
-        }
+        assert command.command.known == ConfigureCommand(id="mode", mode="plan")
         assert command.command.payload_size == len(
             b'{"id":"mode","type":"configure","mode":"plan"}'
         )
@@ -666,8 +690,7 @@ def test_transport_redacts_store_api_key_after_parsing() -> None:
         assert secret not in repr(event.command)
         assert "api_key" in event.command.provided_fields
         assert "_api_key" not in event.command.provided_fields
-        legacy = event.command.to_legacy_dict()
-        assert secret not in repr(legacy)
+        assert secret not in repr(event.command.known)
         assert event.command.payload_size == len(
             f'{{"id":"store","type":"store_api_key","provider":"anthropic",'
             f'"_api_key":"{secret}"}}'.encode()
@@ -705,7 +728,7 @@ def test_transport_recovers_when_json_nesting_exhausts_parser(
 
         assert isinstance(command, _RpcInputCommand)
         assert isinstance(command.command.known, ShutdownCommand)
-        assert command.command.to_legacy_dict() == {"id": "ok", "type": "shutdown"}
+        assert command.command.known == ShutdownCommand(id="ok")
         assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
             "RPC frame is not valid JSON"
         ]

@@ -16,6 +16,7 @@ from pytest import MonkeyPatch
 from tests.rpc_support import (
     RpcExecutorFixture,
     build_rpc_executor_fixture,
+    guard_rpc_command_serialization,
     preserve_running_command,
     reject_unexpected_command,
 )
@@ -118,8 +119,12 @@ class _TrustResolver:
 def _parsed_command(payload: dict[str, object]) -> ParsedRpcCommand:
     try:
         command = RpcCommandAdapter.validate_json(json.dumps(payload))
-    except ValidationError:
-        return ParsedRpcCommand.from_unknown(payload)
+    except ValidationError as exc:
+        if isinstance(payload.get("type"), str) and any(
+            error["type"] == "union_tag_invalid" for error in exc.errors(include_input=False)
+        ):
+            return ParsedRpcCommand.from_unknown(payload)
+        raise
     return ParsedRpcCommand.from_known(command, payload=payload)
 
 
@@ -139,16 +144,6 @@ def _enable_project_init(fixture: RpcExecutorFixture, project_root: Path) -> Non
         tool_context=ToolContext(cwd=project_root),
         project_context_root=project_root,
     )
-
-
-def test_rpc_command_identity_replaces_oversized_ids_before_lifecycle_events() -> None:
-    oversized_id = "x" * 257
-
-    command_id, error = rpc_execution_module.rpc_command_id({"id": oversized_id, "type": "prompt"})
-
-    assert command_id != oversized_id
-    assert len(command_id) == 32
-    assert error == "RPC command id must contain at most 256 characters"
 
 
 def test_executor_bounds_unknown_types_before_lifecycle_events(tmp_path: Path) -> None:
@@ -1030,14 +1025,9 @@ def test_executor_typed_inspection_preserves_identity_and_lifecycle(
         parsed = _parsed_command({"type": command_type, **id_fields})
         assert parsed.known is not None
 
-        def fail_legacy(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("Typed inspection must not enter legacy execution")
-
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            monkeypatch.setattr(executor, "dispatch", fail_legacy)
-            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
             result = await executor.dispatch_parsed(parsed, running)
             task_group.cancel_scope.cancel()
 
@@ -1120,7 +1110,13 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
             {"id": "clear", "type": "clear_queue", "kind": "follow_up"},
             {"id": "invalid", "type": "follow_up"},
         ]
-        parsed_commands = [_parsed_command(command) for command in buffered_commands]
+        parsed_commands = []
+        for payload in buffered_commands:
+            try:
+                parsed_commands.append(_parsed_command(payload))
+            except ValidationError:
+                # Deliberately injected internal corruption, never accepted at ingress.
+                parsed_commands.append(ParsedRpcCommand.from_unknown(payload))
         fixture.coordinator.pending_prompt_queue_commands.extend(parsed_commands)
         running = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
@@ -1138,10 +1134,7 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
         assert report.state.pending_follow_up_count == 0
         assert report.state.steering_mode == "all"
         assert report.state.follow_up_mode == "one_at_a_time"
-        assert [
-            command.to_legacy_dict()
-            for command in fixture.coordinator.pending_prompt_queue_commands
-        ] == buffered_commands
+        assert list(fixture.coordinator.pending_prompt_queue_commands) == parsed_commands
 
     anyio.run(scenario)
 
@@ -1397,9 +1390,6 @@ def test_typed_connection_commands_preserve_lifecycle_without_legacy_conversion(
             access="sentinel-access", refresh="sentinel-refresh", expires=4_102_444_800_000
         )
 
-    def fail_legacy(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Connection execution must not convert to legacy dictionaries")
-
     monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
 
     async def scenario() -> None:
@@ -1419,8 +1409,6 @@ def test_typed_connection_commands_preserve_lifecycle_without_legacy_conversion(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            monkeypatch.setattr(executor, "dispatch", fail_legacy)
-            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
             result = await executor.dispatch_parsed(parsed, None)
             if command_type == "begin_device_code":
                 with anyio.fail_after(2):
@@ -4459,9 +4447,6 @@ def test_typed_queue_identity_content_and_order(
                 else (),
             ), state
 
-        def fail_legacy(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("Queue commands must stay typed")
-
         monkeypatch.setattr(fixture.agent, "steer", enqueue)
         monkeypatch.setattr(fixture.agent, "follow_up", enqueue)
         monkeypatch.setattr(fixture.agent, "set_queue_mode", mode)
@@ -4486,8 +4471,6 @@ def test_typed_queue_identity_content_and_order(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            monkeypatch.setattr(executor, "dispatch", fail_legacy)
-            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
             for payload in payloads:
                 start = len(fixture.events)
                 result = await _dispatch_parsed(executor, {**payload, **id_fields}, running)
@@ -4875,9 +4858,6 @@ def test_control_commands_stay_typed_and_correlated(
             def release_request(self, **_kwargs: object) -> None:
                 effects.append("release")
 
-        def fail_legacy(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("Control commands must stay typed")
-
         running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
@@ -4885,8 +4865,6 @@ def test_control_commands_stay_typed_and_correlated(
             executor.approval_policy = Approval()
             executor.trust_gate = Trust()
             executor.defer_until_after_flush = deferred.append
-            monkeypatch.setattr(executor, "dispatch", fail_legacy)
-            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
             # Validate directly: invalid known payloads must never become unknown envelopes.
             command = RpcCommandAdapter.validate_python({**payload, **id_fields})
             result = await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), running)
@@ -5248,17 +5226,11 @@ def test_run_commands_stay_typed_through_completion(
             if False:
                 yield MessageCompleted(turn=1, content="done", finish_reason="stop")
 
-        def fail_legacy(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("Run commands must stay typed")
-
         monkeypatch.setattr(fixture.agent, "run", run)
         monkeypatch.setattr(fixture.agent, "compact", compact)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            monkeypatch.setattr(executor, "dispatch", fail_legacy)
-            monkeypatch.setattr(executor, "reject", fail_legacy)
-            monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
             command = RpcCommandAdapter.validate_python({**payload, **id_fields})
             result = await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), None)
             with anyio.fail_after(2):
@@ -5317,13 +5289,10 @@ def test_typed_run_preflight_failure_does_not_start_work(
         def fail(*_args: object, **_kwargs: object) -> None:
             pytest.fail("Preflight rejection must neither convert nor launch work")
 
-        monkeypatch.setattr(ParsedRpcCommand, "to_legacy_dict", fail)
         monkeypatch.setattr(fixture.sessions, "create", fail)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            monkeypatch.setattr(executor, "dispatch", fail)
-            monkeypatch.setattr(executor, "reject", fail)
             monkeypatch.setattr(task_group, "start_soon", fail)
             command = RpcCommandAdapter.validate_python({"type": command_type, **id_fields})
             result = await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), None)
@@ -5496,5 +5465,212 @@ def test_typed_compact_rejects_non_file_session(
         assert (
             fixture.events[-1].error == "RPC compact command requires an existing persisted session"
         )
+
+    anyio.run(scenario)
+
+
+@pytest.fixture(autouse=True)
+def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
+    guard_rpc_command_serialization(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("id_fields", "id_error"),
+    [
+        ({}, None),
+        ({"id": None}, None),
+        ({"id": "supplied"}, None),
+        ({"id": " "}, None),
+        ({"id": "界" * 256}, None),
+        ({"id": ""}, "RPC command id must be a non-empty string"),
+        ({"id": False}, "RPC command id must be a non-empty string"),
+        ({"id": 7}, "RPC command id must be a non-empty string"),
+        ({"id": []}, "RPC command id must be a non-empty string"),
+        ({"id": {}}, "RPC command id must be a non-empty string"),
+        ({"id": "界" * 257}, "RPC command id must contain at most 256 characters"),
+    ],
+)
+@pytest.mark.parametrize("dispatch_unknown", [False, True])
+def test_parsed_rejection_preserves_id_rules_and_error_precedence(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    id_fields: dict[str, object],
+    id_error: str | None,
+    dispatch_unknown: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        generated: list[str] = []
+        original_uuid4 = rpc_execution_module.uuid4
+
+        def generate_id():
+            result = original_uuid4()
+            generated.append(result.hex)
+            return result
+
+        monkeypatch.setattr(rpc_execution_module, "uuid4", generate_id)
+        parsed = ParsedRpcCommand.from_unknown({"type": "future_command", **id_fields})
+        assert parsed.command_id_error == id_error
+        raw_id = id_fields.get("id")
+        assert parsed.command_id == (raw_id if isinstance(raw_id, str) and raw_id else None)
+        assert generated == []
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            if dispatch_unknown:
+                result = await executor.dispatch_parsed(parsed, running)
+                assert result.running_command is running
+                assert result.should_shutdown is False
+                assert fixture.coordinator.running_command is running
+            else:
+                fixture.coordinator.running_command = running
+                executor.reject_parsed(parsed, "RPC command queue is full")
+                assert fixture.coordinator.running_command is running
+            assert not running.cancel_scope.cancel_called
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        started, error, finished = fixture.events
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(error, ErrorEvent)
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == started.command_id
+        assert finished.command_type == started.command_type == "future_command"
+        assert finished.ok is False
+        assert (
+            finished.error
+            == error.message
+            == (
+                id_error
+                or (
+                    "Unknown RPC command: future_command"
+                    if dispatch_unknown
+                    else "RPC command queue is full"
+                )
+            )
+        )
+        if raw_id is not None and id_error is None:
+            assert started.command_id == raw_id
+            assert generated == []
+        else:
+            assert generated == [started.command_id]
+            assert len(started.command_id) == 32
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("fields", "normalized"),
+    [
+        ({}, "unknown"),
+        ({"type": None}, "unknown"),
+        ({"type": 1}, "unknown"),
+        ({"type": ""}, "unknown"),
+        ({"type": " future "}, " future "),
+        ({"type": "界" * 64}, "界" * 64),
+        ({"type": "界" * 65}, "unknown"),
+    ],
+)
+def test_unknown_rejection_uses_normalized_discriminator(
+    tmp_path: Path,
+    fields: dict[str, object],
+    normalized: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        parsed = ParsedRpcCommand.from_unknown({"id": "future", **fields})
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = await fixture.executor(task_group=task_group, send=send).dispatch_parsed(
+                parsed, None
+            )
+        assert result.running_command is None
+        assert result.should_shutdown is False
+        started, error, finished = fixture.events
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(error, ErrorEvent)
+        assert isinstance(finished, RpcCommandFinished)
+        assert started.command_type == finished.command_type == normalized
+        assert error.message == finished.error == f"Unknown RPC command: {normalized}"
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("detach_id", [False, True])
+def test_rejecting_credential_command_preserves_secrets_identity_and_store(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    detach_id: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        store = fixture.runtime.auth_store
+        assert store is not None
+        store.set("anthropic", ApiKeyCredential(key="existing-key"))
+        secret = "sentinel-rejected-api-key"
+        command = StoreApiKeyCommand(id="original", provider="anthropic", api_key=secret)
+        parsed = ParsedRpcCommand.from_known(command)
+        rejected = fixture.coordinator._duplicate_rejection_command(parsed) if detach_id else parsed
+        assert parsed.command_id == "original"
+        assert rejected.command_id == (None if detach_id else "original")
+        assert rejected.command_id_error is None
+        assert rejected.known is not None
+        assert secret in rejected.known.to_json_line()  # Intentional wire serialization.
+        assert secret not in repr(rejected)
+        assert secret not in repr(rejected.known)
+        assert rejected.provided_fields == (
+            {"type", "provider", "api_key"} | (set() if detach_id else {"id"})
+        )
+        assert rejected.payload_size == len(
+            json.dumps(
+                {
+                    "type": "store_api_key",
+                    "provider": "anthropic",
+                    "_api_key": secret,
+                    **({} if detach_id else {"id": "original"}),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        )
+
+        def fail_mutation(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Rejected credential commands must not mutate credentials")
+
+        monkeypatch.setattr(store, "set", fail_mutation)
+        monkeypatch.setattr(store, "delete", fail_mutation)
+        message = (
+            "RPC command id is already outstanding: original"
+            if detach_id
+            else (
+                "RPC command queue byte limit exceeded "
+                + "x" * rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS
+            )
+        )
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            fixture.executor(task_group=task_group, send=send).reject_parsed(rejected, message)
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        started, error, finished = fixture.events
+        assert isinstance(started, RpcCommandStarted)
+        assert isinstance(error, ErrorEvent)
+        assert isinstance(finished, RpcCommandFinished)
+        assert started.command_id == finished.command_id
+        assert (finished.command_id != "original") is detach_id
+        expected = (
+            message
+            if detach_id
+            else message[: rpc_execution_module._MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
+        )
+        assert finished.error == error.message == expected
+        assert all(secret not in repr(event) for event in fixture.events)
+        assert store.get("anthropic") == ApiKeyCredential(key="existing-key")
 
     anyio.run(scenario)

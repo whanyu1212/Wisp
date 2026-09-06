@@ -11,6 +11,7 @@ import pytest
 from pytest import MonkeyPatch
 
 import wisp.sdk as sdk_module
+from tests.rpc_support import guard_rpc_command_serialization
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.config import WispConfig
@@ -30,7 +31,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
-from wisp.rpc.commands import ParsedRpcCommand, StoreApiKeyCommand
+from wisp.rpc.commands import StoreApiKeyCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -1036,23 +1037,16 @@ def test_in_process_sdk_preserves_typed_secret_command_until_storage(
         transport._control_send = cast(Any, InspectingSend())
 
         try:
-
-            def fail_legacy(*_args: object, **_kwargs: object) -> None:
-                pytest.fail("SDK credential storage must use typed execution")
-
-            with monkeypatch.context() as patch:
-                patch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", fail_legacy)
-                patch.setattr(ParsedRpcCommand, "to_legacy_dict", fail_legacy)
-                command_id = await controller.store_api_key(
-                    "anthropic",
-                    secret,
-                    command_id="store-1",
-                )
-                events = []
-                async for event in controller.events():
-                    events.append(event)
-                    if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
-                        break
+            command_id = await controller.store_api_key(
+                "anthropic",
+                secret,
+                command_id="store-1",
+            )
+            events = []
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    break
         finally:
             await controller.aclose()
 
@@ -1062,7 +1056,7 @@ def test_in_process_sdk_preserves_typed_secret_command_until_storage(
         assert parsed.known.api_key == secret
         assert secret not in repr(captured[0])
         assert secret not in repr(parsed)
-        assert secret not in repr(parsed.to_legacy_dict())
+        assert secret not in repr(parsed.known)
         assert JsonAuthStore(auth_path).get("anthropic") == ApiKeyCredential(key=secret)
         assert all(secret not in repr(event) for event in events)
         assert isinstance(events[-1], RpcCommandFinished)
@@ -1956,20 +1950,5 @@ def test_sdk_and_host_do_not_depend_on_cli_modules() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _guard_typed_command_dispatch(monkeypatch: MonkeyPatch) -> None:
-    original = rpc_execution_module.RpcCommandExecutor.dispatch
-
-    async def guarded(self: object, command: dict[str, object], running: object) -> object:
-        assert command.get("type") not in {
-            "cancel",
-            "approval",
-            "trust",
-            "shutdown",
-            "prompt",
-            "init",
-            "compact",
-            "get_session_stats",
-        }, "Known commands must execute through typed handlers"
-        return await original(self, command, running)
-
-    monkeypatch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", guarded)
+def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
+    guard_rpc_command_serialization(monkeypatch)

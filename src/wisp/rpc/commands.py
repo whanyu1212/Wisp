@@ -497,7 +497,7 @@ class UnknownCommandEnvelope:
 
 @dataclass(frozen=True)
 class ParsedRpcCommand:
-    """Validated known command or bounded unknown command plus its legacy payload."""
+    """Validated command and retained ingress metadata for scheduling and rejection."""
 
     value: RpcCommand | UnknownCommandEnvelope = dataclass_field(repr=False)
     _payload: Mapping[str, object] = dataclass_field(repr=False)
@@ -510,15 +510,15 @@ class ParsedRpcCommand:
         *,
         payload: Mapping[str, object] | None = None,
     ) -> ParsedRpcCommand:
-        legacy = dict(command.model_dump(exclude_none=True) if payload is None else payload)
-        return cls._from_parts(command, legacy)
+        retained = dict(command.model_dump(exclude_none=True) if payload is None else payload)
+        return cls._from_parts(command, retained)
 
     @classmethod
     def from_unknown(cls, payload: Mapping[str, object]) -> ParsedRpcCommand:
-        legacy = dict(payload)
+        retained = dict(payload)
         return cls._from_parts(
-            UnknownCommandEnvelope(command_type=rpc_command_type(legacy)),
-            legacy,
+            UnknownCommandEnvelope(command_type=rpc_command_type(retained)),
+            retained,
         )
 
     @classmethod
@@ -546,6 +546,18 @@ class ParsedRpcCommand:
         return command_id if isinstance(command_id, str) and command_id else None
 
     @property
+    def command_id_error(self) -> str | None:
+        """Validate the submitted ID without changing coordinator identity semantics."""
+        command_id = self._payload.get("id")
+        if command_id is None:
+            return None
+        if isinstance(command_id, str) and command_id:
+            if len(command_id) <= MAX_RPC_COMMAND_ID_CHARS:
+                return None
+            return f"RPC command id must contain at most {MAX_RPC_COMMAND_ID_CHARS} characters"
+        return "RPC command id must be a non-empty string"
+
+    @property
     def known(self) -> RpcCommand | None:
         return None if isinstance(self.value, UnknownCommandEnvelope) else self.value
 
@@ -570,11 +582,6 @@ class ParsedRpcCommand:
         if not isinstance(value, UnknownCommandEnvelope):
             value = value.model_copy(update={"id": None})
         return self._from_parts(value, payload)
-
-    def to_legacy_dict(self) -> dict[str, object]:
-        """Return a fresh secret-detached payload for the legacy executor."""
-
-        return dict(self._payload)
 
 
 def rpc_command_from_json(line: str) -> RpcCommand:

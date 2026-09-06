@@ -9,6 +9,7 @@ import pytest
 import wisp.coding.tool_execution as tool_execution
 import wisp.rpc.execution as rpc_execution_module
 from tests.cli_support import *
+from tests.rpc_support import guard_rpc_command_serialization
 from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -968,20 +969,6 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    original_legacy = rpc_execution_module.ParsedRpcCommand.to_legacy_dict
-
-    def guard_queue_legacy(command: rpc_execution_module.ParsedRpcCommand) -> dict[str, object]:
-        assert command.command_type not in {
-            "steer",
-            "follow_up",
-            "get_queue_state",
-            "set_queue_mode",
-            "pop_queue",
-            "clear_queue",
-        }, "Queue commands must not enter legacy execution"
-        return original_legacy(command)
-
-    monkeypatch.setattr(rpc_execution_module.ParsedRpcCommand, "to_legacy_dict", guard_queue_legacy)
     provider = BlockingOperationProvider()
 
     async def build_runtime() -> WispRuntime:
@@ -3288,20 +3275,5 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
 
 
 @pytest.fixture(autouse=True)
-def _guard_typed_command_dispatch(monkeypatch: MonkeyPatch) -> None:
-    original = rpc_execution_module.RpcCommandExecutor.dispatch
-
-    async def guarded(self: object, command: dict[str, object], running: object) -> object:
-        assert command.get("type") not in {
-            "cancel",
-            "approval",
-            "trust",
-            "shutdown",
-            "prompt",
-            "init",
-            "compact",
-            "get_session_stats",
-        }, "Known commands must execute through typed handlers"
-        return await original(self, command, running)
-
-    monkeypatch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", guarded)
+def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
+    guard_rpc_command_serialization(monkeypatch)
