@@ -34,3 +34,13 @@ def _session_name_from_entries(entries: tuple[SessionEntry, ...]) -> str | None:
         if isinstance(entry, SessionInfoSessionEntry):
             name = entry.name
     return name
+
+
+def rpc_derived_session_state(
+    session: JsonlSession,
+) -> tuple[int, tuple[Message, ...], str | None, str | None]:
+    """Read a derived target, including a reserved empty first-message fork."""
+
+    if not session.path.is_file():
+        return 0, (), None, None
+    return rpc_selected_session_state(session)
