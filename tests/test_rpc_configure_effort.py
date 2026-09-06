@@ -22,7 +22,7 @@ from tests.test_coding_session import CapturingProvider
 from wisp.events import ErrorEvent, RpcCommandFinished, WispEvent
 from wisp.rpc.commands import ConfigureCommand, RpcCommandAdapter
 from wisp.rpc.configuration import _RpcConfigureOverrides
-from wisp.rpc.execution import handle_rpc_configure_command
+from wisp.rpc.configure import handle_rpc_configure_command
 
 
 def _configure_rpc(

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Protocol, assert_never, cast
+from typing import assert_never
 
 import anyio
 from anyio.abc import TaskGroup
@@ -21,20 +21,13 @@ from wisp.events import (
     AgentStarted,
     ErrorEvent,
     MessageCompleted,
-    ModelProviderAutoSwitched,
-    QueueItemsRemoved,
     RpcCommandFinished,
-    RpcModelCatalogReported,
-    RpcModelCatalogSnapshot,
     SessionStatsReported,
     ToolExecutionEnded,
     WispEvent,
 )
-from wisp.providers.base import Provider
-from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import (
     ApprovalCommand,
-    ApprovalScope,
     BeginDeviceCodeCommand,
     CancelCommand,
     ClearQueueCommand,
@@ -71,7 +64,6 @@ from wisp.rpc.commands import (
     UnrevertSessionTreeCommand,
 )
 from wisp.runtime.api import WispRuntime
-from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import resolve_session_tree
@@ -79,10 +71,17 @@ from wisp.tools.context import ToolContext
 from wisp.tools.file_ops import CreateOnlyWriteReceipt
 
 from .configuration import _RpcConfigureOverrides
+from .configure import handle_rpc_configure_command
 from .connections import (
     handle_rpc_disconnect_provider_command,
     handle_rpc_store_api_key_command,
     start_rpc_device_code_command,
+)
+from .control import (
+    RpcApprovalResolver,
+    RpcTrustResolver,
+    _RpcControlCommand,
+    handle_rpc_control_command,
 )
 from .coordinator import (
     RpcCoordinator,
@@ -101,7 +100,6 @@ from .inspection import (
     handle_rpc_model_catalog_command,
     handle_rpc_skills_command,
     handle_rpc_state_command,
-    rpc_model_catalog_snapshot,
 )
 from .lifecycle import RpcCommandLifecycle, RpcEventWriter
 from .session_mutation import (
@@ -112,23 +110,13 @@ from .session_mutation import (
     start_rpc_set_session_name_command,
     start_rpc_unrevert_session_tree_command,
 )
+from .session_queue import _RpcQueueCommand, handle_rpc_queue_command
 from .session_read import (
     start_rpc_messages_command,
     start_rpc_session_tree_command,
     start_rpc_sessions_command,
 )
 from .session_state import updated_rpc_session_state
-
-type _RpcControlCommand = CancelCommand | ApprovalCommand | TrustCommand | ShutdownCommand
-
-type _RpcQueueCommand = (
-    SteerCommand
-    | FollowUpCommand
-    | GetQueueStateCommand
-    | SetQueueModeCommand
-    | PopQueueCommand
-    | ClearQueueCommand
-)
 
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
@@ -139,35 +127,6 @@ _PROJECT_INIT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "write"})
 
 async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
     return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
-
-
-class RpcApprovalResolver(Protocol):
-    def has_pending_approval(self, *, call_id: str) -> bool: ...
-
-    def resolve_approval(
-        self,
-        *,
-        call_id: str,
-        approved: bool,
-        reason: str | None = None,
-        scope: ApprovalScope = "once",
-    ) -> bool: ...
-
-
-class RpcTrustResolver(Protocol):
-    async def resolve(self) -> bool: ...
-
-    def resolve_request(
-        self,
-        *,
-        request_id: str,
-        trusted: bool,
-        reason: str | None = None,
-        transient: bool = False,
-        release: bool = True,
-    ) -> bool: ...
-
-    def release_request(self, *, request_id: str) -> None: ...
 
 
 class RpcCommandExecutor:
@@ -1351,396 +1310,6 @@ def rpc_has_durable_completion(
         if message.role == "tool" and message.tool_call_id is not None:
             return True
     return False
-
-
-async def handle_rpc_queue_command(
-    command: _RpcQueueCommand,
-    *,
-    agent: CodingSession,
-    session: JsonlSession | None,
-    write_event: RpcEventWriter,
-) -> None:
-    """Execute one ordered queue command through the shared session facade."""
-
-    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
-    command_id = lifecycle.command_id
-
-    removed: QueueItemsRemoved | None = None
-    try:
-        if isinstance(command, GetQueueStateCommand):
-            state = agent.queue_state(session)
-        elif isinstance(command, SteerCommand):
-            state = await agent.steer(command.content)
-        elif isinstance(command, FollowUpCommand):
-            state = await agent.follow_up(command.content)
-        elif isinstance(command, SetQueueModeCommand):
-            kind = command.kind
-            mode = command.mode
-            state = agent.set_queue_mode(kind, mode)
-        elif isinstance(command, PopQueueCommand):
-            kind = command.kind
-            popped, state = agent.pop_queue(kind)
-            removed = QueueItemsRemoved(
-                command_id=command_id,
-                operation="pop",
-                kind=kind,
-                steering=(popped.user_visible_content,)
-                if popped is not None and kind == "steering"
-                else (),
-                follow_up=(popped.user_visible_content,)
-                if popped is not None and kind == "follow_up"
-                else (),
-            )
-        elif isinstance(command, ClearQueueCommand):
-            clear_kind = command.kind
-            cleared, state = agent.clear_queue(clear_kind)
-            removed = QueueItemsRemoved(
-                command_id=command_id,
-                operation="clear",
-                kind=clear_kind,
-                steering=tuple(message.user_visible_content for message in cleared.steering),
-                follow_up=tuple(message.user_visible_content for message in cleared.follow_up),
-            )
-        else:  # pragma: no cover - dispatch owns the closed command set
-            assert_never(command)
-    except (RuntimeError, ValueError) as exc:
-        lifecycle.fail(str(exc))
-        return
-
-    if removed is not None:
-        write_event(removed)
-    write_event(state)
-    lifecycle.finish()
-
-
-def handle_rpc_control_command(
-    command: _RpcControlCommand,
-    *,
-    running_command: _RpcRunningCommand | None,
-    approval_policy: RpcApprovalResolver,
-    write_event: RpcEventWriter,
-    trust_gate: RpcTrustResolver | None = None,
-    coordinator: RpcCoordinator | None = None,
-    defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
-) -> bool:
-    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
-    command_id = lifecycle.command_id
-    command_type = command.type
-    if isinstance(command, ShutdownCommand):
-        lifecycle.finish()
-        return True
-    if isinstance(command, CancelCommand):
-        handle_rpc_cancel_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            running_command=running_command,
-            coordinator=coordinator,
-            write_event=write_event,
-            defer_cancellation=defer_until_after_flush,
-        )
-        return False
-    if isinstance(command, ApprovalCommand):
-        handle_rpc_approval_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            approval_policy=approval_policy,
-            write_event=write_event,
-            defer_resolution=defer_until_after_flush,
-        )
-        return False
-    if isinstance(command, TrustCommand):
-        if trust_gate is None:
-            lifecycle.fail("RPC trust command requires an active trust gate")
-            return False
-        handle_rpc_trust_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            trust_gate=trust_gate,
-            write_event=write_event,
-            defer_resolution=defer_until_after_flush,
-        )
-        return False
-    assert_never(command)
-
-
-def handle_rpc_configure_command(
-    command: ConfigureCommand,
-    *,
-    command_id: str,
-    provided_fields: frozenset[str],
-    agent: CodingSession,
-    runtime: WispRuntime,
-    write_event: RpcEventWriter,
-    configure_overrides: _RpcConfigureOverrides | None = None,
-) -> None:
-    lifecycle = RpcCommandLifecycle.bind(
-        command_id=command_id,
-        command_type="configure",
-        write_event=write_event,
-    )
-    provider = command.provider
-    model = command.model
-    effort = command.effort
-    auto_compaction_enabled = command.auto_compaction_enabled
-    mode = command.mode
-    clear_effort = command.clear_effort
-    has_provider = "provider" in provided_fields
-    has_model = "model" in provided_fields
-    has_effort = "effort" in provided_fields or clear_effort
-    has_auto_compaction_enabled = "auto_compaction_enabled" in provided_fields
-    has_mode = "mode" in provided_fields
-    if has_mode and mode is None:
-        lifecycle.fail("RPC configure command field mode must be 'build' or 'plan'")
-        return
-    if has_auto_compaction_enabled and auto_compaction_enabled is None:
-        lifecycle.fail("RPC configure command field auto_compaction_enabled must be a boolean")
-        return
-    configuration = agent.configuration
-    selected_provider = configuration.provider
-    selected_model = configuration.model
-    selected_effort = configuration.effort
-    selected_auto_compaction_enabled = configuration.auto_compaction_enabled
-    auto_switched_provider: str | None = None
-    if auto_compaction_enabled is not None:
-        selected_auto_compaction_enabled = auto_compaction_enabled
-    if provider is not None:
-        try:
-            selected_provider = runtime.providers.get(provider)
-        except UnknownProviderError as exc:
-            lifecycle.fail(str(exc))
-            return
-        if not has_model:
-            selected_model = None
-        if not has_effort:
-            selected_effort = None
-    if has_model and provider is None and model is not None:
-        try:
-            selected_provider = auto_switch_provider_for_model(
-                model,
-                current_provider=selected_provider,
-                runtime=runtime,
-            )
-            if selected_provider.name != configuration.provider.name:
-                auto_switched_provider = selected_provider.name
-        except AmbiguousModelError as exc:
-            lifecycle.fail(f"{exc}; specify provider explicitly")
-            return
-        except UnknownProviderError as exc:
-            lifecycle.fail(
-                f"Model {model!r} resolves to provider {exc.name!r}, which is not available"
-            )
-            return
-        if not has_effort:
-            selected_effort = None
-    if has_model:
-        selected_model = model
-    if has_effort:
-        selected_effort = None if clear_effort else effort
-    selected_effort = startup_effort(
-        runtime.models,
-        provider_name=selected_provider.name,
-        model=selected_model,
-        default_model=selected_provider.default_model,
-        effort=selected_effort,
-    )
-    selection_changed = (
-        has_provider or has_model or has_effort or (selected_effort != configuration.effort)
-    )
-    model_catalog: RpcModelCatalogSnapshot | None = None
-    model_catalog_error: str | None = None
-    if selection_changed:
-        try:
-            model_catalog = rpc_model_catalog_snapshot(
-                runtime=runtime,
-                provider=selected_provider,
-                model=selected_model,
-                effort=selected_effort,
-            )
-        except Exception as exc:
-            # Catalog bounds protect RPC consumers, not provider configuration.
-            model_catalog_error = str(exc)
-    try:
-        agent.reconfigure(
-            replace(
-                configuration,
-                provider=selected_provider,
-                model=selected_model,
-                effort=selected_effort,
-                models=runtime.models,
-                auto_compaction_enabled=selected_auto_compaction_enabled,
-            )
-        )
-    except RuntimeError as exc:
-        lifecycle.fail(str(exc))
-        return
-    if mode is not None:
-        agent.set_mode(mode)
-    if auto_switched_provider is not None:
-        write_event(
-            ModelProviderAutoSwitched(
-                command_id=command_id,
-                provider=auto_switched_provider,
-                model=cast(str, model),
-            )
-        )
-    if configure_overrides is not None:
-        if has_provider or selected_provider.name != configuration.provider.name:
-            configure_overrides.provider = selected_provider.name
-        if has_model or has_provider:
-            configure_overrides.model = selected_model
-            configure_overrides.has_model = True
-        if has_effort or selected_effort != configuration.effort:
-            configure_overrides.effort = selected_effort
-            configure_overrides.has_effort = True
-        if has_auto_compaction_enabled:
-            configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
-            configure_overrides.has_auto_compaction_enabled = True
-    if model_catalog is not None:
-        write_event(RpcModelCatalogReported(command_id=command_id, catalog=model_catalog))
-    elif model_catalog_error is not None:
-        write_event(
-            ErrorEvent(
-                message=f"Configuration applied; model catalog unavailable: {model_catalog_error}"
-            )
-        )
-    lifecycle.finish()
-
-
-def auto_switch_provider_for_model(
-    model: str,
-    *,
-    current_provider: Provider,
-    runtime: WispRuntime,
-) -> Provider:
-    try:
-        resolved_provider, _entry = runtime.models.resolve(model, prefer=current_provider.name)
-    except UnknownModelError:
-        return current_provider
-    if resolved_provider == current_provider.name:
-        return current_provider
-    return runtime.providers.get(resolved_provider)
-
-
-def handle_rpc_approval_command(
-    command: ApprovalCommand,
-    *,
-    command_id: str,
-    command_type: str,
-    approval_policy: RpcApprovalResolver,
-    write_event: RpcEventWriter,
-    defer_resolution: Callable[[Callable[[], None]], None] | None = None,
-) -> None:
-    lifecycle = RpcCommandLifecycle.bind(
-        command_id=command_id,
-        command_type=command_type,
-        write_event=write_event,
-    )
-    call_id = command.call_id
-    approved = command.approved
-    reason = command.reason
-    scope = command.scope or "once"
-    if not approval_policy.has_pending_approval(call_id=call_id):
-        lifecycle.fail(f"No pending tool approval with call_id: {call_id}")
-        return
-    resolve = partial(
-        approval_policy.resolve_approval,
-        call_id=call_id,
-        approved=approved,
-        reason=reason,
-        scope=scope,
-    )
-    if defer_resolution is None:
-        if not resolve():
-            lifecycle.fail(f"No pending tool approval with call_id: {call_id}")
-            return
-        lifecycle.finish()
-        return
-
-    lifecycle.finish()
-
-    def resolve_after_flush() -> None:
-        resolve()
-
-    defer_resolution(resolve_after_flush)
-
-
-def handle_rpc_trust_command(
-    command: TrustCommand,
-    *,
-    command_id: str,
-    command_type: str,
-    trust_gate: RpcTrustResolver,
-    write_event: RpcEventWriter,
-    defer_resolution: Callable[[Callable[[], None]], None] | None = None,
-) -> None:
-    lifecycle = RpcCommandLifecycle.bind(
-        command_id=command_id,
-        command_type=command_type,
-        write_event=write_event,
-    )
-    request_id = command.request_id
-    trusted = command.trusted
-    reason = command.reason
-    transient = command.transient
-    defer_release = defer_resolution is not None
-    if not trust_gate.resolve_request(
-        request_id=request_id,
-        trusted=trusted,
-        reason=reason,
-        transient=transient is True,
-        release=not defer_release,
-    ):
-        lifecycle.fail(f"No pending trust request with request_id: {request_id}")
-        return
-    lifecycle.finish()
-    if defer_resolution is not None:
-        defer_resolution(partial(trust_gate.release_request, request_id=request_id))
-
-
-def handle_rpc_cancel_command(
-    command: CancelCommand,
-    *,
-    command_id: str,
-    command_type: str,
-    running_command: _RpcRunningCommand | None,
-    write_event: RpcEventWriter,
-    coordinator: RpcCoordinator | None = None,
-    defer_cancellation: Callable[[Callable[[], None]], None] | None = None,
-) -> None:
-    lifecycle = RpcCommandLifecycle.bind(
-        command_id=command_id,
-        command_type=command_type,
-        write_event=write_event,
-    )
-    target_id = command.target_id
-    if (
-        running_command is not None
-        and running_command.command_id == target_id
-        and defer_cancellation is not None
-    ):
-        lifecycle.finish()
-        defer_cancellation(running_command.cancel_scope.cancel)
-        return
-    if coordinator is None:
-        raise RuntimeError("RPC cancellation requires the shared coordinator")
-    result = coordinator.cancel(target_id)
-    if result.outcome == "running":
-        lifecycle.finish()
-        return
-    queued_target = result.command
-    if queued_target is None:
-        lifecycle.fail(f"No running or queued RPC command with id: {target_id}")
-        return
-    target = RpcCommandLifecycle.start(
-        command_id=target_id,
-        command_type=queued_target.command_type,
-        write_event=write_event,
-    )
-    target.finish(ok=False, error=f"RPC command cancelled: {target_id}")
-    lifecycle.finish()
 
 
 __all__ = ["RpcCommandExecutor"]
