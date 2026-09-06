@@ -9,7 +9,6 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, assert_never, cast
-from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
@@ -36,7 +35,6 @@ from wisp.events import (
     RpcCommandDescriptor,
     RpcCommandFinished,
     RpcCommandsReported,
-    RpcCommandStarted,
     RpcConnectionCatalogReported,
     RpcConnectionCatalogSnapshot,
     RpcConnectionMethodSnapshot,
@@ -141,8 +139,7 @@ from .coordinator import (
     _RpcSessionState,
 )
 from .errors import RpcOutputAlreadyReportedError
-
-_MAX_RPC_COMMAND_ERROR_CHARS = 1_000
+from .lifecycle import RpcCommandLifecycle, RpcEventWriter
 
 type _RpcControlCommand = CancelCommand | ApprovalCommand | TrustCommand | ShutdownCommand
 
@@ -155,7 +152,6 @@ type _RpcQueueCommand = (
     | ClearQueueCommand
 )
 
-type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
@@ -343,15 +339,12 @@ class RpcCommandExecutor:
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
         id_error = command.command_id_error
-        command_id = (command.command_id if id_error is None else None) or uuid4().hex
-        command_type = command.command_type
-        self.write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error or message,
+        lifecycle = RpcCommandLifecycle.start(
+            command_id=command.command_id if id_error is None else None,
+            command_type=command.command_type,
             write_event=self.write_event,
         )
+        lifecycle.fail(id_error or message)
 
     def _dispatch_prompt(self, command: PromptCommand) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
@@ -376,14 +369,8 @@ class RpcCommandExecutor:
         try:
             instructions, target = _project_init_request(self.agent)
         except ValueError as exc:
-            command_id = command.id or uuid4().hex
-            self.write_event(RpcCommandStarted(command_id=command_id, command_type=command.type))
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command.type,
-                message=str(exc),
-                write_event=self.write_event,
-            )
+            lifecycle = RpcCommandLifecycle.for_command(command, write_event=self.write_event)
+            lifecycle.fail(str(exc))
             return _RpcDispatchResult(
                 running_command=None,
                 selected_session=self.session_state.session,
@@ -753,20 +740,13 @@ class RpcCommandExecutor:
         provided_fields: frozenset[str],
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
-        command_id = command.id or uuid4().hex
-        write_command_type = "configure"
-        self.write_event(RpcCommandStarted(command_id=command_id, command_type=write_command_type))
+        lifecycle = RpcCommandLifecycle.for_command(command, write_event=self.write_event)
         if running_command is not None:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=write_command_type,
-                message="Cannot configure while another RPC operation is active",
-                write_event=self.write_event,
-            )
+            lifecycle.fail("Cannot configure while another RPC operation is active")
             return _RpcDispatchResult(running_command=running_command)
         handle_rpc_configure_command(
             command,
-            command_id=command_id,
+            command_id=lifecycle.command_id,
             provided_fields=provided_fields,
             agent=self.agent,
             runtime=self.runtime,
@@ -803,18 +783,11 @@ def handle_rpc_new_session_command(
 ) -> bool:
     """Synchronously reset the selected-session state."""
 
-    command_id = command.id or uuid4().hex
-    command_type = "new_session"
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     if running_command is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="Cannot start a new session while another RPC operation is active",
-            write_event=write_event,
-        )
+        lifecycle.fail("Cannot start a new session while another RPC operation is active")
         return False
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
     return True
 
 
@@ -969,9 +942,9 @@ def start_rpc_prompt_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> tuple[_RpcRunningCommand, JsonlSession]:
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    command_id = lifecycle.command_id
     prompt = command.prompt if isinstance(command, PromptCommand) else "/init"
 
     selected_session = session_state.session or sessions.create()
@@ -1021,21 +994,15 @@ def start_rpc_compact_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     instructions = (
         command.instructions.strip() or None if command.instructions is not None else None
     )
 
     session = session_state.session
     if session is None or not session.path.is_file():
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC compact command requires an existing persisted session",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC compact command requires an existing persisted session")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -1072,9 +1039,8 @@ def start_rpc_session_stats_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand:
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
 
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
@@ -1107,16 +1073,10 @@ def start_rpc_messages_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "get_messages"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     if "entry_ids" in provided_fields and command.entry_ids is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC get_messages command field entry_ids must contain non-empty strings",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC get_messages command field entry_ids must contain non-empty strings")
         return None
     if (
         "complete_structure" in provided_fields
@@ -1124,13 +1084,8 @@ def start_rpc_messages_command(
         or "full_content" in provided_fields
         and command.full_content is None
     ):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=(
-                "RPC get_messages complete_structure and full_content fields must be booleans"
-            ),
-            write_event=write_event,
+        lifecycle.fail(
+            "RPC get_messages complete_structure and full_content fields must be booleans"
         )
         return None
 
@@ -1178,8 +1133,8 @@ def start_rpc_sessions_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand:
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type="get_sessions"))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_sessions_command,
@@ -1211,8 +1166,8 @@ def start_rpc_select_session_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand:
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type="select_session"))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     session_id = command.session_id
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
@@ -1244,16 +1199,10 @@ def start_rpc_clone_session_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "clone_session"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     if session_state.session is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC clone_session command requires a selected session",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC clone_session command requires a selected session")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -1286,17 +1235,11 @@ def start_rpc_fork_session_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "fork_session"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     entry_id = command.entry_id
     if session_state.session is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC fork_session command requires a selected session",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC fork_session command requires a selected session")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -1329,8 +1272,8 @@ def start_rpc_session_tree_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand:
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type="get_session_tree"))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
         run_rpc_session_tree_command,
@@ -1361,18 +1304,12 @@ def start_rpc_navigate_session_tree_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "navigate_session_tree"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     entry_id = command.entry_id
     session = session_state.session
     if session is None or not session.path.is_file():
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=("RPC navigate_session_tree command requires an existing persisted session"),
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC navigate_session_tree command requires an existing persisted session")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -1404,17 +1341,11 @@ def start_rpc_unrevert_session_tree_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "unrevert_session_tree"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     session = session_state.session
     if session is None or not session.path.is_file():
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=("RPC unrevert_session_tree command requires an existing persisted session"),
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC unrevert_session_tree command requires an existing persisted session")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -1446,19 +1377,13 @@ def start_rpc_set_session_name_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = "set_session_name"
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     name = command.name
     session_id = command.session_id
     selected_session = session_state.session
     if session_id is None and selected_session is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC set_session_name command requires a selected session or session_id",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC set_session_name command requires a selected session or session_id")
         return None
 
     cancel_scope = anyio.CancelScope()
@@ -2762,9 +2687,8 @@ async def handle_rpc_queue_command(
 ) -> None:
     """Execute one ordered queue command through the shared session facade."""
 
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
 
     removed: QueueItemsRemoved | None = None
     try:
@@ -2805,18 +2729,13 @@ async def handle_rpc_queue_command(
         else:  # pragma: no cover - dispatch owns the closed command set
             assert_never(command)
     except (RuntimeError, ValueError) as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(str(exc))
         return
 
     if removed is not None:
         write_event(removed)
     write_event(state)
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
 
 def handle_rpc_state_command(
@@ -2831,9 +2750,7 @@ def handle_rpc_state_command(
 ) -> None:
     """Return one coherent in-memory state snapshot without becoming active."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
 
     try:
         core_state = _project_buffered_prompt_queue_commands(
@@ -2854,16 +2771,11 @@ def handle_rpc_state_command(
             ),
         )
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(str(exc))
         return
 
-    write_event(RpcStateReported(command_id=command_id, state=state))
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    write_event(RpcStateReported(command_id=lifecycle.command_id, state=state))
+    lifecycle.finish()
 
 
 def handle_rpc_commands_command(
@@ -2874,25 +2786,18 @@ def handle_rpc_commands_command(
 ) -> None:
     """Return one coherent in-memory command registry snapshot without becoming active."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
 
     try:
         commands = tuple(
             _rpc_command_descriptor(descriptor) for descriptor in runtime.commands.all()
         )
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(str(exc))
         return
 
-    write_event(RpcCommandsReported(command_id=command_id, commands=commands))
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    write_event(RpcCommandsReported(command_id=lifecycle.command_id, commands=commands))
+    lifecycle.finish()
 
 
 def rpc_model_catalog_snapshot(
@@ -2947,9 +2852,7 @@ def handle_rpc_model_catalog_command(
 ) -> None:
     """Return one coherent effective model catalog without becoming active."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     try:
         catalog = rpc_model_catalog_snapshot(
             runtime=runtime,
@@ -2958,15 +2861,10 @@ def handle_rpc_model_catalog_command(
             effort=agent.effort,
         )
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(str(exc))
         return
-    write_event(RpcModelCatalogReported(command_id=command_id, catalog=catalog))
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    write_event(RpcModelCatalogReported(command_id=lifecycle.command_id, catalog=catalog))
+    lifecycle.finish()
 
 
 def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
@@ -3020,21 +2918,14 @@ def handle_rpc_connection_catalog_command(
 ) -> None:
     """Return one sanitized connection catalog without becoming active."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     try:
         catalog = rpc_connection_catalog_snapshot(runtime)
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=_sanitized_auth_error(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(_sanitized_auth_error(exc))
         return
-    write_event(RpcConnectionCatalogReported(command_id=command_id, catalog=catalog))
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    write_event(RpcConnectionCatalogReported(command_id=lifecycle.command_id, catalog=catalog))
+    lifecycle.finish()
 
 
 def handle_rpc_store_api_key_command(
@@ -3046,26 +2937,15 @@ def handle_rpc_store_api_key_command(
 ) -> None:
     """Persist one API key and return the refreshed connection catalog."""
 
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     if running_command is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="Cannot store credentials while another RPC operation is active",
-            write_event=write_event,
-        )
+        lifecycle.fail("Cannot store credentials while another RPC operation is active")
         return
     provider = command.provider
     api_key = command.api_key
     if not api_key.strip():
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC store_api_key command requires a non-empty api_key",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC store_api_key command requires a non-empty api_key")
         return
     openai_compatible_provider = (
         runtime.openai_compatible_provider if runtime.openai_compatible_requires_api_key else None
@@ -3074,31 +2954,16 @@ def handle_rpc_store_api_key_command(
         provider,
         openai_compatible_provider=openai_compatible_provider,
     ) or not runtime.providers.is_registered(provider):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"API-key connection is not supported for {provider}.",
-            write_event=write_event,
-        )
+        lifecycle.fail(f"API-key connection is not supported for {provider}.")
         return
     store = runtime.auth_store
     if store is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC store_api_key command requires an auth store",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC store_api_key command requires an auth store")
         return
     try:
         store.set(provider, ApiKeyCredential(key=api_key.strip()))
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=_sanitized_auth_error(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(_sanitized_auth_error(exc))
         return
     _write_connection_catalog_after_mutation(
         runtime=runtime,
@@ -3106,7 +2971,7 @@ def handle_rpc_store_api_key_command(
         outcome="API key stored",
         write_event=write_event,
     )
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
 
 def handle_rpc_disconnect_provider_command(
@@ -3118,36 +2983,20 @@ def handle_rpc_disconnect_provider_command(
 ) -> None:
     """Remove stored credentials and return the refreshed connection catalog."""
 
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     if running_command is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="Cannot disconnect credentials while another RPC operation is active",
-            write_event=write_event,
-        )
+        lifecycle.fail("Cannot disconnect credentials while another RPC operation is active")
         return
     provider = command.provider
     store = runtime.auth_store
     if store is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC disconnect_provider command requires an auth store",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC disconnect_provider command requires an auth store")
         return
     try:
         store.delete(provider)
     except Exception as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=_sanitized_auth_error(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(_sanitized_auth_error(exc))
         return
     _write_connection_catalog_after_mutation(
         runtime=runtime,
@@ -3155,7 +3004,7 @@ def handle_rpc_disconnect_provider_command(
         outcome="Credentials disconnected",
         write_event=write_event,
     )
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
 
 def start_rpc_device_code_command(
@@ -3170,34 +3019,18 @@ def start_rpc_device_code_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> _RpcRunningCommand | None:
-    command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     if running_command is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="Cannot start a device-code login while another RPC operation is active",
-            write_event=write_event,
-        )
+        lifecycle.fail("Cannot start a device-code login while another RPC operation is active")
         return running_command
     provider = command.provider
     if provider != DEVICE_CODE_PROVIDER:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"OAuth connection is not supported for {provider}.",
-            write_event=write_event,
-        )
+        lifecycle.fail(f"OAuth connection is not supported for {provider}.")
         return None
     store = runtime.auth_store
     if store is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC begin_device_code command requires an auth store",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC begin_device_code command requires an auth store")
         return None
     cancel_scope = anyio.CancelScope()
     task_group.start_soon(
@@ -3328,12 +3161,13 @@ def handle_rpc_skills_command(
 ) -> None:
     """Return the active immutable skill catalog without performing discovery."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-
-    write_event(RpcSkillsReported(command_id=command_id, catalog=rpc_skill_catalog_snapshot(agent)))
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    write_event(
+        RpcSkillsReported(
+            command_id=lifecycle.command_id, catalog=rpc_skill_catalog_snapshot(agent)
+        )
+    )
+    lifecycle.finish()
 
 
 def handle_rpc_mcp_status_command(
@@ -3344,9 +3178,8 @@ def handle_rpc_mcp_status_command(
 ) -> None:
     """Return sanitized startup status without reconnecting MCP servers."""
 
-    command_id = command.id or uuid4().hex
-    command_type = command.type
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
 
     mcp_runtime = runtime.mcp_runtime
     servers: tuple[RpcMcpServerSnapshot, ...] = ()
@@ -3376,7 +3209,7 @@ def handle_rpc_mcp_status_command(
     write_event(
         RpcMcpStatusReported(command_id=command_id, status=RpcMcpStatusSnapshot(servers=servers))
     )
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
 
 def rpc_skill_catalog_snapshot(agent: CodingSession) -> RpcSkillCatalogSnapshot:
@@ -3488,11 +3321,11 @@ def handle_rpc_control_command(
     coordinator: RpcCoordinator | None = None,
     defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    command_id = lifecycle.command_id
     command_type = command.type
-    command_id = command.id or uuid4().hex
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
     if isinstance(command, ShutdownCommand):
-        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+        lifecycle.finish()
         return True
     if isinstance(command, CancelCommand):
         handle_rpc_cancel_command(
@@ -3517,12 +3350,7 @@ def handle_rpc_control_command(
         return False
     if isinstance(command, TrustCommand):
         if trust_gate is None:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message="RPC trust command requires an active trust gate",
-                write_event=write_event,
-            )
+            lifecycle.fail("RPC trust command requires an active trust gate")
             return False
         handle_rpc_trust_command(
             command,
@@ -3546,7 +3374,11 @@ def handle_rpc_configure_command(
     write_event: RpcEventWriter,
     configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
-    command_type = "configure"
+    lifecycle = RpcCommandLifecycle.bind(
+        command_id=command_id,
+        command_type="configure",
+        write_event=write_event,
+    )
     provider = command.provider
     model = command.model
     effort = command.effort
@@ -3559,20 +3391,10 @@ def handle_rpc_configure_command(
     has_auto_compaction_enabled = "auto_compaction_enabled" in provided_fields
     has_mode = "mode" in provided_fields
     if has_mode and mode is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field mode must be 'build' or 'plan'",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC configure command field mode must be 'build' or 'plan'")
         return
     if has_auto_compaction_enabled and auto_compaction_enabled is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field auto_compaction_enabled must be a boolean",
-            write_event=write_event,
-        )
+        lifecycle.fail("RPC configure command field auto_compaction_enabled must be a boolean")
         return
     configuration = agent.configuration
     selected_provider = configuration.provider
@@ -3586,12 +3408,7 @@ def handle_rpc_configure_command(
         try:
             selected_provider = runtime.providers.get(provider)
         except UnknownProviderError as exc:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message=str(exc),
-                write_event=write_event,
-            )
+            lifecycle.fail(str(exc))
             return
         if not has_model:
             selected_model = None
@@ -3607,21 +3424,11 @@ def handle_rpc_configure_command(
             if selected_provider.name != configuration.provider.name:
                 auto_switched_provider = selected_provider.name
         except AmbiguousModelError as exc:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message=f"{exc}; specify provider explicitly",
-                write_event=write_event,
-            )
+            lifecycle.fail(f"{exc}; specify provider explicitly")
             return
         except UnknownProviderError as exc:
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message=(
-                    f"Model {model!r} resolves to provider {exc.name!r}, which is not available"
-                ),
-                write_event=write_event,
+            lifecycle.fail(
+                f"Model {model!r} resolves to provider {exc.name!r}, which is not available"
             )
             return
         if not has_effort:
@@ -3665,12 +3472,7 @@ def handle_rpc_configure_command(
             )
         )
     except RuntimeError as exc:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=str(exc),
-            write_event=write_event,
-        )
+        lifecycle.fail(str(exc))
         return
     if mode is not None:
         agent.set_mode(mode)
@@ -3702,7 +3504,7 @@ def handle_rpc_configure_command(
                 message=f"Configuration applied; model catalog unavailable: {model_catalog_error}"
             )
         )
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
 
 def auto_switch_provider_for_model(
@@ -3729,17 +3531,17 @@ def handle_rpc_approval_command(
     write_event: RpcEventWriter,
     defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
+    lifecycle = RpcCommandLifecycle.bind(
+        command_id=command_id,
+        command_type=command_type,
+        write_event=write_event,
+    )
     call_id = command.call_id
     approved = command.approved
     reason = command.reason
     scope = command.scope or "once"
     if not approval_policy.has_pending_approval(call_id=call_id):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No pending tool approval with call_id: {call_id}",
-            write_event=write_event,
-        )
+        lifecycle.fail(f"No pending tool approval with call_id: {call_id}")
         return
     resolve = partial(
         approval_policy.resolve_approval,
@@ -3750,17 +3552,12 @@ def handle_rpc_approval_command(
     )
     if defer_resolution is None:
         if not resolve():
-            write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message=f"No pending tool approval with call_id: {call_id}",
-                write_event=write_event,
-            )
+            lifecycle.fail(f"No pending tool approval with call_id: {call_id}")
             return
-        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+        lifecycle.finish()
         return
 
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
 
     def resolve_after_flush() -> None:
         resolve()
@@ -3777,6 +3574,11 @@ def handle_rpc_trust_command(
     write_event: RpcEventWriter,
     defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
+    lifecycle = RpcCommandLifecycle.bind(
+        command_id=command_id,
+        command_type=command_type,
+        write_event=write_event,
+    )
     request_id = command.request_id
     trusted = command.trusted
     reason = command.reason
@@ -3789,14 +3591,9 @@ def handle_rpc_trust_command(
         transient=transient is True,
         release=not defer_release,
     ):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No pending trust request with request_id: {request_id}",
-            write_event=write_event,
-        )
+        lifecycle.fail(f"No pending trust request with request_id: {request_id}")
         return
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    lifecycle.finish()
     if defer_resolution is not None:
         defer_resolution(partial(trust_gate.release_request, request_id=request_id))
 
@@ -3811,61 +3608,37 @@ def handle_rpc_cancel_command(
     coordinator: RpcCoordinator | None = None,
     defer_cancellation: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
+    lifecycle = RpcCommandLifecycle.bind(
+        command_id=command_id,
+        command_type=command_type,
+        write_event=write_event,
+    )
     target_id = command.target_id
     if (
         running_command is not None
         and running_command.command_id == target_id
         and defer_cancellation is not None
     ):
-        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+        lifecycle.finish()
         defer_cancellation(running_command.cancel_scope.cancel)
         return
     if coordinator is None:
         raise RuntimeError("RPC cancellation requires the shared coordinator")
     result = coordinator.cancel(target_id)
     if result.outcome == "running":
-        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+        lifecycle.finish()
         return
     queued_target = result.command
     if queued_target is None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No running or queued RPC command with id: {target_id}",
-            write_event=write_event,
-        )
+        lifecycle.fail(f"No running or queued RPC command with id: {target_id}")
         return
-    target_type = queued_target.command_type
-    write_event(RpcCommandStarted(command_id=target_id, command_type=target_type))
-    write_event(
-        RpcCommandFinished(
-            command_id=target_id,
-            command_type=target_type,
-            ok=False,
-            error=f"RPC command cancelled: {target_id}",
-        )
+    target = RpcCommandLifecycle.start(
+        command_id=target_id,
+        command_type=queued_target.command_type,
+        write_event=write_event,
     )
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
-
-
-def write_rpc_command_error(
-    *,
-    command_id: str,
-    command_type: str,
-    message: str,
-    write_event: RpcEventWriter,
-) -> None:
-    if len(message) > _MAX_RPC_COMMAND_ERROR_CHARS:
-        message = message[: _MAX_RPC_COMMAND_ERROR_CHARS - 3] + "..."
-    write_event(ErrorEvent(message=message))
-    write_event(
-        RpcCommandFinished(
-            command_id=command_id,
-            command_type=command_type,
-            ok=False,
-            error=message,
-        )
-    )
+    target.finish(ok=False, error=f"RPC command cancelled: {target_id}")
+    lifecycle.finish()
 
 
 __all__ = ["RpcCommandExecutor"]
