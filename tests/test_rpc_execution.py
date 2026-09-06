@@ -62,6 +62,7 @@ from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
+from wisp.rpc import connections as rpc_connections_module
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import inspection as rpc_inspection_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
@@ -78,6 +79,7 @@ from wisp.rpc.commands import (
     TrustCommand,
 )
 from wisp.rpc.configuration import _RpcConfigureOverrides
+from wisp.rpc.connections import handle_rpc_store_api_key_command
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -87,7 +89,6 @@ from wisp.rpc.coordinator import (
 )
 from wisp.rpc.execution import (
     RpcCommandExecutor,
-    handle_rpc_store_api_key_command,
 )
 from wisp.rpc.host import RpcHost
 from wisp.rpc.lifecycle import _MAX_RPC_COMMAND_ERROR_CHARS
@@ -1394,7 +1395,7 @@ def test_typed_connection_commands_preserve_lifecycle_without_legacy_conversion(
             access="sentinel-access", refresh="sentinel-refresh", expires=4_102_444_800_000
         )
 
-    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1488,7 +1489,7 @@ def test_typed_connection_storage_failures_preserve_credentials(
             monkeypatch.setattr(
                 store, "delete" if command_type == "disconnect_provider" else "set", fail_mutation
             )
-        monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+        monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
         payload: dict[str, object] = {"type": command_type, "provider": provider, "id": "failure-1"}
         if command_type == "store_api_key":
             payload["api_key"] = "sentinel-new-key"
@@ -1602,7 +1603,7 @@ def test_typed_connection_rejects_unsupported_provider_without_side_effects(
         store = fixture.runtime.auth_store
         assert store is not None
         monkeypatch.setattr(store, "set", unexpected)
-        monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", unexpected)
+        monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", unexpected)
         payload: dict[str, object] = {
             "type": command_type,
             "provider": "unsupported",
@@ -1715,7 +1716,7 @@ def test_executor_keeps_api_key_success_when_catalog_refresh_fails(
     def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
         raise OverflowError(secret)
 
-    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+    monkeypatch.setattr(rpc_connections_module, "rpc_connection_catalog_snapshot", fail_catalog)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1761,7 +1762,7 @@ def test_executor_keeps_disconnect_success_when_catalog_refresh_fails(
     def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
         raise OverflowError("unsafe diagnostic")
 
-    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+    monkeypatch.setattr(rpc_connections_module, "rpc_connection_catalog_snapshot", fail_catalog)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1810,7 +1811,7 @@ def test_executor_reports_device_code_progress_and_completion(
         on_progress(1)
         return OAuthCredential(access="access", refresh="refresh", expires=4_102_444_800_000)
 
-    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1851,8 +1852,8 @@ def test_executor_keeps_device_login_success_when_catalog_refresh_fails(
     def fail_catalog(_runtime: WispRuntime) -> RpcConnectionCatalogSnapshot:
         raise OverflowError("unsafe diagnostic")
 
-    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
-    monkeypatch.setattr(rpc_execution_module, "rpc_connection_catalog_snapshot", fail_catalog)
+    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_connections_module, "rpc_connection_catalog_snapshot", fail_catalog)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1894,7 +1895,7 @@ def test_executor_sanitizes_device_code_provider_failures(
     async def fake_login(**_kwargs: object) -> OAuthCredential:
         raise RuntimeError(secret)
 
-    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1928,7 +1929,7 @@ def test_executor_cancels_device_code_without_replacing_credentials(
         await anyio.sleep_forever()
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(rpc_execution_module, "login_openai_codex_device_code", fake_login)
+    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
 
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -1983,7 +1984,7 @@ def test_executor_rejects_connection_mutations_while_an_operation_is_active(
         monkeypatch.setattr(store, "set", unexpected_side_effect)
         monkeypatch.setattr(store, "delete", unexpected_side_effect)
         monkeypatch.setattr(
-            rpc_execution_module, "login_openai_codex_device_code", unexpected_side_effect
+            rpc_connections_module, "login_openai_codex_device_code", unexpected_side_effect
         )
         running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
         send, receive = anyio.create_memory_object_stream(1)

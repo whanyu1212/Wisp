@@ -21,7 +21,7 @@ from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.providers.openai_compatible import OpenAICompatibleProvider
 from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
-from wisp.rpc.execution import rpc_connection_catalog_snapshot
+from wisp.rpc.inspection import rpc_connection_catalog_snapshot
 from wisp.runtime import (
     CommandDescriptor,
     CommandRegistry,
