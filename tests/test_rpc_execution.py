@@ -63,6 +63,7 @@ from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
 from wisp.rpc import execution as rpc_execution_module
+from wisp.rpc import inspection as rpc_inspection_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
 from wisp.rpc import session_mutation as rpc_session_mutation_module
 from wisp.rpc.commands import (
@@ -1347,7 +1348,7 @@ def test_executor_typed_connection_catalog_never_reports_credentials(
                 raise RuntimeError(secret)
 
             monkeypatch.setattr(
-                rpc_execution_module, "rpc_connection_catalog_snapshot", fail_snapshot
+                rpc_inspection_module, "rpc_connection_catalog_snapshot", fail_snapshot
             )
 
         running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
@@ -2048,7 +2049,7 @@ def test_model_catalog_marks_unregistered_providers_without_constructing_deferre
         models=models,
     )
 
-    snapshot = rpc_execution_module.rpc_model_catalog_snapshot(
+    snapshot = rpc_inspection_module.rpc_model_catalog_snapshot(
         runtime=runtime,
         provider=current,
         model="custom-model",
@@ -2096,7 +2097,7 @@ def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Pa
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
     overrides = _RpcConfigureOverrides()
     discovery_events: list[WispEvent] = []
-    rpc_execution_module.handle_rpc_model_catalog_command(
+    rpc_inspection_module.handle_rpc_model_catalog_command(
         GetModelCatalogCommand(id="catalog-1"),
         agent=agent,
         runtime=runtime,
