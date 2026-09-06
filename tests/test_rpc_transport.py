@@ -412,6 +412,19 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
         '{"type":"trust","trusted":true}',
         '{"type":"trust","request_id":"request"}',
         '{"type":"trust","request_id":"request","trusted":null}',
+        *[
+            json.dumps({**payload, **fields})
+            for payload in (
+                {"type": "prompt", "prompt": "text"},
+                {"type": "init"},
+                {"type": "compact"},
+                {"type": "get_session_stats"},
+            )
+            for fields in ({"id": []}, {"id": ""}, {"id": "x" * 257}, {"extra": True})
+        ],
+        '{"type":"prompt"}',
+        *[json.dumps({"type": "prompt", "prompt": value}) for value in (None, 1, [], {})],
+        *[json.dumps({"type": "compact", "instructions": value}) for value in (1, [], {})],
         '{"id":"bad","type":"configure"}',
         '{"id":"bad","type":"configure","mode":"invalid"}',
         '{"id":"bad","type":"configure","effort":5}',
@@ -985,4 +998,35 @@ def test_transport_preserves_control_reference_values(
     parsed = transport.parse_command(json.dumps({**payload, reference: value}).encode())
     assert parsed is not None and parsed.known is not None
     assert getattr(parsed.known, reference) == value
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        *[{"type": "prompt", "prompt": value} for value in ("", " \t", "日本語")],
+        *[
+            {"type": "compact", **fields}
+            for fields in (
+                {},
+                {"instructions": None},
+                {"instructions": ""},
+                {"instructions": " \t"},
+                {"instructions": " trim later "},
+            )
+        ],
+    ],
+)
+def test_transport_preserves_run_text_for_execution(payload: dict[str, object]) -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+    parsed = transport.parse_command(json.dumps(payload).encode())
+    assert parsed is not None and parsed.known is not None
+    for key, value in payload.items():
+        assert getattr(parsed.known, key) == value
     assert events == []
