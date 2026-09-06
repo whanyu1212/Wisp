@@ -26,6 +26,7 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
+from wisp.rpc.commands import ApprovalCommand
 from wisp.rpc.coordinator import _RpcPromptReady
 from wisp.rpc.execution import (
     handle_rpc_control_command,
@@ -2936,13 +2937,7 @@ def test_rpc_approval_command_resolves_pending_approval(
     approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
 
     handle_rpc_control_command(
-        {
-            "id": "approval-1",
-            "type": "approval",
-            "call_id": "call-1",
-            "approved": False,
-            "reason": "not safe",
-        },
+        ApprovalCommand(id="approval-1", call_id="call-1", approved=False, reason="not safe"),
         running_command=None,
         approval_policy=approval_policy,
         write_event=cli_module.rpc._write_json_event,
@@ -3012,43 +3007,6 @@ def test_rpc_approval_policy_remembers_all_unsafe_tools_for_process() -> None:
     )
     assert approval_policy.approves(tool) is True
     assert approval_policy.approves(BashTool()) is True
-
-
-@pytest.mark.parametrize(
-    ("scope", "approved", "message"),
-    [
-        ("forever", True, "field scope must be one of"),
-        ([], True, "field scope must be one of"),
-        ("tool_session", False, "scope is only valid for approved requests"),
-    ],
-)
-def test_rpc_approval_command_rejects_invalid_scope(
-    monkeypatch: MonkeyPatch,
-    scope: object,
-    approved: bool,
-    message: str,
-) -> None:
-    output = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", output)
-    approval_policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
-    approval_policy.prepare_approval(DangerTool(), call_id="call-1", arguments={})
-
-    handle_rpc_control_command(
-        {
-            "id": "approval-1",
-            "type": "approval",
-            "call_id": "call-1",
-            "approved": approved,
-            "scope": scope,
-        },
-        running_command=None,
-        approval_policy=approval_policy,
-        write_event=cli_module.rpc._write_json_event,
-    )
-
-    records = _jsonl_records(output.getvalue())
-    assert records[-1]["ok"] is False
-    assert message in str(records[-1]["error"])
 
 
 def test_rpc_mode_denies_pending_approval_when_input_closes(
@@ -3327,3 +3285,16 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
         ("cmd-1", False),
         ("cmd-2", True),
     ]
+
+
+@pytest.fixture(autouse=True)
+def _guard_typed_control_dispatch(monkeypatch: MonkeyPatch) -> None:
+    original = rpc_execution_module.RpcCommandExecutor.dispatch
+
+    async def guarded(self: object, command: dict[str, object], running: object) -> object:
+        assert command.get("type") not in {"cancel", "approval", "trust", "shutdown"}, (
+            "Control commands must execute through typed handlers"
+        )
+        return await original(self, command, running)
+
+    monkeypatch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", guarded)

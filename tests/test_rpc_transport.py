@@ -361,6 +361,57 @@ def test_transport_ignores_bad_lines_and_publishes_later_commands(bad_frame: str
         '{"type":"set_queue_mode","kind":"steering"}',
         '{"type":"set_queue_mode","mode":"all"}',
         '{"type":"pop_queue","kind":null}',
+        *[
+            json.dumps({**payload, **fields})
+            for payload in (
+                {"type": "cancel", "target_id": "target"},
+                {"type": "approval", "call_id": "call", "approved": True},
+                {"type": "trust", "request_id": "request", "trusted": True},
+                {"type": "shutdown"},
+            )
+            for fields in ({"id": []}, {"id": ""}, {"id": "x" * 257}, {"extra": True})
+        ],
+        *[
+            json.dumps({**payload, reference: value})
+            for payload, reference in (
+                ({"type": "cancel"}, "target_id"),
+                ({"type": "approval", "approved": True}, "call_id"),
+                ({"type": "trust", "trusted": True}, "request_id"),
+            )
+            for value in (None, "", 1, [], {})
+        ],
+        *[
+            json.dumps({**payload, field: value})
+            for payload, field in (
+                ({"type": "approval", "call_id": "call"}, "approved"),
+                ({"type": "trust", "request_id": "request"}, "trusted"),
+                ({"type": "trust", "request_id": "request", "trusted": True}, "transient"),
+            )
+            for value in ("true", 1, [], {})
+        ],
+        *[
+            json.dumps({"type": "approval", "call_id": "call", "approved": False, "scope": scope})
+            for scope in ("once", "tool_session", "all_session")
+        ],
+        *[
+            json.dumps({"type": "approval", "call_id": "call", "approved": True, "scope": scope})
+            for scope in ("forever", [])
+        ],
+        *[
+            json.dumps({**payload, "reason": value})
+            for payload in (
+                {"type": "approval", "call_id": "call", "approved": True},
+                {"type": "trust", "request_id": "request", "trusted": True},
+            )
+            for value in (1, [], {})
+        ],
+        '{"type":"cancel"}',
+        '{"type":"approval","approved":true}',
+        '{"type":"approval","call_id":"call"}',
+        '{"type":"approval","call_id":"call","approved":null}',
+        '{"type":"trust","trusted":true}',
+        '{"type":"trust","request_id":"request"}',
+        '{"type":"trust","request_id":"request","trusted":null}',
         '{"id":"bad","type":"configure"}',
         '{"id":"bad","type":"configure","mode":"invalid"}',
         '{"id":"bad","type":"configure","effort":5}',
@@ -910,3 +961,28 @@ def test_transport_handles_regular_file_stdin(tmp_path: Path) -> None:
         anyio.run(scenario)
     finally:
         stdin.close()
+
+
+@pytest.mark.parametrize("value", [" \t", "x" * 1024])
+@pytest.mark.parametrize(
+    "payload,reference",
+    [
+        ({"type": "cancel"}, "target_id"),
+        ({"type": "approval", "approved": True}, "call_id"),
+        ({"type": "trust", "trusted": True}, "request_id"),
+    ],
+)
+def test_transport_preserves_control_reference_values(
+    value: str, payload: dict[str, object], reference: str
+) -> None:
+    events: list[object] = []
+    transport = RpcStdinTransport(
+        stdin=_Input([]),
+        write_event=events.append,
+        input_command_factory=_RpcInputCommand,
+        input_closed_factory=_RpcInputClosed,
+    )
+    parsed = transport.parse_command(json.dumps({**payload, reference: value}).encode())
+    assert parsed is not None and parsed.known is not None
+    assert getattr(parsed.known, reference) == value
+    assert events == []
