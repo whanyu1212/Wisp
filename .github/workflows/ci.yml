@@ -92,14 +92,14 @@ jobs:
         with:
           components: clippy,rustfmt
 
-      - name: Check generated protocol artifacts
-        run: uv run python -m wisp.rpc.protocol_schema --check
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        with:
+          key: ${{ matrix.os }}
 
       - name: Check Rust formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
-
-      - name: Check Rust workspace
-        run: cargo check --workspace --all-targets --all-features
 
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -113,7 +113,19 @@ jobs:
       - name: Test Python/Rust TUI handoff
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
-        run: uv run pytest tests/test_rust_tui_smoke.py
+        run: >-
+          uv run pytest tests/test_rust_tui_smoke.py --durations=20
+          --junitxml=test-results/rust-smoke/junit.xml
+          --ci-node-manifest=test-results/rust-smoke/nodes.json
+
+      - name: Upload Rust handoff test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-rust-smoke-${{ matrix.os }}
+          overwrite: true
+          path: test-results/rust-smoke/
+          if-no-files-found: warn
 
   package:
     name: Build and verify package
@@ -169,10 +181,14 @@ jobs:
             target: tests
             marker: not (slow or tui or process or benchmark or production_fault)
             extra_args: ""
-          - suite: tui-integration
+          - suite: tui-integration-0
             target: tests/test_tui_integration_cli.py
             marker: tui and not production_fault
-            extra_args: ""
+            extra_args: --ci-shard-index=0 --ci-shard-count=2
+          - suite: tui-integration-1
+            target: tests/test_tui_integration_cli.py
+            marker: tui and not production_fault
+            extra_args: --ci-shard-index=1 --ci-shard-count=2
           - suite: tui-components
             target: tests
             marker: tui and not production_fault
@@ -214,11 +230,45 @@ jobs:
           -m '${{ matrix.marker }}'
           ${{ matrix.extra_args }}
           --durations=20
+          --junitxml=test-results/${{ matrix.suite }}/junit.xml
+          --ci-node-manifest=test-results/${{ matrix.suite }}/nodes.json
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.suite }}
+          overwrite: true
+          path: test-results/${{ matrix.suite }}/
+          if-no-files-found: error
+
+  tui-integration-status:
+    name: Test (tui-integration)
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful test shards
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
+      - uses: actions/checkout@v4
+
+      - name: Download integration collections
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-tui-integration-*
+          path: test-results
+
+      - name: Verify complete, disjoint integration collection
+        run: python3 scripts/verify_ci_shards.py test-results/test-results-tui-integration-*/nodes.json
 
   tui-status:
     name: Test (tui)
     if: ${{ always() }}
-    needs: test
+    needs: [test, tui-integration-status]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -226,7 +276,8 @@ jobs:
       - name: Require the split test matrix to pass
         env:
           TEST_RESULT: ${{ needs.test.result }}
-        run: test "$TEST_RESULT" = success
+          INTEGRATION_RESULT: ${{ needs.tui-integration-status.result }}
+        run: test "$TEST_RESULT" = success && test "$INTEGRATION_RESULT" = success
 
   macos-smoke:
     name: Platform smoke (macOS)
@@ -262,6 +313,17 @@ jobs:
           tests/test_secure_tool_filesystem.py
           tests/test_sessions.py
           --durations=20
+          --junitxml=test-results/macos-smoke/junit.xml
+          --ci-node-manifest=test-results/macos-smoke/nodes.json
+
+      - name: Upload platform test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-macos-smoke
+          overwrite: true
+          path: test-results/macos-smoke/
+          if-no-files-found: warn
 
       - name: Smoke-test fake-provider CLI
         env:

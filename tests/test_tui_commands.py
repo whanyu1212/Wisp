@@ -5,6 +5,7 @@ import pytest
 from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tui.commands import (
     SLASH_COMMAND_SPECS,
+    SlashCommandSpec,
     TuiSlashCommandError,
     TuiSlashCommandName,
     parse_tui_slash_command,
@@ -203,3 +204,36 @@ def test_parse_tui_slash_command_rejects_bad_quotes_for_known_command() -> None:
     # then malformed quoting in its args is a real syntax error.
     with pytest.raises(TuiSlashCommandError):
         parse_tui_slash_command('/model "unterminated')
+
+
+@pytest.mark.parametrize(
+    ("typed", "command", "prefills"),
+    [
+        ("/co", "/compact", False),
+        ("/compact", "/compact", False),
+        ("/COMPACT", "/compact", False),
+        ("/mo", "/model", False),
+        ("/MODEL", "/model", False),
+        ("/qu", "/quit", False),
+    ],
+)
+def test_slash_enter_prefill_rules(typed: str, command: str, prefills: bool) -> None:
+    from wisp.tui.textual_app import _slash_enter_prefills
+
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == command)
+    assert _slash_enter_prefills(typed, spec) is prefills
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"), [("/req", True), ("/required", False), ("/REQUIRED", False)]
+)
+def test_required_argument_command_prefills_only_partial_enter(typed: str, expected: bool) -> None:
+    from wisp.tui.textual_app import _slash_enter_prefills
+
+    spec = SlashCommandSpec(
+        command="/required",
+        description="Required argument",
+        takes_args=True,
+        prefill_on_partial_enter=True,
+    )
+    assert _slash_enter_prefills(typed, spec) is expected

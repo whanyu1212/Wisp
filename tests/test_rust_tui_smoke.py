@@ -18,6 +18,23 @@ import pytest
 from wisp import __version__
 
 
+def _complete_logged_commands(path: Path) -> list[dict[str, object]]:
+    """Ignore a final record until the backend finishes writing its newline."""
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_bytes().split(b"\n")[:-1]]
+
+
+def test_command_log_ignores_incomplete_records(tmp_path: Path) -> None:
+    path = tmp_path / "commands.jsonl"
+    assert _complete_logged_commands(path) == []
+    path.write_bytes(b'{"type":"prompt"}\n{"type":"follow_up"')
+    assert _complete_logged_commands(path) == [{"type": "prompt"}]
+    with path.open("ab") as log:
+        log.write(b"}\n")
+    assert _complete_logged_commands(path) == [{"type": "prompt"}, {"type": "follow_up"}]
+
+
 @pytest.mark.process
 @pytest.mark.parametrize(
     ("exercise_prompt", "expected_exit"),
@@ -504,6 +521,8 @@ for line in sys.stdin:
     output = bytearray()
     status: int | None = None
     phase = "startup"
+    phase_output_offset = 0
+    commands: list[dict[str, object]] = []
     restore_output_offset: int | None = None
     queue_update_output_offset: int | None = None
     idle_output_offset: int | None = None
@@ -517,11 +536,7 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            commands = (
-                [json.loads(line) for line in command_log.read_text().splitlines()]
-                if command_log.exists()
-                else []
-            )
+            commands = _complete_logged_commands(command_log)
             command_types = [command["type"] for command in commands]
             if (
                 phase == "startup"
@@ -529,15 +544,37 @@ for line in sys.stdin:
                 and command_types[:3]
                 == ["get_messages", "get_connection_catalog", "get_queue_state"]
             ):
+                phase_output_offset = len(output)
                 os.write(terminal_fd, b"prompt-kept-running\r")
                 phase = "prompt sent"
-            elif phase == "prompt sent" and "prompt" in command_types:
+            elif (
+                phase == "prompt sent"
+                and "prompt" in command_types
+                and b"queue steer:0 later:0" in output[phase_output_offset:]
+            ):
+                phase_output_offset = len(output)
                 os.write(terminal_fd, b"steer-via-enter\r")
                 phase = "steer sent"
-            elif phase == "steer sent" and "steer" in command_types:
-                os.write(terminal_fd, b"follow-up-via-alt-enter\x1b\r")
+            elif (
+                phase == "steer sent"
+                and "steer" in command_types
+                and b"steer:1 later:0" in output[phase_output_offset:]
+            ):
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"follow-up-via-alt-enter")
+                phase = "follow-up typed"
+            elif (
+                phase == "follow-up typed"
+                and b"follow-up-via-alt-enter" in output[phase_output_offset:]
+            ):
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\x1b\r")
                 phase = "follow-up sent"
-            elif phase == "follow-up sent" and "follow_up" in command_types:
+            elif (
+                phase == "follow-up sent"
+                and "follow_up" in command_types
+                and b"later:1" in output[phase_output_offset:]
+            ):
                 restore_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b[1;3A")
                 phase = "restore sent"
@@ -573,7 +610,11 @@ for line in sys.stdin:
                 status = waited_status
                 break
         if status is None:
-            pytest.fail(f"Rust TUI queue lifecycle test timed out; output={bytes(output)!r}")
+            pytest.fail(
+                f"Rust TUI queue lifecycle timed out in phase {phase!r}; "
+                f"recent commands={commands[-8:]!r}; "
+                f"terminal tail={bytes(output[-6000:])!r}"
+            )
     finally:
         if status is None:
             try:
@@ -586,7 +627,7 @@ for line in sys.stdin:
                 pass
             os.waitpid(child_pid, 0)
 
-    commands = [json.loads(line) for line in command_log.read_text().splitlines()]
+    commands = _complete_logged_commands(command_log)
     command_types = [command["type"] for command in commands]
     lifecycle_commands = [
         command

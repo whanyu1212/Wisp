@@ -92,7 +92,9 @@ def test_line_renderer_bounds_new_pending_submission_preview() -> None:
     assert len(rendered.splitlines()) == 3
 
 
-def test_renderers_clear_session_for_new_session() -> None:
+def test_renderers_clear_session_for_new_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rich honors TERM=dumb even when force_terminal is set; this tests ANSI clearing.
+    monkeypatch.setenv("TERM", "xterm-256color")
     console, output = _console()
     line = LineTuiRenderer(console)
     interactive_output = io.StringIO()
@@ -768,7 +770,10 @@ def test_line_tui_renderer_renders_threshold_compaction_as_automatic_notices() -
     assert "Warning: Event publication failed: listener failed" in rendered
 
 
-def test_line_tui_renderer_renders_failed_manual_compaction_as_error() -> None:
+def test_line_tui_renderer_renders_failed_manual_compaction_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERM", "xterm-256color")
     # Regression: a manual /compact failure (reason="manual", the default) fell
     # through to the bare unstyled branch -- rendered in default terminal
     # color, less visually distinct than a routine successful compaction (which
