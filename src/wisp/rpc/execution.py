@@ -75,7 +75,6 @@ from wisp.events import (
 from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import (
-    MAX_RPC_COMMAND_ID_CHARS,
     ApprovalCommand,
     ApprovalScope,
     BeginDeviceCodeCommand,
@@ -112,9 +111,6 @@ from wisp.rpc.commands import (
     StoreApiKeyCommand,
     TrustCommand,
     UnrevertSessionTreeCommand,
-)
-from wisp.rpc.commands import (
-    rpc_command_type as normalized_rpc_command_type,
 )
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
@@ -339,20 +335,23 @@ class RpcCommandExecutor:
         if isinstance(known, GetSessionStatsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_session_stats(known)
-        return await self.dispatch(command.to_legacy_dict(), running_command)
+        if known is not None:
+            assert_never(known)
+        self.coordinator.running_command = running_command
+        self.reject_parsed(command, f"Unknown RPC command: {command.command_type}")
+        return _RpcDispatchResult(running_command=running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
-        self.reject(command.to_legacy_dict(), message)
-
-    async def dispatch(
-        self,
-        command: dict[str, object],
-        running_command: _RpcRunningCommand | None,
-    ) -> _RpcDispatchResult:
-        self.coordinator.running_command = running_command
-        command_type = rpc_command_type(command)
-        self.reject(command, f"Unknown RPC command: {command_type}")
-        return _RpcDispatchResult(running_command=running_command)
+        id_error = command.command_id_error
+        command_id = (command.command_id if id_error is None else None) or uuid4().hex
+        command_type = command.command_type
+        self.write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error or message,
+            write_event=self.write_event,
+        )
 
     def _dispatch_prompt(self, command: PromptCommand) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
@@ -794,9 +793,6 @@ class RpcCommandExecutor:
             running_command=running_command,
             should_shutdown=should_shutdown,
         )
-
-    def reject(self, command: dict[str, object], message: str) -> None:
-        reject_rpc_command(command, message=message, write_event=self.write_event)
 
 
 def handle_rpc_new_session_command(
@@ -2757,22 +2753,6 @@ def _rpc_session_tree_node(summary: SessionTreeNodeSummary) -> RpcSessionTreeNod
     )
 
 
-def reject_rpc_command(
-    command: dict[str, object],
-    *,
-    message: str,
-    write_event: RpcEventWriter,
-) -> None:
-    command_type, command_id, id_error = rpc_command_identity(command)
-    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    write_rpc_command_error(
-        command_id=command_id,
-        command_type=command_type,
-        message=id_error or message,
-        write_event=write_event,
-    )
-
-
 async def handle_rpc_queue_command(
     command: _RpcQueueCommand,
     *,
@@ -3886,30 +3866,6 @@ def write_rpc_command_error(
             error=message,
         )
     )
-
-
-def rpc_command_identity(command: dict[str, object]) -> tuple[str, str, str | None]:
-    command_type = rpc_command_type(command)
-    command_id, id_error = rpc_command_id(command)
-    return command_type, command_id, id_error
-
-
-def rpc_command_type(command: dict[str, object]) -> str:
-    return normalized_rpc_command_type(command)
-
-
-def rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
-    command_id = command.get("id")
-    if command_id is None:
-        return uuid4().hex, None
-    if isinstance(command_id, str) and command_id:
-        if len(command_id) <= MAX_RPC_COMMAND_ID_CHARS:
-            return command_id, None
-        return (
-            uuid4().hex,
-            f"RPC command id must contain at most {MAX_RPC_COMMAND_ID_CHARS} characters",
-        )
-    return uuid4().hex, "RPC command id must be a non-empty string"
 
 
 __all__ = ["RpcCommandExecutor"]

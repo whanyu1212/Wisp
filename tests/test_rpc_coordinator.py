@@ -44,8 +44,12 @@ class _Receiver:
 def _parsed_command(payload: dict[str, object]) -> ParsedRpcCommand:
     try:
         command = RpcCommandAdapter.validate_json(json.dumps(payload))
-    except ValidationError:
-        return ParsedRpcCommand.from_unknown(payload)
+    except ValidationError as exc:
+        if isinstance(payload.get("type"), str) and any(
+            error["type"] == "union_tag_invalid" for error in exc.errors(include_input=False)
+        ):
+            return ParsedRpcCommand.from_unknown(payload)
+        raise
     return ParsedRpcCommand.from_known(command, payload=payload)
 
 
@@ -53,14 +57,14 @@ def _input_command(payload: dict[str, object]) -> _RpcInputCommand:
     return _RpcInputCommand(_parsed_command(payload))
 
 
-def _legacy(commands: Iterable[ParsedRpcCommand]) -> list[dict[str, object]]:
-    return [command.to_legacy_dict() for command in commands]
+def _expected_commands(payloads: Iterable[dict[str, object]]) -> list[ParsedRpcCommand]:
+    return [_parsed_command(payload) for payload in payloads]
 
 
-def _legacy_rejections(
-    rejections: Iterable[tuple[ParsedRpcCommand, str]],
-) -> list[tuple[dict[str, object], str]]:
-    return [(command.to_legacy_dict(), message) for command, message in rejections]
+def _expected_rejections(
+    pairs: Iterable[tuple[dict[str, object], str]],
+) -> list[tuple[ParsedRpcCommand, str]]:
+    return [(_parsed_command(payload), message) for payload, message in pairs]
 
 
 async def _ignore_reject(_command: ParsedRpcCommand, _message: str) -> None:
@@ -72,9 +76,9 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
         history = (Message(role="user", content="done"),)
         receiver = _Receiver(
             [
-                _input_command({"id": "one", "type": "prompt"}),
-                _input_command({"id": "two", "type": "prompt"}),
-                _input_command({"id": "three", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "one", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "two", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "three", "type": "prompt"}),
                 _RpcCommandCompleted("one", "prompt", True, history, 1),
                 _RpcCommandCompleted("two", "prompt", True, history, 2),
                 _RpcCommandCompleted("three", "prompt", True, history, 3),
@@ -155,7 +159,9 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         background = _RpcRunningCommand("background", command_type, anyio.CancelScope())
         coordinator.running_command = background
-        coordinator.queued_commands.append(_parsed_command({"id": "prompt", "type": "prompt"}))
+        coordinator.queued_commands.append(
+            _parsed_command({"prompt": "", "id": "prompt", "type": "prompt"})
+        )
         dispatched: list[str] = []
 
         await coordinator.handle_event(
@@ -167,10 +173,9 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
         )
 
         assert dispatched == []
-        assert _legacy(coordinator.queued_commands) == [
-            {"id": "prompt", "type": "prompt"},
-            {"id": "new", "type": "new_session"},
-        ]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"prompt": "", "id": "prompt", "type": "prompt"}, {"id": "new", "type": "new_session"}]
+        )
         assert background.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
@@ -198,7 +203,9 @@ def test_coordinator_queues_new_session_behind_active_ordered_read(
         )
 
         assert dispatched == []
-        assert _legacy(coordinator.queued_commands) == [{"id": "new", "type": "new_session"}]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"id": "new", "type": "new_session"}]
+        )
         assert background.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
@@ -209,7 +216,9 @@ def test_coordinator_queues_new_session_behind_work_waiting_on_stats_async() -> 
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
         stats = _RpcRunningCommand("stats", "get_session_stats", anyio.CancelScope())
         coordinator.running_command = stats
-        coordinator.queued_commands.append(_parsed_command({"id": "prompt", "type": "prompt"}))
+        coordinator.queued_commands.append(
+            _parsed_command({"prompt": "", "id": "prompt", "type": "prompt"})
+        )
         dispatched: list[str] = []
 
         async def dispatch(
@@ -229,10 +238,9 @@ def test_coordinator_queues_new_session_behind_work_waiting_on_stats_async() -> 
         )
 
         assert dispatched == []
-        assert _legacy(coordinator.queued_commands) == [
-            {"id": "prompt", "type": "prompt"},
-            {"id": "new", "type": "new_session"},
-        ]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"prompt": "", "id": "prompt", "type": "prompt"}, {"id": "new", "type": "new_session"}]
+        )
         assert stats.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
@@ -242,8 +250,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "prompt", "type": "prompt"}),
-                _input_command({"id": "queued", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "prompt", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "queued", "type": "prompt"}),
                 _input_command(
                     {
                         "id": "messages",
@@ -252,7 +260,9 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                     }
                 ),
                 _input_command({"id": "sessions", "type": "get_sessions"}),
-                _input_command({"id": "select", "type": "select_session"}),
+                _input_command(
+                    {"session_id": "session-1", "id": "select", "type": "select_session"}
+                ),
                 _input_command({"id": "clone", "type": "clone_session"}),
                 _input_command({"id": "fork", "type": "fork_session", "entry_id": "entry"}),
                 _input_command({"id": "tree", "type": "get_session_tree"}),
@@ -261,12 +271,16 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 ),
                 _input_command({"id": "unrevert", "type": "unrevert_session_tree"}),
                 _input_command({"id": "commands", "type": "get_commands"}),
-                _input_command({"id": "approval", "type": "approval"}),
-                _input_command({"id": "steer", "type": "steer"}),
-                _input_command({"id": "follow", "type": "follow_up"}),
+                _input_command(
+                    {"call_id": "call-1", "approved": True, "id": "approval", "type": "approval"}
+                ),
+                _input_command({"content": "", "id": "steer", "type": "steer"}),
+                _input_command({"content": "", "id": "follow", "type": "follow_up"}),
                 _input_command({"id": "state", "type": "get_queue_state"}),
-                _input_command({"id": "mode", "type": "set_queue_mode"}),
-                _input_command({"id": "pop", "type": "pop_queue"}),
+                _input_command(
+                    {"kind": "steering", "mode": "all", "id": "mode", "type": "set_queue_mode"}
+                ),
+                _input_command({"kind": "follow_up", "id": "pop", "type": "pop_queue"}),
                 _input_command({"id": "clear", "type": "clear_queue"}),
                 _RpcPromptReady("prompt"),
                 _RpcCommandCompleted("messages", "get_messages", True, (), 1),
@@ -353,9 +367,15 @@ def test_coordinator_orders_configure_between_active_work_and_later_prompt(
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "active", "type": active_type}),
-                _input_command({"id": "configure", "type": "configure"}),
-                _input_command({"id": "prompt-after", "type": "prompt"}),
+                _input_command(
+                    {
+                        "id": "active",
+                        "type": active_type,
+                        **({"prompt": ""} if active_type == "prompt" else {}),
+                    }
+                ),
+                _input_command({"provider": "fake", "id": "configure", "type": "configure"}),
+                _input_command({"prompt": "", "id": "prompt-after", "type": "prompt"}),
                 _RpcCommandCompleted("active", active_type, completed_ok, (), 0),
                 _RpcCommandCompleted("prompt-after", "prompt", True, (), 1),
                 _RpcInputClosed(),
@@ -410,20 +430,22 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready(run_type: str) ->
             return _RpcDispatchResult(_RpcRunningCommand(command_id, run_type, anyio.CancelScope()))
 
         await coordinator.handle_event(
-            _input_command({"id": "run", "type": run_type}),
+            _input_command(
+                {"id": "run", "type": run_type, **({"prompt": ""} if run_type == "prompt" else {})}
+            ),
             dispatch=dispatch,
             reject=_ignore_reject,
         )
         await coordinator.handle_event(
-            _input_command({"id": "steer", "type": "steer"}),
+            _input_command({"content": "", "id": "steer", "type": "steer"}),
             dispatch=dispatch,
             reject=_ignore_reject,
         )
 
         assert dispatched == ["run"]
-        assert _legacy(coordinator.pending_prompt_queue_commands) == [
-            {"id": "steer", "type": "steer"}
-        ]
+        assert list(coordinator.pending_prompt_queue_commands) == _expected_commands(
+            [{"content": "", "id": "steer", "type": "steer"}]
+        )
 
         await coordinator.handle_event(
             _RpcPromptReady("run"),
@@ -454,7 +476,7 @@ def test_coordinator_async_buffers_init_queue_until_ready() -> None:
             raise AssertionError("command unexpectedly rejected")
 
         await coordinator.handle_event(
-            _input_command({"id": "follow-up", "type": "follow_up"}),
+            _input_command({"content": "", "id": "follow-up", "type": "follow_up"}),
             dispatch=dispatch,
             reject=reject,
         )
@@ -540,8 +562,8 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
                 reject=_ignore_reject,
             )
 
-        await handle({"id": "prompt", "type": "prompt"})
-        await handle({"id": "steer", "type": "steer"})
+        await handle({"prompt": "", "id": "prompt", "type": "prompt"})
+        await handle({"content": "", "id": "steer", "type": "steer"})
         await handle({"id": "queued", "type": "compact"})
         await handle({"id": "state-before", "type": "get_state"})
         await handle({"id": "commands-before", "type": "get_commands"})
@@ -551,10 +573,12 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
             ("state-before", "prompt"),
             ("commands-before", "prompt"),
         ]
-        assert _legacy(coordinator.pending_prompt_queue_commands) == [
-            {"id": "steer", "type": "steer"}
-        ]
-        assert _legacy(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
+        assert list(coordinator.pending_prompt_queue_commands) == _expected_commands(
+            [{"content": "", "id": "steer", "type": "steer"}]
+        )
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"id": "queued", "type": "compact"}]
+        )
 
         await coordinator.handle_event(
             _RpcPromptReady("prompt"),
@@ -573,7 +597,9 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
             ("commands-after", "prompt"),
         ]
         assert not coordinator.pending_prompt_queue_commands
-        assert _legacy(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"id": "queued", "type": "compact"}]
+        )
         assert coordinator.running_command is not None
         assert coordinator.running_command.command_id == "prompt"
 
@@ -865,12 +891,9 @@ def test_coordinator_bounds_shutdown_queued_behind_an_auxiliary_read() -> None:
         assert coordinator.running_command is None
         assert coordinator.auxiliary_commands == {"messages": message_read}
         assert not coordinator.queued_commands
-        assert _legacy_rejections(rejected) == [
-            (
-                shutdown,
-                "RPC command queue is full while another RPC command is running",
-            )
-        ]
+        assert list(rejected) == _expected_rejections(
+            [(shutdown, "RPC command queue is full while another RPC command is running")]
+        )
 
     anyio.run(scenario)
 
@@ -881,7 +904,7 @@ def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> Non
         auxiliary = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
         coordinator.auxiliary_commands[auxiliary.command_id] = auxiliary
         coordinator.queued_commands.append(
-            _parsed_command({"id": "configure", "type": "configure"})
+            _parsed_command({"provider": "fake", "id": "configure", "type": "configure"})
         )
         dispatched: list[str] = []
 
@@ -900,16 +923,18 @@ def test_coordinator_preserves_fifo_order_while_auxiliary_read_finishes() -> Non
             )
 
         await coordinator.handle_event(
-            _input_command({"id": "later-prompt", "type": "prompt"}),
+            _input_command({"prompt": "", "id": "later-prompt", "type": "prompt"}),
             dispatch=dispatch,
             reject=_ignore_reject,
         )
 
         assert dispatched == []
-        assert _legacy(coordinator.queued_commands) == [
-            {"id": "configure", "type": "configure"},
-            {"id": "later-prompt", "type": "prompt"},
-        ]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [
+                {"provider": "fake", "id": "configure", "type": "configure"},
+                {"prompt": "", "id": "later-prompt", "type": "prompt"},
+            ]
+        )
 
         receiver = _Receiver(
             [
@@ -939,7 +964,13 @@ def test_coordinator_queues_session_work_behind_auxiliary_read(command_type: str
         dispatched: list[str] = []
 
         await coordinator.handle_event(
-            _input_command({"id": "session-work", "type": command_type}),
+            _input_command(
+                {
+                    "id": "session-work",
+                    "type": command_type,
+                    **({"session_id": "session-1"} if command_type == "select_session" else {}),
+                }
+            ),
             dispatch=lambda command, running: (
                 dispatched.append(str(command.command_id)) or _RpcDispatchResult(running)
             ),
@@ -947,9 +978,15 @@ def test_coordinator_queues_session_work_behind_auxiliary_read(command_type: str
         )
 
         assert dispatched == []
-        assert _legacy(coordinator.queued_commands) == [
-            {"id": "session-work", "type": command_type}
-        ]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [
+                {
+                    "id": "session-work",
+                    "type": command_type,
+                    **({"session_id": "session-1"} if command_type == "select_session" else {}),
+                }
+            ]
+        )
 
     anyio.run(scenario)
 
@@ -1050,8 +1087,8 @@ def test_coordinator_ignores_stale_prompt_readiness() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "prompt", "type": "prompt"}),
-                _input_command({"id": "steer", "type": "steer"}),
+                _input_command({"prompt": "", "id": "prompt", "type": "prompt"}),
+                _input_command({"content": "", "id": "steer", "type": "steer"}),
                 _RpcPromptReady("stale"),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcInputClosed(),
@@ -1085,9 +1122,9 @@ def test_coordinator_does_not_retarget_queue_commands_when_prompt_fails_before_r
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "first", "type": "prompt"}),
-                _input_command({"id": "second", "type": "prompt"}),
-                _input_command({"id": "steer", "type": "steer"}),
+                _input_command({"prompt": "", "id": "first", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "second", "type": "prompt"}),
+                _input_command({"content": "", "id": "steer", "type": "steer"}),
                 _RpcCommandCompleted("first", "prompt", False, (), 0),
                 _RpcPromptReady("second"),
                 _RpcCommandCompleted("second", "prompt", True, (), 1),
@@ -1126,10 +1163,10 @@ def test_coordinator_rejects_duplicate_running_and_allows_reuse_after_completion
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "same", "type": "prompt"}),
-                _input_command({"id": "same", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "same", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "same", "type": "prompt"}),
                 _RpcCommandCompleted("same", "prompt", True, (), 1),
-                _input_command({"id": "same", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "same", "type": "prompt"}),
                 _RpcCommandCompleted("same", "prompt", True, (), 2),
                 _RpcInputClosed(),
             ]
@@ -1156,9 +1193,9 @@ def test_coordinator_rejects_duplicate_running_and_allows_reuse_after_completion
         )
 
         assert dispatched == ["same", "same"]
-        assert _legacy_rejections(rejected) == [
-            ({"type": "prompt"}, "RPC command id is already outstanding: same")
-        ]
+        assert list(rejected) == _expected_rejections(
+            [({"prompt": "", "type": "prompt"}, "RPC command id is already outstanding: same")]
+        )
         assert coordinator.session_state.entry_count == 2
 
     anyio.run(scenario)
@@ -1192,16 +1229,18 @@ def test_coordinator_rejects_duplicate_ids_in_both_queues() -> None:
                 reject=reject,
             )
 
-        assert _legacy_rejections(rejected) == [
-            (
-                {"type": "prompt", "prompt": "duplicate"},
-                "RPC command id is already outstanding: pending",
-            ),
-            (
-                {"type": "prompt", "prompt": "duplicate"},
-                "RPC command id is already outstanding: queued",
-            ),
-        ]
+        assert list(rejected) == _expected_rejections(
+            [
+                (
+                    {"type": "prompt", "prompt": "duplicate"},
+                    "RPC command id is already outstanding: pending",
+                ),
+                (
+                    {"type": "prompt", "prompt": "duplicate"},
+                    "RPC command id is already outstanding: queued",
+                ),
+            ]
+        )
         assert [command.command_id for command in coordinator.pending_prompt_queue_commands] == [
             "pending"
         ]
@@ -1233,9 +1272,9 @@ def test_coordinator_rejects_duplicate_running_id_async() -> None:
         )
 
         assert coordinator.running_command is running
-        assert _legacy_rejections(rejected) == [
-            ({"type": "get_state"}, "RPC command id is already outstanding: same")
-        ]
+        assert list(rejected) == _expected_rejections(
+            [({"type": "get_state"}, "RPC command id is already outstanding: same")]
+        )
 
     anyio.run(scenario)
 
@@ -1244,9 +1283,9 @@ def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "active", "type": "prompt"}),
-                _input_command({"id": "queued", "type": "prompt"}),
-                _input_command({"id": "overflow", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "active", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "queued", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "overflow", "type": "prompt"}),
                 _RpcCommandCompleted("active", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
                 _RpcInputClosed(),
@@ -1312,7 +1351,7 @@ def test_coordinator_bounds_aggregate_queued_command_bytes() -> None:
             reject=reject,
         )
 
-        assert _legacy(coordinator.queued_commands) == [first]
+        assert list(coordinator.queued_commands) == _expected_commands([first])
         assert rejected == [
             (
                 "queued-2",
@@ -1326,7 +1365,7 @@ def test_coordinator_bounds_aggregate_queued_command_bytes() -> None:
             dispatch=dispatch,
             reject=reject,
         )
-        assert _legacy(coordinator.queued_commands) == [second]
+        assert list(coordinator.queued_commands) == _expected_commands([second])
 
     anyio.run(scenario)
 
@@ -1341,7 +1380,7 @@ def test_coordinator_ignores_stale_completion_and_closes_decisions_once() -> Non
 
         receiver = _Receiver(
             [
-                _input_command({"id": "active", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "active", "type": "prompt"}),
                 _RpcCommandCompleted("stale", "prompt", True, (), 99),
                 _RpcInputClosed(),
                 _RpcInputClosed(),
@@ -1436,7 +1475,7 @@ def test_coordinator_rejects_queued_device_code_when_input_closes() -> None:
             dispatch=lambda _command, running: _RpcDispatchResult(running),
             reject=reject,
         )
-        assert _legacy(coordinator.queued_commands) == [device_code]
+        assert list(coordinator.queued_commands) == _expected_commands([device_code])
 
         await coordinator.handle_event(
             _RpcInputClosed(),
@@ -1444,11 +1483,11 @@ def test_coordinator_rejects_queued_device_code_when_input_closes() -> None:
             reject=reject,
         )
 
-        assert _legacy(coordinator.queued_commands) == []
+        assert list(coordinator.queued_commands) == _expected_commands([])
         assert coordinator._queued_command_bytes == 0
-        assert _legacy_rejections(rejected) == [
-            (device_code, "RPC command cancelled: device-code-1")
-        ]
+        assert list(rejected) == _expected_rejections(
+            [(device_code, "RPC command cancelled: device-code-1")]
+        )
 
     anyio.run(scenario)
 
@@ -1457,7 +1496,7 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "prompt", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "prompt", "type": "prompt"}),
                 _input_command({"id": "shutdown", "type": "shutdown"}),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _input_command({"id": "cancel", "type": "cancel", "target_id": "shutdown"}),
@@ -1497,7 +1536,7 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown_async() -> No
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "prompt", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "prompt", "type": "prompt"}),
                 _input_command({"id": "shutdown", "type": "shutdown"}),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _input_command({"id": "cancel", "type": "cancel", "target_id": "shutdown"}),
@@ -1654,7 +1693,7 @@ def test_coordinator_rejects_buffered_work_before_idle_shutdown_dispatch() -> No
         receiver = _Receiver(
             [
                 _input_command({"id": "shutdown", "type": "shutdown"}),
-                _input_command({"id": "unreached", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "unreached", "type": "prompt"}),
             ]
         )
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
@@ -1677,12 +1716,14 @@ def test_coordinator_rejects_buffered_work_before_idle_shutdown_dispatch() -> No
 
         assert should_shutdown is True
         assert not receiver.events
-        assert _legacy_rejections(rejected) == [
-            (
-                {"id": "unreached", "type": "prompt"},
-                "RPC command rejected because shutdown is pending",
-            )
-        ]
+        assert list(rejected) == _expected_rejections(
+            [
+                (
+                    {"prompt": "", "id": "unreached", "type": "prompt"},
+                    "RPC command rejected because shutdown is pending",
+                )
+            ]
+        )
 
     anyio.run(scenario)
 
@@ -1703,7 +1744,7 @@ def test_coordinator_accepts_compatibility_event_types() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
             [
-                _input_command({"id": "active", "type": "prompt"}),
+                _input_command({"prompt": "", "id": "active", "type": "prompt"}),
                 CompatInputClosed(),
                 CompatCommandCompleted("active", "prompt", True, (), 1),
             ]
@@ -1739,11 +1780,11 @@ def test_coordinator_owns_running_and_queued_cancellation() -> None:
         coordinator = RpcCoordinator(state)
         active_scope = anyio.CancelScope()
         coordinator.running_command = _RpcRunningCommand("active", "prompt", active_scope)
-        pending = _parsed_command({"id": "pending", "type": "steer"})
+        pending = _parsed_command({"content": "", "id": "pending", "type": "steer"})
         coordinator.pending_prompt_queue_commands.append(pending)
-        queued = _parsed_command({"id": "queued", "type": "prompt"})
+        queued = _parsed_command({"prompt": "", "id": "queued", "type": "prompt"})
         coordinator.queued_commands.extend(
-            [queued, _parsed_command({"id": "later", "type": "prompt"})]
+            [queued, _parsed_command({"prompt": "", "id": "later", "type": "prompt"})]
         )
 
         active_result = coordinator.cancel("active")
@@ -1758,7 +1799,9 @@ def test_coordinator_owns_running_and_queued_cancellation() -> None:
         assert not coordinator.pending_prompt_queue_commands
         assert queued_result.outcome == "queued"
         assert queued_result.command is queued
-        assert _legacy(coordinator.queued_commands) == [{"id": "later", "type": "prompt"}]
+        assert list(coordinator.queued_commands) == _expected_commands(
+            [{"prompt": "", "id": "later", "type": "prompt"}]
+        )
         assert missing_result.outcome == "missing"
 
     anyio.run(scenario)

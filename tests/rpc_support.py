@@ -6,10 +6,12 @@ from pathlib import Path
 
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from pytest import MonkeyPatch
 
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import WispEvent
+from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     RpcCoordinator,
@@ -50,13 +52,13 @@ class TrustResolver:
 
 
 async def preserve_running_command(
-    _command: dict[str, object],
+    _command: ParsedRpcCommand,
     running: _RpcRunningCommand | None,
 ) -> _RpcDispatchResult:
     return _RpcDispatchResult(running)
 
 
-async def reject_unexpected_command(_command: dict[str, object], message: str) -> None:
+async def reject_unexpected_command(_command: ParsedRpcCommand, message: str) -> None:
     raise AssertionError(message)
 
 
@@ -120,3 +122,44 @@ async def build_rpc_executor_fixture(tmp_path: Path) -> RpcExecutorFixture:
         coordinator=RpcCoordinator(state, completion_event_writer=writer),
         writer=writer,
     )
+
+
+def guard_rpc_command_serialization(monkeypatch: MonkeyPatch) -> None:
+    """Allow ingress accounting, but forbid flattening commands inside the executor."""
+    from contextvars import ContextVar
+
+    from wisp.rpc.commands import RpcCommandModel
+
+    executing = ContextVar("rpc_execution", default=False)
+    dispatch = RpcCommandExecutor.dispatch_parsed
+    reject = RpcCommandExecutor.reject_parsed
+
+    async def guarded_dispatch(
+        self: RpcCommandExecutor,
+        command: ParsedRpcCommand,
+        running: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        token = executing.set(True)
+        try:
+            return await dispatch(self, command, running)
+        finally:
+            executing.reset(token)
+
+    def guarded_reject(self: RpcCommandExecutor, command: ParsedRpcCommand, message: str) -> None:
+        token = executing.set(True)
+        try:
+            return reject(self, command, message)
+        finally:
+            executing.reset(token)
+
+    def guard_serializer(serialize):
+        def guarded(self, *args, **kwargs):
+            assert not executing.get(), "RPC execution/rejection must not serialize command models"
+            return serialize(self, *args, **kwargs)
+
+        return guarded
+
+    for name in ("model_dump", "model_dump_json"):
+        monkeypatch.setattr(RpcCommandModel, name, guard_serializer(getattr(RpcCommandModel, name)))
+    monkeypatch.setattr(RpcCommandExecutor, "dispatch_parsed", guarded_dispatch)
+    monkeypatch.setattr(RpcCommandExecutor, "reject_parsed", guarded_reject)
