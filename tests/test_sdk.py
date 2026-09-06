@@ -1953,3 +1953,16 @@ def test_sdk_and_host_do_not_depend_on_cli_modules() -> None:
 
     assert "wisp.cli" not in sdk_source
     assert "wisp.cli" not in host_source
+
+
+@pytest.fixture(autouse=True)
+def _guard_typed_control_dispatch(monkeypatch: MonkeyPatch) -> None:
+    original = rpc_execution_module.RpcCommandExecutor.dispatch
+
+    async def guarded(self: object, command: dict[str, object], running: object) -> object:
+        assert command.get("type") not in {"cancel", "approval", "trust", "shutdown"}, (
+            "Control commands must execute through typed handlers"
+        )
+        return await original(self, command, running)
+
+    monkeypatch.setattr(rpc_execution_module.RpcCommandExecutor, "dispatch", guarded)

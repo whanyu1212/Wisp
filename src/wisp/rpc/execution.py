@@ -76,8 +76,10 @@ from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_ID_CHARS,
+    ApprovalCommand,
     ApprovalScope,
     BeginDeviceCodeCommand,
+    CancelCommand,
     ClearQueueCommand,
     CloneSessionCommand,
     ConfigureCommand,
@@ -101,8 +103,10 @@ from wisp.rpc.commands import (
     SelectSessionCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
+    ShutdownCommand,
     SteerCommand,
     StoreApiKeyCommand,
+    TrustCommand,
     UnrevertSessionTreeCommand,
 )
 from wisp.rpc.commands import (
@@ -139,6 +143,8 @@ from .coordinator import (
 from .errors import RpcOutputAlreadyReportedError
 
 _MAX_RPC_COMMAND_ERROR_CHARS = 1_000
+
+type _RpcControlCommand = CancelCommand | ApprovalCommand | TrustCommand | ShutdownCommand
 
 type _RpcQueueCommand = (
     SteerCommand
@@ -314,6 +320,9 @@ class RpcCommandExecutor:
         ):
             self.coordinator.running_command = running_command
             return await self._dispatch_queue(known, running_command)
+        if isinstance(known, (CancelCommand, ApprovalCommand, TrustCommand, ShutdownCommand)):
+            self.coordinator.running_command = running_command
+            return self._dispatch_control(known, running_command)
         return await self.dispatch(command.to_legacy_dict(), running_command)
 
     def reject_parsed(self, command: ParsedRpcCommand, message: str) -> None:
@@ -334,7 +343,8 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
-        return self._dispatch_control(command, running_command)
+        self.reject(command, f"Unknown RPC command: {command_type}")
+        return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
@@ -753,7 +763,7 @@ class RpcCommandExecutor:
 
     def _dispatch_control(
         self,
-        command: dict[str, object],
+        command: _RpcControlCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         should_shutdown = handle_rpc_control_command(
@@ -3512,7 +3522,7 @@ def _project_buffered_prompt_queue_commands(
 
 
 def handle_rpc_control_command(
-    command: dict[str, object],
+    command: _RpcControlCommand,
     *,
     running_command: _RpcRunningCommand | None,
     approval_policy: RpcApprovalResolver,
@@ -3521,20 +3531,13 @@ def handle_rpc_control_command(
     coordinator: RpcCoordinator | None = None,
     defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
-    command_type, command_id, id_error = rpc_command_identity(command)
+    command_type = command.type
+    command_id = command.id or uuid4().hex
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-            write_event=write_event,
-        )
-        return False
-    if command_type == "shutdown":
+    if isinstance(command, ShutdownCommand):
         write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
         return True
-    if command_type == "cancel":
+    if isinstance(command, CancelCommand):
         handle_rpc_cancel_command(
             command,
             command_id=command_id,
@@ -3545,7 +3548,7 @@ def handle_rpc_control_command(
             defer_cancellation=defer_until_after_flush,
         )
         return False
-    if command_type == "approval":
+    if isinstance(command, ApprovalCommand):
         handle_rpc_approval_command(
             command,
             command_id=command_id,
@@ -3555,7 +3558,7 @@ def handle_rpc_control_command(
             defer_resolution=defer_until_after_flush,
         )
         return False
-    if command_type == "trust":
+    if isinstance(command, TrustCommand):
         if trust_gate is None:
             write_rpc_command_error(
                 command_id=command_id,
@@ -3573,14 +3576,7 @@ def handle_rpc_control_command(
             defer_resolution=defer_until_after_flush,
         )
         return False
-    message = f"Unknown RPC command: {command_type}"
-    write_rpc_command_error(
-        command_id=command_id,
-        command_type=command_type,
-        message=message,
-        write_event=write_event,
-    )
-    return False
+    assert_never(command)
 
 
 def handle_rpc_configure_command(
@@ -3768,7 +3764,7 @@ def auto_switch_provider_for_model(
 
 
 def handle_rpc_approval_command(
-    command: dict[str, object],
+    command: ApprovalCommand,
     *,
     command_id: str,
     command_type: str,
@@ -3776,61 +3772,10 @@ def handle_rpc_approval_command(
     write_event: RpcEventWriter,
     defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
-    call_id = command.get("call_id")
-    if not isinstance(call_id, str) or not call_id:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command requires string field: call_id",
-            write_event=write_event,
-        )
-        return
-    approved = command.get("approved")
-    if not isinstance(approved, bool):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command requires boolean field: approved",
-            write_event=write_event,
-        )
-        return
-    reason = command.get("reason")
-    if reason is not None and not isinstance(reason, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command field reason must be a string",
-            write_event=write_event,
-        )
-        return
-    raw_scope = command.get("scope")
-    scope: ApprovalScope
-    if raw_scope is None:
-        scope = "once"
-    elif isinstance(raw_scope, str) and raw_scope in {
-        "once",
-        "tool_session",
-        "all_session",
-    }:
-        scope = cast(ApprovalScope, raw_scope)
-    else:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=(
-                "RPC approval command field scope must be one of: once, tool_session, all_session"
-            ),
-            write_event=write_event,
-        )
-        return
-    if not approved and scope != "once":
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval scope is only valid for approved requests",
-            write_event=write_event,
-        )
-        return
+    call_id = command.call_id
+    approved = command.approved
+    reason = command.reason
+    scope = command.scope or "once"
     if not approval_policy.has_pending_approval(call_id=call_id):
         write_rpc_command_error(
             command_id=command_id,
@@ -3867,7 +3812,7 @@ def handle_rpc_approval_command(
 
 
 def handle_rpc_trust_command(
-    command: dict[str, object],
+    command: TrustCommand,
     *,
     command_id: str,
     command_type: str,
@@ -3875,42 +3820,10 @@ def handle_rpc_trust_command(
     write_event: RpcEventWriter,
     defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
-    request_id = command.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command requires string field: request_id",
-            write_event=write_event,
-        )
-        return
-    trusted = command.get("trusted")
-    if not isinstance(trusted, bool):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command requires boolean field: trusted",
-            write_event=write_event,
-        )
-        return
-    reason = command.get("reason")
-    if reason is not None and not isinstance(reason, str):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command field reason must be a string",
-            write_event=write_event,
-        )
-        return
-    transient = command.get("transient")
-    if transient is not None and not isinstance(transient, bool):
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command field transient must be a boolean",
-            write_event=write_event,
-        )
-        return
+    request_id = command.request_id
+    trusted = command.trusted
+    reason = command.reason
+    transient = command.transient
     defer_release = defer_resolution is not None
     if not trust_gate.resolve_request(
         request_id=request_id,
@@ -3932,7 +3845,7 @@ def handle_rpc_trust_command(
 
 
 def handle_rpc_cancel_command(
-    command: dict[str, object],
+    command: CancelCommand,
     *,
     command_id: str,
     command_type: str,
@@ -3941,15 +3854,7 @@ def handle_rpc_cancel_command(
     coordinator: RpcCoordinator | None = None,
     defer_cancellation: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
-    target_id = command.get("target_id")
-    if not isinstance(target_id, str) or not target_id:
-        write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC cancel command requires string field: target_id",
-            write_event=write_event,
-        )
-        return
+    target_id = command.target_id
     if (
         running_command is not None
         and running_command.command_id == target_id
