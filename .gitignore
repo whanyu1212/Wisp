@@ -42,6 +42,7 @@ __pycache__/
 build/
 dist/
 /profiles/
+/test-results/
 
 # Rust
 /target/
