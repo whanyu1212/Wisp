@@ -7687,14 +7687,26 @@ def test_textual_session_operation_waits_for_the_composed_tail(
             transcript = app_instance.query_one("#transcript", Transcript)
             transcript.scroll_home(animate=False)
             await pilot.pause()
+            with anyio.fail_after(5):
+                while (
+                    transcript.max_scroll_y <= 0 or transcript.scroll_y >= transcript.max_scroll_y
+                ):
+                    await pilot.pause()
             transcript._follow = True
             original_follow_tail = transcript.follow_tail
+            original_watch_scroll_y = transcript.watch_scroll_y
 
             def delayed_follow_tail() -> None:
                 if release_tail:
                     original_follow_tail()
 
+            def keep_follow_intent(old_value: float, new_value: float) -> None:
+                following = transcript._follow
+                original_watch_scroll_y(old_value, new_value)
+                transcript._follow = following
+
             monkeypatch.setattr(transcript, "follow_tail", delayed_follow_tail)
+            monkeypatch.setattr(transcript, "watch_scroll_y", keep_follow_intent)
             renderer.session_switch_finished()
             for _ in range(5):
                 await pilot.pause()
