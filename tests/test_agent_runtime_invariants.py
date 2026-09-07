@@ -434,7 +434,7 @@ def test_assert_turn_invariants_rejects_non_1_initial_turn() -> None:
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
     with pytest.raises(AssertionError, match="expected turn 1"):
-        assert_turn_invariants(events)
+        assert_turn_invariants(events, initial_turn=1)
 
 
 def test_assert_turn_invariants_rejects_turn_gap() -> None:
@@ -475,14 +475,14 @@ def test_assert_turn_invariants_rejects_completed_with_cancelled_finish_reason()
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_turn_activity_after_failure() -> None:
+def test_assert_turn_invariants_rejects_turn_activity_after_cancellation() -> None:
     events = (
         TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
-    with pytest.raises(AssertionError, match="appeared after terminal turn 1"):
+    with pytest.raises(AssertionError, match="appeared after turn 1 was cancelled"):
         assert_turn_invariants(events)
 
 
@@ -524,6 +524,25 @@ def test_assert_cancellation_settled_rejects_completed_outcome() -> None:
         assert_cancellation_settled(events)
 
 
+def test_assert_turn_invariants_accepts_nonzero_initial_turn() -> None:
+    events = (
+        TurnStarted(turn=5),
+        TurnCompleted(turn=5, outcome="completed", finish_reason="stop"),
+    )
+    assert_turn_invariants(events)
+    assert_turn_invariants(events, initial_turn=5)
+
+
+def test_assert_turn_invariants_accepts_context_overflow_retry_after_failed_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    assert_turn_invariants(events)
+
+
 def test_assert_queue_ordering_invariants_accepts_steering_before_follow_up() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer text"),
@@ -545,16 +564,50 @@ def test_assert_queue_ordering_invariants_rejects_follow_up_before_steering() ->
         assert_queue_ordering_invariants(events)
 
 
+def test_assert_queue_ordering_invariants_rejects_injection_during_active_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        QueueMessageInjected(kind="steering", content="in flight"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="appeared inside an active turn"):
+        assert_queue_ordering_invariants(events)
+
+
 def test_assert_continuation_invariants_accepts_tool_continuation() -> None:
     events = (
         TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
         _ended("call-1"),
         _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
     assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_uncompleted_tool_calls_at_final_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+    )
+    with pytest.raises(AssertionError, match="no subsequent continuation turn"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_tool_call_without_results_before_next_turn() -> (
+    None
+):
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="had no tool execution within that turn"):
+        assert_continuation_invariants(events)
 
 
 def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
