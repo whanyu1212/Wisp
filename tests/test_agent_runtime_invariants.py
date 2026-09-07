@@ -547,6 +547,32 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+@pytest.mark.parametrize("position", ["before", "after", "next_turn"])
+def test_assert_cancellation_settled_rejects_activity_outside_cancelled_turn(position: str) -> None:
+    events: list[object] = [
+        TurnStarted(turn=1),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    ]
+    if position == "before":
+        events.insert(0, MessageDelta(turn=1, delta="Too early"))
+        match = "outside an active turn"
+    elif position == "after":
+        events.append(MessageDelta(turn=1, delta="Too late"))
+        match = "after final TurnCompleted"
+    else:
+        events.extend(
+            [
+                TurnStarted(turn=2),
+                ErrorEvent(message="Agent run cancelled again"),
+                TurnCompleted(turn=2, outcome="cancelled", finish_reason="cancelled"),
+            ]
+        )
+        match = "after turn 1 was cancelled"
+    with pytest.raises(AssertionError, match=match):
+        assert_cancellation_settled(events)
+
+
 def test_assert_cancellation_settled_rejects_scoped_activity_before_first_turn() -> None:
     events = (
         _ended("call-1"),
@@ -1228,6 +1254,25 @@ def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
     )
     with pytest.raises(AssertionError, match="ErrorEvent before completion"):
+        assert_cancellation_settled(events)
+
+
+@pytest.mark.parametrize("earlier_turn", [True, False])
+def test_assert_cancellation_settled_rejects_nonadjacent_error(earlier_turn: bool) -> None:
+    events: list[object] = [TurnStarted(turn=1), ErrorEvent(message="Earlier failure")]
+    if earlier_turn:
+        events.extend(
+            [
+                TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
+                TurnStarted(turn=2),
+            ]
+        )
+    else:
+        events.append(MessageDelta(turn=1, delta="Still running"))
+    events.append(
+        TurnCompleted(turn=2 if earlier_turn else 1, outcome="cancelled", finish_reason="cancelled")
+    )
+    with pytest.raises(AssertionError, match="immediately adjacent"):
         assert_cancellation_settled(events)
 
 

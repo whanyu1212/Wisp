@@ -287,13 +287,14 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
 
     Enforces:
     1. If a turn was interrupted, the final TurnCompleted must have outcome='cancelled'
-       and finish_reason='cancelled', with an ErrorEvent before that terminal.
+       and finish_reason='cancelled', with an ErrorEvent immediately before that terminal.
     2. If no turns were started, no TurnCompleted may appear, and an ErrorEvent must
        still be present.
     3. If the last turn already completed, cancellation may emit only a trailing
        ErrorEvent after that TurnCompleted (no cancelled terminal).
     4. Tool execution Ended/Ready pairing is preserved, except for a single
        unmatched Ended immediately followed by the cancellation ErrorEvent.
+    5. Started turns obey sequencing and event containment invariants.
     """
 
     assert_tool_result_pairing(events, allow_unpaired_ended_before_cancel=True)
@@ -313,6 +314,7 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         assert error_events, "Cancelled run must emit an ErrorEvent before completion"
         return
 
+    assert_turn_invariants(events)
     assert turns, "Cancelled run started a turn but produced no TurnCompleted events"
     last_turn = turns[-1]
     last_idx = events.index(last_turn)
@@ -323,8 +325,9 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         assert last_turn.finish_reason == "cancelled", (
             f"Expected final turn finish_reason 'cancelled', got {last_turn.finish_reason!r}"
         )
-        error_events = [event for event in events[:last_idx] if isinstance(event, ErrorEvent)]
-        assert error_events, "Cancelled run must emit an ErrorEvent before completion"
+        assert last_idx > 0 and isinstance(events[last_idx - 1], ErrorEvent), (
+            "Cancelled run must emit an ErrorEvent before completion (immediately adjacent)"
+        )
         return
 
     if last_turn.outcome in ("completed", "failed") and trailing_errors:
