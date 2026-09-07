@@ -73,7 +73,11 @@ def assert_turn_terminals(events: Sequence[object]) -> None:
     raise AssertionError(f"{noun} {labels} started without a terminal TurnCompleted")
 
 
-def assert_tool_result_pairing(events: Sequence[object]) -> None:
+def assert_tool_result_pairing(
+    events: Sequence[object],
+    *,
+    allow_unpaired_ended_before_cancel: bool = False,
+) -> None:
     """Require Ended/Ready pairing for each tool execution occurrence.
 
     Uniqueness is per unmatched occurrence, not per run. Gemini may omit
@@ -90,6 +94,10 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
     `ToolExecutionStarted` was emitted. Sequential cancellation may stop after
     those events; use `assert_settled_tool_calls` only on paths that promise
     settlement.
+
+    `allow_unpaired_ended_before_cancel` covers the harness projection boundary
+    where cancel is observed on `ToolExecutionEnded`: the consumer may see that
+    Ended, then the cancellation error/terminal, without a following Ready.
     """
 
     pending_ended: dict[str, tuple[int, ToolExecutionEnded]] = {}
@@ -124,6 +132,15 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
                     f"ToolExecutionEnded ({mismatched})"
                 )
     unmatched = sorted(pending_ended)
+    if allow_unpaired_ended_before_cancel and len(pending_ended) == 1:
+        ended_index = next(iter(pending_ended.values()))[0]
+        trailing = events[ended_index + 1 :]
+        if (
+            trailing
+            and isinstance(trailing[0], ErrorEvent)
+            and all(isinstance(item, (ErrorEvent, TurnCompleted)) for item in trailing)
+        ):
+            return
     assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
 
 
@@ -162,10 +179,25 @@ def assert_turn_invariants(
     3. Outcomes are valid ('completed', 'failed', 'cancelled').
     4. Outcome 'cancelled' requires finish_reason 'cancelled' and prohibits subsequent turns.
     5. Outcome 'completed' requires a non-cancelled finish_reason ('stop', 'tool_calls', etc.).
-    6. No turn or tool events appear after cancellation or after the final TurnCompleted.
+    6. Tool lifecycle events appear only inside an active turn.
+    7. No turn or tool events appear after the final TurnCompleted.
     """
 
     assert_turn_terminals(events)
+    last_turn_completed_idx = max(
+        (idx for idx, e in enumerate(events) if isinstance(e, TurnCompleted)),
+        default=None,
+    )
+    if last_turn_completed_idx is not None and last_turn_completed_idx < len(events) - 1:
+        forbidden_trailing = [
+            type(e).__name__
+            for e in events[last_turn_completed_idx + 1 :]
+            if isinstance(e, (TurnStarted, TurnCompleted, *_TOOL_LIFECYCLE_EVENT_TYPES))
+        ]
+        assert not forbidden_trailing, (
+            f"Events appeared after final TurnCompleted: {', '.join(forbidden_trailing)}"
+        )
+
     expected_turn = initial_turn
     in_turn: int | None = None
     cancelled_turn: int | None = None
@@ -206,20 +238,8 @@ def assert_turn_invariants(
             in_turn = None
             if expected_turn is not None:
                 expected_turn += 1
-
-    last_turn_completed_idx = max(
-        (idx for idx, e in enumerate(events) if isinstance(e, TurnCompleted)),
-        default=None,
-    )
-    if last_turn_completed_idx is not None and last_turn_completed_idx < len(events) - 1:
-        forbidden_trailing = [
-            type(e).__name__
-            for e in events[last_turn_completed_idx + 1 :]
-            if isinstance(e, (TurnStarted, TurnCompleted, *_TOOL_LIFECYCLE_EVENT_TYPES))
-        ]
-        assert not forbidden_trailing, (
-            f"Events appeared after final TurnCompleted: {', '.join(forbidden_trailing)}"
-        )
+        elif isinstance(event, _TOOL_LIFECYCLE_EVENT_TYPES):
+            assert in_turn is not None, f"{type(event).__name__} appeared outside an active turn"
 
 
 def assert_cancellation_settled(events: Sequence[object]) -> None:
@@ -229,11 +249,13 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     1. If turns were started, the final TurnCompleted must have outcome='cancelled'
        and finish_reason='cancelled'.
     2. If no turns were started, no TurnCompleted may appear.
-    3. An ErrorEvent indicating cancellation must appear before any TurnCompleted.
-    4. Tool execution Ended/Ready pairing is preserved.
+    3. An ErrorEvent must appear before any TurnCompleted. The message is not
+       required to contain 'cancel'; aborted providers copy their own wording.
+    4. Tool execution Ended/Ready pairing is preserved, except for a single
+       unmatched Ended immediately followed by the cancellation ErrorEvent.
     """
 
-    assert_tool_result_pairing(events)
+    assert_tool_result_pairing(events, allow_unpaired_ended_before_cancel=True)
     assert_turn_terminals(events)
 
     turns = [e for e in events if isinstance(e, TurnCompleted)]
@@ -252,12 +274,8 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         assert not turns, "Cancelled run produced TurnCompleted without TurnStarted"
         turn_index = len(events)
 
-    error_events = [
-        e
-        for e in events[:turn_index]
-        if isinstance(e, ErrorEvent) and "cancel" in e.message.lower()
-    ]
-    assert error_events, "Cancelled run must emit a cancellation ErrorEvent before completion"
+    error_events = [e for e in events[:turn_index] if isinstance(e, ErrorEvent)]
+    assert error_events, "Cancelled run must emit an ErrorEvent before completion"
 
 
 def assert_queue_ordering_invariants(
@@ -265,6 +283,8 @@ def assert_queue_ordering_invariants(
     *,
     initial_steering_count: int | None = None,
     initial_follow_up_count: int | None = None,
+    expected_steering: Sequence[str] | None = None,
+    expected_follow_up: Sequence[str] | None = None,
 ) -> None:
     """Require that queue injections adhere to steering priority over follow-up and FIFO order.
 
@@ -273,6 +293,8 @@ def assert_queue_ordering_invariants(
        injections.
     3. If initial queue counts are provided, all initial steering messages must be injected before
        any initial follow-up messages are injected across boundaries.
+    4. If expected_steering / expected_follow_up snapshots are provided, injected contents for
+       each kind must match that enqueue order (FIFO within kind).
     """
 
     in_turn = False
@@ -327,14 +349,28 @@ def assert_queue_ordering_invariants(
                 f"before follow-ups, but only {steering_before_follow_up} were"
             )
 
+    if expected_steering is not None:
+        steering_contents = [inj.content for inj in all_injections if inj.kind == "steering"]
+        assert steering_contents == list(expected_steering), (
+            f"Steering injections {steering_contents!r} != expected FIFO order "
+            f"{list(expected_steering)!r}"
+        )
+    if expected_follow_up is not None:
+        follow_up_contents = [inj.content for inj in all_injections if inj.kind == "follow_up"]
+        assert follow_up_contents == list(expected_follow_up), (
+            f"Follow-up injections {follow_up_contents!r} != expected FIFO order "
+            f"{list(expected_follow_up)!r}"
+        )
+
 
 def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
     1. Any tool-bearing turn (requested tool calls or MessageCompleted.tool_calls)
        must have matching terminal tool execution results for every requested call
-       (unless cancelled).
-    2. Any tool-bearing turn must be followed by a continuation turn (unless the run was cancelled).
+       (unless the turn failed or was cancelled).
+    2. Any tool-bearing turn must be followed by a continuation turn (unless the run
+       failed or was cancelled).
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
     4. Strict turn sequencing must hold.
     """
@@ -350,25 +386,32 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
         end_idx = events.index(completed)
         turn_events = events[start_idx:end_idx]
 
-        requested_calls = [e.call_id for e in turn_events if isinstance(e, ToolCallRequested)]
-        if not requested_calls:
-            for e in turn_events:
-                if isinstance(e, MessageCompleted) and e.tool_calls:
-                    requested_calls.extend(call.call_id for call in e.tool_calls)
+        requested_from_events = Counter(
+            e.call_id for e in turn_events if isinstance(e, ToolCallRequested)
+        )
+        requested_from_completion = Counter(
+            call.call_id
+            for e in turn_events
+            if isinstance(e, MessageCompleted)
+            for call in e.tool_calls
+        )
+        requested_calls = requested_from_events | requested_from_completion
 
         has_tool_calls = bool(requested_calls) or completed.finish_reason == "tool_calls"
         if has_tool_calls:
             is_last = i == len(turns) - 1
+            terminal_without_continuation = completed.outcome in ("cancelled", "failed")
             if is_last:
-                assert completed.outcome == "cancelled", (
+                assert terminal_without_continuation, (
                     f"Turn {completed.turn} had tool calls but has no subsequent continuation turn"
                 )
-            if completed.outcome != "cancelled":
+            if not terminal_without_continuation:
                 ended_calls = [e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)]
                 if requested_calls:
-                    missing = Counter(requested_calls) - Counter(ended_calls)
+                    missing = requested_calls - Counter(ended_calls)
                     assert not missing, (
-                        f"Turn {completed.turn} requested calls {requested_calls} but was missing "
+                        f"Turn {completed.turn} requested calls "
+                        f"{list(requested_calls.elements())} but was missing "
                         f"terminal results for: {list(missing.keys())}"
                     )
                 else:

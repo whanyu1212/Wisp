@@ -20,9 +20,11 @@ from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
+    MessageCompleted,
     MessageDelta,
     QueueMessageInjected,
     ToolCallRequested,
+    ToolCallSnapshot,
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
@@ -528,6 +530,37 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ErrorEvent(message="request aborted"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    )
+    assert_cancellation_settled(events)
+
+
+def test_assert_cancellation_settled_allows_ended_without_ready() -> None:
+    events = (
+        TurnStarted(turn=1),
+        _ended("call-1"),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    )
+    assert_cancellation_settled(events)
+
+
+def test_assert_cancellation_settled_rejects_multiple_unpaired_ended() -> None:
+    events = (
+        TurnStarted(turn=1),
+        _ended("call-1"),
+        _ended("call-2"),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    )
+    with pytest.raises(AssertionError, match="without ToolResultReady"):
+        assert_cancellation_settled(events)
+
+
 def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
@@ -535,6 +568,27 @@ def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
     )
     with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_tool_event_before_first_turn() -> None:
+    events = (
+        _ended("call-1"),
+        _ready("call-1"),
+        *_completed_turn(),
+    )
+    with pytest.raises(AssertionError, match="appeared outside an active turn"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_tool_event_between_turns() -> None:
+    events = (
+        *_completed_turn(1),
+        _ended("call-1"),
+        _ready("call-1"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(AssertionError, match="appeared outside an active turn"):
         assert_turn_invariants(events)
 
 
@@ -583,12 +637,54 @@ def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn(
         assert_continuation_invariants(events)
 
 
+def test_assert_continuation_invariants_reconciles_completed_and_requested_calls() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="read", arguments={}),
+                ToolCallSnapshot(call_id="call-2", name="read", arguments={}),
+            ),
+        ),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="missing terminal results for: \\['call-2'\\]"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="length"),
+        TurnStarted(turn=2),
+        MessageCompleted(
+            turn=2,
+            content="",
+            finish_reason="length",
+            tool_calls=(ToolCallSnapshot(call_id="call-2", name="read", arguments={}),),
+        ),
+        TurnCompleted(turn=2, outcome="failed", finish_reason="error"),
+    )
+    assert_continuation_invariants(events)
+
+
 def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
     )
-    with pytest.raises(AssertionError, match="cancellation ErrorEvent"):
+    with pytest.raises(AssertionError, match="ErrorEvent before completion"):
         assert_cancellation_settled(events)
 
 
@@ -650,6 +746,32 @@ def test_assert_queue_ordering_invariants_rejects_injection_during_active_turn()
     )
     with pytest.raises(AssertionError, match="appeared inside an active turn"):
         assert_queue_ordering_invariants(events)
+
+
+def test_assert_queue_ordering_invariants_rejects_within_kind_reorder() -> None:
+    events = (
+        QueueMessageInjected(kind="steering", content="steer 2"),
+        QueueMessageInjected(kind="steering", content="steer 1"),
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="expected FIFO order"):
+        assert_queue_ordering_invariants(events, expected_steering=("steer 1", "steer 2"))
+
+
+def test_assert_queue_ordering_invariants_accepts_matching_fifo_snapshot() -> None:
+    events = (
+        QueueMessageInjected(kind="steering", content="steer 1"),
+        QueueMessageInjected(kind="steering", content="steer 2"),
+        QueueMessageInjected(kind="follow_up", content="follow 1"),
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    assert_queue_ordering_invariants(
+        events,
+        expected_steering=("steer 1", "steer 2"),
+        expected_follow_up=("follow 1",),
+    )
 
 
 def test_assert_continuation_invariants_accepts_tool_continuation() -> None:
@@ -784,4 +906,111 @@ def test_live_queue_drain_satisfies_ordering_invariants() -> None:
 
     events = anyio.run(run)
     assert_turn_invariants(events)
-    assert_queue_ordering_invariants(events)
+    assert_queue_ordering_invariants(
+        events,
+        initial_steering_count=1,
+        initial_follow_up_count=1,
+        expected_steering=("queued steering",),
+        expected_follow_up=("queued follow-up",),
+    )
+
+
+def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseFailed(message="request aborted", failure_kind="aborted"),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=_NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_cancellation_settled(events)
+
+
+def test_live_cancel_after_tool_execution_end_satisfies_cancellation_invariants() -> None:
+    call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(provider=provider, tool_executor=_RecordingToolExecutor())
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        async for event in harness.prompt("initial"):
+            events.append(event)
+            if isinstance(event, ToolExecutionEnded):
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_cancellation_settled(events)
+
+
+def test_live_failed_truncated_tool_limit_satisfies_continuation_invariants() -> None:
+    first = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
+    second = ToolCall(call_id="call-2", name="read", arguments={"path": "two.txt"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=first),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(first,),
+                    finish_reason="length",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=second),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(second,),
+                    finish_reason="length",
+                ),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="Maximum tool iterations exceeded: 1"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=_NeverToolExecutor(),
+                    max_tool_iterations=1,
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_continuation_invariants(events)
