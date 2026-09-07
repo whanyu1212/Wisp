@@ -920,6 +920,91 @@ def test_assert_continuation_invariants_checks_result_names_for_repeated_call_id
         assert_continuation_invariants(events)
 
 
+def test_assert_continuation_invariants_rejects_reordered_request_occurrences() -> None:
+    calls = (
+        ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "a"}),
+        ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "b"}),
+    )
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
+        *(
+            ToolCallRequested(call_id=call.call_id, name=call.name, arguments=call.arguments)
+            for call in reversed(calls)
+        ),
+        _ended(),
+        _ready(),
+        _ended(),
+        _ready(),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(
+        AssertionError, match="do not match MessageCompleted.tool_calls in occurrence"
+    ):
+        assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("repeat_id", [True, False])
+@pytest.mark.parametrize("reverse_results", [True, False])
+def test_assert_continuation_invariants_matches_result_occurrence_order(
+    repeat_id: bool,
+    reverse_results: bool,
+) -> None:
+    second_id = "call-1" if repeat_id else "call-2"
+    calls = (
+        ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
+        ToolCallSnapshot(call_id=second_id, name="other", arguments={}),
+    )
+    results = (_ended(), _ended(second_id).model_copy(update={"name": "other"}))
+    if reverse_results:
+        results = results[::-1]
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
+        *(
+            ToolCallRequested(call_id=call.call_id, name=call.name, arguments=call.arguments)
+            for call in calls
+        ),
+        *(
+            event
+            for result in results
+            for event in (result, ToolResultReady.from_execution_ended(result))
+        ),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    if reverse_results:
+        with pytest.raises(AssertionError, match="terminal result names do not match"):
+            assert_continuation_invariants(events)
+    else:
+        assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("repeat_id", [True, False])
+def test_assert_continuation_invariants_rejects_result_before_request_occurrence(
+    repeat_id: bool,
+) -> None:
+    first_occurrence = (
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        _ended(),
+        _ready(),
+    )
+    events = (
+        TurnStarted(turn=1),
+        *(first_occurrence if repeat_id else ()),
+        _ended(),
+        _ready(),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(
+        AssertionError, match="terminal result appeared before its request occurrence"
+    ):
+        assert_continuation_invariants(events)
+
+
 def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() -> None:
     events = (
         TurnStarted(turn=1),

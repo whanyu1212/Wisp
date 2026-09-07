@@ -429,7 +429,7 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
     1. Successful turns with request or completion events must have exactly matching
-       request IDs, names, and arguments, plus matching terminal IDs and names,
+       ordered request IDs, names, and arguments, plus matching terminal IDs and names,
        including when the completion requests no calls. Abbreviated streams without
        either event retain the result-only check.
     2. Any tool-bearing turn must be followed by a continuation turn (unless the run
@@ -474,17 +474,17 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 f"MessageCompleted.tool_calls "
                 f"{list(requested_from_completion.elements())}"
             )
-            request_payloads = Counter(
+            request_payloads = [
                 (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
                 for call in request_events
-            )
-            completion_payloads = Counter(
+            ]
+            completion_payloads = [
                 (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
                 for call in completed_calls
-            )
+            ]
             assert request_payloads == completion_payloads, (
                 f"Turn {completed.turn} ToolCallRequested names or arguments "
-                "do not match MessageCompleted.tool_calls"
+                "do not match MessageCompleted.tool_calls in occurrence order"
             )
         expected_calls = requested_from_events or requested_from_completion
         terminal_events = [e for e in turn_events if isinstance(e, ToolExecutionEnded)]
@@ -501,13 +501,30 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 f"Turn {completed.turn} had terminal results for unrequested calls: "
                 f"{list(unexpected.elements())}"
             )
-            expected_names = Counter(
+            expected_names = [
                 (call.call_id, call.name) for call in (request_events or completed_calls)
-            )
-            terminal_names = Counter((event.call_id, event.name) for event in terminal_events)
+            ]
+            terminal_names = [(event.call_id, event.name) for event in terminal_events]
             assert expected_names == terminal_names, (
-                f"Turn {completed.turn} terminal result names do not match requested tools"
+                f"Turn {completed.turn} terminal result names do not match requested tools "
+                "in occurrence order"
             )
+            request_indices = [
+                index
+                for index, event in enumerate(turn_events)
+                if isinstance(event, ToolCallRequested)
+            ]
+            terminal_indices = [
+                index
+                for index, event in enumerate(turn_events)
+                if isinstance(event, ToolExecutionEnded)
+            ]
+            assert all(
+                request_index < terminal_index
+                for request_index, terminal_index in zip(
+                    request_indices, terminal_indices, strict=True
+                )
+            ), f"Turn {completed.turn} terminal result appeared before its request occurrence"
         if has_tool_calls:
             assert terminal_calls, (
                 f"Turn {completed.turn} completed with 'tool_calls' but had no "
