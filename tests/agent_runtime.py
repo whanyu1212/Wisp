@@ -430,8 +430,9 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
 
     1. Successful turns with request or completion events must have exactly matching
        ordered request IDs, names, and arguments, plus matching terminal IDs and names,
-       including when the completion requests no calls. Abbreviated streams without
-       either event retain the result-only check.
+       including when the completion requests no calls. Each occurrence must follow
+       completion -> request -> result order. Abbreviated streams without request or
+       completion events retain the result-only check.
     2. Any tool-bearing turn must be followed by a continuation turn (unless the run
        failed or was cancelled).
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
@@ -467,6 +468,9 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
         if terminal_without_continuation:
             continue
 
+        request_indices = [
+            index for index, event in enumerate(turn_events) if isinstance(event, ToolCallRequested)
+        ]
         if message_completions:
             assert requested_from_events == requested_from_completion, (
                 f"Turn {completed.turn} ToolCallRequested "
@@ -486,6 +490,18 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 f"Turn {completed.turn} ToolCallRequested names or arguments "
                 "do not match MessageCompleted.tool_calls in occurrence order"
             )
+            completion_indices = [
+                index
+                for index, event in enumerate(turn_events)
+                if isinstance(event, MessageCompleted)
+                for _call in event.tool_calls
+            ]
+            assert all(
+                completion_index < request_index
+                for completion_index, request_index in zip(
+                    completion_indices, request_indices, strict=True
+                )
+            ), f"Turn {completed.turn} tool request appeared before its completion snapshot"
         expected_calls = requested_from_events or requested_from_completion
         terminal_events = [e for e in turn_events if isinstance(e, ToolExecutionEnded)]
         terminal_calls = Counter(e.call_id for e in terminal_events)
@@ -509,11 +525,6 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 f"Turn {completed.turn} terminal result names do not match requested tools "
                 "in occurrence order"
             )
-            request_indices = [
-                index
-                for index, event in enumerate(turn_events)
-                if isinstance(event, ToolCallRequested)
-            ]
             terminal_indices = [
                 index
                 for index, event in enumerate(turn_events)

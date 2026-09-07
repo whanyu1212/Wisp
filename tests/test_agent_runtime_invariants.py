@@ -945,6 +945,36 @@ def test_assert_continuation_invariants_rejects_reordered_request_occurrences() 
         assert_continuation_invariants(events)
 
 
+@pytest.mark.parametrize("request_first", [True, False])
+@pytest.mark.parametrize("repeat_id", [True, False])
+def test_assert_continuation_invariants_checks_completion_request_order(
+    request_first: bool,
+    repeat_id: bool,
+) -> None:
+    call = ToolCallSnapshot(call_id="call-1", name="lookup", arguments={})
+    calls = (call, call) if repeat_id else (call,)
+    requests = tuple(
+        ToolCallRequested(call_id=item.call_id, name=item.name, arguments=item.arguments)
+        for item in calls
+    )
+    events = (
+        TurnStarted(turn=1),
+        *(requests[:1] if request_first else ()),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
+        *(requests[1:] if request_first else requests),
+        *(event for _call in calls for event in (_ended(), _ready())),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    if request_first:
+        with pytest.raises(
+            AssertionError, match="tool request appeared before its completion snapshot"
+        ):
+            assert_continuation_invariants(events)
+    else:
+        assert_continuation_invariants(events)
+
+
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("reverse_results", [True, False])
 def test_assert_continuation_invariants_matches_result_occurrence_order(
