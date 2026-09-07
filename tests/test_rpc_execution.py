@@ -69,6 +69,7 @@ from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import inspection as rpc_inspection_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
 from wisp.rpc import session_mutation as rpc_session_mutation_module
+from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
     ApprovalCommand,
@@ -424,7 +425,7 @@ def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
     target = tmp_path / "AGENTS.md"
     conflict = tmp_path / "conflict.md"
     receipt = CreateOnlyWriteReceipt()
-    completion = rpc_execution_module._ProjectInitCompletion(
+    completion = rpc_session_run_module._ProjectInitCompletion(
         target,
         conflicting_paths=(conflict,),
         receipt=receipt,
@@ -466,7 +467,7 @@ def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
 def test_init_completion_rejects_replacement_before_tool_event(tmp_path: Path) -> None:
     target = tmp_path / "AGENTS.md"
     receipt = CreateOnlyWriteReceipt()
-    completion = rpc_execution_module._ProjectInitCompletion(
+    completion = rpc_session_run_module._ProjectInitCompletion(
         target,
         conflicting_paths=(),
         receipt=receipt,
@@ -5414,7 +5415,7 @@ def test_run_workers_wait_for_started_event_flush(
             "compact": "compact",
             "get_session_stats": "session_stats",
         }[command_type]
-        monkeypatch.setattr(rpc_execution_module, f"run_rpc_{worker_name}_command", worker)
+        monkeypatch.setattr(rpc_session_run_module, f"run_rpc_{worker_name}_command", worker)
         payload = {"type": command_type, **({"prompt": "text"} if command_type == "prompt" else {})}
 
         async def run(_receive: object, *, dispatch: object, reject: object) -> bool:

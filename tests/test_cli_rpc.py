@@ -7,7 +7,6 @@ from collections.abc import Mapping
 import pytest
 
 import wisp.coding.tool_execution as tool_execution
-import wisp.rpc.execution as rpc_execution_module
 from tests.cli_support import *
 from tests.rpc_support import guard_rpc_command_serialization
 from wisp import __version__
@@ -27,15 +26,16 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
+from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import ApprovalCommand
 from wisp.rpc.control import handle_rpc_control_command
 from wisp.rpc.coordinator import _RpcPromptReady
-from wisp.rpc.execution import (
+from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+from wisp.rpc.session_run import (
     rpc_has_durable_completion,
     run_rpc_prompt_command,
 )
-from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -2562,7 +2562,7 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
         )
         snapshot_started = anyio.Event()
         release_snapshot = anyio.Event()
-        execution = rpc_execution_module
+        execution = rpc_session_run_module
         original_run_sync = execution.anyio.to_thread.run_sync
 
         async def delayed_run_sync(func: object, *args: object, **kwargs: object) -> object:

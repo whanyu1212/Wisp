@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 from wisp.agent.messages import Message
+from wisp.rpc.coordinator import _RpcSessionState
 from wisp.sessions.entries import SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.jsonl import JsonlSession
 from wisp.sessions.replay import replay_session_entries
+
+
+def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
+    if session is None or not session.path.is_file():
+        return _RpcSessionState(session=session, history=(), entry_count=0)
+    return _RpcSessionState(
+        session=session,
+        history=session.read_context_messages(),
+        entry_count=len(session.read_entries()),
+        name=session.read_name(),
+    )
 
 
 def updated_rpc_session_state(
