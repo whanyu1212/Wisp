@@ -22,6 +22,7 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    MessageStarted,
     QueueMessageInjected,
     ToolCallRequested,
     ToolCallSnapshot,
@@ -580,6 +581,16 @@ def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -
         assert_turn_invariants(events)
 
 
+def test_assert_turn_invariants_rejects_message_event_after_final_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+        MessageCompleted(turn=1, content="late", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
+        assert_turn_invariants(events)
+
+
 def test_assert_turn_invariants_rejects_tool_event_before_first_turn() -> None:
     events = (
         _ended("call-1"),
@@ -601,6 +612,17 @@ def test_assert_turn_invariants_rejects_tool_event_between_turns() -> None:
         assert_turn_invariants(events)
 
 
+def test_assert_turn_invariants_rejects_message_event_between_turns() -> None:
+    events = (
+        *_completed_turn(1),
+        MessageStarted(turn=2),
+        MessageDelta(turn=2, delta="late"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(AssertionError, match="appeared outside an active turn"):
+        assert_turn_invariants(events)
+
+
 def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_reversal() -> None:
     events = (
         QueueMessageInjected(kind="follow_up", content="follow 1"),
@@ -610,12 +632,31 @@ def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_revers
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
-    with pytest.raises(AssertionError, match="Expected all 1 initial steering messages"):
+    with pytest.raises(AssertionError, match="Expected at least 1 initial steering messages"):
         assert_queue_ordering_invariants(
             events,
             initial_steering_count=1,
             initial_follow_up_count=1,
         )
+
+
+def test_assert_queue_ordering_invariants_accepts_dynamic_steering_before_initial_follow_up() -> (
+    None
+):
+    events = (
+        *_completed_turn(1),
+        QueueMessageInjected(kind="steering", content="initial steer"),
+        *_completed_turn(2),
+        QueueMessageInjected(kind="steering", content="dynamic steer"),
+        *_completed_turn(3),
+        QueueMessageInjected(kind="follow_up", content="initial follow"),
+        *_completed_turn(4),
+    )
+    assert_queue_ordering_invariants(
+        events,
+        initial_steering_count=1,
+        initial_follow_up_count=1,
+    )
 
 
 def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> None:

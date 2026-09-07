@@ -18,8 +18,14 @@ from collections import Counter
 from collections.abc import Sequence
 
 from wisp.events import (
+    ContextEstimated,
+    ContextOverflow,
+    ContextPressure,
     ErrorEvent,
     MessageCompleted,
+    MessageDelta,
+    MessageStarted,
+    ProviderRetrying,
     QueueMessageInjected,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -38,6 +44,16 @@ _TOOL_LIFECYCLE_EVENT_TYPES = (
     ToolResultReady,
     ToolApprovalRequested,
     ToolApprovalResolved,
+)
+_TURN_SCOPED_EVENT_TYPES = (
+    ProviderRetrying,
+    MessageStarted,
+    MessageDelta,
+    MessageCompleted,
+    ContextEstimated,
+    ContextPressure,
+    ContextOverflow,
+    *_TOOL_LIFECYCLE_EVENT_TYPES,
 )
 
 
@@ -179,8 +195,9 @@ def assert_turn_invariants(
     3. Outcomes are valid ('completed', 'failed', 'cancelled').
     4. Outcome 'cancelled' requires finish_reason 'cancelled' and prohibits subsequent turns.
     5. Outcome 'completed' requires a non-cancelled finish_reason ('stop', 'tool_calls', etc.).
-    6. Tool lifecycle events appear only inside an active turn.
-    7. No turn or tool events appear after the final TurnCompleted.
+    6. Turn-scoped events (messages, retries, context, and tool lifecycle) appear
+       only inside an active turn.
+    7. No turn-scoped events appear after the final TurnCompleted.
     """
 
     assert_turn_terminals(events)
@@ -192,7 +209,7 @@ def assert_turn_invariants(
         forbidden_trailing = [
             type(e).__name__
             for e in events[last_turn_completed_idx + 1 :]
-            if isinstance(e, (TurnStarted, TurnCompleted, *_TOOL_LIFECYCLE_EVENT_TYPES))
+            if isinstance(e, (TurnStarted, TurnCompleted, *_TURN_SCOPED_EVENT_TYPES))
         ]
         assert not forbidden_trailing, (
             f"Events appeared after final TurnCompleted: {', '.join(forbidden_trailing)}"
@@ -238,7 +255,7 @@ def assert_turn_invariants(
             in_turn = None
             if expected_turn is not None:
                 expected_turn += 1
-        elif isinstance(event, _TOOL_LIFECYCLE_EVENT_TYPES):
+        elif isinstance(event, _TURN_SCOPED_EVENT_TYPES):
             assert in_turn is not None, f"{type(event).__name__} appeared outside an active turn"
 
 
@@ -285,7 +302,7 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         forbidden_trailing = [
             type(event).__name__
             for event in trailing
-            if isinstance(event, (TurnStarted, TurnCompleted, *_TOOL_LIFECYCLE_EVENT_TYPES))
+            if isinstance(event, (TurnStarted, TurnCompleted, *_TURN_SCOPED_EVENT_TYPES))
         ]
         assert not forbidden_trailing, (
             f"Events appeared after completed-turn cancellation: {', '.join(forbidden_trailing)}"
@@ -308,8 +325,8 @@ def assert_queue_ordering_invariants(
     1. Injected messages cannot appear inside an active turn (TurnStarted to TurnCompleted).
     2. Within each turn transition boundary, all steering injections must precede follow-up
        injections.
-    3. If initial queue counts are provided, all initial steering messages must be injected before
-       any initial follow-up messages are injected across boundaries.
+    3. If initial queue counts are provided, at least that many steering messages must be injected
+       before any follow-up, so later dynamically queued steering may still precede the follow-up.
     4. If expected_steering / expected_follow_up snapshots are provided, injected contents for
        each kind must match that enqueue order (FIFO within kind).
     """
@@ -361,9 +378,9 @@ def assert_queue_ordering_invariants(
             steering_before_follow_up = sum(
                 1 for inj in all_injections[:first_follow_up_idx] if inj.kind == "steering"
             )
-            assert steering_before_follow_up == min(initial_steering_count, len(all_injections)), (
-                f"Expected all {initial_steering_count} initial steering messages to be injected "
-                f"before follow-ups, but only {steering_before_follow_up} were"
+            assert steering_before_follow_up >= initial_steering_count, (
+                f"Expected at least {initial_steering_count} initial steering messages to be "
+                f"injected before follow-ups, but only {steering_before_follow_up} were"
             )
 
     if expected_steering is not None:
