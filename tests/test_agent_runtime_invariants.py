@@ -6,8 +6,12 @@ import anyio
 import pytest
 
 from tests.agent_runtime import (
+    assert_cancellation_settled,
+    assert_continuation_invariants,
+    assert_queue_ordering_invariants,
     assert_settled_tool_calls,
     assert_tool_result_pairing,
+    assert_turn_invariants,
     assert_turn_terminals,
 )
 from wisp.agent.execution import PreparedToolExecution, ToolExecutionEvent, ToolPreparationEvent
@@ -17,6 +21,7 @@ from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
     MessageDelta,
+    QueueMessageInjected,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -411,3 +416,241 @@ def test_live_prepared_batch_cancel_settles_each_requested_call() -> None:
     events = anyio.run(run)
     assert_turn_terminals(events)
     assert_settled_tool_calls(events, ("call-1", "call-2"))
+
+
+def test_assert_turn_invariants_accepts_clean_turn_sequence() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_non_1_initial_turn() -> None:
+    events = (
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="expected turn 1"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_turn_gap() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=3),
+        TurnCompleted(turn=3, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="expected turn 2"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_invalid_outcome() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted.model_construct(turn=1, outcome="unknown", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="Invalid TurnCompleted outcome"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_cancelled_with_wrong_finish_reason() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="finish_reason 'cancelled'"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_completed_with_cancelled_finish_reason() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="cancelled"),
+    )
+    with pytest.raises(AssertionError, match="must not have finish_reason 'cancelled'"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_turn_activity_after_failure() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="appeared after terminal turn 1"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_turn_event_after_final_turn_completed() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+        _ended("call-1"),
+    )
+    with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
+        assert_turn_invariants(events)
+
+
+def test_assert_cancellation_settled_accepts_clean_cancellation() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    )
+    assert_cancellation_settled(events)
+
+
+def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+    )
+    with pytest.raises(AssertionError, match="cancellation ErrorEvent"):
+        assert_cancellation_settled(events)
+
+
+def test_assert_cancellation_settled_rejects_completed_outcome() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="outcome 'cancelled'"):
+        assert_cancellation_settled(events)
+
+
+def test_assert_queue_ordering_invariants_accepts_steering_before_follow_up() -> None:
+    events = (
+        QueueMessageInjected(kind="steering", content="steer text"),
+        QueueMessageInjected(kind="follow_up", content="follow text"),
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    assert_queue_ordering_invariants(events)
+
+
+def test_assert_queue_ordering_invariants_rejects_follow_up_before_steering() -> None:
+    events = (
+        QueueMessageInjected(kind="follow_up", content="follow text"),
+        QueueMessageInjected(kind="steering", content="steer text"),
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="steering injection appeared after follow-up"):
+        assert_queue_ordering_invariants(events)
+
+
+def test_assert_continuation_invariants_accepts_tool_continuation() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    assert_continuation_invariants(events)
+
+
+def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
+    call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="resp-1"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                    response_id="resp-1",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="resp-2"),
+                ProviderTextDelta(delta="all done"),
+                ProviderResponseCompleted(
+                    content="all done",
+                    finish_reason="stop",
+                    response_id="resp-2",
+                ),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=_RecordingToolExecutor()),
+                messages=(Message(role="user", content="lookup something"),),
+            )
+        ]
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_tool_result_pairing(events)
+    assert_continuation_invariants(events)
+    assert_settled_tool_calls(events, ("call-1",))
+
+
+def test_live_cancellation_settlement_satisfies_invariants() -> None:
+    provider = _BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
+    harness = AgentHarness(
+        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with anyio.fail_after(1):
+            async for event in harness.prompt("stop"):
+                events.append(event)
+                if isinstance(event, MessageDelta):
+                    assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_cancellation_settled(events)
+
+
+def test_live_queue_drain_satisfies_ordering_invariants() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="first response"),
+                ProviderResponseCompleted(content="first response"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="steered response"),
+                ProviderResponseCompleted(content="steered response"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="follow-up response"),
+                ProviderResponseCompleted(content="follow-up response"),
+            ],
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        harness.follow_up("queued follow-up")
+        harness.steer("queued steering")
+        async for event in harness.prompt("initial prompt"):
+            events.append(event)
+        return events
+
+    events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_queue_ordering_invariants(events)

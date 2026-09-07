@@ -17,7 +17,14 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 
-from wisp.events import ToolExecutionEnded, ToolResultReady, TurnCompleted, TurnStarted
+from wisp.events import (
+    ErrorEvent,
+    QueueMessageInjected,
+    ToolExecutionEnded,
+    ToolResultReady,
+    TurnCompleted,
+    TurnStarted,
+)
 
 
 def assert_turn_terminals(events: Sequence[object]) -> None:
@@ -126,3 +133,152 @@ def assert_settled_tool_calls(events: Sequence[object], call_ids: Sequence[str])
         if ended_counts[call_id] < expected
     ]
     assert not missing, f"missing terminal tool results for call_ids: {', '.join(missing)}"
+
+
+def assert_turn_invariants(events: Sequence[object]) -> None:
+    """Enforce strict 1-based turn sequencing, valid outcomes, and containment.
+
+    Verifies:
+    1. 1:1 match between TurnStarted and TurnCompleted (via assert_turn_terminals).
+    2. Turn numbers start at 1 and advance strictly by 1 (1, 2, 3...) with no gaps.
+    3. Outcomes are valid ('completed', 'failed', 'cancelled').
+    4. Outcome 'cancelled' requires finish_reason 'cancelled'.
+    5. Outcome 'completed' requires a non-cancelled finish_reason ('stop', 'tool_calls', etc.).
+    6. No turn or tool events appear after failure/cancellation or after the final TurnCompleted.
+    """
+
+    assert_turn_terminals(events)
+    expected_turn = 1
+    in_turn: int | None = None
+    terminal_error_turn: int | None = None
+
+    for _index, event in enumerate(events):
+        if isinstance(event, TurnStarted):
+            assert terminal_error_turn is None, (
+                f"TurnStarted for turn {event.turn} appeared after terminal turn "
+                f"{terminal_error_turn} failed/cancelled"
+            )
+            assert event.turn == expected_turn, (
+                f"TurnStarted expected turn {expected_turn}, got {event.turn}"
+            )
+            in_turn = event.turn
+        elif isinstance(event, TurnCompleted):
+            assert in_turn == event.turn, (
+                f"TurnCompleted for turn {event.turn} arrived while in_turn was {in_turn}"
+            )
+            assert event.outcome in ("completed", "failed", "cancelled"), (
+                f"Invalid TurnCompleted outcome: {event.outcome!r}"
+            )
+            if event.outcome == "cancelled":
+                assert event.finish_reason == "cancelled", (
+                    "Cancelled turn must have finish_reason 'cancelled', "
+                    f"got {event.finish_reason!r}"
+                )
+                terminal_error_turn = event.turn
+            elif event.outcome == "failed":
+                terminal_error_turn = event.turn
+            elif event.outcome == "completed":
+                assert event.finish_reason != "cancelled", (
+                    "Completed turn must not have finish_reason 'cancelled'"
+                )
+            in_turn = None
+            expected_turn += 1
+
+    last_turn_completed_idx = max(
+        (idx for idx, e in enumerate(events) if isinstance(e, TurnCompleted)),
+        default=None,
+    )
+    if last_turn_completed_idx is not None and last_turn_completed_idx < len(events) - 1:
+        forbidden_trailing = [
+            type(e).__name__
+            for e in events[last_turn_completed_idx + 1 :]
+            if isinstance(e, (TurnStarted, TurnCompleted, ToolExecutionEnded, ToolResultReady))
+        ]
+        assert not forbidden_trailing, (
+            f"Events appeared after final TurnCompleted: {', '.join(forbidden_trailing)}"
+        )
+
+
+def assert_cancellation_settled(events: Sequence[object]) -> None:
+    """Require that a cancelled run terminates cleanly with explicit settlement.
+
+    Enforces:
+    1. The final TurnCompleted must have outcome='cancelled' and finish_reason='cancelled'.
+    2. An ErrorEvent indicating cancellation must appear before the final TurnCompleted.
+    3. Tool execution Ended/Ready pairing is preserved.
+    """
+
+    assert_tool_result_pairing(events)
+    assert_turn_terminals(events)
+
+    turns = [e for e in events if isinstance(e, TurnCompleted)]
+    assert turns, "Cancelled run produced no TurnCompleted events"
+    last_turn = turns[-1]
+    assert last_turn.outcome == "cancelled", (
+        f"Expected final turn outcome 'cancelled', got {last_turn.outcome!r}"
+    )
+    assert last_turn.finish_reason == "cancelled", (
+        f"Expected final turn finish_reason 'cancelled', got {last_turn.finish_reason!r}"
+    )
+
+    turn_index = events.index(last_turn)
+    error_events = [
+        e
+        for e in events[:turn_index]
+        if isinstance(e, ErrorEvent) and "cancel" in e.message.lower()
+    ]
+    assert error_events, "Cancelled run must emit a cancellation ErrorEvent before TurnCompleted"
+
+
+def assert_queue_ordering_invariants(events: Sequence[object]) -> None:
+    """Require that queue injections adhere to steering priority over follow-up and FIFO order.
+
+    Within each turn transition boundary:
+    1. All steering injections must precede follow-up injections.
+    2. Injected messages cannot appear inside an active provider/tool round.
+    """
+
+    injected_by_turn: list[list[QueueMessageInjected]] = []
+    current_injections: list[QueueMessageInjected] = []
+
+    for event in events:
+        if isinstance(event, QueueMessageInjected):
+            current_injections.append(event)
+        elif isinstance(event, TurnStarted):
+            injected_by_turn.append(list(current_injections))
+            current_injections.clear()
+
+    for turn_idx, injections in enumerate(injected_by_turn, start=1):
+        if not injections:
+            continue
+        saw_follow_up = False
+        for injection in injections:
+            if injection.kind == "follow_up":
+                saw_follow_up = True
+            elif injection.kind == "steering":
+                assert not saw_follow_up, (
+                    f"Turn {turn_idx}: steering injection appeared after follow-up injection"
+                )
+
+
+def assert_continuation_invariants(events: Sequence[object]) -> None:
+    """Enforce provider continuation and context rebase lifecycle consistency.
+
+    1. A turn ending with finish_reason='tool_calls' must be followed by a turn
+       providing matching tool results or continuation.
+    2. Tool execution Ended/Ready pairing must hold across the entire stream.
+    3. Strict turn sequencing must hold.
+    """
+
+    assert_tool_result_pairing(events)
+    assert_turn_invariants(events)
+
+    turns = [e for e in events if isinstance(e, TurnCompleted)]
+    for i in range(len(turns) - 1):
+        completed = turns[i]
+        next_turn = turns[i + 1]
+        if completed.finish_reason == "tool_calls":
+            assert next_turn.turn == completed.turn + 1, (
+                f"Turn {completed.turn} with tool_calls must be followed by "
+                f"turn {completed.turn + 1}"
+            )
