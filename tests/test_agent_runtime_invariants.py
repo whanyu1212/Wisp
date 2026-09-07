@@ -571,6 +571,15 @@ def test_assert_cancellation_settled_rejects_multiple_unpaired_ended() -> None:
         assert_cancellation_settled(events)
 
 
+def test_assert_cancellation_settled_rejects_unpaired_ended_without_cancelled_turn() -> None:
+    events = (
+        _ended("call-1"),
+        ErrorEvent(message="Agent run cancelled"),
+    )
+    with pytest.raises(AssertionError, match="without ToolResultReady"):
+        assert_cancellation_settled(events)
+
+
 def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
@@ -620,6 +629,16 @@ def test_assert_turn_invariants_rejects_message_event_between_turns() -> None:
         *_completed_turn(2),
     )
     with pytest.raises(AssertionError, match="appeared outside an active turn"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_scoped_event_for_wrong_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageStarted(turn=2),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="for turn 2 appeared while in_turn was 1"):
         assert_turn_invariants(events)
 
 
@@ -706,7 +725,30 @@ def test_assert_continuation_invariants_reconciles_completed_and_requested_calls
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
-    with pytest.raises(AssertionError, match="missing terminal results for: \\['call-2'\\]"):
+    with pytest.raises(AssertionError, match="does not match MessageCompleted.tool_calls"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_requested_call_absent_from_completion() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(ToolCallSnapshot(call_id="call-1", name="read", arguments={}),),
+        ),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-2", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        _ended("call-2"),
+        _ready("call-2"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="does not match MessageCompleted.tool_calls"):
         assert_continuation_invariants(events)
 
 

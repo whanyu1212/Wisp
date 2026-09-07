@@ -113,7 +113,9 @@ def assert_tool_result_pairing(
 
     `allow_unpaired_ended_before_cancel` covers the harness projection boundary
     where cancel is observed on `ToolExecutionEnded`: the consumer may see that
-    Ended, then the cancellation error/terminal, without a following Ready.
+    Ended, then the cancellation error and matching cancelled TurnCompleted,
+    without a following Ready. Pre-turn cancellation cannot emit tool activity,
+    so the exemption requires that cancelled terminal.
     """
 
     pending_ended: dict[str, tuple[int, ToolExecutionEnded]] = {}
@@ -151,10 +153,23 @@ def assert_tool_result_pairing(
     if allow_unpaired_ended_before_cancel and len(pending_ended) == 1:
         ended_index = next(iter(pending_ended.values()))[0]
         trailing = events[ended_index + 1 :]
+        cancelled_terminal = next(
+            (
+                item
+                for item in trailing
+                if isinstance(item, TurnCompleted) and item.outcome == "cancelled"
+            ),
+            None,
+        )
         if (
-            trailing
+            cancelled_terminal is not None
+            and trailing
             and isinstance(trailing[0], ErrorEvent)
             and all(isinstance(item, (ErrorEvent, TurnCompleted)) for item in trailing)
+            and any(
+                isinstance(item, TurnStarted) and item.turn == cancelled_terminal.turn
+                for item in events[:ended_index]
+            )
         ):
             return
     assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
@@ -257,6 +272,12 @@ def assert_turn_invariants(
                 expected_turn += 1
         elif isinstance(event, _TURN_SCOPED_EVENT_TYPES):
             assert in_turn is not None, f"{type(event).__name__} appeared outside an active turn"
+            event_turn = getattr(event, "turn", None)
+            if event_turn is not None:
+                assert event_turn == in_turn, (
+                    f"{type(event).__name__} for turn {event_turn} appeared "
+                    f"while in_turn was {in_turn}"
+                )
 
 
 def assert_cancellation_settled(events: Sequence[object]) -> None:
@@ -440,12 +461,20 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                     f"Turn {completed.turn} had tool calls but has no subsequent continuation turn"
                 )
             if not terminal_without_continuation:
+                if requested_from_events and requested_from_completion:
+                    assert requested_from_events == requested_from_completion, (
+                        f"Turn {completed.turn} ToolCallRequested "
+                        f"{list(requested_from_events.elements())} does not match "
+                        f"MessageCompleted.tool_calls "
+                        f"{list(requested_from_completion.elements())}"
+                    )
+                expected_calls = requested_from_events or requested_from_completion
                 ended_calls = [e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)]
-                if requested_calls:
-                    missing = requested_calls - Counter(ended_calls)
+                if expected_calls:
+                    missing = expected_calls - Counter(ended_calls)
                     assert not missing, (
                         f"Turn {completed.turn} requested calls "
-                        f"{list(requested_calls.elements())} but was missing "
+                        f"{list(expected_calls.elements())} but was missing "
                         f"terminal results for: {list(missing.keys())}"
                     )
                 else:
