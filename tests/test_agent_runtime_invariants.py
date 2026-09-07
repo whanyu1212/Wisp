@@ -505,6 +505,62 @@ def test_assert_cancellation_settled_accepts_clean_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
+    events = (ErrorEvent(message="Agent run cancelled"),)
+    assert_cancellation_settled(events)
+
+
+def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+    )
+    with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
+        assert_turn_invariants(events)
+
+
+def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_reversal() -> None:
+    events = (
+        QueueMessageInjected(kind="follow_up", content="follow 1"),
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+        QueueMessageInjected(kind="steering", content="steer 2"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="appeared after follow-up injection"):
+        assert_queue_ordering_invariants(events)
+
+
+def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="length"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-2", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="missing terminal results for: \\['call-2'\\]"):
+        assert_continuation_invariants(events)
+
+
 def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
     events = (
         TurnStarted(turn=1),
@@ -560,7 +616,7 @@ def test_assert_queue_ordering_invariants_rejects_follow_up_before_steering() ->
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
     )
-    with pytest.raises(AssertionError, match="steering injection appeared after follow-up"):
+    with pytest.raises(AssertionError, match="[Ss]teering injection.*appeared after follow-up"):
         assert_queue_ordering_invariants(events)
 
 
