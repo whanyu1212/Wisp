@@ -328,6 +328,7 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         assert last_idx > 0 and isinstance(events[last_idx - 1], ErrorEvent), (
             "Cancelled run must emit an ErrorEvent before completion (immediately adjacent)"
         )
+        assert not trailing, "Events appeared after cancelled TurnCompleted"
         return
 
     if last_turn.outcome in ("completed", "failed") and trailing_errors:

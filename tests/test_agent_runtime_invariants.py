@@ -547,6 +547,24 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+@pytest.mark.parametrize(
+    "trailing",
+    [
+        ErrorEvent(message="Late error"),
+        QueueMessageInjected(kind="follow_up", content="Late follow-up"),
+    ],
+)
+def test_assert_cancellation_settled_rejects_trailing_boundary_events(trailing: object) -> None:
+    events = (
+        TurnStarted(turn=1),
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
+        trailing,
+    )
+    with pytest.raises(AssertionError, match="after cancelled TurnCompleted"):
+        assert_cancellation_settled(events)
+
+
 @pytest.mark.parametrize("position", ["before", "after", "next_turn"])
 def test_assert_cancellation_settled_rejects_activity_outside_cancelled_turn(position: str) -> None:
     events: list[object] = [
