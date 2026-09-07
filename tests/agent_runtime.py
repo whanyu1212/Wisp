@@ -18,6 +18,7 @@ import json
 from collections import Counter, deque
 from collections.abc import Sequence
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ContextEstimated,
     ContextOverflow,
@@ -483,22 +484,46 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
                 for call in completed_calls
             ]
-            if terminal_without_continuation:
-                completion_payloads = completion_payloads[: len(request_payloads)]
-            assert request_payloads == completion_payloads, (
-                f"Turn {completed.turn} ToolCallRequested names or arguments "
-                "do not match MessageCompleted.tool_calls in occurrence order"
-            )
             completion_indices = [
                 index
                 for index, event in enumerate(turn_events)
                 if isinstance(event, MessageCompleted)
                 for _call in event.tool_calls
             ]
+            if terminal_without_continuation:
+                first_terminal_indices: dict[str, int] = {}
+                for index, event in enumerate(turn_events):
+                    if isinstance(event, ToolExecutionEnded):
+                        first_terminal_indices.setdefault(event.call_id, index)
+                matched_offsets: list[int] = []
+                offset = 0
+                for request_index, payload in zip(request_indices, request_payloads, strict=True):
+                    while (
+                        completed.outcome == "cancelled"
+                        and offset < len(completion_payloads)
+                        and completion_payloads[offset] != payload
+                        and first_terminal_indices.get(
+                            completed_calls[offset].call_id, request_index
+                        )
+                        < request_index
+                    ):
+                        # Cancellation finalization skips already-settled IDs,
+                        # including later duplicate occurrences in the snapshot.
+                        offset += 1
+                    if offset == len(completion_payloads):
+                        break
+                    matched_offsets.append(offset)
+                    offset += 1
+                completion_payloads = [completion_payloads[index] for index in matched_offsets]
+                completion_indices = [completion_indices[index] for index in matched_offsets]
+            assert request_payloads == completion_payloads, (
+                f"Turn {completed.turn} ToolCallRequested names or arguments "
+                "do not match MessageCompleted.tool_calls in occurrence order"
+            )
             assert all(
                 completion_index < request_index
                 for completion_index, request_index in zip(
-                    completion_indices[: len(request_indices)], request_indices, strict=True
+                    completion_indices, request_indices, strict=True
                 )
             ), f"Turn {completed.turn} tool request appeared before its completion snapshot"
         expected_calls = requested_from_events
@@ -523,6 +548,8 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                     (request_index, request_event)
                 )
             last_result_index = -1
+            last_settlement_index = -1
+            settled_result_ids: set[str] = set()
             for terminal_index, terminal in enumerate(turn_events):
                 if not isinstance(terminal, ToolExecutionEnded):
                     continue
@@ -532,6 +559,7 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                     completed.outcome == "cancelled"
                     and terminal.process_state == "cancelled"
                     and terminal.is_error
+                    and terminal.output == INTERRUPTED_TOOL_RESULT_TEXT
                 )
                 if terminal_without_continuation:
                     # A failed prepared call can leave a gap before a later result.
@@ -549,12 +577,26 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 )
                 # Cancellation finalization can settle an earlier interrupted call
                 # after a later call has already produced its successful result.
-                if not cancellation_settlement:
+                if cancellation_settlement:
+                    assert terminal.call_id not in settled_result_ids, (
+                        f"Turn {completed.turn} cancellation settled an already-settled call ID"
+                    )
+                    assert expected[0] > last_settlement_index, (
+                        f"Turn {completed.turn} cancellation settlements "
+                        "appeared out of request order"
+                    )
+                    last_settlement_index = expected[0]
+                else:
+                    assert last_settlement_index == -1, (
+                        f"Turn {completed.turn} ordinary result appeared "
+                        "after cancellation settlement"
+                    )
                     assert expected[0] > last_result_index, (
                         f"Turn {completed.turn} terminal result names do not match requested tools "
                         "in occurrence order"
                     )
                     last_result_index = expected[0]
+                settled_result_ids.add(terminal.call_id)
         if has_tool_calls and not terminal_without_continuation:
             assert terminal_calls, (
                 f"Turn {completed.turn} completed with 'tool_calls' but had no "

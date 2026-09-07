@@ -19,6 +19,7 @@ from wisp.agent.execution import PreparedToolExecution, ToolExecutionEvent, Tool
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -1098,6 +1099,107 @@ def test_assert_continuation_invariants_rejects_skipped_request_in_interrupted_t
     with pytest.raises(
         AssertionError, match="do not match MessageCompleted.tool_calls in occurrence"
     ):
+        assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("settled_first", [True, False])
+def test_assert_continuation_invariants_only_skips_settled_duplicates_on_cancellation(
+    settled_first: bool,
+) -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(
+                ToolCallSnapshot(call_id="repeat", name="lookup", arguments={"n": 1}),
+                ToolCallSnapshot(call_id="repeat", name="lookup", arguments={"n": 2}),
+                ToolCallSnapshot(call_id="middle", name="lookup", arguments={"n": 3}),
+            ),
+        ),
+        ToolCallRequested(call_id="repeat", name="lookup", arguments={"n": 1}),
+        *((_ended("repeat"), _ready("repeat")) if settled_first else ()),
+        ToolCallRequested(call_id="middle", name="lookup", arguments={"n": 3}),
+        *((_ended("repeat"), _ready("repeat")) if not settled_first else ()),
+        _ended("middle"),
+        _ready("middle"),
+        *_tool_turn_end("cancelled"),
+    )
+    if settled_first:
+        assert_continuation_invariants(events)
+    else:
+        with pytest.raises(AssertionError, match="do not match MessageCompleted.tool_calls"):
+            assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize(
+    ("result_order", "error"),
+    [
+        (("normal-2", "cancel-1"), None),
+        (("cancel-1", "normal-2"), "ordinary result appeared after cancellation settlement"),
+        (("cancel-1", "cancel-2"), None),
+        (("cancel-2", "cancel-1"), "cancellation settlements appeared out of request order"),
+    ],
+)
+def test_assert_continuation_invariants_checks_cancellation_settlement_phase(
+    result_order: tuple[str, str],
+    error: str | None,
+) -> None:
+    results = {
+        "normal-2": _ended("call-2"),
+        "cancel-1": _ended("call-1").model_copy(
+            update={
+                "output": INTERRUPTED_TOOL_RESULT_TEXT,
+                "is_error": True,
+                "process_state": "cancelled",
+            }
+        ),
+        "cancel-2": _ended("call-2").model_copy(
+            update={
+                "output": INTERRUPTED_TOOL_RESULT_TEXT,
+                "is_error": True,
+                "process_state": "cancelled",
+            }
+        ),
+    }
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        ToolCallRequested(call_id="call-2", name="lookup", arguments={}),
+        *(
+            event
+            for key in result_order
+            for event in (results[key], ToolResultReady.from_execution_ended(results[key]))
+        ),
+        *_tool_turn_end("cancelled"),
+    )
+    if error is not None:
+        with pytest.raises(AssertionError, match=error):
+            assert_continuation_invariants(events)
+    else:
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_resettling_cancelled_call_id() -> None:
+    cancellation = _ended().model_copy(
+        update={
+            "output": INTERRUPTED_TOOL_RESULT_TEXT,
+            "is_error": True,
+            "process_state": "cancelled",
+        }
+    )
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        _ended(),
+        _ready(),
+        cancellation,
+        ToolResultReady.from_execution_ended(cancellation),
+        *_tool_turn_end("cancelled"),
+    )
+    with pytest.raises(AssertionError, match="cancellation settled an already-settled call ID"):
         assert_continuation_invariants(events)
 
 
