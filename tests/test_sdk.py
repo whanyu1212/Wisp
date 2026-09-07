@@ -29,8 +29,8 @@ from wisp.providers.events import (
     ProviderTextDelta,
 )
 from wisp.providers.fake import ScriptedProvider
-from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
+from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import StoreApiKeyCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
@@ -1130,7 +1130,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
             ]
         ]
     )
-    original_updated_state = rpc_execution_module.updated_rpc_session_state
+    original_updated_state = rpc_session_run_module.updated_rpc_session_state
 
     async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
         runtime = await build_runtime()
@@ -1147,7 +1147,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
         return original_updated_state(session, committed_history, entry_start)
 
     monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
-    monkeypatch.setattr(rpc_execution_module, "updated_rpc_session_state", blocked_updated_state)
+    monkeypatch.setattr(rpc_session_run_module, "updated_rpc_session_state", blocked_updated_state)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -1194,7 +1194,7 @@ def test_in_process_sdk_reports_prompt_final_state_refresh_errors(
         raise OSError("session state unavailable")
 
     monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
-    monkeypatch.setattr(rpc_execution_module, "updated_rpc_session_state", failed_updated_state)
+    monkeypatch.setattr(rpc_session_run_module, "updated_rpc_session_state", failed_updated_state)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -1292,7 +1292,7 @@ def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
             ],
         ]
     )
-    original_updated_state = rpc_execution_module.updated_rpc_session_state
+    original_updated_state = rpc_session_run_module.updated_rpc_session_state
 
     async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
         runtime = await build_runtime()
@@ -1336,7 +1336,7 @@ def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
                 await wait_for_completion("prompt-2")
 
                 monkeypatch.setattr(
-                    rpc_execution_module,
+                    rpc_session_run_module,
                     "updated_rpc_session_state",
                     blocked_updated_state,
                 )
@@ -1604,7 +1604,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
             ]
         ]
     )
-    original_run_start = rpc_execution_module.rpc_session_run_start
+    original_run_start = rpc_session_run_module.rpc_session_run_start
 
     async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
         runtime = await build_runtime()
@@ -1617,7 +1617,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
         return original_run_start(session, entry_start)
 
     monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
-    monkeypatch.setattr(rpc_execution_module, "rpc_session_run_start", blocked_run_start)
+    monkeypatch.setattr(rpc_session_run_module, "rpc_session_run_start", blocked_run_start)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(

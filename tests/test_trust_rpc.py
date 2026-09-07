@@ -15,8 +15,8 @@ from wisp.providers.events import ProviderResponseCompleted, ProviderResponseSta
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.configuration import _ConfigOverrides
-from wisp.rpc.execution import run_rpc_prompt_command
 from wisp.rpc.host import RpcTrustGate
+from wisp.rpc.session_run import run_rpc_prompt_command
 from wisp.skills.tool import SkillTool
 
 
