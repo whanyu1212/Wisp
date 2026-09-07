@@ -13,7 +13,11 @@ import anyio
 import pytest
 
 import wisp.agent.loop as agent_loop_module
-from tests.agent_runtime import assert_settled_tool_calls, assert_turn_terminals
+from tests.agent_runtime import (
+    assert_continuation_invariants,
+    assert_settled_tool_calls,
+    assert_turn_terminals,
+)
 from wisp.agent.context import observe_context
 from wisp.agent.execution import (
     ContextOverflowSnapshot,
@@ -39,6 +43,7 @@ from wisp.events import (
     MessageStarted,
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolCallRequested,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
@@ -424,6 +429,140 @@ def test_configured_parallel_batch_isolates_tool_owned_failure() -> None:
         "call-1",
         "call-2",
     ]
+
+
+@pytest.mark.parametrize("first_raises", [True, False])
+def test_prepared_cancellation_distinguishes_tool_results_from_settlement(
+    first_raises: bool,
+) -> None:
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    token = Token()
+    calls = (
+        ToolCall(call_id="call-1", name="lookup", arguments={}),
+        ToolCall(call_id="call-2", name="lookup", arguments={}),
+    )
+
+    async def runner(call: ToolCall) -> ToolExecutionEnded:
+        if call.call_id == "call-1":
+            if first_raises:
+                raise RuntimeError("first call failed")
+            return ToolExecutionEnded(
+                call_id=call.call_id,
+                name=call.name,
+                output="Tool stopped",
+                is_error=True,
+                process_state="cancelled",
+            )
+        token.cancelled = True
+        return ToolExecutionEnded(
+            call_id=call.call_id, name=call.name, output="done", is_error=False
+        )
+
+    async def run() -> list[object]:
+        with anyio.fail_after(3):
+            return [
+                event
+                async for event in run_agent_loop(
+                    AgentLoopConfig(
+                        provider=_scripted_tool_batch_provider(calls),
+                        tool_executor=PreparedScriptExecutor(runner),
+                        cancellation_token=token,
+                    ),
+                    messages=(Message(role="user", content="hi"),),
+                )
+            ]
+
+    events = anyio.run(run)
+    assert [
+        (event.call_id, event.process_state)
+        for event in events
+        if isinstance(event, ToolExecutionEnded)
+    ] == (
+        [("call-2", None), ("call-1", "cancelled")]
+        if first_raises
+        else [("call-1", "cancelled"), ("call-2", None)]
+    )
+    assert_continuation_invariants(events)
+
+
+def test_prepared_failure_matches_later_repeated_call_occurrence() -> None:
+    calls = (
+        ToolCall(call_id="repeat", name="lookup", arguments={"n": 1}),
+        ToolCall(call_id="middle", name="lookup", arguments={"n": 2}),
+        ToolCall(call_id="repeat", name="lookup", arguments={"n": 3}),
+    )
+
+    async def runner(call: ToolCall) -> ToolExecutionEnded:
+        if call.arguments["n"] == 1:
+            raise RuntimeError("first occurrence failed")
+        return ToolExecutionEnded(
+            call_id=call.call_id, name=call.name, output=str(call.arguments["n"]), is_error=False
+        )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with anyio.fail_after(3), pytest.raises(RuntimeError, match="first occurrence failed"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=_scripted_tool_batch_provider(calls),
+                    tool_executor=PreparedScriptExecutor(runner),
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+    assert [
+        (event.call_id, event.output) for event in events if isinstance(event, ToolExecutionEnded)
+    ] == [("middle", "2"), ("repeat", "3")]
+    assert_continuation_invariants(events)
+
+
+def test_prepared_cancellation_skips_already_settled_duplicate_snapshot() -> None:
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    token = Token()
+    calls = (
+        ToolCall(call_id="repeat", name="lookup", arguments={"n": 1}),
+        ToolCall(call_id="repeat", name="lookup", arguments={"n": 2}),
+        ToolCall(call_id="middle", name="lookup", arguments={"n": 3}),
+    )
+
+    async def runner(call: ToolCall) -> ToolExecutionEnded:
+        raise AssertionError(f"Unexpected execution: {call.call_id}")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with anyio.fail_after(3):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=_scripted_tool_batch_provider(calls),
+                    tool_executor=PreparedScriptExecutor(runner),
+                    cancellation_token=token,
+                ),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+                if isinstance(event, ToolCallRequested):
+                    token.cancelled = True
+        return events
+
+    events = anyio.run(run)
+    assert [event.call_id for event in events if isinstance(event, ToolCallRequested)] == [
+        "repeat",
+        "middle",
+    ]
+    assert_continuation_invariants(events)
 
 
 def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> None:
