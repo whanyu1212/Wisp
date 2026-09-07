@@ -15,7 +15,7 @@ and pressure later slices to change production behavior.
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Sequence
 
 from wisp.events import (
@@ -428,13 +428,12 @@ def assert_queue_ordering_invariants(
 def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
-    1. Successful turns with request or completion events must have exactly matching
-       ordered request IDs, names, and arguments, plus matching terminal IDs and names,
-       including when the completion requests no calls. Each occurrence must follow
-       completion -> request -> result order. Abbreviated streams without request or
-       completion events retain the result-only check.
-    2. Any tool-bearing turn must be followed by a continuation turn (unless the run
-       failed or was cancelled).
+    1. Requests match earlier completion snapshots in source order, and results match
+       earlier request occurrences. Interrupted turns may omit requests/results, and
+       cancellation settlement may fill earlier result gaps after later successes.
+       Successful turns settle the complete snapshot in order. Abbreviated streams
+       without request or completion events retain the result-only check.
+    2. Any successful tool-bearing turn must be followed by a continuation turn.
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
     4. Strict turn sequencing must hold.
     """
@@ -465,19 +464,17 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 assert terminal_without_continuation, (
                     f"Turn {completed.turn} had tool calls but has no subsequent continuation turn"
                 )
-        if terminal_without_continuation:
-            continue
-
         request_indices = [
             index for index, event in enumerate(turn_events) if isinstance(event, ToolCallRequested)
         ]
         if message_completions:
-            assert requested_from_events == requested_from_completion, (
-                f"Turn {completed.turn} ToolCallRequested "
-                f"{list(requested_from_events.elements())} does not match "
-                f"MessageCompleted.tool_calls "
-                f"{list(requested_from_completion.elements())}"
-            )
+            if not terminal_without_continuation:
+                assert requested_from_events == requested_from_completion, (
+                    f"Turn {completed.turn} ToolCallRequested "
+                    f"{list(requested_from_events.elements())} does not match "
+                    f"MessageCompleted.tool_calls "
+                    f"{list(requested_from_completion.elements())}"
+                )
             request_payloads = [
                 (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
                 for call in request_events
@@ -486,6 +483,8 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
                 for call in completed_calls
             ]
+            if terminal_without_continuation:
+                completion_payloads = completion_payloads[: len(request_payloads)]
             assert request_payloads == completion_payloads, (
                 f"Turn {completed.turn} ToolCallRequested names or arguments "
                 "do not match MessageCompleted.tool_calls in occurrence order"
@@ -499,44 +498,64 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
             assert all(
                 completion_index < request_index
                 for completion_index, request_index in zip(
-                    completion_indices, request_indices, strict=True
+                    completion_indices[: len(request_indices)], request_indices, strict=True
                 )
             ), f"Turn {completed.turn} tool request appeared before its completion snapshot"
-        expected_calls = requested_from_events or requested_from_completion
+        expected_calls = requested_from_events
         terminal_events = [e for e in turn_events if isinstance(e, ToolExecutionEnded)]
         terminal_calls = Counter(e.call_id for e in terminal_events)
         if expected_calls or message_completions:
-            missing = expected_calls - terminal_calls
-            assert not missing, (
-                f"Turn {completed.turn} requested calls "
-                f"{list(expected_calls.elements())} but was missing "
-                f"terminal results for: {list(missing.keys())}"
-            )
+            if not terminal_without_continuation:
+                missing = expected_calls - terminal_calls
+                assert not missing, (
+                    f"Turn {completed.turn} requested calls "
+                    f"{list(expected_calls.elements())} but was missing "
+                    f"terminal results for: {list(missing.keys())}"
+                )
             unexpected = terminal_calls - expected_calls
             assert not unexpected, (
                 f"Turn {completed.turn} had terminal results for unrequested calls: "
                 f"{list(unexpected.elements())}"
             )
-            expected_names = [
-                (call.call_id, call.name) for call in (request_events or completed_calls)
-            ]
-            terminal_names = [(event.call_id, event.name) for event in terminal_events]
-            assert expected_names == terminal_names, (
-                f"Turn {completed.turn} terminal result names do not match requested tools "
-                "in occurrence order"
-            )
-            terminal_indices = [
-                index
-                for index, event in enumerate(turn_events)
-                if isinstance(event, ToolExecutionEnded)
-            ]
-            assert all(
-                request_index < terminal_index
-                for request_index, terminal_index in zip(
-                    request_indices, terminal_indices, strict=True
+            remaining_requests: dict[str, deque[tuple[int, ToolCallRequested]]] = {}
+            for request_index, request_event in zip(request_indices, request_events, strict=True):
+                remaining_requests.setdefault(request_event.call_id, deque()).append(
+                    (request_index, request_event)
                 )
-            ), f"Turn {completed.turn} terminal result appeared before its request occurrence"
-        if has_tool_calls:
+            last_result_index = -1
+            for terminal_index, terminal in enumerate(turn_events):
+                if not isinstance(terminal, ToolExecutionEnded):
+                    continue
+                candidates = remaining_requests[terminal.call_id]
+                expected = candidates.popleft() if candidates else None
+                cancellation_settlement = (
+                    completed.outcome == "cancelled"
+                    and terminal.process_state == "cancelled"
+                    and terminal.is_error
+                )
+                if terminal_without_continuation:
+                    # A failed prepared call can leave a gap before a later result.
+                    while expected is not None and (
+                        expected[1].name != terminal.name
+                        or (not cancellation_settlement and expected[0] <= last_result_index)
+                    ):
+                        expected = candidates.popleft() if candidates else None
+                assert expected is not None and expected[1].name == terminal.name, (
+                    f"Turn {completed.turn} terminal result names do not match requested tools "
+                    "in occurrence order"
+                )
+                assert expected[0] < terminal_index, (
+                    f"Turn {completed.turn} terminal result appeared before its request occurrence"
+                )
+                # Cancellation finalization can settle an earlier interrupted call
+                # after a later call has already produced its successful result.
+                if not cancellation_settlement:
+                    assert expected[0] > last_result_index, (
+                        f"Turn {completed.turn} terminal result names do not match requested tools "
+                        "in occurrence order"
+                    )
+                    last_result_index = expected[0]
+        if has_tool_calls and not terminal_without_continuation:
             assert terminal_calls, (
                 f"Turn {completed.turn} completed with 'tool_calls' but had no "
                 "tool execution within that turn"

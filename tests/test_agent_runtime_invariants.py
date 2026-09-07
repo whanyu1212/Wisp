@@ -67,6 +67,20 @@ def _ready(call_id: str = "call-1") -> ToolResultReady:
     return ToolResultReady.from_execution_ended(_ended(call_id))
 
 
+def _tool_turn_end(outcome: Literal["completed", "failed", "cancelled"]) -> tuple[object, ...]:
+    if outcome == "completed":
+        return (
+            TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+            *_completed_turn(2),
+        )
+    return (
+        ErrorEvent(message="Tool execution interrupted"),
+        TurnCompleted(
+            turn=1, outcome=outcome, finish_reason="error" if outcome == "failed" else "cancelled"
+        ),
+    )
+
+
 def test_assert_turn_terminals_accepts_matched_starts_and_completes() -> None:
     assert_turn_terminals(_completed_turn())
     assert_turn_terminals((*_completed_turn(1), *_completed_turn(2)))
@@ -836,8 +850,10 @@ def test_assert_continuation_invariants_rejects_empty_tool_continuation() -> Non
         ToolCallRequested(call_id="call-1", name="lookup", arguments={"path": "b"}),
     ],
 )
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_assert_continuation_invariants_rejects_changed_request_payload(
     request_event: ToolCallRequested,
+    outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
     events = (
         TurnStarted(turn=1),
@@ -852,8 +868,7 @@ def test_assert_continuation_invariants_rejects_changed_request_payload(
         request_event,
         _ended(),
         _ready(),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
-        *_completed_turn(2),
+        *_tool_turn_end(outcome),
     )
     with pytest.raises(AssertionError, match="names or arguments do not match"):
         assert_continuation_invariants(events)
@@ -882,8 +897,10 @@ def test_assert_continuation_invariants_accepts_reordered_argument_keys() -> Non
 
 
 @pytest.mark.parametrize("include_completion", [True, False])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_assert_continuation_invariants_rejects_changed_result_name(
     include_completion: bool,
+    outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
     completion = MessageCompleted(
         turn=1,
@@ -897,8 +914,7 @@ def test_assert_continuation_invariants_rejects_changed_result_name(
         ToolCallRequested(call_id="call-1", name="other", arguments={}),
         _ended(),
         _ready(),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
-        *_completed_turn(2),
+        *_tool_turn_end(outcome),
     )
     with pytest.raises(AssertionError, match="terminal result names do not match"):
         assert_continuation_invariants(events)
@@ -947,9 +963,11 @@ def test_assert_continuation_invariants_rejects_reordered_request_occurrences() 
 
 @pytest.mark.parametrize("request_first", [True, False])
 @pytest.mark.parametrize("repeat_id", [True, False])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_assert_continuation_invariants_checks_completion_request_order(
     request_first: bool,
     repeat_id: bool,
+    outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
     call = ToolCallSnapshot(call_id="call-1", name="lookup", arguments={})
     calls = (call, call) if repeat_id else (call,)
@@ -963,8 +981,7 @@ def test_assert_continuation_invariants_checks_completion_request_order(
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
         *(requests[1:] if request_first else requests),
         *(event for _call in calls for event in (_ended(), _ready())),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
-        *_completed_turn(2),
+        *_tool_turn_end(outcome),
     )
     if request_first:
         with pytest.raises(
@@ -977,9 +994,11 @@ def test_assert_continuation_invariants_checks_completion_request_order(
 
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("reverse_results", [True, False])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_assert_continuation_invariants_matches_result_occurrence_order(
     repeat_id: bool,
     reverse_results: bool,
+    outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
     second_id = "call-1" if repeat_id else "call-2"
     calls = (
@@ -1001,8 +1020,7 @@ def test_assert_continuation_invariants_matches_result_occurrence_order(
             for result in results
             for event in (result, ToolResultReady.from_execution_ended(result))
         ),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
-        *_completed_turn(2),
+        *_tool_turn_end(outcome),
     )
     if reverse_results:
         with pytest.raises(AssertionError, match="terminal result names do not match"):
@@ -1012,8 +1030,10 @@ def test_assert_continuation_invariants_matches_result_occurrence_order(
 
 
 @pytest.mark.parametrize("repeat_id", [True, False])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_assert_continuation_invariants_rejects_result_before_request_occurrence(
     repeat_id: bool,
+    outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
     first_occurrence = (
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -1026,11 +1046,57 @@ def test_assert_continuation_invariants_rejects_result_before_request_occurrence
         _ended(),
         _ready(),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
-        *_completed_turn(2),
+        *_tool_turn_end(outcome),
     )
     with pytest.raises(
         AssertionError, match="terminal result appeared before its request occurrence"
+    ):
+        assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+@pytest.mark.parametrize("settled_id", [None, "call-1", "call-2"])
+def test_assert_continuation_invariants_allows_partial_interrupted_tool_turn(
+    outcome: Literal["failed", "cancelled"],
+    settled_id: str | None,
+) -> None:
+    calls = tuple(
+        ToolCallSnapshot(call_id=f"call-{index}", name="lookup", arguments={})
+        for index in (1, 2, 3)
+    )
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
+        *(
+            ToolCallRequested(call_id=call.call_id, name=call.name, arguments=call.arguments)
+            for call in calls[:2]
+        ),
+        *((_ended(settled_id), _ready(settled_id)) if settled_id is not None else ()),
+        *_tool_turn_end(outcome),
+    )
+    assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+def test_assert_continuation_invariants_rejects_skipped_request_in_interrupted_turn(
+    outcome: Literal["failed", "cancelled"],
+) -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
+                ToolCallSnapshot(call_id="call-2", name="lookup", arguments={}),
+            ),
+        ),
+        ToolCallRequested(call_id="call-2", name="lookup", arguments={}),
+        *_tool_turn_end(outcome),
+    )
+    with pytest.raises(
+        AssertionError, match="do not match MessageCompleted.tool_calls in occurrence"
     ):
         assert_continuation_invariants(events)
 
