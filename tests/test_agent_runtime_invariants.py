@@ -530,6 +530,15 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+def test_assert_cancellation_settled_accepts_error_after_completed_turn() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+        ErrorEvent(message="Agent run cancelled"),
+    )
+    assert_cancellation_settled(events)
+
+
 def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() -> None:
     events = (
         TurnStarted(turn=1),
@@ -868,6 +877,34 @@ def test_live_cancellation_settlement_satisfies_invariants() -> None:
         return events
 
     events = anyio.run(run)
+    assert_turn_invariants(events)
+    assert_cancellation_settled(events)
+
+
+def test_live_cancel_after_completed_turn_satisfies_cancellation_invariants() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="answer"),
+            ]
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
+    )
+    harness.steer("do not inject")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        async for event in harness.prompt("initial"):
+            events.append(event)
+            if isinstance(event, TurnCompleted):
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+    assert events[-1].type == "error"
     assert_turn_invariants(events)
     assert_cancellation_settled(events)
 

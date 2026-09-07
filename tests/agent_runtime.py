@@ -246,11 +246,12 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     """Require that a cancelled run terminates cleanly with explicit settlement.
 
     Enforces:
-    1. If turns were started, the final TurnCompleted must have outcome='cancelled'
-       and finish_reason='cancelled'.
-    2. If no turns were started, no TurnCompleted may appear.
-    3. An ErrorEvent must appear before any TurnCompleted. The message is not
-       required to contain 'cancel'; aborted providers copy their own wording.
+    1. If a turn was interrupted, the final TurnCompleted must have outcome='cancelled'
+       and finish_reason='cancelled', with an ErrorEvent before that terminal.
+    2. If no turns were started, no TurnCompleted may appear, and an ErrorEvent must
+       still be present.
+    3. If the last turn already completed, cancellation may emit only a trailing
+       ErrorEvent after that TurnCompleted (no cancelled terminal).
     4. Tool execution Ended/Ready pairing is preserved, except for a single
        unmatched Ended immediately followed by the cancellation ErrorEvent.
     """
@@ -260,22 +261,38 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
 
     turns = [e for e in events if isinstance(e, TurnCompleted)]
     started = [e for e in events if isinstance(e, TurnStarted)]
-    if started:
-        assert turns, "Cancelled run started a turn but produced no TurnCompleted events"
-        last_turn = turns[-1]
-        assert last_turn.outcome == "cancelled", (
-            f"Expected final turn outcome 'cancelled', got {last_turn.outcome!r}"
-        )
+    if not started:
+        assert not turns, "Cancelled run produced TurnCompleted without TurnStarted"
+        error_events = [e for e in events if isinstance(e, ErrorEvent)]
+        assert error_events, "Cancelled run must emit an ErrorEvent before completion"
+        return
+
+    assert turns, "Cancelled run started a turn but produced no TurnCompleted events"
+    last_turn = turns[-1]
+    last_idx = events.index(last_turn)
+    trailing = events[last_idx + 1 :]
+    trailing_errors = [event for event in trailing if isinstance(event, ErrorEvent)]
+
+    if last_turn.outcome == "cancelled":
         assert last_turn.finish_reason == "cancelled", (
             f"Expected final turn finish_reason 'cancelled', got {last_turn.finish_reason!r}"
         )
-        turn_index = events.index(last_turn)
-    else:
-        assert not turns, "Cancelled run produced TurnCompleted without TurnStarted"
-        turn_index = len(events)
+        error_events = [event for event in events[:last_idx] if isinstance(event, ErrorEvent)]
+        assert error_events, "Cancelled run must emit an ErrorEvent before completion"
+        return
 
-    error_events = [e for e in events[:turn_index] if isinstance(e, ErrorEvent)]
-    assert error_events, "Cancelled run must emit an ErrorEvent before completion"
+    if last_turn.outcome in ("completed", "failed") and trailing_errors:
+        forbidden_trailing = [
+            type(event).__name__
+            for event in trailing
+            if isinstance(event, (TurnStarted, TurnCompleted, *_TOOL_LIFECYCLE_EVENT_TYPES))
+        ]
+        assert not forbidden_trailing, (
+            f"Events appeared after completed-turn cancellation: {', '.join(forbidden_trailing)}"
+        )
+        return
+
+    raise AssertionError(f"Expected final turn outcome 'cancelled', got {last_turn.outcome!r}")
 
 
 def assert_queue_ordering_invariants(
