@@ -301,6 +301,12 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     started = [e for e in events if isinstance(e, TurnStarted)]
     if not started:
         assert not turns, "Cancelled run produced TurnCompleted without TurnStarted"
+        scoped_events = [
+            type(event).__name__ for event in events if isinstance(event, _TURN_SCOPED_EVENT_TYPES)
+        ]
+        assert not scoped_events, "Pre-turn cancellation produced turn-scoped events: " + ", ".join(
+            scoped_events
+        )
         error_events = [e for e in events if isinstance(e, ErrorEvent)]
         assert error_events, "Cancelled run must emit an ErrorEvent before completion"
         return
@@ -421,9 +427,9 @@ def assert_queue_ordering_invariants(
 def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
-    1. Any tool-bearing turn (requested tool calls or MessageCompleted.tool_calls)
-       must have matching terminal tool execution results for every requested call
-       (unless the turn failed or was cancelled).
+    1. Successful turns with request or completion events must have exactly matching
+       terminal tool execution results, including when the completion requests no calls.
+       Abbreviated streams without either event retain the result-only check.
     2. Any tool-bearing turn must be followed by a continuation turn (unless the run
        failed or was cancelled).
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
@@ -444,41 +450,48 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
         requested_from_events = Counter(
             e.call_id for e in turn_events if isinstance(e, ToolCallRequested)
         )
+        message_completions = [e for e in turn_events if isinstance(e, MessageCompleted)]
         requested_from_completion = Counter(
-            call.call_id
-            for e in turn_events
-            if isinstance(e, MessageCompleted)
-            for call in e.tool_calls
+            call.call_id for e in message_completions for call in e.tool_calls
         )
         requested_calls = requested_from_events | requested_from_completion
 
         has_tool_calls = bool(requested_calls) or completed.finish_reason == "tool_calls"
+        terminal_without_continuation = completed.outcome in ("cancelled", "failed")
         if has_tool_calls:
             is_last = i == len(turns) - 1
-            terminal_without_continuation = completed.outcome in ("cancelled", "failed")
             if is_last:
                 assert terminal_without_continuation, (
                     f"Turn {completed.turn} had tool calls but has no subsequent continuation turn"
                 )
-            if not terminal_without_continuation:
-                if requested_from_events and requested_from_completion:
-                    assert requested_from_events == requested_from_completion, (
-                        f"Turn {completed.turn} ToolCallRequested "
-                        f"{list(requested_from_events.elements())} does not match "
-                        f"MessageCompleted.tool_calls "
-                        f"{list(requested_from_completion.elements())}"
-                    )
-                expected_calls = requested_from_events or requested_from_completion
-                ended_calls = [e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)]
-                if expected_calls:
-                    missing = expected_calls - Counter(ended_calls)
-                    assert not missing, (
-                        f"Turn {completed.turn} requested calls "
-                        f"{list(expected_calls.elements())} but was missing "
-                        f"terminal results for: {list(missing.keys())}"
-                    )
-                else:
-                    assert ended_calls, (
-                        f"Turn {completed.turn} completed with 'tool_calls' but had no "
-                        "tool execution within that turn"
-                    )
+        if terminal_without_continuation:
+            continue
+
+        if message_completions:
+            assert requested_from_events == requested_from_completion, (
+                f"Turn {completed.turn} ToolCallRequested "
+                f"{list(requested_from_events.elements())} does not match "
+                f"MessageCompleted.tool_calls "
+                f"{list(requested_from_completion.elements())}"
+            )
+        expected_calls = requested_from_events or requested_from_completion
+        terminal_calls = Counter(
+            e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)
+        )
+        if expected_calls or message_completions:
+            missing = expected_calls - terminal_calls
+            assert not missing, (
+                f"Turn {completed.turn} requested calls "
+                f"{list(expected_calls.elements())} but was missing "
+                f"terminal results for: {list(missing.keys())}"
+            )
+            unexpected = terminal_calls - expected_calls
+            assert not unexpected, (
+                f"Turn {completed.turn} had terminal results for unrequested calls: "
+                f"{list(unexpected.elements())}"
+            )
+        if has_tool_calls:
+            assert terminal_calls, (
+                f"Turn {completed.turn} completed with 'tool_calls' but had no "
+                "tool execution within that turn"
+            )

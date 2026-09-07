@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from typing import Literal
 
 import anyio
 import pytest
@@ -531,6 +532,16 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
+def test_assert_cancellation_settled_rejects_scoped_activity_before_first_turn() -> None:
+    events = (
+        _ended("call-1"),
+        _ready("call-1"),
+        ErrorEvent(message="Agent run cancelled"),
+    )
+    with pytest.raises(AssertionError, match="Pre-turn cancellation produced turn-scoped events"):
+        assert_cancellation_settled(events)
+
+
 def test_assert_cancellation_settled_accepts_error_after_completed_turn() -> None:
     events = (
         TurnStarted(turn=1),
@@ -706,6 +717,21 @@ def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn(
         assert_continuation_invariants(events)
 
 
+def test_assert_continuation_invariants_rejects_empty_completion_call_list() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="does not match MessageCompleted.tool_calls"):
+        assert_continuation_invariants(events)
+
+
 def test_assert_continuation_invariants_reconciles_completed_and_requested_calls() -> None:
     events = (
         TurnStarted(turn=1),
@@ -729,6 +755,45 @@ def test_assert_continuation_invariants_reconciles_completed_and_requested_calls
         assert_continuation_invariants(events)
 
 
+def test_assert_continuation_invariants_rejects_terminal_for_unrequested_call() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(ToolCallSnapshot(call_id="call-1", name="read", arguments={}),),
+        ),
+        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        _ended("call-1"),
+        _ready("call-1"),
+        _ended("call-2"),
+        _ready("call-2"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="terminal results for unrequested calls"):
+        assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls"])
+def test_assert_continuation_invariants_rejects_results_for_empty_request_bags(
+    finish_reason: Literal["stop", "tool_calls"],
+) -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason=finish_reason, tool_calls=()),
+        _ended("orphan"),
+        _ready("orphan"),
+        TurnCompleted(turn=1, outcome="completed", finish_reason=finish_reason),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="terminal results for unrequested calls"):
+        assert_continuation_invariants(events)
+
+
 def test_assert_continuation_invariants_rejects_requested_call_absent_from_completion() -> None:
     events = (
         TurnStarted(turn=1),
@@ -749,6 +814,18 @@ def test_assert_continuation_invariants_rejects_requested_call_absent_from_compl
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
     with pytest.raises(AssertionError, match="does not match MessageCompleted.tool_calls"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_rejects_empty_tool_continuation() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        TurnStarted(turn=2),
+        TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="had no tool execution within that turn"):
         assert_continuation_invariants(events)
 
 
