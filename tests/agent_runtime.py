@@ -14,6 +14,7 @@ and pressure later slices to change production behavior.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Sequence
 
@@ -428,8 +429,9 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
     1. Successful turns with request or completion events must have exactly matching
-       terminal tool execution results, including when the completion requests no calls.
-       Abbreviated streams without either event retain the result-only check.
+       request IDs, names, and arguments, plus matching terminal IDs and names,
+       including when the completion requests no calls. Abbreviated streams without
+       either event retain the result-only check.
     2. Any tool-bearing turn must be followed by a continuation turn (unless the run
        failed or was cancelled).
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
@@ -447,13 +449,11 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
         end_idx = events.index(completed)
         turn_events = events[start_idx:end_idx]
 
-        requested_from_events = Counter(
-            e.call_id for e in turn_events if isinstance(e, ToolCallRequested)
-        )
+        request_events = [e for e in turn_events if isinstance(e, ToolCallRequested)]
+        requested_from_events = Counter(e.call_id for e in request_events)
         message_completions = [e for e in turn_events if isinstance(e, MessageCompleted)]
-        requested_from_completion = Counter(
-            call.call_id for e in message_completions for call in e.tool_calls
-        )
+        completed_calls = [call for e in message_completions for call in e.tool_calls]
+        requested_from_completion = Counter(call.call_id for call in completed_calls)
         requested_calls = requested_from_events | requested_from_completion
 
         has_tool_calls = bool(requested_calls) or completed.finish_reason == "tool_calls"
@@ -474,10 +474,21 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 f"MessageCompleted.tool_calls "
                 f"{list(requested_from_completion.elements())}"
             )
+            request_payloads = Counter(
+                (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
+                for call in request_events
+            )
+            completion_payloads = Counter(
+                (call.call_id, call.name, json.dumps(call.arguments, sort_keys=True))
+                for call in completed_calls
+            )
+            assert request_payloads == completion_payloads, (
+                f"Turn {completed.turn} ToolCallRequested names or arguments "
+                "do not match MessageCompleted.tool_calls"
+            )
         expected_calls = requested_from_events or requested_from_completion
-        terminal_calls = Counter(
-            e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)
-        )
+        terminal_events = [e for e in turn_events if isinstance(e, ToolExecutionEnded)]
+        terminal_calls = Counter(e.call_id for e in terminal_events)
         if expected_calls or message_completions:
             missing = expected_calls - terminal_calls
             assert not missing, (
@@ -489,6 +500,13 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
             assert not unexpected, (
                 f"Turn {completed.turn} had terminal results for unrequested calls: "
                 f"{list(unexpected.elements())}"
+            )
+            expected_names = Counter(
+                (call.call_id, call.name) for call in (request_events or completed_calls)
+            )
+            terminal_names = Counter((event.call_id, event.name) for event in terminal_events)
+            assert expected_names == terminal_names, (
+                f"Turn {completed.turn} terminal result names do not match requested tools"
             )
         if has_tool_calls:
             assert terminal_calls, (

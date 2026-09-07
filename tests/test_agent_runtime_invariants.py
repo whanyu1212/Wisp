@@ -692,7 +692,7 @@ def test_assert_queue_ordering_invariants_accepts_dynamic_steering_before_initia
 def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> None:
     events = (
         TurnStarted(turn=1),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         TurnCompleted(turn=1, outcome="completed", finish_reason="length"),
@@ -705,8 +705,8 @@ def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> Non
 def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn() -> None:
     events = (
         TurnStarted(turn=1),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
-        ToolCallRequested(call_id="call-2", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        ToolCallRequested(call_id="call-2", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -721,7 +721,7 @@ def test_assert_continuation_invariants_rejects_empty_completion_call_list() -> 
     events = (
         TurnStarted(turn=1),
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -740,11 +740,11 @@ def test_assert_continuation_invariants_reconciles_completed_and_requested_calls
             content="",
             finish_reason="tool_calls",
             tool_calls=(
-                ToolCallSnapshot(call_id="call-1", name="read", arguments={}),
-                ToolCallSnapshot(call_id="call-2", name="read", arguments={}),
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
+                ToolCallSnapshot(call_id="call-2", name="lookup", arguments={}),
             ),
         ),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -762,9 +762,9 @@ def test_assert_continuation_invariants_rejects_terminal_for_unrequested_call() 
             turn=1,
             content="",
             finish_reason="tool_calls",
-            tool_calls=(ToolCallSnapshot(call_id="call-1", name="read", arguments={}),),
+            tool_calls=(ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),),
         ),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         _ended("call-2"),
@@ -801,10 +801,10 @@ def test_assert_continuation_invariants_rejects_requested_call_absent_from_compl
             turn=1,
             content="",
             finish_reason="tool_calls",
-            tool_calls=(ToolCallSnapshot(call_id="call-1", name="read", arguments={}),),
+            tool_calls=(ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),),
         ),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
-        ToolCallRequested(call_id="call-2", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        ToolCallRequested(call_id="call-2", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         _ended("call-2"),
@@ -829,10 +829,101 @@ def test_assert_continuation_invariants_rejects_empty_tool_continuation() -> Non
         assert_continuation_invariants(events)
 
 
+@pytest.mark.parametrize(
+    "request_event",
+    [
+        ToolCallRequested(call_id="call-1", name="other", arguments={"path": "a"}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={"path": "b"}),
+    ],
+)
+def test_assert_continuation_invariants_rejects_changed_request_payload(
+    request_event: ToolCallRequested,
+) -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "a"}),
+            ),
+        ),
+        request_event,
+        _ended(),
+        _ready(),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(AssertionError, match="names or arguments do not match"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_accepts_reordered_argument_keys() -> None:
+    events = (
+        TurnStarted(turn=1),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(
+                ToolCallSnapshot(
+                    call_id="call-1", name="lookup", arguments={"query": {"a": 1, "b": 2}}
+                ),
+            ),
+        ),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={"query": {"b": 2, "a": 1}}),
+        _ended(),
+        _ready(),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    assert_continuation_invariants(events)
+
+
+@pytest.mark.parametrize("include_completion", [True, False])
+def test_assert_continuation_invariants_rejects_changed_result_name(
+    include_completion: bool,
+) -> None:
+    completion = MessageCompleted(
+        turn=1,
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=(ToolCallSnapshot(call_id="call-1", name="other", arguments={}),),
+    )
+    events = (
+        TurnStarted(turn=1),
+        *((completion,) if include_completion else ()),
+        ToolCallRequested(call_id="call-1", name="other", arguments={}),
+        _ended(),
+        _ready(),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(AssertionError, match="terminal result names do not match"):
+        assert_continuation_invariants(events)
+
+
+def test_assert_continuation_invariants_checks_result_names_for_repeated_call_ids() -> None:
+    events = (
+        TurnStarted(turn=1),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
+        ToolCallRequested(call_id="call-1", name="other", arguments={}),
+        _ended(),
+        _ready(),
+        _ended(),
+        _ready(),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
+        *_completed_turn(2),
+    )
+    with pytest.raises(AssertionError, match="terminal result names do not match"):
+        assert_continuation_invariants(events)
+
+
 def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
-        ToolCallRequested(call_id="call-1", name="read", arguments={}),
+        ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
         _ended("call-1"),
         _ready("call-1"),
         TurnCompleted(turn=1, outcome="completed", finish_reason="length"),
@@ -841,7 +932,7 @@ def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() 
             turn=2,
             content="",
             finish_reason="length",
-            tool_calls=(ToolCallSnapshot(call_id="call-2", name="read", arguments={}),),
+            tool_calls=(ToolCallSnapshot(call_id="call-2", name="lookup", arguments={}),),
         ),
         TurnCompleted(turn=2, outcome="failed", finish_reason="error"),
     )
