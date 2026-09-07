@@ -195,9 +195,13 @@ def assert_turn_invariants(
                     f"got {event.finish_reason!r}"
                 )
                 cancelled_turn = event.turn
+            elif event.outcome == "failed":
+                assert event.finish_reason == "error", (
+                    f"Failed turn must have finish_reason 'error', got {event.finish_reason!r}"
+                )
             elif event.outcome == "completed":
-                assert event.finish_reason != "cancelled", (
-                    "Completed turn must not have finish_reason 'cancelled'"
+                assert event.finish_reason not in ("error", "cancelled"), (
+                    f"Completed turn must not have finish_reason {event.finish_reason!r}"
                 )
             in_turn = None
             if expected_turn is not None:
@@ -256,15 +260,25 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     assert error_events, "Cancelled run must emit a cancellation ErrorEvent before completion"
 
 
-def assert_queue_ordering_invariants(events: Sequence[object]) -> None:
+def assert_queue_ordering_invariants(
+    events: Sequence[object],
+    *,
+    initial_steering_count: int | None = None,
+    initial_follow_up_count: int | None = None,
+) -> None:
     """Require that queue injections adhere to steering priority over follow-up and FIFO order.
 
     1. Injected messages cannot appear inside an active turn (TurnStarted to TurnCompleted).
-    2. Across the entire run, all steering injections must precede follow-up injections.
+    2. Within each turn transition boundary, all steering injections must precede follow-up
+       injections.
+    3. If initial queue counts are provided, all initial steering messages must be injected before
+       any initial follow-up messages are injected across boundaries.
     """
 
     in_turn = False
-    injections: list[QueueMessageInjected] = []
+    injections_by_boundary: list[list[QueueMessageInjected]] = []
+    current_injections: list[QueueMessageInjected] = []
+    all_injections: list[QueueMessageInjected] = []
 
     for event in events:
         if isinstance(event, TurnStarted):
@@ -272,6 +286,8 @@ def assert_queue_ordering_invariants(events: Sequence[object]) -> None:
                 f"TurnStarted for turn {event.turn} appeared while previous turn was still active"
             )
             in_turn = True
+            injections_by_boundary.append(list(current_injections))
+            current_injections.clear()
         elif isinstance(event, TurnCompleted):
             assert in_turn, f"TurnCompleted for turn {event.turn} appeared outside an active turn"
             in_turn = False
@@ -280,15 +296,35 @@ def assert_queue_ordering_invariants(events: Sequence[object]) -> None:
                 f"QueueMessageInjected ({event.kind}: {event.content!r}) appeared "
                 "inside an active turn"
             )
-            injections.append(event)
+            current_injections.append(event)
+            all_injections.append(event)
 
-    saw_follow_up = False
-    for injection in injections:
-        if injection.kind == "follow_up":
-            saw_follow_up = True
-        elif injection.kind == "steering":
-            assert not saw_follow_up, (
-                f"Steering injection ({injection.content!r}) appeared after follow-up injection"
+    if current_injections:
+        injections_by_boundary.append(list(current_injections))
+
+    for boundary_idx, boundary_injections in enumerate(injections_by_boundary, start=1):
+        saw_follow_up = False
+        for injection in boundary_injections:
+            if injection.kind == "follow_up":
+                saw_follow_up = True
+            elif injection.kind == "steering":
+                assert not saw_follow_up, (
+                    f"Boundary {boundary_idx}: steering injection appeared after "
+                    "follow-up injection"
+                )
+
+    if initial_steering_count is not None and initial_follow_up_count is not None:
+        first_follow_up_idx = next(
+            (idx for idx, inj in enumerate(all_injections) if inj.kind == "follow_up"),
+            None,
+        )
+        if first_follow_up_idx is not None:
+            steering_before_follow_up = sum(
+                1 for inj in all_injections[:first_follow_up_idx] if inj.kind == "steering"
+            )
+            assert steering_before_follow_up == min(initial_steering_count, len(all_injections)), (
+                f"Expected all {initial_steering_count} initial steering messages to be injected "
+                f"before follow-ups, but only {steering_before_follow_up} were"
             )
 
 
@@ -296,7 +332,8 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
     """Enforce provider continuation and context rebase lifecycle consistency.
 
     1. Any tool-bearing turn (requested tool calls or MessageCompleted.tool_calls)
-       must have matching terminal tool execution results for every requested call.
+       must have matching terminal tool execution results for every requested call
+       (unless cancelled).
     2. Any tool-bearing turn must be followed by a continuation turn (unless the run was cancelled).
     3. Tool execution Ended/Ready pairing must hold across the entire stream.
     4. Strict turn sequencing must hold.
@@ -326,15 +363,16 @@ def assert_continuation_invariants(events: Sequence[object]) -> None:
                 assert completed.outcome == "cancelled", (
                     f"Turn {completed.turn} had tool calls but has no subsequent continuation turn"
                 )
-            ended_calls = [e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)]
-            if requested_calls:
-                missing = Counter(requested_calls) - Counter(ended_calls)
-                assert not missing, (
-                    f"Turn {completed.turn} requested calls {requested_calls} but was missing "
-                    f"terminal results for: {list(missing.keys())}"
-                )
-            else:
-                assert ended_calls, (
-                    f"Turn {completed.turn} completed with 'tool_calls' but had no tool execution "
-                    "within that turn"
-                )
+            if completed.outcome != "cancelled":
+                ended_calls = [e.call_id for e in turn_events if isinstance(e, ToolExecutionEnded)]
+                if requested_calls:
+                    missing = Counter(requested_calls) - Counter(ended_calls)
+                    assert not missing, (
+                        f"Turn {completed.turn} requested calls {requested_calls} but was missing "
+                        f"terminal results for: {list(missing.keys())}"
+                    )
+                else:
+                    assert ended_calls, (
+                        f"Turn {completed.turn} completed with 'tool_calls' but had no "
+                        "tool execution within that turn"
+                    )

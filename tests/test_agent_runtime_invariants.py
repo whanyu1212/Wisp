@@ -475,6 +475,24 @@ def test_assert_turn_invariants_rejects_completed_with_cancelled_finish_reason()
         assert_turn_invariants(events)
 
 
+def test_assert_turn_invariants_rejects_completed_with_error_finish_reason() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="completed", finish_reason="error"),
+    )
+    with pytest.raises(AssertionError, match="must not have finish_reason 'error'"):
+        assert_turn_invariants(events)
+
+
+def test_assert_turn_invariants_rejects_failed_with_non_error_finish_reason() -> None:
+    events = (
+        TurnStarted(turn=1),
+        TurnCompleted(turn=1, outcome="failed", finish_reason="stop"),
+    )
+    with pytest.raises(AssertionError, match="Failed turn must have finish_reason 'error'"):
+        assert_turn_invariants(events)
+
+
 def test_assert_turn_invariants_rejects_turn_activity_after_cancellation() -> None:
     events = (
         TurnStarted(turn=1),
@@ -529,8 +547,12 @@ def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_revers
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
     )
-    with pytest.raises(AssertionError, match="appeared after follow-up injection"):
-        assert_queue_ordering_invariants(events)
+    with pytest.raises(AssertionError, match="Expected all 1 initial steering messages"):
+        assert_queue_ordering_invariants(
+            events,
+            initial_steering_count=1,
+            initial_follow_up_count=1,
+        )
 
 
 def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> None:
