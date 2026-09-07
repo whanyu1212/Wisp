@@ -288,10 +288,10 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     Enforces:
     1. If a turn was interrupted, the final TurnCompleted must have outcome='cancelled'
        and finish_reason='cancelled', with an ErrorEvent immediately before that terminal.
-    2. If no turns were started, no TurnCompleted may appear, and an ErrorEvent must
-       still be present.
+    2. If no turns were started, the stream consists of a single ErrorEvent.
     3. If the last turn already completed, cancellation may emit only a trailing
-       ErrorEvent after that TurnCompleted (no cancelled terminal).
+       ErrorEvent after that TurnCompleted (no cancelled terminal). Queue events may
+       precede that error, but the error must be unique after the turn and end the stream.
     4. Tool execution Ended/Ready pairing is preserved, except for a single
        unmatched Ended immediately followed by the cancellation ErrorEvent.
     5. Started turns obey sequencing and event containment invariants.
@@ -312,6 +312,9 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         )
         error_events = [e for e in events if isinstance(e, ErrorEvent)]
         assert error_events, "Cancelled run must emit an ErrorEvent before completion"
+        assert len(events) == 1 and isinstance(events[-1], ErrorEvent), (
+            "Pre-turn cancellation must end with exactly one ErrorEvent"
+        )
         return
 
     assert_turn_invariants(events)
@@ -332,6 +335,9 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
         return
 
     if last_turn.outcome in ("completed", "failed") and trailing_errors:
+        assert len(trailing_errors) == 1 and isinstance(trailing[-1], ErrorEvent), (
+            "Boundary cancellation must end with exactly one ErrorEvent"
+        )
         forbidden_trailing = [
             type(event).__name__
             for event in trailing

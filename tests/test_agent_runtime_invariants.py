@@ -610,6 +610,35 @@ def test_assert_cancellation_settled_accepts_error_after_completed_turn() -> Non
     assert_cancellation_settled(events)
 
 
+@pytest.mark.parametrize("boundary", ["pre_turn", "completed", "failed"])
+@pytest.mark.parametrize("tail_kind", ["queue_then_error", "error_then_queue", "two_errors"])
+def test_assert_cancellation_settled_requires_one_final_boundary_error(
+    boundary: str, tail_kind: str
+) -> None:
+    events: list[object] = []
+    if boundary == "completed":
+        events.extend(_completed_turn())
+    elif boundary == "failed":
+        events.extend(
+            [
+                TurnStarted(turn=1),
+                ErrorEvent(message="Earlier provider failure"),
+                TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
+            ]
+        )
+    error = ErrorEvent(message="Agent run cancelled")
+    queued = QueueMessageInjected(kind="follow_up", content="Next message")
+    if tail_kind == "queue_then_error":
+        events.extend([queued, error])
+    else:
+        events.extend([error, queued if tail_kind == "error_then_queue" else error])
+    if tail_kind == "queue_then_error" and boundary != "pre_turn":
+        assert_cancellation_settled(events)
+    else:
+        with pytest.raises(AssertionError, match="must end with exactly one ErrorEvent"):
+            assert_cancellation_settled(events)
+
+
 def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() -> None:
     events = (
         TurnStarted(turn=1),
