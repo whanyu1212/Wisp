@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 import anyio
 
-import wisp.providers.events as provider_events
 from wisp.agent.configuration import (
     validate_agent_runtime_limits,
     validate_non_negative_integer,
@@ -22,7 +21,6 @@ from wisp.agent.continuation import (
     ContinuationState,
     at_context_overflow,
     at_request_boundary,
-    provider_supports_continuation_messages,
 )
 from wisp.agent.execution import (
     ContextOverflowHook,
@@ -34,6 +32,14 @@ from wisp.agent.execution import (
     ToolExecutor,
 )
 from wisp.agent.messages import Message
+from wisp.agent.provider_turn import (
+    CancelledProviderTurn,
+    CompletedProviderTurn,
+    FailedProviderTurn,
+    OverflowProviderTurn,
+    ProviderTurn,
+    project_usage_and_cost,
+)
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ContextEstimated,
@@ -58,22 +64,12 @@ from wisp.events import (
 )
 from wisp.providers.base import (
     ContextOverflowError,
-    ContinuationMessageProvider,
-    PromptCacheContinuationMessageProvider,
-    PromptCacheKeyProvider,
     Provider,
-    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
 )
 from wisp.providers.events import (
-    ProviderResponseCompleted,
-    ProviderResponseFailed,
-    ProviderResponseStarted,
-    ProviderTextDelta,
-    ProviderThinkingDelta,
-    ProviderToolCallCompleted,
     ToolCall,
 )
 
@@ -148,108 +144,6 @@ def _is_cancelled(config: AgentLoopConfig) -> bool:
     return token is not None and token.is_cancelled()
 
 
-def _provider_supports_prompt_cache_key(provider: Provider) -> bool:
-    return getattr(provider, "supports_prompt_cache_key", False) is True
-
-
-def _provider_stream(
-    config: AgentLoopConfig,
-    *,
-    messages: Sequence[Message],
-    tool_results: Sequence[ToolCallResult],
-    extra_messages: Sequence[Message],
-    previous_response_id: str | None,
-) -> AsyncIterator[provider_events.ProviderEvent]:
-    """Call one provider without imposing optional keywords on legacy adapters."""
-
-    provider = config.provider
-    supports_continuation_messages = provider_supports_continuation_messages(provider)
-    supports_prompt_cache_key = _provider_supports_prompt_cache_key(provider)
-    use_prompt_cache_key = config.prompt_cache_key is not None and supports_prompt_cache_key
-
-    if extra_messages and supports_continuation_messages and use_prompt_cache_key:
-        combined_provider = cast(PromptCacheContinuationMessageProvider, provider)
-        if config.effort is not None:
-            return combined_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                extra_messages=extra_messages,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-                prompt_cache_key=config.prompt_cache_key,
-            )
-        return combined_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            extra_messages=extra_messages,
-            previous_response_id=previous_response_id,
-            prompt_cache_key=config.prompt_cache_key,
-        )
-
-    if extra_messages and supports_continuation_messages:
-        continuation_provider = cast(ContinuationMessageProvider, provider)
-        if config.effort is not None:
-            return continuation_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                extra_messages=extra_messages,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-            )
-        return continuation_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            extra_messages=extra_messages,
-            previous_response_id=previous_response_id,
-        )
-
-    if use_prompt_cache_key:
-        cache_provider = cast(PromptCacheKeyProvider, provider)
-        if config.effort is not None:
-            return cache_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-                prompt_cache_key=config.prompt_cache_key,
-            )
-        return cache_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
-            prompt_cache_key=config.prompt_cache_key,
-        )
-
-    if config.effort is not None:
-        return provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
-            effort=config.effort,
-        )
-    return provider.stream(
-        messages,
-        model=config.model,
-        tools=config.tools,
-        tool_results=tool_results,
-        previous_response_id=previous_response_id,
-    )
-
-
 def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     return (
         ErrorEvent(message="Agent run cancelled"),
@@ -277,167 +171,6 @@ def _truncated_tool_call_events(
     return terminal, ToolResultReady.from_execution_ended(terminal)
 
 
-def _unavailable_cost(
-    provider: str,
-    requested_model: str | None,
-    response_model: str | None,
-    *,
-    reason: Literal["pricing_unavailable", "usage_incomplete", "estimation_failed"],
-) -> UsageCost:
-    """Keep optional accounting failures from discarding a completed provider response."""
-
-    return UsageCost(
-        provider=provider,
-        requested_model=requested_model,
-        model=response_model or requested_model,
-        unavailable_reason=reason,
-    )
-
-
-def _require_provider_response_started(started: bool) -> None:
-    if not started:
-        raise ProviderProtocolError("Provider emitted response data before response_started")
-
-
-def _resolve_provider_response_id(
-    *,
-    started_response_id: str | None,
-    terminal_response_id: str | None,
-    tool_calls: Sequence[ToolCall],
-) -> str | None:
-    """Resolve one consistent response id from a provider lifecycle."""
-
-    candidates = [
-        ("response_started", started_response_id),
-        ("terminal response", terminal_response_id),
-        *((f"tool call {tool_call.call_id}", tool_call.response_id) for tool_call in tool_calls),
-    ]
-    supplied = [
-        (source, response_id) for source, response_id in candidates if response_id is not None
-    ]
-    if not supplied:
-        return None
-
-    resolved_source, resolved_id = supplied[0]
-    for source, response_id in supplied[1:]:
-        if response_id != resolved_id:
-            raise ProviderProtocolError(
-                "Provider emitted conflicting response ids: "
-                f"{resolved_source}={resolved_id!r}, {source}={response_id!r}"
-            )
-    return resolved_id
-
-
-@dataclass(frozen=True, slots=True)
-class _CompletedProviderResponse:
-    """Validated successful provider response assembled from one stream."""
-
-    response: ProviderResponseCompleted
-    content: str
-    response_id: str | None
-    response_model: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _FailedProviderResponse:
-    """Validated terminal provider failure assembled from one stream."""
-
-    response: ProviderResponseFailed
-    content: str
-    response_id: str | None
-
-
-@dataclass(slots=True)
-class _ProviderResponseLifecycle:
-    """Own and validate the state transitions for one provider response."""
-
-    started: bool = False
-    started_response_id: str | None = None
-    response_model: str | None = None
-    terminal: ProviderResponseCompleted | ProviderResponseFailed | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    text: list[str] = field(default_factory=list)
-
-    def require_open(self) -> None:
-        if self.terminal is not None:
-            raise ProviderProtocolError("Provider emitted an event after its terminal response")
-
-    def start(self, event: ProviderResponseStarted) -> None:
-        self.require_open()
-        if self.started:
-            raise ProviderProtocolError("Provider emitted response_started more than once")
-        self.started = True
-        self.started_response_id = event.response_id
-        self.response_model = event.model
-
-    def retry(self) -> None:
-        self.require_open()
-        if self.started:
-            raise ProviderProtocolError("Provider emitted retry progress after response_started")
-
-    def add_text(self, delta: str) -> None:
-        self.require_open()
-        _require_provider_response_started(self.started)
-        self.text.append(delta)
-
-    def add_thinking(self, delta: str) -> None:
-        self.require_open()
-        _require_provider_response_started(self.started)
-        del delta
-
-    def add_tool_call(self, tool_call: ToolCall) -> None:
-        self.require_open()
-        _require_provider_response_started(self.started)
-        self.tool_calls.append(tool_call)
-
-    def complete(self, event: ProviderResponseCompleted | ProviderResponseFailed) -> None:
-        self.require_open()
-        if isinstance(event, ProviderResponseCompleted):
-            _require_provider_response_started(self.started)
-        self.terminal = event
-
-    def finish(self) -> _CompletedProviderResponse | _FailedProviderResponse:
-        if self.terminal is None:
-            if not self.started:
-                raise ProviderProtocolError("Provider stream ended before response_started")
-            raise ProviderProtocolError("Provider stream ended without a terminal response")
-        if isinstance(self.terminal, ProviderResponseFailed):
-            response_id = _resolve_provider_response_id(
-                started_response_id=self.started_response_id,
-                terminal_response_id=self.terminal.response_id,
-                tool_calls=self.tool_calls,
-            )
-            return _FailedProviderResponse(
-                response=self.terminal,
-                content=self.terminal.partial_content or "".join(self.text),
-                response_id=response_id,
-            )
-        if not self.started:
-            raise ProviderProtocolError("Provider stream ended before response_started")
-        if tuple(self.tool_calls) != self.terminal.tool_calls:
-            raise ProviderProtocolError(
-                "Provider terminal tool calls do not match streamed tool calls"
-            )
-        has_tool_calls = bool(self.terminal.tool_calls)
-        if self.terminal.finish_reason == "tool_calls" and not has_tool_calls:
-            raise ProviderProtocolError(
-                "Provider finish reason 'tool_calls' requires at least one tool call"
-            )
-        if self.terminal.finish_reason == "stop" and has_tool_calls:
-            raise ProviderProtocolError("Provider finish reason 'stop' cannot include tool calls")
-        response_id = _resolve_provider_response_id(
-            started_response_id=self.started_response_id,
-            terminal_response_id=self.terminal.response_id,
-            tool_calls=self.terminal.tool_calls,
-        )
-        return _CompletedProviderResponse(
-            response=self.terminal,
-            content=self.terminal.content or "".join(self.text),
-            response_id=response_id,
-            response_model=self.response_model,
-        )
-
-
 @dataclass(slots=True)
 class _AgentLoopState:
     """Turn counters plus the extracted continuation cursor/transcript."""
@@ -454,24 +187,6 @@ class _AgentLoopState:
         if maximum is not None and self.tool_iterations >= maximum:
             raise RuntimeError(f"Maximum tool iterations exceeded: {maximum}")
         self.tool_iterations += 1
-
-
-async def _provider_events(
-    stream: AsyncIterator[provider_events.ProviderEvent],
-) -> AsyncIterator[provider_events.ProviderEvent]:
-    """Normalize context overflows raised while advancing a provider stream."""
-
-    iterator = aiter(stream)
-    while True:
-        try:
-            event = await anext(iterator)
-        except StopAsyncIteration:
-            return
-        except Exception as exc:
-            if is_context_overflow_message(str(exc)):
-                raise ContextOverflowError(str(exc)) from exc
-            raise
-        yield event
 
 
 def _json_payloads_match(left: object, right: object) -> bool:
@@ -882,8 +597,6 @@ async def run_agent_loop(
                 for event in _cancelled_turn_events(turn):
                     yield event
                 break
-            lifecycle = _ProviderResponseLifecycle()
-
             request_messages = (*messages, *state.continuation.continuation_messages)
             selected_model = config.model or config.provider.default_model
             previous_observation = next(
@@ -910,94 +623,43 @@ async def run_agent_loop(
                 budget=context_budget,
             )
 
-            attempt_had_streamed_delta = False
-            request_overflow_error: ContextOverflowError | None = None
-            try:
-                provider_stream = _provider_stream(
-                    config,
-                    messages=messages,
-                    tool_results=state.continuation.pending_tool_results,
-                    extra_messages=state.continuation.pending_extra_messages,
-                    previous_response_id=state.continuation.previous_response_id,
-                )
-                async for provider_event in _provider_events(provider_stream):
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-                    lifecycle.require_open()
-                    if isinstance(provider_event, ProviderResponseStarted):
-                        lifecycle.start(provider_event)
-                        yield MessageStarted(turn=turn)
-                    elif isinstance(provider_event, provider_events.ProviderRetrying):
-                        lifecycle.retry()
-                        yield ProviderRetrying(
-                            turn=turn,
-                            provider=config.provider.name,
-                            attempt=provider_event.attempt,
-                            max_attempts=provider_event.max_attempts,
-                            delay_seconds=provider_event.delay_seconds,
-                            reason=provider_event.reason,
-                            status_code=provider_event.status_code,
-                        )
-                    elif isinstance(provider_event, ProviderTextDelta):
-                        lifecycle.add_text(provider_event.delta)
-                        attempt_had_streamed_delta = True
-                        yield MessageDelta(
-                            turn=turn,
-                            delta=provider_event.delta,
-                            content_index=provider_event.content_index,
-                        )
-                    elif isinstance(provider_event, ProviderThinkingDelta):
-                        lifecycle.add_thinking(provider_event.delta)
-                        attempt_had_streamed_delta = True
-                        yield MessageDelta(
-                            turn=turn,
-                            delta=provider_event.delta,
-                            content_index=provider_event.content_index,
-                            content_kind="thinking",
-                        )
-                    elif isinstance(provider_event, ProviderToolCallCompleted):
-                        lifecycle.add_tool_call(provider_event.tool_call)
-                    elif isinstance(
-                        provider_event, ProviderResponseCompleted | ProviderResponseFailed
-                    ):
-                        lifecycle.complete(provider_event)
-                    else:
-                        event_type = type(provider_event).__name__
-                        raise ProviderProtocolError(
-                            f"Provider emitted unsupported event type: {event_type}"
-                        )
-            except ContextOverflowError as exc:
-                request_overflow_error = exc
-            except Exception as exc:
-                if is_context_overflow_message(str(exc)):
-                    request_overflow_error = ContextOverflowError(str(exc))
-                else:
-                    raise
+            provider_turn = ProviderTurn(
+                config,
+                messages=messages,
+                tool_results=state.continuation.pending_tool_results,
+                extra_messages=state.continuation.pending_extra_messages,
+                previous_response_id=state.continuation.previous_response_id,
+            )
+            async for provider_event in provider_turn.events(turn=turn):
+                yield provider_event
+            outcome = provider_turn.outcome
+            if outcome is None:
+                raise RuntimeError("Provider turn ended without a typed outcome")
+            if isinstance(outcome, CancelledProviderTurn):
+                return
 
-            if request_overflow_error is not None:
+            if isinstance(outcome, OverflowProviderTurn):
                 # A provider may open a public response lifecycle and then
                 # raise instead of yielding a typed terminal failure. Close
                 # that lifecycle before recovery starts another turn.
-                if lifecycle.started:
+                if outcome.started:
                     yield MessageCompleted(
                         turn=turn,
-                        content="".join(lifecycle.text),
+                        content=outcome.content,
                         finish_reason="error",
-                        response_id=lifecycle.started_response_id,
+                        response_id=outcome.started_response_id,
                     )
                 # Preserve the historical raised-overflow path for callers
                 # without an explicit same-loop recovery hook. The outer
                 # handler owns its public terminal events and re-raises.
                 if config.context_overflow_hook is None:
-                    raise request_overflow_error
+                    raise outcome.error
                 yield ContextOverflow(
                     turn=turn,
                     provider=config.provider.name,
                     model=config.model or config.provider.default_model,
                     context_window=config.context_window,
-                    message=str(request_overflow_error),
+                    message=str(outcome.error),
                 )
                 messages, retry = await at_context_overflow(
                     config,
@@ -1006,8 +668,8 @@ async def run_agent_loop(
                     tool_iterations=state.tool_iterations,
                     messages=messages,
                     context_budget=context_budget,
-                    had_streamed_delta=attempt_had_streamed_delta,
-                    message=str(request_overflow_error),
+                    had_streamed_delta=outcome.had_streamed_delta,
+                    message=str(outcome.error),
                 )
                 if retry:
                     yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
@@ -1015,29 +677,23 @@ async def run_agent_loop(
                     continue
                 if config.defer_context_overflow_errors:
                     return
-                yield ErrorEvent(message=str(request_overflow_error))
+                yield ErrorEvent(message=str(outcome.error))
                 yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
                 return
-
-            if _is_cancelled(config):
-                for event in _cancelled_turn_events(turn):
-                    yield event
-                break
-            completed = lifecycle.finish()
-            if isinstance(completed, _FailedProviderResponse):
-                failure = completed.response
+            if isinstance(outcome, FailedProviderTurn):
+                failure = outcome.failed.response
                 failure_kind = (
                     "context_overflow"
                     if failure.failure_kind == "context_overflow"
                     or is_context_overflow_message(failure.message)
                     else failure.failure_kind
                 )
-                if lifecycle.started:
+                if outcome.started:
                     yield MessageCompleted(
                         turn=turn,
-                        content=completed.content,
+                        content=outcome.failed.content,
                         finish_reason="error",
-                        response_id=completed.response_id,
+                        response_id=outcome.failed.response_id,
                     )
                 if failure_kind == "context_overflow":
                     yield ContextOverflow(
@@ -1054,7 +710,7 @@ async def run_agent_loop(
                         tool_iterations=state.tool_iterations,
                         messages=messages,
                         context_budget=context_budget,
-                        had_streamed_delta=attempt_had_streamed_delta,
+                        had_streamed_delta=outcome.had_streamed_delta,
                         message=failure.message,
                     )
                     if retry:
@@ -1070,51 +726,14 @@ async def run_agent_loop(
                     finish_reason="cancelled" if failure_kind == "aborted" else "error",
                 )
                 return
+            if not isinstance(outcome, CompletedProviderTurn):
+                raise RuntimeError("Provider turn ended without a completed response")
+            completed = outcome.completed
             response = completed.response
             completed_content = completed.content
             tool_calls = response.tool_calls
             response_id = completed.response_id
-            usage = (
-                TokenUsage(
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    total_tokens=response.usage.total_tokens,
-                    cache_read_input_tokens=response.usage.cache_read_input_tokens,
-                    cache_write_input_tokens=response.usage.cache_write_input_tokens,
-                    reasoning_output_tokens=response.usage.reasoning_output_tokens,
-                )
-                if response.usage is not None
-                else None
-            )
-            if usage is None:
-                cost = _unavailable_cost(
-                    config.provider.name,
-                    config.model,
-                    completed.response_model,
-                    reason="usage_incomplete",
-                )
-            elif config.cost_estimator is None:
-                cost = _unavailable_cost(
-                    config.provider.name,
-                    config.model,
-                    completed.response_model,
-                    reason="pricing_unavailable",
-                )
-            else:
-                try:
-                    cost = config.cost_estimator(
-                        config.provider.name,
-                        config.model,
-                        completed.response_model,
-                        usage,
-                    )
-                except Exception:
-                    cost = _unavailable_cost(
-                        config.provider.name,
-                        config.model,
-                        completed.response_model,
-                        reason="estimation_failed",
-                    )
+            usage, cost = project_usage_and_cost(config, completed)
             tool_call_snapshots = tuple(
                 ToolCallSnapshot(
                     call_id=tool_call.call_id,
