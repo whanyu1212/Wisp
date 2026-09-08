@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, cast
-
-import anyio
+from typing import Protocol
 
 from wisp.agent.configuration import (
     validate_agent_runtime_limits,
@@ -24,11 +21,7 @@ from wisp.agent.continuation import (
 )
 from wisp.agent.execution import (
     ContextOverflowHook,
-    PreparedToolExecution,
-    PreparedToolExecutor,
     RequestBoundaryHook,
-    ToolExecutionEvent,
-    ToolExecutionProtocolError,
     ToolExecutor,
 )
 from wisp.agent.messages import Message
@@ -40,7 +33,7 @@ from wisp.agent.provider_turn import (
     ProviderTurn,
     project_usage_and_cost,
 )
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.tool_round import CancelledToolRound, ToolRound
 from wisp.events import (
     ContextEstimated,
     ContextOverflow,
@@ -65,12 +58,8 @@ from wisp.events import (
 from wisp.providers.base import (
     ContextOverflowError,
     Provider,
-    ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
-)
-from wisp.providers.events import (
-    ToolCall,
 )
 
 type AgentLoopEvent = (
@@ -151,26 +140,6 @@ def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     )
 
 
-def _truncated_tool_call_events(
-    tool_call: ToolCall,
-) -> tuple[ToolExecutionEnded, ToolResultReady]:
-    """Reject one call from an incomplete model response without invoking tools."""
-
-    terminal = ToolExecutionEnded(
-        call_id=tool_call.call_id,
-        name=tool_call.name,
-        output=(
-            "Tool call was not executed because the model response was truncated. "
-            "Re-issue the call with complete arguments."
-        ),
-        is_error=True,
-        failure_code="invalid_arguments",
-        retryable=True,
-        recovery_hint="Re-issue the tool call with complete arguments.",
-    )
-    return terminal, ToolResultReady.from_execution_ended(terminal)
-
-
 @dataclass(slots=True)
 class _AgentLoopState:
     """Turn counters plus the extracted continuation cursor/transcript."""
@@ -187,380 +156,6 @@ class _AgentLoopState:
         if maximum is not None and self.tool_iterations >= maximum:
             raise RuntimeError(f"Maximum tool iterations exceeded: {maximum}")
         self.tool_iterations += 1
-
-
-def _json_payloads_match(left: object, right: object) -> bool:
-    """Compare JSON payloads canonically without conflating booleans and numbers."""
-
-    try:
-        return json.dumps(
-            left,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ) == json.dumps(
-            right,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    except (TypeError, ValueError):
-        return False
-
-
-@dataclass(slots=True)
-class _ToolExecutionLifecycle:
-    """Validate one executor stream before its result reaches the provider."""
-
-    tool_call: ToolCall
-    approval_requested: bool = False
-    approval_resolved: bool = False
-    approved: bool | None = None
-    terminal: ToolExecutionEnded | None = None
-
-    def accept(self, event: object) -> ToolExecutionEvent:
-        if not isinstance(event, ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded):
-            raise ToolExecutionProtocolError(
-                "Tool executor emitted an unsupported event type for "
-                f"{self.tool_call.call_id}: {type(event).__name__}"
-            )
-        if self.terminal is not None:
-            raise ToolExecutionProtocolError(
-                f"Tool executor emitted an event after the result for {self.tool_call.call_id}"
-            )
-        if event.call_id != self.tool_call.call_id or event.name != self.tool_call.name:
-            raise ToolExecutionProtocolError(
-                "Tool executor event does not match the requested call: "
-                f"expected {self.tool_call.name}/{self.tool_call.call_id}, "
-                f"got {event.name}/{event.call_id}"
-            )
-
-        if isinstance(event, ToolApprovalRequested):
-            if self.approval_requested:
-                raise ToolExecutionProtocolError(
-                    f"Tool executor requested approval more than once for {self.tool_call.call_id}"
-                )
-            if not _json_payloads_match(event.arguments, self.tool_call.arguments):
-                raise ToolExecutionProtocolError(
-                    "Tool executor approval arguments do not match the requested call "
-                    f"{self.tool_call.call_id}"
-                )
-            self.approval_requested = True
-        elif isinstance(event, ToolApprovalResolved):
-            if not self.approval_requested:
-                raise ToolExecutionProtocolError(
-                    "Tool executor resolved approval before requesting it for "
-                    f"{self.tool_call.call_id}"
-                )
-            if self.approval_resolved:
-                raise ToolExecutionProtocolError(
-                    f"Tool executor resolved approval more than once for {self.tool_call.call_id}"
-                )
-            self.approval_resolved = True
-            self.approved = event.approved
-        else:
-            if self.approval_requested and not self.approval_resolved:
-                raise ToolExecutionProtocolError(
-                    f"Tool executor ended with an unresolved approval for {self.tool_call.call_id}"
-                )
-            if self.approved is False and not event.is_error:
-                raise ToolExecutionProtocolError(
-                    "Tool executor reported success after approval was denied for "
-                    f"{self.tool_call.call_id}"
-                )
-            self.terminal = event
-        return event
-
-    def accept_prepared(self, prepared: PreparedToolExecution) -> None:
-        if self.terminal is not None:
-            raise ToolExecutionProtocolError(
-                f"Tool executor prepared a call after the result for {self.tool_call.call_id}"
-            )
-        if prepared.call_id != self.tool_call.call_id or prepared.name != self.tool_call.name:
-            raise ToolExecutionProtocolError(
-                "Prepared execution does not match the requested call: "
-                f"expected {self.tool_call.name}/{self.tool_call.call_id}, "
-                f"got {prepared.name}/{prepared.call_id}"
-            )
-        if self.approval_requested and not self.approval_resolved:
-            raise ToolExecutionProtocolError(
-                f"Tool executor prepared {self.tool_call.call_id} with unresolved approval"
-            )
-
-    def finish(self) -> ToolExecutionEnded:
-        if self.approval_requested and not self.approval_resolved:
-            raise ToolExecutionProtocolError(
-                f"Tool executor ended with an unresolved approval for {self.tool_call.call_id}"
-            )
-        if self.terminal is None:
-            raise ToolExecutionProtocolError(
-                f"Tool executor ended without a result for {self.tool_call.call_id}"
-            )
-        return self.terminal
-
-
-async def _execute_tool_call(
-    config: AgentLoopConfig,
-    tool_call: ToolCall,
-) -> AsyncIterator[ToolExecutionEvent | ToolResultReady]:
-    lifecycle = _ToolExecutionLifecycle(tool_call)
-    async for raw_event in config.tool_executor.execute(tool_call):
-        event = lifecycle.accept(raw_event)
-        if not isinstance(event, ToolExecutionEnded):
-            yield event
-
-    terminal = lifecycle.finish()
-    yield terminal
-    yield ToolResultReady.from_execution_ended(terminal)
-
-
-_MAX_PARALLEL_TOOL_EXECUTIONS = 8
-
-
-@dataclass(slots=True)
-class _PreparedCallState:
-    tool_call: ToolCall
-    lifecycle: _ToolExecutionLifecycle
-    execution: PreparedToolExecution
-
-
-@dataclass(slots=True)
-class _PreparedBatchStatus:
-    cancelled: bool = False
-
-
-@dataclass(slots=True)
-class _PreparedRunOutcome:
-    terminal: ToolExecutionEnded | None = None
-    error: Exception | None = None
-
-
-async def _run_prepared_chunk(
-    calls: Sequence[_PreparedCallState],
-) -> tuple[tuple[_PreparedRunOutcome, ...], bool]:
-    outcomes = [_PreparedRunOutcome() for _ in calls]
-
-    async def run_one(index: int, call: _PreparedCallState) -> None:
-        try:
-            outcomes[index].terminal = await call.execution.run()
-        except Exception as exc:  # noqa: BLE001 - preserve the original fatal error
-            outcomes[index].error = exc
-
-    cancelled = False
-    try:
-        async with anyio.create_task_group() as task_group:
-            for index, call in enumerate(calls):
-                task_group.start_soon(run_one, index, call)
-    except anyio.get_cancelled_exc_class():
-        cancelled = True
-    return tuple(outcomes), cancelled
-
-
-def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
-    return ToolExecutionEnded(
-        call_id=tool_call.call_id,
-        name=tool_call.name,
-        output=INTERRUPTED_TOOL_RESULT_TEXT,
-        is_error=True,
-        failure_code="internal_error",
-        retryable=True,
-        recovery_hint="Retry the tool call if its effects can be safely repeated.",
-        process_state="cancelled",
-    )
-
-
-async def _prepared_tool_batch_events(
-    config: AgentLoopConfig,
-    tool_calls: Sequence[ToolCall],
-    status: _PreparedBatchStatus,
-) -> AsyncIterator[
-    ToolCallRequested
-    | ToolExecutionStarted
-    | ToolApprovalRequested
-    | ToolApprovalResolved
-    | ToolExecutionEnded
-    | ToolResultReady
-]:
-    executor = cast(PreparedToolExecutor, config.tool_executor)
-    prepared_calls: list[_PreparedCallState] = []
-    lifecycles: dict[str, _ToolExecutionLifecycle] = {}
-    requested_call_ids: set[str] = set()
-    result_call_ids: set[str] = set()
-
-    async def finalize_interrupted() -> AsyncIterator[
-        ToolCallRequested | ToolApprovalResolved | ToolExecutionEnded | ToolResultReady
-    ]:
-        for tool_call in tool_calls:
-            if tool_call.call_id in result_call_ids:
-                continue
-            if tool_call.call_id not in requested_call_ids:
-                requested_call_ids.add(tool_call.call_id)
-                yield ToolCallRequested(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    arguments=dict(tool_call.arguments),
-                )
-            lifecycle = lifecycles.get(tool_call.call_id)
-            if (
-                lifecycle is not None
-                and lifecycle.approval_requested
-                and not lifecycle.approval_resolved
-            ):
-                approval = ToolApprovalResolved(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    approved=False,
-                    reason="Agent run cancelled",
-                )
-                lifecycle.accept(approval)
-                yield approval
-            terminal = _interrupted_tool_execution(tool_call)
-            if lifecycle is not None:
-                lifecycle.accept(terminal)
-                terminal = lifecycle.finish()
-            result = ToolResultReady.from_execution_ended(terminal)
-            result_call_ids.add(tool_call.call_id)
-            yield terminal
-            yield result
-
-    for tool_call in tool_calls:
-        arguments = dict(tool_call.arguments)
-        requested_call_ids.add(tool_call.call_id)
-        yield ToolCallRequested(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            arguments=arguments,
-        )
-        if _is_cancelled(config):
-            status.cancelled = True
-            break
-
-        yield ToolExecutionStarted(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            arguments=arguments,
-        )
-        if _is_cancelled(config):
-            status.cancelled = True
-            break
-
-        lifecycle = _ToolExecutionLifecycle(tool_call)
-        lifecycles[tool_call.call_id] = lifecycle
-        prepared: PreparedToolExecution | None = None
-        preparation = executor.prepare(tool_call)
-        try:
-            async for raw_event in preparation:
-                if isinstance(raw_event, PreparedToolExecution):
-                    if prepared is not None:
-                        raise ToolExecutionProtocolError(
-                            "Tool executor prepared more than one execution for "
-                            f"{tool_call.call_id}"
-                        )
-                    lifecycle.accept_prepared(raw_event)
-                    prepared = raw_event
-                    if _is_cancelled(config):
-                        status.cancelled = True
-                        break
-                    continue
-                if prepared is not None:
-                    raise ToolExecutionProtocolError(
-                        f"Tool executor emitted an event after preparing {tool_call.call_id}"
-                    )
-                event = lifecycle.accept(raw_event)
-                if isinstance(event, ToolExecutionEnded):
-                    raise ToolExecutionProtocolError(
-                        "Prepared tool executor emitted a terminal result during preparation for "
-                        f"{tool_call.call_id}"
-                    )
-                yield event
-                if _is_cancelled(config):
-                    status.cancelled = True
-                    break
-        except anyio.get_cancelled_exc_class():
-            status.cancelled = True
-        finally:
-            close_preparation = getattr(preparation, "aclose", None)
-            if callable(close_preparation):
-                with anyio.CancelScope(shield=True):
-                    await cast(Callable[[], Awaitable[None]], close_preparation)()
-        if status.cancelled:
-            break
-        if prepared is None:
-            raise ToolExecutionProtocolError(
-                f"Tool executor ended preparation without a result for {tool_call.call_id}"
-            )
-        prepared_calls.append(
-            _PreparedCallState(
-                tool_call=tool_call,
-                lifecycle=lifecycle,
-                execution=prepared,
-            )
-        )
-
-    if status.cancelled:
-        async for interrupted_event in finalize_interrupted():
-            yield interrupted_event
-        return
-
-    batch_is_parallel = all(call.execution.parallel_safe for call in prepared_calls)
-    chunk_size = _MAX_PARALLEL_TOOL_EXECUTIONS if batch_is_parallel else 1
-    for chunk_start in range(0, len(prepared_calls), chunk_size):
-        if _is_cancelled(config):
-            status.cancelled = True
-            async for interrupted_event in finalize_interrupted():
-                yield interrupted_event
-            return
-        chunk = prepared_calls[chunk_start : chunk_start + chunk_size]
-        outcomes, chunk_cancelled = await _run_prepared_chunk(chunk)
-        status.cancelled = status.cancelled or chunk_cancelled or _is_cancelled(config)
-        fatal_error: Exception | None = None
-        for call, outcome in zip(chunk, outcomes, strict=True):
-            if outcome.error is not None:
-                if fatal_error is None:
-                    fatal_error = outcome.error
-                continue
-            if outcome.terminal is None:
-                if not status.cancelled and fatal_error is None:
-                    fatal_error = ToolExecutionProtocolError(
-                        "Prepared tool execution ended without a result for "
-                        f"{call.tool_call.call_id}"
-                    )
-                continue
-            try:
-                call.lifecycle.accept(outcome.terminal)
-                terminal = call.lifecycle.finish()
-                result = ToolResultReady.from_execution_ended(terminal)
-            except Exception as exc:
-                if fatal_error is None:
-                    fatal_error = exc
-                continue
-            result_call_ids.add(call.tool_call.call_id)
-            yield terminal
-            yield result
-            status.cancelled = status.cancelled or _is_cancelled(config)
-        if status.cancelled:
-            async for interrupted_event in finalize_interrupted():
-                yield interrupted_event
-            return
-        if fatal_error is not None:
-            raise fatal_error
-
-
-def _record_tool_result(
-    state: _AgentLoopState,
-    tool_results: list[ToolCallResult],
-    result_event: ToolResultReady,
-) -> None:
-    tool_results.append(
-        ToolCallResult(
-            call_id=result_event.call_id,
-            output=result_event.output,
-            is_error=result_event.is_error,
-        )
-    )
-    state.continuation.record_tool_result(result_event)
 
 
 async def run_agent_loop(
@@ -831,84 +426,23 @@ async def run_agent_loop(
                     yield event
                 break
             state.begin_tool_round(config.max_tool_iterations)
-            tool_results: list[ToolCallResult] = []
-
-            if response.finish_reason == "length":
-                for tool_call in tool_calls:
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-                    yield ToolCallRequested(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=dict(tool_call.arguments),
-                    )
-                    terminal_event, truncated_result_event = _truncated_tool_call_events(tool_call)
-                    yield terminal_event
-                    yield truncated_result_event
-                    _record_tool_result(state, tool_results, truncated_result_event)
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-            elif isinstance(config.tool_executor, PreparedToolExecutor):
-                batch_status = _PreparedBatchStatus()
-                async for execution_event in _prepared_tool_batch_events(
-                    config,
-                    tool_calls,
-                    batch_status,
-                ):
-                    yield execution_event
-                    if isinstance(execution_event, ToolResultReady):
-                        _record_tool_result(state, tool_results, execution_event)
-                if batch_status.cancelled:
-                    state.continuation.complete_tool_round(tool_results)
-                    for event in _cancelled_turn_events(turn):
-                        yield event
-                    return
-            else:
-                for tool_call in tool_calls:
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-                    arguments = dict(tool_call.arguments)
-                    yield ToolCallRequested(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=arguments,
-                    )
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-                    yield ToolExecutionStarted(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        arguments=arguments,
-                    )
-                    if _is_cancelled(config):
-                        for event in _cancelled_turn_events(turn):
-                            yield event
-                        return
-                    result_event: ToolResultReady | None = None
-                    async for execution_event in _execute_tool_call(config, tool_call):
-                        yield execution_event
-                        if isinstance(execution_event, ToolResultReady):
-                            result_event = execution_event
-                        if _is_cancelled(config) and not isinstance(
-                            execution_event, ToolExecutionEnded
-                        ):
-                            for event in _cancelled_turn_events(turn):
-                                yield event
-                            return
-                    if result_event is None:
-                        raise ToolExecutionProtocolError(
-                            f"Tool executor produced no provider result for {tool_call.call_id}"
-                        )
-                    _record_tool_result(state, tool_results, result_event)
-            state.continuation.complete_tool_round(tool_results)
+            tool_round = ToolRound(
+                tool_executor=config.tool_executor,
+                tool_calls=tool_calls,
+                truncated=response.finish_reason == "length",
+                is_cancelled=lambda: _is_cancelled(config),
+                on_result=state.continuation.record_tool_result,
+            )
+            async for tool_event in tool_round.events():
+                yield tool_event
+            tool_outcome = tool_round.outcome
+            if tool_outcome is None:
+                raise RuntimeError("Tool round ended without a typed outcome")
+            state.continuation.complete_tool_round(tool_outcome.results)
+            if isinstance(tool_outcome, CancelledToolRound):
+                for event in _cancelled_turn_events(turn):
+                    yield event
+                return
             yield TurnCompleted(
                 turn=turn,
                 outcome="completed",
