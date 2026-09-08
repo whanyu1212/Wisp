@@ -13,6 +13,7 @@ import anyio
 import pytest
 
 import wisp.agent.loop as agent_loop_module
+import wisp.agent.tool_round as tool_round_module
 from tests.agent_runtime import (
     assert_continuation_invariants,
     assert_settled_tool_calls,
@@ -639,7 +640,7 @@ def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> 
 def test_prepared_tool_batch_enforces_bounded_live_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(agent_loop_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
+    monkeypatch.setattr(tool_round_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="read", arguments={}) for index in range(1, 6)
     )
