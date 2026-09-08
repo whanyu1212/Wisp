@@ -186,6 +186,113 @@ class _ArmedRequestBoundary:
     stop_by_default: bool
 
 
+@dataclass(slots=True)
+class _HarnessBoundaryCoordinator:
+    """Coordinate one harness run's request boundaries and transcript transitions."""
+
+    harness: AgentHarness
+    active_from: int
+    boundary_preparer: HarnessBoundaryPreparer | None
+    context_overflow_hook: ContextOverflowHook | None
+    armed_boundary: _ArmedRequestBoundary | None = None
+    pending_transcript_transition: tuple[RequestBoundaryDecision, tuple[Message, ...]] | None = None
+
+    def arm(
+        self,
+        *,
+        turn: int,
+        had_tool_calls: bool,
+        injected_messages: Sequence[Message],
+        stop_by_default: bool,
+    ) -> None:
+        self.armed_boundary = _ArmedRequestBoundary(
+            turn=turn,
+            had_tool_calls=had_tool_calls,
+            injected_messages=tuple(injected_messages),
+            stop_by_default=stop_by_default,
+        )
+
+    async def before_next_request(
+        self, *, snapshot: RequestBoundarySnapshot
+    ) -> RequestBoundaryDecision:
+        boundary = self.armed_boundary
+        if boundary is None:
+            raise RuntimeError("AgentHarness received an unarmed request boundary")
+        if snapshot.turn != boundary.turn or snapshot.had_tool_calls != boundary.had_tool_calls:
+            raise RuntimeError("AgentHarness request boundary did not match its completed turn")
+        self.armed_boundary = None
+
+        if self.boundary_preparer is not None:
+            decision = await self.boundary_preparer.prepare_boundary(
+                context=HarnessBoundaryContext(
+                    snapshot=snapshot,
+                    messages=tuple(
+                        message.model_copy(deep=True) for message in self.harness._messages
+                    ),
+                    active_from=self.active_from,
+                    injected_messages=boundary.injected_messages,
+                    stop_by_default=boundary.stop_by_default,
+                )
+            )
+            if decision is not None:
+                self._remember_transcript_transition(decision, snapshot.continuation_messages)
+                return decision
+
+        if boundary.injected_messages:
+            if snapshot.can_append_user_messages:
+                return RequestBoundaryDecision(extra_messages=boundary.injected_messages)
+            # Cursor-less structured history cannot be flattened into
+            # extras. Replace from the complete normalized transcript,
+            # retaining assistant/tool pairs atomically.
+            return RequestBoundaryDecision(
+                messages=prepare_provider_history(
+                    self.harness._messages,
+                    provider=self.harness._config.provider,
+                    effort=self.harness._config.effort,
+                    active_from=self.active_from,
+                )
+            )
+        return RequestBoundaryDecision(stop=boundary.stop_by_default)
+
+    async def recover_context_overflow(
+        self, *, snapshot: ContextOverflowSnapshot
+    ) -> RequestBoundaryDecision | None:
+        if self.context_overflow_hook is None:
+            raise RuntimeError("AgentHarness received context overflow without a recovery hook")
+        decision = await self.context_overflow_hook.recover_context_overflow(snapshot=snapshot)
+        if decision is not None:
+            self._remember_transcript_transition(decision, snapshot.continuation_messages)
+        return decision
+
+    def apply_pending_transcript_transition(self) -> None:
+        pending = self.pending_transcript_transition
+        if pending is None:
+            return
+        decision, continuation_messages = pending
+        if not decision.stop:
+            if decision.messages is not None:
+                self.harness._messages = [*decision.messages, *decision.extra_messages]
+            elif decision.context_rebase is not None:
+                self.harness._messages = [
+                    *decision.context_rebase.base_messages,
+                    *continuation_messages,
+                    *decision.extra_messages,
+                ]
+        # The applied request consumes every row now in the rebuilt
+        # transcript. Only rows emitted by this and later samples are
+        # active at a subsequent internal request boundary.
+        self.active_from = len(self.harness._messages)
+        self.pending_transcript_transition = None
+
+    def _remember_transcript_transition(
+        self,
+        decision: RequestBoundaryDecision,
+        continuation_messages: Sequence[Message],
+    ) -> None:
+        if decision.messages is not None or decision.context_rebase is not None:
+            self.pending_transcript_transition = (decision, tuple(continuation_messages))
+
+
 class AgentHarness:
     """Own an in-memory transcript and delegate execution to the pure loop."""
 
@@ -433,7 +540,12 @@ class AgentHarness:
         # Every row already present when a run begins is durable history. New
         # assistant/tool rows appended during this invocation form the only live
         # tail that may need native reconstruction at an internal request boundary.
-        active_from = len(self._messages)
+        boundary = _HarnessBoundaryCoordinator(
+            harness=self,
+            active_from=len(self._messages),
+            boundary_preparer=boundary_preparer,
+            context_overflow_hook=context_overflow_hook,
+        )
         self._running = True
         token = SimpleCancellationToken()
         self._current_token = token
@@ -441,74 +553,6 @@ class AgentHarness:
             self._messages.append(prompt_message)
 
         run = _HarnessRunState()
-        armed_boundary: _ArmedRequestBoundary | None = None
-        pending_transcript_transition: (
-            tuple[RequestBoundaryDecision, tuple[Message, ...]] | None
-        ) = None
-
-        class _BoundaryHook:
-            async def before_next_request(
-                _self, *, snapshot: RequestBoundarySnapshot
-            ) -> RequestBoundaryDecision:
-                nonlocal armed_boundary, pending_transcript_transition
-                boundary = armed_boundary
-                if boundary is None:
-                    raise RuntimeError("AgentHarness received an unarmed request boundary")
-                if (
-                    snapshot.turn != boundary.turn
-                    or snapshot.had_tool_calls != boundary.had_tool_calls
-                ):
-                    raise RuntimeError(
-                        "AgentHarness request boundary did not match its completed turn"
-                    )
-                armed_boundary = None
-                if boundary_preparer is not None:
-                    decision = await boundary_preparer.prepare_boundary(
-                        context=HarnessBoundaryContext(
-                            snapshot=snapshot,
-                            messages=tuple(
-                                message.model_copy(deep=True) for message in self._messages
-                            ),
-                            active_from=active_from,
-                            injected_messages=boundary.injected_messages,
-                            stop_by_default=boundary.stop_by_default,
-                        )
-                    )
-                    if decision is not None:
-                        if decision.messages is not None or decision.context_rebase is not None:
-                            pending_transcript_transition = (
-                                decision,
-                                snapshot.continuation_messages,
-                            )
-                        return decision
-                if boundary.injected_messages:
-                    if snapshot.can_append_user_messages:
-                        return RequestBoundaryDecision(extra_messages=boundary.injected_messages)
-                    # Cursor-less structured history cannot be flattened into
-                    # extras. Replace from the complete normalized transcript,
-                    # retaining assistant/tool pairs atomically.
-                    return RequestBoundaryDecision(
-                        messages=prepare_provider_history(
-                            self._messages,
-                            provider=self._config.provider,
-                            effort=self._config.effort,
-                            active_from=active_from,
-                        )
-                    )
-                return RequestBoundaryDecision(stop=boundary.stop_by_default)
-
-        class _OverflowHook:
-            async def recover_context_overflow(
-                _self, *, snapshot: ContextOverflowSnapshot
-            ) -> RequestBoundaryDecision | None:
-                nonlocal pending_transcript_transition
-                assert context_overflow_hook is not None
-                decision = await context_overflow_hook.recover_context_overflow(snapshot=snapshot)
-                if decision is not None and (
-                    decision.messages is not None or decision.context_rebase is not None
-                ):
-                    pending_transcript_transition = (decision, snapshot.continuation_messages)
-                return decision
 
         config = AgentLoopConfig(
             provider=self._config.provider,
@@ -526,14 +570,14 @@ class AgentHarness:
             tool_iteration_offset=tool_iteration_offset,
             cost_estimator=self._config.cost_estimator,
             defer_context_overflow_errors=defer_context_overflow_errors,
-            request_boundary_hook=_BoundaryHook(),
-            context_overflow_hook=_OverflowHook() if context_overflow_hook is not None else None,
+            request_boundary_hook=boundary,
+            context_overflow_hook=boundary if context_overflow_hook is not None else None,
         )
         provider_messages = prepare_provider_history(
             self._messages,
             provider=self._config.provider,
             effort=self._config.effort,
-            active_from=active_from,
+            active_from=boundary.active_from,
         )
         loop_events = run_agent_loop(config, messages=provider_messages)
         draining_cancellation = False
@@ -575,16 +619,8 @@ class AgentHarness:
                     raise RuntimeError("Agent loop produced no event")
 
                 run.observe(event)
-                if isinstance(event, TurnStarted) and pending_transcript_transition is not None:
-                    decision, continuation_messages = pending_transcript_transition
-                    self._apply_transcript_transition(
-                        decision, continuation_messages=continuation_messages
-                    )
-                    # The applied request consumes every row now in the rebuilt
-                    # transcript. Only rows emitted by this and later samples are
-                    # active at a subsequent internal request boundary.
-                    active_from = len(self._messages)
-                    pending_transcript_transition = None
+                if isinstance(event, TurnStarted):
+                    boundary.apply_pending_transcript_transition()
                 if isinstance(
                     event, MessageCompleted | ToolExecutionEnded
                 ) and completion_event_has_history(event):
@@ -626,10 +662,10 @@ class AgentHarness:
                             yield cancellation_event
                         return
 
-                armed_boundary = _ArmedRequestBoundary(
+                boundary.arm(
                     turn=event.turn,
                     had_tool_calls=run.had_tool_calls,
-                    injected_messages=tuple(injected_messages),
+                    injected_messages=injected_messages,
                     stop_by_default=not run.had_tool_calls and not injected_messages,
                 )
         finally:
@@ -660,26 +696,6 @@ class AgentHarness:
             skill_invocation=message.skill_invocation,
             timestamp=message.created_at,
         )
-
-    def _apply_transcript_transition(
-        self,
-        decision: RequestBoundaryDecision,
-        *,
-        continuation_messages: Sequence[Message],
-    ) -> None:
-        """Keep harness history atomic with a loop replacement or rebase."""
-
-        if decision.stop:
-            return
-        if decision.messages is not None:
-            self._messages = [*decision.messages, *decision.extra_messages]
-            return
-        if decision.context_rebase is not None:
-            self._messages = [
-                *decision.context_rebase.base_messages,
-                *continuation_messages,
-                *decision.extra_messages,
-            ]
 
     def _ensure_idle(self) -> None:
         if self._running:
