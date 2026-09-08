@@ -16,6 +16,7 @@ from tests.agent_runtime import (
 from wisp.agent.execution import (
     PreparedToolExecution,
     RequestBoundaryDecision,
+    RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
     RequestContextRebase,
     ToolExecutionEvent,
@@ -313,6 +314,122 @@ def test_harness_continue_treats_completed_tool_turn_as_history() -> None:
     ]
     assert json.loads(replayed[1].content)["type"] == "wisp.portable_tool_exchange"
     assert replayed[2].content == "done"
+
+
+def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> None:
+    harness = _harness(ScriptedProvider([]))
+    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
+        harness=harness,
+        active_from=0,
+        boundary_preparer=None,
+        context_overflow_hook=None,
+    )
+    snapshot = RequestBoundarySnapshot(
+        turn=1,
+        tool_iterations=0,
+        had_tool_calls=False,
+        can_append_user_messages=False,
+        continuation_messages=(),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="unarmed request boundary"):
+            await coordinator.before_next_request(snapshot=snapshot)
+        coordinator.arm(
+            turn=2,
+            had_tool_calls=False,
+            injected_messages=(),
+            stop_by_default=True,
+        )
+        with pytest.raises(RuntimeError, match="did not match its completed turn"):
+            await coordinator.before_next_request(snapshot=snapshot)
+
+    anyio.run(run)
+
+
+def test_boundary_coordinator_applies_prepared_replacement_on_next_turn() -> None:
+    original = Message(role="user", content="old")
+    replacement = Message(role="user", content="compressed")
+    extra = Message(role="user", content="steered")
+    harness = _harness(ScriptedProvider([]), messages=(original,))
+
+    class Preparer:
+        async def prepare_boundary(
+            self, *, context: agent_harness_module.HarnessBoundaryContext
+        ) -> RequestBoundaryDecision:
+            assert context.active_from == 1
+            return RequestBoundaryDecision(
+                messages=(replacement,),
+                extra_messages=(extra,),
+            )
+
+    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
+        harness=harness,
+        active_from=1,
+        boundary_preparer=Preparer(),
+        context_overflow_hook=None,
+    )
+    coordinator.arm(
+        turn=1,
+        had_tool_calls=False,
+        injected_messages=(extra,),
+        stop_by_default=False,
+    )
+    snapshot = RequestBoundarySnapshot(
+        turn=1,
+        tool_iterations=0,
+        had_tool_calls=False,
+        can_append_user_messages=False,
+        continuation_messages=(Message(role="assistant", content="answer"),),
+    )
+
+    async def run() -> None:
+        decision = await coordinator.before_next_request(snapshot=snapshot)
+        assert decision.messages == (replacement,)
+
+    anyio.run(run)
+    assert harness.messages == (original,)
+
+    coordinator.apply_pending_transcript_transition()
+
+    assert harness.messages == (replacement, extra)
+    assert coordinator.active_from == 2
+    assert coordinator.pending_transcript_transition is None
+
+
+def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition() -> None:
+    user = Message(role="user", content="initial")
+    injected = Message(role="user", content="steered")
+    harness = _harness(ScriptedProvider([]), messages=(user, injected))
+    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
+        harness=harness,
+        active_from=1,
+        boundary_preparer=None,
+        context_overflow_hook=None,
+    )
+    coordinator.arm(
+        turn=1,
+        had_tool_calls=True,
+        injected_messages=(injected,),
+        stop_by_default=False,
+    )
+    snapshot = RequestBoundarySnapshot(
+        turn=1,
+        tool_iterations=1,
+        had_tool_calls=True,
+        can_append_user_messages=False,
+        continuation_messages=(),
+    )
+
+    async def run() -> RequestBoundaryDecision:
+        return await coordinator.before_next_request(snapshot=snapshot)
+
+    decision = anyio.run(run)
+
+    assert decision.messages is not None
+    assert coordinator.pending_transcript_transition is None
+    coordinator.apply_pending_transcript_transition()
+    assert harness.messages == (user, injected)
 
 
 def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
