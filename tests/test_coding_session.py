@@ -11,10 +11,10 @@ import pytest
 
 import wisp.coding.session as session_module
 import wisp.coding.tool_execution as tool_execution
-from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.prompt import build_prompt_messages
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.tool_contracts import ToolResultProcessingError
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession, _prompt_cache_key, _tool_result_status
 from wisp.events import (
     AgentCompleted,

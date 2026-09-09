@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 
-from wisp.agent.context import estimate_context_budget
+from wisp.agent.context_budget import estimate_context_budget
 from wisp.agent.messages import Message
 from wisp.events import (
     ContextEstimated,

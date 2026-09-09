@@ -11,7 +11,7 @@ from tests.cli_support import *
 from tests.rpc_support import guard_rpc_command_serialization
 from wisp import __version__
 from wisp.agent.messages import CompactionRecord
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import EVENT_SCHEMA_VERSION, ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (

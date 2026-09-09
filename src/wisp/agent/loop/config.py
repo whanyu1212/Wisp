@@ -6,15 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from wisp.agent.configuration import (
-    validate_agent_runtime_limits,
-    validate_non_negative_integer,
-)
-from wisp.agent.execution import (
-    ContextOverflowHook,
-    RequestBoundaryHook,
-    ToolExecutor,
-)
+from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
+from wisp.agent.tool_contracts import ToolExecutor
+from wisp.agent.validation import validate_agent_runtime_limits, validate_non_negative_integer
 from wisp.events import TokenUsage, UsageCost
 from wisp.providers.base import Provider, ToolSpec
 

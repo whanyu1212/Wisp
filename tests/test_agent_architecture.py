@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import os
 import subprocess
 import sys
@@ -11,9 +12,16 @@ from pathlib import Path
 import pytest
 
 _PURE_AGENT_MODULES = (
-    "configuration.py",
-    "execution.py",
-    "harness.py",
+    "validation.py",
+    "context_budget.py",
+    "history.py",
+    "transcript_repair.py",
+    "request_boundary.py",
+    "tool_contracts.py",
+    "harness/__init__.py",
+    "harness/config.py",
+    "harness/boundaries.py",
+    "harness/runner.py",
     "loop/__init__.py",
     "loop/config.py",
     "loop/continuation.py",
@@ -47,6 +55,11 @@ _CODING_FORBIDDEN_IMPORTS = (
 _FRONTEND_MODULES = (Path("cli/__init__.py"),)
 _FRESH_IMPORT_MODULES = (
     "wisp.agent.harness",
+    "wisp.agent.prompt",
+    "wisp.agent.history",
+    "wisp.agent.messages",
+    "wisp.agent.request_boundary",
+    "wisp.agent.tool_contracts",
     "wisp.coding.compaction",
     "wisp.coding.session",
     "wisp.coding.tool_execution",
@@ -131,6 +144,30 @@ def test_pure_agent_modules_do_not_import_application_layers() -> None:
                 violations.append(f"{filename}: {imported}")
 
     assert violations == []
+
+
+@pytest.mark.parametrize(
+    ("public_module", "implementation_module", "symbol"),
+    [
+        ("harness", "harness.config", "AgentHarnessConfig"),
+        ("harness", "harness.runner", "AgentHarness"),
+        ("prompt", "prompt.builder", "build_prompt_messages"),
+    ],
+)
+def test_agent_public_packages_export_the_implementation(
+    public_module: str, implementation_module: str, symbol: str
+) -> None:
+    public = importlib.import_module(f"wisp.agent.{public_module}")
+    implementation = importlib.import_module(f"wisp.agent.{implementation_module}")
+
+    assert getattr(public, symbol) is getattr(implementation, symbol)
+
+
+def test_obsolete_agent_compatibility_modules_are_removed() -> None:
+    agent_dir = Path(__file__).parents[1] / "src" / "wisp" / "agent"
+
+    for filename in ("configuration.py", "context.py", "execution.py", "transcript.py"):
+        assert not (agent_dir / filename).exists()
 
 
 def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:

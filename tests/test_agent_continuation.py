@@ -5,14 +5,6 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import pytest
 
-from wisp.agent.execution import (
-    ContextOverflowSnapshot,
-    RequestBoundaryDecision,
-    RequestBoundarySnapshot,
-    RequestBoundaryUnsupportedError,
-    RequestContextRebase,
-    ToolExecutionEvent,
-)
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.continuation import (
     ContinuationState,
@@ -23,6 +15,14 @@ from wisp.agent.loop.continuation import (
     is_tool_shaped,
 )
 from wisp.agent.messages import Message
+from wisp.agent.request_boundary import (
+    ContextOverflowSnapshot,
+    RequestBoundaryDecision,
+    RequestBoundarySnapshot,
+    RequestBoundaryUnsupportedError,
+    RequestContextRebase,
+)
+from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import (
     ContextBudget,
     ContextEstimate,

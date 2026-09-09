@@ -7,24 +7,28 @@ from typing import cast
 import anyio
 import pytest
 
-import wisp.agent.harness as agent_harness_module
+import wisp.agent.harness.boundaries as agent_boundary_module
+import wisp.agent.harness.runner as agent_harness_module
 from tests.agent_runtime import (
     assert_settled_tool_calls,
     assert_tool_result_pairing,
     assert_turn_terminals,
 )
-from wisp.agent.execution import (
-    PreparedToolExecution,
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
+from wisp.agent.messages import Message
+from wisp.agent.request_boundary import (
+    ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
     RequestContextRebase,
+)
+from wisp.agent.tool_contracts import (
+    PreparedToolExecution,
     ToolExecutionEvent,
     ToolExecutor,
     ToolPreparationEvent,
 )
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
-from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
     MessageDelta,
@@ -35,9 +39,16 @@ from wisp.events import (
     ToolExecutionEnded,
     ToolResultReady,
     TurnCompleted,
+    TurnStarted,
     wisp_event_from_json,
 )
-from wisp.providers.base import Provider, ToolCallResult, ToolSpec, prepare_provider_history
+from wisp.providers.base import (
+    ContextOverflowError,
+    Provider,
+    ToolCallResult,
+    ToolSpec,
+    prepare_provider_history,
+)
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -318,8 +329,10 @@ def test_harness_continue_treats_completed_tool_turn_as_history() -> None:
 
 def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> None:
     harness = _harness(ScriptedProvider([]))
-    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
-        harness=harness,
+    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
+        get_messages=lambda: harness.messages,
+        provider=harness.config.provider,
+        effort=harness.config.effort,
         active_from=0,
         boundary_preparer=None,
         context_overflow_hook=None,
@@ -347,7 +360,7 @@ def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> Non
     anyio.run(run)
 
 
-def test_boundary_coordinator_applies_prepared_replacement_on_next_turn() -> None:
+def test_boundary_coordinator_returns_replacement_without_mutating_transcript() -> None:
     original = Message(role="user", content="old")
     replacement = Message(role="user", content="compressed")
     extra = Message(role="user", content="steered")
@@ -355,7 +368,7 @@ def test_boundary_coordinator_applies_prepared_replacement_on_next_turn() -> Non
 
     class Preparer:
         async def prepare_boundary(
-            self, *, context: agent_harness_module.HarnessBoundaryContext
+            self, *, context: agent_boundary_module.HarnessBoundaryContext
         ) -> RequestBoundaryDecision:
             assert context.active_from == 1
             return RequestBoundaryDecision(
@@ -363,8 +376,10 @@ def test_boundary_coordinator_applies_prepared_replacement_on_next_turn() -> Non
                 extra_messages=(extra,),
             )
 
-    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
-        harness=harness,
+    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
+        get_messages=lambda: harness.messages,
+        provider=harness.config.provider,
+        effort=harness.config.effort,
         active_from=1,
         boundary_preparer=Preparer(),
         context_overflow_hook=None,
@@ -390,10 +405,10 @@ def test_boundary_coordinator_applies_prepared_replacement_on_next_turn() -> Non
     anyio.run(run)
     assert harness.messages == (original,)
 
-    coordinator.apply_pending_transcript_transition()
-
-    assert harness.messages == (replacement, extra)
-    assert coordinator.active_from == 2
+    assert coordinator.take_transcript_replacement() == (replacement, extra)
+    assert coordinator.take_transcript_replacement() is None
+    assert harness.messages == (original,)
+    assert coordinator.active_from == 1
     assert coordinator.pending_transcript_transition is None
 
 
@@ -401,8 +416,10 @@ def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition()
     user = Message(role="user", content="initial")
     injected = Message(role="user", content="steered")
     harness = _harness(ScriptedProvider([]), messages=(user, injected))
-    coordinator = agent_harness_module._HarnessBoundaryCoordinator(
-        harness=harness,
+    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
+        get_messages=lambda: harness.messages,
+        provider=harness.config.provider,
+        effort=harness.config.effort,
         active_from=1,
         boundary_preparer=None,
         context_overflow_hook=None,
@@ -428,8 +445,62 @@ def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition()
 
     assert decision.messages is not None
     assert coordinator.pending_transcript_transition is None
-    coordinator.apply_pending_transcript_transition()
+    assert coordinator.take_transcript_replacement() is None
     assert harness.messages == (user, injected)
+
+
+@pytest.mark.parametrize("raised", [False, True])
+@pytest.mark.parametrize("empty_replacement", [False, True])
+def test_harness_applies_overflow_replacement_only_when_retry_starts(
+    raised: bool, empty_replacement: bool
+) -> None:
+    original = Message(role="user", content="long prompt")
+    replacement = () if empty_replacement else (Message(role="user", content="summary"),)
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="rejected"),
+                ProviderTextDelta(delta="partial answer"),
+                ContextOverflowError("context window exceeded")
+                if raised
+                else ProviderResponseFailed(
+                    message="context window exceeded", failure_kind="context_overflow"
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="recovered"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+    harness = _harness(provider, messages=(original,))
+
+    class RecoverOverflow:
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> RequestBoundaryDecision:
+            assert snapshot.had_streamed_delta
+            assert harness.messages[0] == original
+            assert harness.messages[-1].content == "partial answer"
+            return RequestBoundaryDecision(messages=replacement)
+
+    async def run() -> None:
+        started_turns = []
+        async for event in harness.continue_(context_overflow_hook=RecoverOverflow()):
+            if isinstance(event, TurnCompleted) and event.turn == 1:
+                assert harness.messages[0] == original
+                assert harness.messages[-1].content == "partial answer"
+            if isinstance(event, TurnStarted):
+                started_turns.append(event.turn)
+                if event.turn == 2:
+                    assert harness.messages == replacement
+        assert started_turns == [1, 2]
+
+    anyio.run(run)
+
+    assert provider.calls[1].messages == replacement
+    assert harness.messages[:-1] == replacement
+    assert harness.messages[-1].content == "done"
 
 
 def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
@@ -461,7 +532,7 @@ def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
             self.boundaries: list[int] = []
 
         async def prepare_boundary(
-            self, *, context: agent_harness_module.HarnessBoundaryContext
+            self, *, context: agent_boundary_module.HarnessBoundaryContext
         ) -> RequestBoundaryDecision | None:
             self.boundaries.append(context.active_from)
             if len(self.boundaries) == 1:

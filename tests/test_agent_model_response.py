@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import pytest
 
-from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import (
     CompletedProviderResponse,
@@ -16,6 +15,7 @@ from wisp.agent.loop.model_response import (
     resolve_provider_response_id,
 )
 from wisp.agent.messages import Message
+from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import UsageCost
 from wisp.providers.base import (
     ContextOverflowError,

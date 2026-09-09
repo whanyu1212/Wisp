@@ -426,7 +426,7 @@ def test_normalized_historical_tool_call_never_reaches_wire_dangling() -> None:
     reach the wire, rather than only asserting on the normalizer's return value.
     """
 
-    from wisp.agent.messages import normalize_provider_history
+    from wisp.agent.history import normalize_provider_history
 
     transcript = [
         Message(role="user", content="search"),

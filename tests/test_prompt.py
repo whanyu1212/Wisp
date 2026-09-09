@@ -7,13 +7,14 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.agent import prompt as prompt_module
 from wisp.agent.prompt import (
     build_project_context,
     build_prompt_messages,
     build_untrusted_project_context,
     resolve_project_context_root,
 )
+from wisp.agent.prompt import project_context as project_context_module
+from wisp.agent.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 
@@ -60,7 +61,7 @@ def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: P
     assert guidance.count("Read only the relevant section.") == 1
     assert guidance.count(shared) == 1
     assert "actual availability, sandboxing" in guidance
-    assert len(guidance) <= prompt_module.DEFAULT_TOOL_GUIDANCE_MAX_CHARS
+    assert len(guidance) <= DEFAULT_TOOL_GUIDANCE_MAX_CHARS
     assert guidance.endswith("[tool guidance truncated]")
 
 
@@ -309,7 +310,7 @@ def test_project_context_uses_context_file_as_root_marker(
     subdir = project / "src"
     subdir.mkdir(parents=True)
     (project / "AGENTS.md").write_text("Root-only agent guidance.\n", encoding="utf-8")
-    monkeypatch.setattr(prompt_module, "_run_git", lambda _cwd, *args: None)
+    monkeypatch.setattr(project_context_module, "_run_git", lambda _cwd, *args: None)
 
     context = build_project_context(cwd=subdir)
 
@@ -377,7 +378,7 @@ def test_project_context_file_read_is_bounded(
 
     monkeypatch.setattr(Path, "open", fake_open)
 
-    content = prompt_module._read_context_file(tmp_path / "AGENTS.md", max_chars=80)
+    content = project_context_module._read_context_file(tmp_path / "AGENTS.md", max_chars=80)
 
     assert reads == [81]
     assert len(content) <= 80
@@ -462,7 +463,7 @@ def test_project_context_scans_git_root_from_subdirectory(
             return ""
         return None
 
-    monkeypatch.setattr(prompt_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
 
     context = build_project_context(cwd=subdir)
 
@@ -481,7 +482,7 @@ def test_project_context_walks_parents_without_git(
     subdir = project / "packages" / "app"
     subdir.mkdir(parents=True)
     (project / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
-    monkeypatch.setattr(prompt_module, "_run_git", lambda _cwd, *args: None)
+    monkeypatch.setattr(project_context_module, "_run_git", lambda _cwd, *args: None)
 
     context = build_project_context(cwd=subdir)
 
@@ -502,7 +503,7 @@ def test_project_context_includes_bounded_git_status(
     def fake_run_git(_cwd: Path, *args: str) -> str | None:
         return responses.get(args)
 
-    monkeypatch.setattr(prompt_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
 
     context = build_project_context(cwd=tmp_path)
 
@@ -522,7 +523,7 @@ def test_project_context_is_bounded(tmp_path: Path, monkeypatch: MonkeyPatch) ->
             return "\n".join(f" M very-long-file-name-{index}.py" for index in range(50))
         return None
 
-    monkeypatch.setattr(prompt_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
 
     context = build_project_context(cwd=tmp_path, max_chars=120)
 
@@ -550,8 +551,8 @@ def test_project_context_applies_one_aggregate_git_deadline(
         output = "true" if command[-2:] == ("rev-parse", "--is-inside-work-tree") else ""
         return subprocess.CompletedProcess(command, 0, stdout=output)
 
-    monkeypatch.setattr(prompt_module.time, "monotonic", lambda: next(monotonic_values))
-    monkeypatch.setattr(prompt_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(project_context_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(project_context_module.subprocess, "run", fake_run)
 
     context = build_project_context(cwd=tmp_path)
 

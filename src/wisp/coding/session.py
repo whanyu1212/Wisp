@@ -9,19 +9,10 @@ from pathlib import Path
 
 import anyio
 
-from wisp.agent.configuration import (
-    validate_non_negative_integer,
-    validate_optional_non_negative_integer,
-)
-from wisp.agent.context import (
+from wisp.agent.context_budget import (
     build_context_budget,
     estimate_context,
     estimate_context_budget,
-)
-from wisp.agent.execution import (
-    ContextOverflowSnapshot,
-    RequestBoundaryDecision,
-    RequestContextRebase,
 )
 from wisp.agent.harness import (
     AgentHarness,
@@ -29,16 +20,25 @@ from wisp.agent.harness import (
     HarnessBoundaryContext,
     QueuedMessages,
 )
+from wisp.agent.history import active_turn_start
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
-    active_turn_start,
     completion_event_has_history,
     message_from_completion_event,
 )
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
-from wisp.agent.transcript import plan_interrupted_tool_repairs
+from wisp.agent.request_boundary import (
+    ContextOverflowSnapshot,
+    RequestBoundaryDecision,
+    RequestContextRebase,
+)
+from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
+from wisp.agent.validation import (
+    validate_non_negative_integer,
+    validate_optional_non_negative_integer,
+)
 from wisp.coding.compaction import (
     CompactionSummary,
     CompactionSummaryError,

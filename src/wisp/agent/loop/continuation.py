@@ -6,13 +6,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from wisp.agent.execution import (
+from wisp.agent.messages import Message
+from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
 )
-from wisp.agent.messages import Message
 from wisp.events import ContextBudget, ToolResultReady
 from wisp.providers.base import (
     Provider,

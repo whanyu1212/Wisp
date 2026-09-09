@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from wisp.agent.messages import Message
-from wisp.agent.transcript import (
+from wisp.agent.transcript_repair import (
     INTERRUPTED_TOOL_RESULT_TEXT,
     MissingToolResult,
     order_tool_result_items,

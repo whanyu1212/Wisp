@@ -5,25 +5,17 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol
 
 import anyio
 
-from wisp.agent.configuration import validate_agent_runtime_limits
-from wisp.agent.execution import (
-    ContextOverflowHook,
-    ContextOverflowSnapshot,
-    RequestBoundaryDecision,
-    RequestBoundarySnapshot,
-    ToolExecutor,
-)
-from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator, run_agent_loop
+from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
 from wisp.agent.messages import (
     Message,
     completion_event_has_history,
     message_from_completion_event,
 )
-from wisp.agent.transcript import plan_interrupted_tool_repairs
+from wisp.agent.request_boundary import ContextOverflowHook
+from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -35,54 +27,12 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
 )
-from wisp.providers.base import Provider, ToolSpec, prepare_provider_history
+from wisp.providers.base import prepare_provider_history
 
-_MAX_PENDING_QUEUE_MESSAGES = 100
-_MAX_PENDING_QUEUE_BYTES = 8 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class AgentHarnessConfig:
-    """Portable dependencies and limits for an `AgentHarness`."""
-
-    provider: Provider
-    tool_executor: ToolExecutor
-    model: str | None = None
-    tools: tuple[ToolSpec, ...] = ()
-    max_tool_iterations: int | None = None
-    effort: str | None = None
-    context_window: int | None = None
-    context_reserve_tokens: int = 16_384
-    context_pressure_threshold: float = 0.8
-    cost_estimator: UsageCostEstimator | None = None
-    steering_mode: QueueMode = "one_at_a_time"
-    follow_up_mode: QueueMode = "one_at_a_time"
-    max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
-    max_pending_queue_bytes: int = _MAX_PENDING_QUEUE_BYTES
-    prompt_cache_key: str | None = None
-
-    def __post_init__(self) -> None:
-        """Reject invalid runtime settings even when callers bypass static typing."""
-        validate_agent_runtime_limits(
-            max_tool_iterations=self.max_tool_iterations,
-            context_window=self.context_window,
-            context_reserve_tokens=self.context_reserve_tokens,
-            context_pressure_threshold=self.context_pressure_threshold,
-        )
-        _require_queue_mode(self.steering_mode)
-        _require_queue_mode(self.follow_up_mode)
-        if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:
-            raise ValueError("max_pending_queue_messages must be a non-negative integer")
-        if type(self.max_pending_queue_bytes) is not int or self.max_pending_queue_bytes < 0:
-            raise ValueError("max_pending_queue_bytes must be a non-negative integer")
-
+from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
+from .config import AgentHarnessConfig
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
-
-
-def _require_queue_mode(mode: object) -> None:
-    if not isinstance(mode, str) or mode not in {"one_at_a_time", "all"}:
-        raise ValueError(f"Unsupported queue mode: {mode!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,144 +103,6 @@ class _HarnessRunState:
             self.active_turn,
             active_turn_completed=self.active_turn_completed,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class HarnessBoundaryContext:
-    """Harness state available to session-owned request-boundary preparation."""
-
-    snapshot: RequestBoundarySnapshot
-    messages: tuple[Message, ...]
-    active_from: int
-    injected_messages: tuple[Message, ...]
-    stop_by_default: bool
-
-
-class HarnessBoundaryPreparer(Protocol):
-    """Prepare compaction/rebase decisions without owning queues or the loop."""
-
-    async def prepare_boundary(
-        self, *, context: HarnessBoundaryContext
-    ) -> RequestBoundaryDecision | None:
-        """Return a complete loop decision, or ``None`` for harness defaults."""
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class _ArmedRequestBoundary:
-    """Queue effects exposed before the loop invokes its boundary hook."""
-
-    turn: int
-    had_tool_calls: bool
-    injected_messages: tuple[Message, ...]
-    stop_by_default: bool
-
-
-@dataclass(slots=True)
-class _HarnessBoundaryCoordinator:
-    """Coordinate one harness run's request boundaries and transcript transitions."""
-
-    harness: AgentHarness
-    active_from: int
-    boundary_preparer: HarnessBoundaryPreparer | None
-    context_overflow_hook: ContextOverflowHook | None
-    armed_boundary: _ArmedRequestBoundary | None = None
-    pending_transcript_transition: tuple[RequestBoundaryDecision, tuple[Message, ...]] | None = None
-
-    def arm(
-        self,
-        *,
-        turn: int,
-        had_tool_calls: bool,
-        injected_messages: Sequence[Message],
-        stop_by_default: bool,
-    ) -> None:
-        self.armed_boundary = _ArmedRequestBoundary(
-            turn=turn,
-            had_tool_calls=had_tool_calls,
-            injected_messages=tuple(injected_messages),
-            stop_by_default=stop_by_default,
-        )
-
-    async def before_next_request(
-        self, *, snapshot: RequestBoundarySnapshot
-    ) -> RequestBoundaryDecision:
-        boundary = self.armed_boundary
-        if boundary is None:
-            raise RuntimeError("AgentHarness received an unarmed request boundary")
-        if snapshot.turn != boundary.turn or snapshot.had_tool_calls != boundary.had_tool_calls:
-            raise RuntimeError("AgentHarness request boundary did not match its completed turn")
-        self.armed_boundary = None
-
-        if self.boundary_preparer is not None:
-            decision = await self.boundary_preparer.prepare_boundary(
-                context=HarnessBoundaryContext(
-                    snapshot=snapshot,
-                    messages=tuple(
-                        message.model_copy(deep=True) for message in self.harness._messages
-                    ),
-                    active_from=self.active_from,
-                    injected_messages=boundary.injected_messages,
-                    stop_by_default=boundary.stop_by_default,
-                )
-            )
-            if decision is not None:
-                self._remember_transcript_transition(decision, snapshot.continuation_messages)
-                return decision
-
-        if boundary.injected_messages:
-            if snapshot.can_append_user_messages:
-                return RequestBoundaryDecision(extra_messages=boundary.injected_messages)
-            # Cursor-less structured history cannot be flattened into
-            # extras. Replace from the complete normalized transcript,
-            # retaining assistant/tool pairs atomically.
-            return RequestBoundaryDecision(
-                messages=prepare_provider_history(
-                    self.harness._messages,
-                    provider=self.harness._config.provider,
-                    effort=self.harness._config.effort,
-                    active_from=self.active_from,
-                )
-            )
-        return RequestBoundaryDecision(stop=boundary.stop_by_default)
-
-    async def recover_context_overflow(
-        self, *, snapshot: ContextOverflowSnapshot
-    ) -> RequestBoundaryDecision | None:
-        if self.context_overflow_hook is None:
-            raise RuntimeError("AgentHarness received context overflow without a recovery hook")
-        decision = await self.context_overflow_hook.recover_context_overflow(snapshot=snapshot)
-        if decision is not None:
-            self._remember_transcript_transition(decision, snapshot.continuation_messages)
-        return decision
-
-    def apply_pending_transcript_transition(self) -> None:
-        pending = self.pending_transcript_transition
-        if pending is None:
-            return
-        decision, continuation_messages = pending
-        if not decision.stop:
-            if decision.messages is not None:
-                self.harness._messages = [*decision.messages, *decision.extra_messages]
-            elif decision.context_rebase is not None:
-                self.harness._messages = [
-                    *decision.context_rebase.base_messages,
-                    *continuation_messages,
-                    *decision.extra_messages,
-                ]
-        # The applied request consumes every row now in the rebuilt
-        # transcript. Only rows emitted by this and later samples are
-        # active at a subsequent internal request boundary.
-        self.active_from = len(self.harness._messages)
-        self.pending_transcript_transition = None
-
-    def _remember_transcript_transition(
-        self,
-        decision: RequestBoundaryDecision,
-        continuation_messages: Sequence[Message],
-    ) -> None:
-        if decision.messages is not None or decision.context_rebase is not None:
-            self.pending_transcript_transition = (decision, tuple(continuation_messages))
 
 
 class AgentHarness:
@@ -476,7 +288,23 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
-        """Append a user message and start a run."""
+        """Create an event stream for a new user prompt.
+
+        Args:
+            content (str): User text to append when the stream is consumed.
+            turn_offset (int): Number of turns preceding this run.
+            tool_iteration_offset (int): Number of earlier tool iterations.
+            defer_context_overflow_errors (bool): Whether overflow recovery is
+                delegated to the enclosing session.
+            boundary_preparer (HarnessBoundaryPreparer | None): Session policy
+                invoked between completed turns and new provider requests.
+            context_overflow_hook (ContextOverflowHook | None): Recovery hook for
+                provider-rejected context.
+
+        Returns:
+            AsyncGenerator[AgentHarnessEvent, None]: Lazy stream of loop and queue
+            events. Consume or close it to allow the harness to finish cleanup.
+        """
         return self.prompt_message(
             Message(role="user", content=content),
             turn_offset=turn_offset,
@@ -496,7 +324,25 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
-        """Append an existing user message and start a run."""
+        """Create a run from an existing user message, preserving its metadata.
+
+        Args:
+            message (Message): User message to append when iteration begins.
+            turn_offset (int): Number of turns preceding this run.
+            tool_iteration_offset (int): Number of earlier tool iterations.
+            defer_context_overflow_errors (bool): Whether to defer overflow errors.
+            boundary_preparer (HarnessBoundaryPreparer | None): Session policy
+                invoked before subsequent requests.
+            context_overflow_hook (ContextOverflowHook | None): Provider-overflow
+                recovery hook.
+
+        Returns:
+            AsyncGenerator[AgentHarnessEvent, None]: Lazy stream with the same
+            lifecycle and queue behavior as prompt().
+
+        Raises:
+            ValueError: If the supplied message does not have the user role.
+        """
         if message.role != "user":
             raise ValueError("AgentHarness prompts require a user message")
         return self._run(
@@ -517,7 +363,21 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
-        """Continue from the current transcript without adding a user message."""
+        """Continue from the current transcript without adding a user message.
+
+        Args:
+            turn_offset (int): Number of turns preceding this continuation.
+            tool_iteration_offset (int): Number of earlier tool iterations.
+            defer_context_overflow_errors (bool): Whether to defer overflow errors.
+            boundary_preparer (HarnessBoundaryPreparer | None): Session policy
+                invoked before subsequent requests.
+            context_overflow_hook (ContextOverflowHook | None): Provider-overflow
+                recovery hook.
+
+        Returns:
+            AsyncGenerator[AgentHarnessEvent, None]: Lazy event stream that repairs
+            interrupted tool calls before running and releases run state on close.
+        """
         return self._run(
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
@@ -541,7 +401,9 @@ class AgentHarness:
         # assistant/tool rows appended during this invocation form the only live
         # tail that may need native reconstruction at an internal request boundary.
         boundary = _HarnessBoundaryCoordinator(
-            harness=self,
+            get_messages=lambda: self.messages,
+            provider=self._config.provider,
+            effort=self._config.effort,
             active_from=len(self._messages),
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
@@ -620,7 +482,12 @@ class AgentHarness:
 
                 run.observe(event)
                 if isinstance(event, TurnStarted):
-                    boundary.apply_pending_transcript_transition()
+                    replacement = boundary.take_transcript_replacement()
+                    if replacement is not None:
+                        self._messages = list(replacement)
+                        # The accepted request consumed these rows. Only later
+                        # completions belong to the next boundary's active tail.
+                        boundary.active_from = len(self._messages)
                 if isinstance(
                     event, MessageCompleted | ToolExecutionEnded
                 ) and completion_event_has_history(event):
@@ -731,15 +598,3 @@ class AgentHarness:
     def _require_user_queue_message(message: Message) -> None:
         if message.role != "user":
             raise ValueError("AgentHarness queues require a user message")
-
-
-__all__ = [
-    "AgentHarness",
-    "AgentHarnessConfig",
-    "AgentHarnessEvent",
-    "HarnessBoundaryContext",
-    "HarnessBoundaryPreparer",
-    "QueuedMessages",
-    "QueueKind",
-    "SimpleCancellationToken",
-]

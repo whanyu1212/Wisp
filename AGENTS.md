@@ -80,10 +80,25 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - Preserve append-only JSONL session semantics and backward-compatible event parsing when changing
   persisted schemas.
 
-For loop work, start with `src/wisp/agent/loop/runner.py` for execution flow and `loop/config.py`
-for configuration. The sibling `model_response.py`, `tool_execution.py`, and `continuation.py` contain
-the supporting mechanisms. Keep `wisp.agent.loop` as the public import surface; package internals
-import directly from the defining modules. Shared agent contracts remain outside this subpackage.
+### Finding agent code
+
+- Start with `src/wisp/agent/harness/runner.py` for transcript and queue behavior across runs,
+  then `loop/runner.py` for execution within one run. Each package keeps configuration in `config.py`.
+- `harness/boundaries.py` prepares boundary decisions and transcript replacements; `harness/runner.py`
+  applies replacements when the next turn starts. The loop's `model_response.py`, `tool_execution.py`,
+  and `continuation.py` contain its supporting mechanisms.
+- `prompt/builder.py` assembles instructions in order; `prompt/instructions.py` holds core instruction
+  text; `prompt/project_context.py` discovers trusted files and bounded Git/project context.
+  `prompt/text_budget.py` applies shared character limits to context and tool guidance.
+- `messages.py` defines message and compaction records and projects completion events. `history.py`
+  normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
+- `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
+  and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
+- Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.agent.prompt` as their public import surfaces.
+  Within each package, import from defining modules. Use the current shared module names above;
+  do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`
+  import shims. Import history helpers directly from `wisp.agent.history` and concrete session-entry
+  models from `wisp.sessions`; do not restore the removed `wisp.agent.messages.SessionEntry` factory.
 
 ## Implementation conventions
 

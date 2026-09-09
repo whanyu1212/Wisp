@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from wisp.agent.execution import (
+from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     ToolExecutionEvent,
     ToolPreparationEvent,

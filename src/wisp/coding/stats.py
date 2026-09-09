@@ -7,7 +7,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from wisp.agent.context import (
+from wisp.agent.context_budget import (
     build_context_budget,
     context_fingerprint,
     estimate_context,

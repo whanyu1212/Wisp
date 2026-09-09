@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from textual.widget import Widget
 
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     AgentCompleted,
     CompactionCompleted,

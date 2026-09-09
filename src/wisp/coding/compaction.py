@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 
-from wisp.agent.execution import ToolExecutionEvent
+from wisp.agent.history import surrogate_safe_text
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message, surrogate_safe_text
+from wisp.agent.messages import Message
+from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import (
     BillableTokenUsage,
     ContextBudget,
@@ -25,7 +26,7 @@ from wisp.sessions.replay import SessionContextRow, SessionReplay
 from wisp.tools.truncation import truncate_text_tail
 
 MAX_COMPACTION_TOOL_RESULT_CHARS = 2_000
-# Mirrors the UTF-8-bytes-per-token heuristic in ``agent.context.estimate_context``
+# Mirrors the UTF-8-bytes-per-token heuristic in ``agent.context_budget.estimate_context``
 # so truncation can target "shave N tokens" in the same units as the budget check.
 _ESTIMATE_BYTES_PER_TOKEN = 4
 # Always keep at least this many characters of a truncated tool result — enough

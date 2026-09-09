@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 import wisp.providers.events as provider_events
-from wisp.agent.context import observe_context
+from wisp.agent.context_budget import observe_context
 from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,

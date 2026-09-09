@@ -20,21 +20,23 @@ from tests.agent_runtime import (
     assert_settled_tool_calls,
     assert_turn_terminals,
 )
-from wisp.agent.context import observe_context
-from wisp.agent.execution import (
+from wisp.agent.context_budget import observe_context
+from wisp.agent.loop import AgentLoopConfig, run_agent_loop
+from wisp.agent.messages import Message
+from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
-    PreparedToolExecution,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
     RequestContextRebase,
+)
+from wisp.agent.tool_contracts import (
+    PreparedToolExecution,
     ToolExecutionEvent,
     ToolExecutionProtocolError,
     ToolExecutor,
     ToolPreparationEvent,
 )
-from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     BillableTokenUsage,

@@ -12,6 +12,15 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- **Breaking Python API cleanup:** removed the deprecated `wisp.agent.messages.SessionEntry(...)`
+  factory as an explicit early-removal exception to the normal deprecation window. Construct
+  `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` instead;
+  wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)` for `EventSessionEntry`.
+  Existing JSONL session files and supported event schemas remain readable without migration.
+- Reorganized agent internals into focused prompt and harness packages. Internal imports now use
+  `wisp.agent.validation`, `context_budget`, `transcript_repair`, `tool_contracts`, and
+  `request_boundary`; history normalization helpers live in `wisp.agent.history`. The old flat
+  module paths and history-helper re-exports from `wisp.agent.messages` have been removed.
 - Recorded the #470 renderer decision: Textual remains the default TUI; the Rust frontend stays
   experimental source-build opt-in on macOS and Linux. Explicit Rust selection does not fall back to
   Textual, and Python distributions still do not bundle the binary.

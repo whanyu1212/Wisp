@@ -9,7 +9,7 @@ import anyio
 import pytest
 
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.agent.transcript import plan_interrupted_tool_repairs
+from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
 from wisp.events import ToolCallSnapshot
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,

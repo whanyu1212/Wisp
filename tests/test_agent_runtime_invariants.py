@@ -15,11 +15,15 @@ from tests.agent_runtime import (
     assert_turn_invariants,
     assert_turn_terminals,
 )
-from wisp.agent.execution import PreparedToolExecution, ToolExecutionEvent, ToolPreparationEvent
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.tool_contracts import (
+    PreparedToolExecution,
+    ToolExecutionEvent,
+    ToolPreparationEvent,
+)
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
