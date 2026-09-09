@@ -35,6 +35,9 @@ Each layer adds one concern:
 This boundary keeps persistence and frontend concerns out of the provider loop, while allowing
 provider adapters to preserve their own request, replay, continuation, and usage semantics.
 
+See [Agent runtime](./agent-runtime) for the loop and harness lifecycles, ownership boundaries,
+request-boundary handshake, and source navigation.
+
 ## Terminal frontend boundary
 
 Textual is Wisp's current interactive terminal frontend and remains supported. Wisp has accepted an

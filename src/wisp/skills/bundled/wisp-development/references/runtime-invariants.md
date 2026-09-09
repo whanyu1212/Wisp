@@ -44,9 +44,9 @@ Later slices must preserve:
 
 Do not freeze these as compatibility contracts:
 
-- Private `_AgentLoopState` field layout and helper names in `loop.py`.
+- Private `_AgentLoopState` field layout and helper names in `loop/runner.py`.
 - Nested request-boundary / overflow hook coordination and nonlocal variables
-  in `harness.py`.
+  in `harness/runner.py` and `harness/boundaries.py`.
 - Exact control-flow nesting of the `while` loop.
 - Duplicated scenario fixtures across loop and harness tests.
 - Log lines, comment wording, and test function names.
