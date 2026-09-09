@@ -5,17 +5,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import anyio
 import pytest
 
-from wisp.agent.execution import (
-    PreparedToolExecution,
-    ToolExecutionEvent,
-    ToolExecutionProtocolError,
-    ToolPreparationEvent,
-)
 from wisp.agent.loop.tool_execution import (
     CancelledToolBatch,
     CompletedToolBatch,
     ToolBatch,
     ToolExecutionLifecycle,
+)
+from wisp.agent.tool_contracts import (
+    PreparedToolExecution,
+    ToolExecutionEvent,
+    ToolExecutionProtocolError,
+    ToolPreparationEvent,
 )
 from wisp.events import (
     ToolApprovalRequested,

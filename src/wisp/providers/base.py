@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from wisp.agent.messages import Message, normalize_provider_history
+from wisp.agent.history import normalize_provider_history
+from wisp.agent.messages import Message
 from wisp.providers.events import JsonObject, ProviderEvent
 from wisp.providers.events import ToolCall as ToolCall
 from wisp.tools.base import Tool

@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from wisp.agent.context import (
+from wisp.agent.context_budget import (
     build_context_budget,
     context_fingerprint,
     estimate_context,

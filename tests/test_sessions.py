@@ -16,7 +16,6 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.agent.messages import SessionEntry as LegacySessionEntry
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
     ContextBudget,
@@ -41,6 +40,7 @@ from wisp.sessions.entries import (
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
+    PersistedEventEnvelope,
     SessionEntry,
     SessionEntryAdapter,
     SessionInfoSessionEntry,
@@ -1477,7 +1477,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
 
 
-def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:
+def test_concrete_session_entry_variants_preserve_payloads() -> None:
     message = Message(role="user", content="hello")
     compaction = CompactionRecord(
         summary="Earlier context.",
@@ -1485,26 +1485,23 @@ def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:
         provider="openai",
     )
 
-    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
-        message_entry = LegacySessionEntry(
-            id="message",
-            session_id="session",
-            message=message,
-        )
-    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
-        event_entry = LegacySessionEntry(
-            id="event",
-            session_id="session",
-            kind="event",
-            event={"type": "error", "schema_version": 12, "message": "boom"},
-        )
-    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
-        compaction_entry = LegacySessionEntry(
-            id="compaction",
-            session_id="session",
-            kind="compaction",
-            compaction=compaction,
-        )
+    message_entry = MessageSessionEntry(
+        id="message",
+        session_id="session",
+        message=message,
+    )
+    event_entry = EventSessionEntry(
+        id="event",
+        session_id="session",
+        event=PersistedEventEnvelope(
+            payload={"type": "error", "schema_version": 12, "message": "boom"}
+        ),
+    )
+    compaction_entry = CompactionSessionEntry(
+        id="compaction",
+        session_id="session",
+        compaction=compaction,
+    )
 
     assert isinstance(message_entry, MessageSessionEntry)
     assert message_entry.message == message
@@ -1869,19 +1866,18 @@ def test_session_reads_public_exclude_none_serialization_as_linear_chain(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "public-serialization.jsonl"
-    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
-        entries = (
-            LegacySessionEntry(
-                id="first",
-                session_id="session",
-                message=Message(role="user", content="one"),
-            ),
-            LegacySessionEntry(
-                id="second",
-                session_id="session",
-                message=Message(role="assistant", content="two"),
-            ),
-        )
+    entries = (
+        MessageSessionEntry(
+            id="first",
+            session_id="session",
+            message=Message(role="user", content="one"),
+        ),
+        MessageSessionEntry(
+            id="second",
+            session_id="session",
+            message=Message(role="assistant", content="two"),
+        ),
+    )
     path.write_text(
         "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
         encoding="utf-8",

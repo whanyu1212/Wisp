@@ -101,7 +101,8 @@ workflows. All earlier bundles remain immutable.
 
 ## Deprecation and removal
 
-A public API may be removed only when all of these conditions are met:
+Except for an explicit exception documented below, a public API may be removed only when all of
+these conditions are met:
 
 1. The deprecation is recorded in the changelog and reference documentation with a supported
    replacement and required migration.
@@ -115,9 +116,16 @@ A security, data-loss, legal, or ecosystem failure that cannot be mitigated may 
 removal. Such an exception must be called out prominently in release notes with the safest available
 migration or containment advice.
 
-The deprecated `wisp.agent.messages.SessionEntry(...)` factory demonstrates the normal transition:
-it warns when called while the concrete `wisp.sessions` entry models remain available as the
-replacement.
+::: warning Unreleased agent API cleanup exception
+The agent module reorganization removes the deprecated `wisp.agent.messages.SessionEntry(...)`
+factory before the normal deprecation window and breaking package boundary. This is a specific
+exception for the agent API cleanup; the normal policy continues to apply to other public APIs.
+
+Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
+instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.
+The removal changes Python construction only: existing JSONL session files and supported event
+schemas remain readable without migration.
+:::
 
 ## Event schemas
 

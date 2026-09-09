@@ -5,9 +5,9 @@ from collections.abc import AsyncIterator
 import anyio
 import pytest
 
-from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
+from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
 from wisp.events import (
     ContextOverflow,

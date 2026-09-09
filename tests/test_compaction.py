@@ -9,8 +9,8 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-import wisp.agent.harness as agent_harness_module
-from wisp.agent.context import build_context_budget, estimate_context
+import wisp.agent.harness.runner as agent_harness_module
+from wisp.agent.context_budget import build_context_budget, estimate_context
 from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     MAX_COMPACTION_TOOL_RESULT_CHARS,

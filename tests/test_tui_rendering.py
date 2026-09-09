@@ -9,7 +9,7 @@ import pytest
 from textual.theme import Theme
 
 from tests.tui_support import *
-from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
