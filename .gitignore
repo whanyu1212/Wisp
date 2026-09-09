@@ -60,8 +60,7 @@ docs/*
 # Published reference documentation IS tracked.
 !docs/reference/
 
-# Local agent instructions
-/AGENTS.md
+# Local Claude instructions (shared agent guidance lives in tracked AGENTS.md)
 /CLAUDE.md
 
 # VitePress docs site (source lives in site/ and IS tracked; build output is not)

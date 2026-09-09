@@ -4446,7 +4446,8 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
 
         rendered = output.getvalue()
         assert rendered.count("(current)") == 1
-        assert "  OpenAI API: gpt-5.6-sol (current)" in rendered
+        # The default need not be the first model listed by the provider.
+        assert "gpt-5.6-sol (current)" in rendered
         assert "Current model: provider default" in rendered
 
     anyio.run(run)

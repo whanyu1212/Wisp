@@ -7,8 +7,7 @@ import pytest
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.messages import Message
-from wisp.agent.provider_turn import (
+from wisp.agent.loop.model_response import (
     CompletedProviderResponse,
     ProviderResponseLifecycle,
     iter_provider_events,
@@ -16,6 +15,7 @@ from wisp.agent.provider_turn import (
     project_usage_and_cost,
     resolve_provider_response_id,
 )
+from wisp.agent.messages import Message
 from wisp.events import UsageCost
 from wisp.providers.base import (
     ContextOverflowError,

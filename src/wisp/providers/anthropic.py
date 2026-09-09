@@ -152,15 +152,22 @@ class AnthropicProvider:
         self._replays = ContinuationStore[tuple[MessageParam, ...]]()
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
-        """Reject fresh tool replay while adaptive thinking is enabled.
+        """Reject fresh tool replay that could discard signed thinking blocks.
 
         Anthropic requires signed thinking blocks to be preserved byte-for-byte
         beside their tool uses. ``Message`` snapshots intentionally retain only
-        portable text and tool data, so a replacement cannot safely rebuild a
-        tool exchange when ``effort`` enabled adaptive thinking.
+        portable text and tool data. Models such as Fable 5.1 think even when
+        effort is omitted. This capability has no request model, so it cannot
+        safely opt in based on effort or the provider's default model.
+
+        Args:
+            effort (str | None): Requested effort; omission does not disable thinking.
+
+        Returns:
+            bool: Always False; tool continuation must preserve native replay.
         """
 
-        return effort is None
+        return False
 
     async def stream(
         self,

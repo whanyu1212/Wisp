@@ -10,7 +10,17 @@ from pathlib import Path
 
 import pytest
 
-_PURE_AGENT_MODULES = ("configuration.py", "loop.py", "execution.py", "harness.py")
+_PURE_AGENT_MODULES = (
+    "configuration.py",
+    "execution.py",
+    "harness.py",
+    "loop/__init__.py",
+    "loop/config.py",
+    "loop/continuation.py",
+    "loop/model_response.py",
+    "loop/runner.py",
+    "loop/tool_execution.py",
+)
 _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.agent.prompt",
@@ -228,6 +238,25 @@ def test_legacy_agent_compatibility_exports_are_removed() -> None:
     assert not compat_path.exists()
     assert not hasattr(agent_loop, "Agent")
     assert "Agent" not in agent_loop.__all__
+
+
+def test_agent_loop_package_exports_public_contracts() -> None:
+    from wisp.agent import loop
+    from wisp.agent.loop.config import AgentLoopConfig, CancellationToken, UsageCostEstimator
+    from wisp.agent.loop.runner import AgentLoopEvent, run_agent_loop
+
+    assert loop.AgentLoopConfig is AgentLoopConfig
+    assert loop.AgentLoopEvent is AgentLoopEvent
+    assert loop.CancellationToken is CancellationToken
+    assert loop.UsageCostEstimator is UsageCostEstimator
+    assert loop.run_agent_loop is run_agent_loop
+    assert loop.__all__ == [
+        "AgentLoopConfig",
+        "AgentLoopEvent",
+        "CancellationToken",
+        "UsageCostEstimator",
+        "run_agent_loop",
+    ]
 
 
 def test_coding_package_exports_session_coordinator() -> None:
