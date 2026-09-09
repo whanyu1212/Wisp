@@ -4,6 +4,7 @@ import shlex
 import sys
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -12,8 +13,8 @@ from unittest.mock import Mock
 import anyio
 import pytest
 
-import wisp.agent.loop as agent_loop_module
-import wisp.agent.tool_round as tool_round_module
+import wisp.agent.loop.runner as agent_loop_module
+import wisp.agent.loop.tool_execution as tool_execution_module
 from tests.agent_runtime import (
     assert_continuation_invariants,
     assert_settled_tool_calls,
@@ -640,7 +641,7 @@ def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> 
 def test_prepared_tool_batch_enforces_bounded_live_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tool_round_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
+    monkeypatch.setattr(tool_execution_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="read", arguments={}) for index in range(1, 6)
     )
@@ -1716,8 +1717,11 @@ class RaisingRequestBoundaryHook:
         raise RuntimeError("boundary hook failed")
 
 
-def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> None:
-    """A hook failure after a clean turn must not emit a second TurnCompleted.
+@pytest.mark.parametrize("had_tool_calls", [False, True])
+def test_request_boundary_hook_failure_does_not_double_complete_the_turn(
+    had_tool_calls: bool,
+) -> None:
+    """A hook failure after a completed turn must not emit a second TurnCompleted.
 
     Regression for #363 review: the turn's one terminal TurnCompleted(outcome=
     "completed") is yielded before the hook is invoked. If the hook then
@@ -1726,7 +1730,19 @@ def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> No
     "failed") for the same turn.
     """
 
-    provider = ScriptedProvider([_completed_stream("first")])
+    tool_call = ToolCall(call_id="call-1", name="test", arguments={})
+    stream = (
+        [
+            ProviderResponseStarted(model="test"),
+            ProviderToolCallCompleted(tool_call=tool_call),
+            ProviderResponseCompleted(
+                content="", tool_calls=(tool_call,), finish_reason="tool_calls"
+            ),
+        ]
+        if had_tool_calls
+        else _completed_stream("first")
+    )
+    provider = ScriptedProvider([stream])
     hook = RaisingRequestBoundaryHook()
     messages = (Message(role="user", content="hi"),)
     collected: list[object] = []
@@ -1735,7 +1751,7 @@ def test_request_boundary_hook_failure_does_not_double_complete_the_turn() -> No
         async for event in run_agent_loop(
             AgentLoopConfig(
                 provider=provider,
-                tool_executor=NeverToolExecutor(),
+                tool_executor=RecordingToolExecutor(),
                 request_boundary_hook=hook,
             ),
             messages=messages,
@@ -3840,16 +3856,21 @@ def test_raised_context_overflow_closes_started_message_before_retry() -> None:
     assert provider.calls == 2
 
 
-def test_context_overflow_hook_retries_in_the_same_loop() -> None:
+@pytest.mark.parametrize("raised", [False, True])
+def test_context_overflow_hook_retries_in_the_same_loop(raised: bool) -> None:
     """A hook may replace the failed request without constructing another loop."""
 
     provider = ScriptedProvider(
         [
             [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseFailed(
+                ProviderResponseStarted(model="test", response_id="rejected"),
+                ProviderTextDelta(delta="partial answer"),
+                ContextOverflowError("context window exceeded")
+                if raised
+                else ProviderResponseFailed(
                     message="context window exceeded",
                     failure_kind="context_overflow",
+                    response_id="rejected",
                 ),
             ],
             _completed_stream("recovered", response_id="recovered-response"),
@@ -3888,7 +3909,33 @@ def test_context_overflow_hook_retries_in_the_same_loop() -> None:
 
     assert [event.turn for event in events if isinstance(event, TurnCompleted)] == [1, 2]
     assert any(isinstance(event, ContextOverflow) for event in events)
-    assert hook.snapshots[0].had_streamed_delta is False
+    assert hook.snapshots[0].had_streamed_delta is True
+    assert hook.snapshots[0].continuation_messages == ()
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "context.overflow",
+        "turn.completed",
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
+    ]
+    failed_completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert failed_completion.content == "partial answer"
+    assert failed_completion.response_id == "rejected"
+    assert failed_completion.finish_reason == "error"
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [
+        (1, "failed"),
+        (2, "completed"),
+    ]
     assert len(provider.calls) == 2
     assert [(message.role, message.content) for message in provider.calls[1].messages] == [
         ("user", "compacted summary")
@@ -3896,3 +3943,134 @@ def test_context_overflow_hook_retries_in_the_same_loop() -> None:
     assert provider.calls[1].previous_response_id is None
     assert provider.calls[1].tool_results == ()
     assert provider.calls[1].extra_messages == ()
+
+
+@pytest.mark.parametrize("raised", [False, True])
+@pytest.mark.parametrize("with_hook", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_unrecovered_overflow_preserves_events_and_exception_contract(
+    raised: bool,
+    with_hook: bool,
+    deferred: bool,
+) -> None:
+    events: list[agent_loop_module.AgentLoopEvent] = []
+    snapshots: list[ContextOverflowSnapshot] = []
+
+    class DeclineRecovery:
+        async def recover_context_overflow(
+            self,
+            *,
+            snapshot: ContextOverflowSnapshot,
+        ) -> RequestBoundaryDecision | None:
+            assert events[-1].type == "context.overflow"
+            snapshots.append(snapshot)
+            return None
+
+    error = ContextOverflowError("context window exceeded")
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="rejected"),
+                ProviderTextDelta(delta="partial"),
+                error
+                if raised
+                else ProviderResponseFailed(message=str(error), response_id="rejected"),
+            ]
+        ]
+    )
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                context_overflow_hook=DeclineRecovery() if with_hook else None,
+                defer_context_overflow_errors=deferred,
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ContextOverflowError) if raised and not with_hook else nullcontext():
+        anyio.run(run)
+
+    expected = [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "context.overflow",
+    ]
+    if not deferred:
+        expected.extend(["error", "turn.completed"])
+    assert [event.type for event in events] == expected
+    assert len(provider.calls) == 1
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.content, completion.response_id, completion.finish_reason) == (
+        "partial",
+        "rejected",
+        "error",
+    )
+    assert len(snapshots) == int(with_hook)
+    if with_hook:
+        assert snapshots[0].had_streamed_delta is True
+        assert snapshots[0].continuation_messages == ()
+    if not deferred:
+        terminal = events[-1]
+        assert isinstance(terminal, TurnCompleted)
+        assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
+
+
+@pytest.mark.parametrize("had_tool_calls", [False, True])
+def test_cancellation_after_completed_turn_preserves_boundary_behavior(
+    had_tool_calls: bool,
+) -> None:
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    token = Token()
+    tool_call = ToolCall(call_id="call-1", name="test", arguments={})
+    stream = (
+        [
+            ProviderResponseStarted(model="test"),
+            ProviderToolCallCompleted(tool_call=tool_call),
+            ProviderResponseCompleted(
+                content="", tool_calls=(tool_call,), finish_reason="tool_calls"
+            ),
+        ]
+        if had_tool_calls
+        else _completed_stream("done")
+    )
+    provider = ScriptedProvider([stream])
+
+    async def run() -> list[agent_loop_module.AgentLoopEvent]:
+        events: list[agent_loop_module.AgentLoopEvent] = []
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=RecordingToolExecutor(),
+                cancellation_token=token,
+                request_boundary_hook=RaisingRequestBoundaryHook(),
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+            if isinstance(event, TurnCompleted):
+                token.cancelled = True
+        return events
+
+    events = anyio.run(run)
+    assert len(provider.calls) == 1
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [
+        (1, "completed"),
+    ]
+    assert [event.message for event in events if isinstance(event, ErrorEvent)] == (
+        ["Agent run cancelled"] if had_tool_calls else []
+    )
+    assert events[-1].type == ("error" if had_tool_calls else "turn.completed")

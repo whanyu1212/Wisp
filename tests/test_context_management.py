@@ -9,7 +9,13 @@ from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
-from wisp.events import ContextOverflow, ContextPressure, ErrorEvent, wisp_event_from_json
+from wisp.events import (
+    ContextOverflow,
+    ContextPressure,
+    ErrorEvent,
+    MessageCompleted,
+    wisp_event_from_json,
+)
 from wisp.providers.base import ContextOverflowError, is_context_overflow_message
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (
@@ -130,7 +136,10 @@ def _run_loop(config: AgentLoopConfig) -> list[object]:
     return anyio.run(run)
 
 
-def test_context_pressure_emits_after_completed_message_at_threshold() -> None:
+@pytest.mark.parametrize("context_input_tokens", [None, 95])
+def test_context_pressure_emits_after_completed_message_at_threshold(
+    context_input_tokens: int | None,
+) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -139,6 +148,7 @@ def test_context_pressure_emits_after_completed_message_at_threshold() -> None:
                     content="done",
                     usage=ProviderUsage(
                         input_tokens=80,
+                        context_input_tokens=context_input_tokens,
                         output_tokens=5,
                         total_tokens=85,
                     ),
@@ -171,6 +181,11 @@ def test_context_pressure_emits_after_completed_message_at_threshold() -> None:
     assert pressure.observed_tokens == 80
     assert pressure.remaining_tokens == 20
     assert pressure.pressure_ratio == 0.8
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completion.context_observation is not None
+    assert completion.context_observation.input_tokens == (
+        context_input_tokens if context_input_tokens is not None else 80
+    )
 
 
 @pytest.mark.parametrize(

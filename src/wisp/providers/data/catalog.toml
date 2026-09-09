@@ -20,6 +20,7 @@ docs_url = "https://platform.openai.com/docs"
 # catalog on 2026-07-18. Excludes specialized audio, image, realtime,
 # embeddings, moderation, and deprecated models.
 models = [
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -33,6 +34,7 @@ models = [
 "gpt-5.6" = "gpt-5.6-sol"
 
 [providers.context_windows]
+"gpt-6-astra" = 1050000
 "gpt-5.6-sol" = 1050000
 "gpt-5.6-terra" = 1050000
 "gpt-5.6-luna" = 1050000
@@ -42,6 +44,7 @@ models = [
 "gpt-5.4-mini" = 400000
 
 [providers.model_lifecycle]
+"gpt-6-astra" = "stable"
 "gpt-5.6-sol" = "stable"
 "gpt-5.6-terra" = "stable"
 "gpt-5.6-luna" = "stable"
@@ -54,54 +57,71 @@ models = [
 # reasoning-effort guide. Older models remain usable but are omitted unless
 # their exact accepted subsets are documented.
 [providers.effort_levels]
+"gpt-6-astra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-sol" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-terra" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-luna" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
 
-# OpenAI standard API list prices per million tokens, verified 2026-07-19:
+# Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
+# OpenAI GPT-6/5.6 standard API list prices per million tokens, verified 2026-09-09:
 # https://developers.openai.com/api/docs/pricing
-# GPT-5.6 model pages document the >272K-input long-context threshold. Prices
+# GPT-6/5.6 model pages document the >272K-input long-context threshold. Prices
 # are snapshots used for new requests only; historical sessions retain their
 # selected rate snapshot instead of being repriced after catalog changes.
-[[providers.pricing."gpt-5.6-sol"]]
-input_usd_per_million = "5"
-cache_read_usd_per_million = "0.5"
-cache_write_usd_per_million = "6.25"
-output_usd_per_million = "30"
-
-[[providers.pricing."gpt-5.6-sol"]]
-input_token_threshold = 272001
+[[providers.pricing."gpt-6-astra"]]
 input_usd_per_million = "10"
 cache_read_usd_per_million = "1"
 cache_write_usd_per_million = "12.5"
-output_usd_per_million = "45"
+output_usd_per_million = "50"
+
+[[providers.pricing."gpt-6-astra"]]
+input_token_threshold = 272001
+input_usd_per_million = "20"
+cache_read_usd_per_million = "2"
+cache_write_usd_per_million = "25"
+output_usd_per_million = "75"
+
+# Sol's current promotional rates are guaranteed at least through 2026-11-21;
+# no future replacement price has been announced.
+[[providers.pricing."gpt-5.6-sol"]]
+input_usd_per_million = "4"
+cache_read_usd_per_million = "0.4"
+cache_write_usd_per_million = "5"
+output_usd_per_million = "20"
+
+[[providers.pricing."gpt-5.6-sol"]]
+input_token_threshold = 272001
+input_usd_per_million = "8"
+cache_read_usd_per_million = "0.8"
+cache_write_usd_per_million = "10"
+output_usd_per_million = "30"
 
 [[providers.pricing."gpt-5.6-terra"]]
-input_usd_per_million = "2.5"
-cache_read_usd_per_million = "0.25"
-cache_write_usd_per_million = "3.125"
-output_usd_per_million = "15"
-
-[[providers.pricing."gpt-5.6-terra"]]
-input_token_threshold = 272001
-input_usd_per_million = "5"
-cache_read_usd_per_million = "0.5"
-cache_write_usd_per_million = "6.25"
-output_usd_per_million = "22.5"
-
-[[providers.pricing."gpt-5.6-luna"]]
-input_usd_per_million = "1"
-cache_read_usd_per_million = "0.1"
-cache_write_usd_per_million = "1.25"
-output_usd_per_million = "6"
-
-[[providers.pricing."gpt-5.6-luna"]]
-input_token_threshold = 272001
 input_usd_per_million = "2"
 cache_read_usd_per_million = "0.2"
 cache_write_usd_per_million = "2.5"
-output_usd_per_million = "9"
+output_usd_per_million = "12"
+
+[[providers.pricing."gpt-5.6-terra"]]
+input_token_threshold = 272001
+input_usd_per_million = "4"
+cache_read_usd_per_million = "0.4"
+cache_write_usd_per_million = "5"
+output_usd_per_million = "18"
+
+[[providers.pricing."gpt-5.6-luna"]]
+input_usd_per_million = "0.2"
+cache_read_usd_per_million = "0.02"
+cache_write_usd_per_million = "0.25"
+output_usd_per_million = "1.2"
+
+[[providers.pricing."gpt-5.6-luna"]]
+input_token_threshold = 272001
+input_usd_per_million = "0.4"
+cache_read_usd_per_million = "0.04"
+cache_write_usd_per_million = "0.5"
+output_usd_per_million = "1.8"
 
 [[providers.pricing."gpt-5.5"]]
 input_usd_per_million = "5"
@@ -148,7 +168,10 @@ docs_url = "https://developers.openai.com/codex/models"
 # on 2026-07-18. Context metadata was verified against the Codex backend model
 # catalog and openai/codex models-manager metadata on 2026-08-06. The
 # access-controlled gpt-5.3-codex-spark preview is excluded.
+# Astra was verified against the guide and local Codex backend model metadata
+# on 2026-09-09. Use its default 272K context, not its opt-in maximum.
 models = [
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -163,6 +186,7 @@ models = [
 # Codex subscription limits are provider-surface metadata and intentionally
 # differ from the direct OpenAI Responses API for several shared model ids.
 [providers.context_windows]
+"gpt-6-astra" = 272000
 "gpt-5.6-sol" = 272000
 "gpt-5.6-terra" = 272000
 "gpt-5.6-luna" = 272000
@@ -174,6 +198,7 @@ models = [
 # Wisp treats these as upper bounds: a larger user reserve still triggers
 # compaction earlier, while a smaller reserve cannot weaken this safeguard.
 [providers.auto_compact_token_limits]
+"gpt-6-astra" = 244800
 "gpt-5.6-sol" = 244800
 "gpt-5.6-terra" = 244800
 "gpt-5.6-luna" = 244800
@@ -182,6 +207,7 @@ models = [
 "gpt-5.4-mini" = 244800
 
 [providers.model_lifecycle]
+"gpt-6-astra" = "stable"
 "gpt-5.6-sol" = "stable"
 "gpt-5.6-terra" = "stable"
 "gpt-5.6-luna" = "stable"
@@ -194,6 +220,7 @@ models = [
 # adds max; older models top out at xhigh. Minimal is omitted because Codex maps
 # it to low rather than accepting it as a distinct provider effort. Ultra is
 # agent orchestration, not a provider effort tier.
+"gpt-6-astra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-sol" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-terra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-luna" = ["low", "medium", "high", "xhigh", "max"]
@@ -206,7 +233,10 @@ name = "anthropic"
 display_name = "Anthropic"
 default_model = "claude-sonnet-5"
 docs_url = "https://platform.claude.com/docs"
+# New models verified 2026-09-09: https://platform.claude.com/docs/en/models/overview
 models = [
+    "claude-fable-5-1",
+    "claude-opus-5",
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
@@ -217,6 +247,8 @@ models = [
 ]
 
 [providers.context_windows]
+"claude-fable-5-1" = 1000000
+"claude-opus-5" = 1000000
 "claude-fable-5" = 1000000
 "claude-sonnet-5" = 1000000
 "claude-opus-4-8" = 1000000
@@ -226,6 +258,8 @@ models = [
 "claude-sonnet-4-6" = 1000000
 
 [providers.model_lifecycle]
+"claude-fable-5-1" = "stable"
+"claude-opus-5" = "stable"
 "claude-fable-5" = "stable"
 "claude-sonnet-5" = "stable"
 "claude-opus-4-8" = "stable"
@@ -239,6 +273,8 @@ models = [
 # claude-haiku-4-5 is deliberately omitted -- capabilities.effort.supported is
 # False for it (no effort control at all).
 [providers.effort_levels]
+"claude-fable-5-1" = ["low", "medium", "high", "xhigh", "max"]
+"claude-opus-5" = ["low", "medium", "high", "xhigh", "max"]
 "claude-fable-5" = ["low", "medium", "high", "xhigh", "max"]
 "claude-sonnet-5" = ["low", "medium", "high", "xhigh", "max"]
 "claude-opus-4-8" = ["low", "medium", "high", "xhigh", "max"]
@@ -247,9 +283,21 @@ models = [
 "claude-sonnet-4-6" = ["low", "medium", "high", "max"]
 
 # Anthropic first-party API standard list prices per million tokens, verified
-# 2026-07-19: https://platform.claude.com/docs/en/about-claude/pricing
+# 2026-09-09: https://platform.claude.com/docs/en/about-claude/pricing
 # Cache-write rates are the standard five-minute rate. Wisp does not currently
 # request a one-hour cache policy, so its distinct rate is intentionally absent.
+[[providers.pricing."claude-fable-5-1"]]
+input_usd_per_million = "10"
+cache_read_usd_per_million = "0.25"
+cache_write_usd_per_million = "12.5"
+output_usd_per_million = "50"
+
+[[providers.pricing."claude-opus-5"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "25"
+
 [[providers.pricing."claude-fable-5"]]
 input_usd_per_million = "10"
 cache_read_usd_per_million = "1"
@@ -257,18 +305,11 @@ cache_write_usd_per_million = "12.5"
 output_usd_per_million = "50"
 
 [[providers.pricing."claude-sonnet-5"]]
-effective_until = 2026-08-31
+# The previously scheduled September price increase was cancelled.
 input_usd_per_million = "2"
 cache_read_usd_per_million = "0.2"
 cache_write_usd_per_million = "2.5"
 output_usd_per_million = "10"
-
-[[providers.pricing."claude-sonnet-5"]]
-effective_from = 2026-09-01
-input_usd_per_million = "3"
-cache_read_usd_per_million = "0.3"
-cache_write_usd_per_million = "3.75"
-output_usd_per_million = "15"
 
 [[providers.pricing."claude-opus-4-8"]]
 input_usd_per_million = "5"
@@ -306,9 +347,11 @@ display_name = "Google"
 default_model = "gemini-3.6-flash"
 docs_url = "https://ai.google.dev/gemini-api/docs"
 # The Google provider uses the Gemini Developer API. These text-output model IDs
-# and capabilities were verified against Google's model and thinking docs on
-# 2026-08-18; account availability can still vary by API key.
+# and capabilities for 3.7/3.8 were verified against Google's model and thinking
+# docs on 2026-09-09; account availability can still vary by API key.
 models = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
@@ -320,10 +363,14 @@ models = [
     "gemini-3-flash-preview",
 ]
 
+# Retain the existing alias metadata for provider auto-selection. Google may
+# move this alias independently; use an explicit release ID for current metadata.
 [providers.model_aliases]
 "gemini-flash-latest" = "gemini-3.6-flash"
 
 [providers.context_windows]
+"gemini-3.8-flash" = 1048576
+"gemini-3.7-flash" = 1048576
 "gemini-3.6-flash" = 1048576
 "gemini-3.5-flash" = 1048576
 "gemini-3.5-flash-lite" = 1048576
@@ -335,6 +382,8 @@ models = [
 "gemini-3-flash-preview" = 1048576
 
 [providers.model_lifecycle]
+"gemini-3.8-flash" = "stable"
+"gemini-3.7-flash" = "stable"
 "gemini-3.6-flash" = "stable"
 "gemini-3.5-flash" = "stable"
 "gemini-3.5-flash-lite" = "stable"
@@ -348,12 +397,42 @@ models = [
 # Gemini 3 models support named thinking levels. Gemini 2.5 models use numeric
 # thinking budgets, which this provider intentionally does not map from named tiers.
 [providers.effort_levels]
+"gemini-3.8-flash" = ["LOW", "MEDIUM", "HIGH"]
+"gemini-3.7-flash" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-3.6-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.5-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.5-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.1-pro-preview" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-3-flash-preview" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+
+# Standard text-token prices verified 2026-09-09:
+# https://ai.google.dev/gemini-api/docs/pricing
+# Introductory rates end on December 31. Storage and hosted tool fees are not
+# token prices; Wisp does not request explicit cache storage or hosted tools.
+[[providers.pricing."gemini-3.8-flash"]]
+effective_until = 2026-12-31
+input_usd_per_million = "0.75"
+cache_read_usd_per_million = "0.075"
+output_usd_per_million = "3.75"
+
+[[providers.pricing."gemini-3.8-flash"]]
+effective_from = 2027-01-01
+input_usd_per_million = "1.5"
+cache_read_usd_per_million = "0.15"
+output_usd_per_million = "7.5"
+
+[[providers.pricing."gemini-3.7-flash"]]
+effective_until = 2026-12-31
+input_usd_per_million = "0.75"
+cache_read_usd_per_million = "0.075"
+output_usd_per_million = "3.75"
+
+[[providers.pricing."gemini-3.7-flash"]]
+effective_from = 2027-01-01
+input_usd_per_million = "1.5"
+cache_read_usd_per_million = "0.15"
+output_usd_per_million = "7.5"
 
 [[providers]]
 name = "deepseek"

@@ -11,11 +11,11 @@ from wisp.agent.execution import (
     ToolExecutionProtocolError,
     ToolPreparationEvent,
 )
-from wisp.agent.tool_round import (
-    CancelledToolRound,
-    CompletedToolRound,
+from wisp.agent.loop.tool_execution import (
+    CancelledToolBatch,
+    CompletedToolBatch,
+    ToolBatch,
     ToolExecutionLifecycle,
-    ToolRound,
 )
 from wisp.events import (
     ToolApprovalRequested,
@@ -177,11 +177,11 @@ def test_tool_execution_lifecycle_rejects_malformed_sequences(
         lifecycle.finish()
 
 
-def test_sequential_round_streams_events_and_returns_provider_results() -> None:
+def test_sequential_batch_streams_events_and_returns_provider_results() -> None:
     call = _call()
     executor = _ScriptedExecutor((_approval(call), _resolution(call), _ended(call)))
     recorded: list[ToolResultReady] = []
-    round_ = ToolRound(
+    batch = ToolBatch(
         tool_executor=executor,
         tool_calls=(call,),
         truncated=False,
@@ -190,7 +190,7 @@ def test_sequential_round_streams_events_and_returns_provider_results() -> None:
     )
 
     async def run() -> list[object]:
-        return [event async for event in round_.events()]
+        return [event async for event in batch.events()]
 
     events = anyio.run(run)
 
@@ -202,19 +202,19 @@ def test_sequential_round_streams_events_and_returns_provider_results() -> None:
         ToolExecutionEnded,
         ToolResultReady,
     ]
-    assert isinstance(round_.outcome, CompletedToolRound)
-    assert round_.outcome.results == (
+    assert isinstance(batch.outcome, CompletedToolBatch)
+    assert batch.outcome.results == (
         ToolCallResult(call_id=call.call_id, output="done", is_error=False),
     )
     assert len(recorded) == 1
     assert recorded[0] is events[-1]
 
 
-def test_truncated_round_synthesizes_results_without_execution() -> None:
+def test_truncated_batch_synthesizes_results_without_execution() -> None:
     call = _call()
     executor = _NeverExecutor()
     recorded: list[ToolResultReady] = []
-    round_ = ToolRound(
+    batch = ToolBatch(
         tool_executor=executor,
         tool_calls=(call,),
         truncated=True,
@@ -223,7 +223,7 @@ def test_truncated_round_synthesizes_results_without_execution() -> None:
     )
 
     async def run() -> list[object]:
-        return [event async for event in round_.events()]
+        return [event async for event in batch.events()]
 
     events = anyio.run(run)
 
@@ -233,12 +233,12 @@ def test_truncated_round_synthesizes_results_without_execution() -> None:
         ToolResultReady,
     ]
     assert executor.calls == []
-    assert isinstance(round_.outcome, CompletedToolRound)
-    assert round_.outcome.results[0].is_error is True
+    assert isinstance(batch.outcome, CompletedToolBatch)
+    assert batch.outcome.results[0].is_error is True
     assert recorded[0].failure_code == "invalid_arguments"
 
 
-def test_prepared_round_publishes_source_order_after_reverse_completion() -> None:
+def test_prepared_batch_publishes_source_order_after_reverse_completion() -> None:
     calls = (_call("call-1"), _call("call-2"))
     first_started = anyio.Event()
     release_first = anyio.Event()
@@ -256,7 +256,7 @@ def test_prepared_round_publishes_source_order_after_reverse_completion() -> Non
             completion_order.append(call.call_id)
         return _ended(call, output=f"output-{call.call_id}")
 
-    round_ = ToolRound(
+    batch = ToolBatch(
         tool_executor=_PreparedExecutor(runner),
         tool_calls=calls,
         truncated=False,
@@ -266,7 +266,7 @@ def test_prepared_round_publishes_source_order_after_reverse_completion() -> Non
 
     async def run() -> list[object]:
         with anyio.fail_after(2):
-            return [event async for event in round_.events()]
+            return [event async for event in batch.events()]
 
     events = anyio.run(run)
 
@@ -275,8 +275,8 @@ def test_prepared_round_publishes_source_order_after_reverse_completion() -> Non
         "call-1",
         "call-2",
     ]
-    assert isinstance(round_.outcome, CompletedToolRound)
-    assert [result.call_id for result in round_.outcome.results] == ["call-1", "call-2"]
+    assert isinstance(batch.outcome, CompletedToolBatch)
+    assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
 
 
 def test_prepared_cancellation_settles_requested_calls() -> None:
@@ -294,7 +294,7 @@ def test_prepared_cancellation_settles_requested_calls() -> None:
         return _ended(call)
 
     recorded: list[ToolResultReady] = []
-    round_ = ToolRound(
+    batch = ToolBatch(
         tool_executor=_PreparedExecutor(runner, before_prepare=cancel_during_prepare),
         tool_calls=calls,
         truncated=False,
@@ -303,25 +303,25 @@ def test_prepared_cancellation_settles_requested_calls() -> None:
     )
 
     async def run() -> list[object]:
-        return [event async for event in round_.events()]
+        return [event async for event in batch.events()]
 
     events = anyio.run(run)
 
     assert runner_calls == 0
-    assert isinstance(round_.outcome, CancelledToolRound)
+    assert isinstance(batch.outcome, CancelledToolBatch)
     assert [event.call_id for event in events if isinstance(event, ToolResultReady)] == [
         "call-1",
         "call-2",
     ]
     assert [result.process_state for result in recorded] == ["cancelled", "cancelled"]
-    assert [result.call_id for result in round_.outcome.results] == ["call-1", "call-2"]
+    assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
 
 
 def test_cancellation_check_errors_propagate() -> None:
     def raise_cancelled() -> bool:
         raise RuntimeError("cancellation check failed")
 
-    round_ = ToolRound(
+    batch = ToolBatch(
         tool_executor=_NeverExecutor(),
         tool_calls=(_call(),),
         truncated=False,
@@ -331,7 +331,7 @@ def test_cancellation_check_errors_propagate() -> None:
 
     async def run() -> None:
         with pytest.raises(RuntimeError, match="cancellation check failed"):
-            async for _event in round_.events():
+            async for _event in batch.events():
                 pass
 
     anyio.run(run)

@@ -62,11 +62,13 @@ _EXPECTED_USAGE = ProviderUsage(
 )
 
 
-def test_anthropic_provider_allows_structured_replacement_without_adaptive_thinking() -> None:
-    provider = AnthropicProvider(api_key="test-key")
+@pytest.mark.parametrize("effort", [None, "high"])
+def test_anthropic_provider_rejects_structured_replacement_even_without_effort(
+    effort: str | None,
+) -> None:
+    provider = AnthropicProvider(api_key="test-key", default_model="claude-fable-5-1")
 
-    assert provider.supports_structured_tool_replacement(effort=None)
-    assert not provider.supports_structured_tool_replacement(effort="high")
+    assert not provider.supports_structured_tool_replacement(effort=effort)
 
 
 class StubAnthropicProvider(AnthropicProvider):

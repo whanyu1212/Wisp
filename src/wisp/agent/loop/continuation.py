@@ -21,7 +21,7 @@ from wisp.providers.base import (
 )
 
 if TYPE_CHECKING:
-    from wisp.agent.loop import AgentLoopConfig
+    from .config import AgentLoopConfig
 
 
 @dataclass(slots=True)
@@ -34,6 +34,12 @@ class ContinuationState:
     continuation_messages: list[Message] = field(default_factory=list)
 
     def record_response(self, message: Message, *, response_id: str | None) -> None:
+        """Append a successful response and consume queued extra messages.
+
+        Args:
+            message (Message): Assistant transcript row with isolated tool snapshots.
+            response_id (str | None): New provider cursor. None retains any prior cursor.
+        """
         # Public response IDs remain upstream-observed values. Stateless
         # adapters may safely retain their existing local replay key when a
         # later clean response has no new upstream ID, so do not erase a
@@ -44,6 +50,11 @@ class ContinuationState:
         self.continuation_messages.append(message)
 
     def record_tool_result(self, result_event: ToolResultReady) -> None:
+        """Append a tool's provider-visible output to the continuation transcript.
+
+        Args:
+            result_event (ToolResultReady): Result containing the call identity and output.
+        """
         self.continuation_messages.append(
             Message(
                 role="tool",
@@ -55,6 +66,12 @@ class ContinuationState:
         )
 
     def complete_tool_round(self, results: Sequence[ToolCallResult]) -> None:
+        """Store batch results for the next provider request.
+
+        Args:
+            results (Sequence[ToolCallResult]): Ordered results, including any partial
+                results collected before cancellation.
+        """
         self.pending_tool_results = tuple(results)
 
     def consume_pending_tool_results(self) -> None:
@@ -71,7 +88,14 @@ class ContinuationState:
         self.pending_tool_results = ()
 
     def queue_extra_messages(self, messages: Sequence[Message]) -> None:
-        """Queue user messages for exactly the next continued request."""
+        """Queue user messages for exactly the next continued request.
+
+        Appends to the transcript and replaces the pending extra-message tuple.
+        The boundary decision validator is responsible for checking message roles.
+
+        Args:
+            messages (Sequence[Message]): Validated plain user messages to inject.
+        """
 
         queued = tuple(messages)
         self.continuation_messages.extend(queued)
@@ -98,6 +122,22 @@ class ContinuationState:
         resetting `previous_response_id` is always safe there, since every
         provider's plain-message converter round-trips ordinary text messages
         correctly.
+
+        Args:
+            messages (Sequence[Message]): Portable base history to extend.
+
+        Returns:
+            Sequence[Message]: Base history followed by the live continuation. The
+                continuation transcript, cursor, and pending inputs are cleared.
+
+        Examples:
+            >>> state = ContinuationState()
+            >>> state.record_response(Message(role="assistant", content="Done"), response_id="r1")
+            >>> folded = state.fold_clean((Message(role="user", content="Hello"),))
+            >>> [message.content for message in folded]
+            ['Hello', 'Done']
+            >>> state.previous_response_id is None
+            True
         """
 
         folded = (*messages, *self.continuation_messages)
@@ -106,7 +146,12 @@ class ContinuationState:
         return folded
 
     def snapshot(self) -> tuple[Message, ...]:
-        """Return a deep, immutable-facing view of live continuation state."""
+        """Copy the continuation transcript for a caller or hook.
+
+        Returns:
+            tuple[Message, ...]: Deep copies in transcript order. Mutating nested tool
+                arguments in a snapshot cannot change the live continuation.
+        """
 
         # `Message`/`ToolCallSnapshot` are frozen, but a `ToolCallSnapshot`'s
         # arguments contain a mutable dict. Never expose the loop's live state.
@@ -114,7 +159,14 @@ class ContinuationState:
 
 
 def is_tool_shaped(message: Message) -> bool:
-    """Return whether a row belongs to a structured assistant/tool exchange."""
+    """Check whether a row belongs to a structured assistant/tool exchange.
+
+    Args:
+        message (Message): Transcript row to inspect.
+
+    Returns:
+        bool: True for a tool result or a message carrying tool-call snapshots.
+    """
 
     return bool(message.tool_calls) or message.role == "tool"
 
@@ -126,6 +178,20 @@ def has_valid_replacement_tool_order(messages: Sequence[Message]) -> bool:
     safely summarize. It must still be self-contained: accepting an orphaned
     tool row would make adapter-specific error handling decide whether raw
     tool output is trusted context.
+
+    Args:
+        messages (Sequence[Message]): Complete replacement history to inspect.
+
+    Returns:
+        bool: True when every assistant call group is immediately followed by exactly
+            its matching tool results, in any result order, with no orphan tool rows.
+
+    Examples:
+        >>> has_valid_replacement_tool_order((Message(role="user", content="Hello"),))
+        True
+        >>> orphan = Message(role="tool", content="output", tool_call_id="missing")
+        >>> has_valid_replacement_tool_order((orphan,))
+        False
     """
 
     index = 0
@@ -157,7 +223,19 @@ def has_valid_replacement_tool_order(messages: Sequence[Message]) -> bool:
 def validate_replacement_messages(
     config: AgentLoopConfig, messages: Sequence[Message]
 ) -> tuple[Message, ...]:
-    """Validate a caller-owned portable base before a fresh/rebased request."""
+    """Validate a caller-owned portable base before a fresh or rebased request.
+
+    Args:
+        config (AgentLoopConfig): Provider and effort used to check replay support.
+        messages (Sequence[Message]): Self-contained replacement history.
+
+    Returns:
+        tuple[Message, ...]: Validated history in its original order, without deep copies.
+
+    Raises:
+        RequestBoundaryUnsupportedError: Tool exchanges are unpaired or the provider
+            explicitly rejects structured replay for the requested effort.
+    """
 
     replacement = tuple(messages)
     if not has_valid_replacement_tool_order(replacement):
@@ -174,10 +252,26 @@ def validate_replacement_messages(
 
 
 def provider_supports_continuation_messages(provider: Provider) -> bool:
+    """Check the adapter's explicit opt-in to extra continuation messages.
+
+    Args:
+        provider (Provider): Adapter to inspect without requiring a new protocol member.
+
+    Returns:
+        bool: True only when supports_continuation_messages is literally True.
+    """
     return getattr(provider, "supports_continuation_messages", False) is True
 
 
 def provider_supports_context_rebase(provider: Provider) -> bool:
+    """Check the adapter's explicit opt-in to rebasing beneath a live cursor.
+
+    Args:
+        provider (Provider): Adapter whose optional capability is inspected.
+
+    Returns:
+        bool: True only when supports_context_rebase is literally True.
+    """
     return getattr(provider, "supports_context_rebase", False) is True
 
 
@@ -190,7 +284,41 @@ def apply_request_boundary_decision(
     decision: RequestBoundaryDecision,
     allow_extra_messages: bool,
 ) -> tuple[Sequence[Message], bool]:
-    """Validate and atomically apply one caller-supplied loop transition."""
+    """Apply a caller's stop, replacement, rebase, or continuation decision.
+
+    Stop takes precedence without changing state. Replacement discards live continuation;
+    rebase keeps the cursor and replay tail after checking the expected transcript.
+    Plain continuation may consume old results or fold a text-only tail into the base.
+
+    Args:
+        config (AgentLoopConfig): Provider capabilities and replay settings.
+        state (ContinuationState): Live state to update as the decision is applied.
+        messages (Sequence[Message]): Current portable base history.
+        had_tool_calls (bool): Whether the preceding turn produced a tool batch.
+        decision (RequestBoundaryDecision): Caller-supplied transition and optional inputs.
+        allow_extra_messages (bool): Whether this boundary permits user-message injection.
+
+    Returns:
+        tuple[Sequence[Message], bool]: Updated base history and a stop flag. True means
+            no further request should be made.
+
+    Examples:
+        Replace context using an existing run configuration::
+
+            decision = RequestBoundaryDecision(
+                messages=(Message(role="user", content="Compacted summary"),)
+            )
+            messages, stop = apply_request_boundary_decision(
+                config, state, messages=history, had_tool_calls=True,
+                decision=decision, allow_extra_messages=True,
+            )
+            # stop is False; state now has no cursor or pending tool results.
+
+    Raises:
+        RequestBoundaryUnsupportedError: The decision conflicts with itself, contains
+            invalid messages, requests unsupported continuation, or has a stale rebase.
+            Some continuation paths consume pending results before detecting an error.
+    """
 
     # No provider request follows a stop, so unused content must not make a
     # completed turn fail or mutate its logical continuation.
@@ -292,7 +420,24 @@ async def at_request_boundary(
     had_tool_calls: bool,
     stop_by_default: bool,
 ) -> tuple[Sequence[Message], bool]:
-    """Apply a typed transition between a completed turn and the next request."""
+    """Consult the optional policy hook after a successful turn.
+
+    Args:
+        config (AgentLoopConfig): Run configuration with an optional boundary hook.
+        state (ContinuationState): Live continuation used to build an isolated snapshot.
+        turn (int): Number of the completed turn.
+        tool_iterations (int): Tool batches consumed so far, including the offset.
+        messages (Sequence[Message]): Current base history.
+        had_tool_calls (bool): Whether this turn executed a tool batch.
+        stop_by_default (bool): Decision used when no hook is configured.
+
+    Returns:
+        tuple[Sequence[Message], bool]: Updated base history and whether to stop.
+
+    Raises:
+        RequestBoundaryUnsupportedError: The hook's transition cannot be represented safely.
+        Exception: An exception raised by the hook propagates to the loop.
+    """
 
     if config.request_boundary_hook is None:
         return messages, stop_by_default
@@ -328,7 +473,40 @@ async def at_context_overflow(
     had_streamed_delta: bool,
     message: str,
 ) -> tuple[Sequence[Message], bool]:
-    """Ask the optional hook whether this rejected request can retry safely."""
+    """Ask the optional hook to replace or rebase a rejected request's context.
+
+    Args:
+        config (AgentLoopConfig): Run configuration with an optional recovery hook.
+        state (ContinuationState): Live continuation to snapshot and potentially update.
+        turn (int): Number of the rejected turn.
+        tool_iterations (int): Tool batches consumed so far, including the offset.
+        messages (Sequence[Message]): Current base history.
+        context_budget (ContextBudget): Estimate made before the rejected request.
+        had_streamed_delta (bool): Whether text or thinking escaped during that attempt.
+        message (str): Provider's overflow description.
+
+    Returns:
+        tuple[Sequence[Message], bool]: Updated history and a retry flag. True means retry,
+            unlike the stop flag returned by at_request_boundary. False means no hook,
+            declined recovery, or a stop decision.
+
+    Examples:
+        A recovery hook can supply caller-owned compacted history::
+
+            class ReplaceOverflowContext:
+                def __init__(self, compacted_messages):
+                    self.compacted_messages = tuple(compacted_messages)
+
+                async def recover_context_overflow(self, *, snapshot):
+                    if snapshot.had_streamed_delta:
+                        return None
+                    return RequestBoundaryDecision(messages=self.compacted_messages)
+
+    Raises:
+        RequestBoundaryUnsupportedError: Recovery appends extra messages, omits a
+            replacement/rebase, or fails the normal transition validation.
+        Exception: An exception raised by the recovery hook propagates to the loop.
+    """
 
     if config.context_overflow_hook is None:
         return messages, False
