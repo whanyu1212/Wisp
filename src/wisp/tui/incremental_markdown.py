@@ -30,12 +30,12 @@ class _ParsedMarkdown(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class IncrementalMarkdownBuild[MarkdownT]:
-    """One parsed document plus numeric work and stable-fence metadata."""
+    """One parsed document plus numeric work and stable-block metadata."""
 
     markdown: MarkdownT
     processed_chars: int
     reused_chars: int
-    cacheable_fence_token_ids: frozenset[int]
+    cacheable_block_token_ids: frozenset[int]
     incremental: bool
 
 
@@ -45,7 +45,7 @@ class IncrementalMarkdownState:
     def __init__(self) -> None:
         self._stable_source_chars = 0
         self._stable_tokens: list[object] = []
-        self._stable_fence_token_ids: set[int] = set()
+        self._stable_block_token_ids: set[int] = set()
         self._full_rebuild_only = False
 
     def reset(self) -> None:
@@ -53,7 +53,7 @@ class IncrementalMarkdownState:
 
         self._stable_source_chars = 0
         self._stable_tokens.clear()
-        self._stable_fence_token_ids.clear()
+        self._stable_block_token_ids.clear()
         self._full_rebuild_only = False
 
     def release(self) -> None:
@@ -81,7 +81,7 @@ class IncrementalMarkdownState:
             self._full_rebuild_only = True
             self._stable_source_chars = 0
             self._stable_tokens.clear()
-            self._stable_fence_token_ids.clear()
+            self._stable_block_token_ids.clear()
 
         if self._full_rebuild_only:
             markdown = build_markdown(source)
@@ -89,7 +89,7 @@ class IncrementalMarkdownState:
                 markdown=markdown,
                 processed_chars=len(source),
                 reused_chars=0,
-                cacheable_fence_token_ids=frozenset(),
+                cacheable_block_token_ids=frozenset(),
                 incremental=False,
             )
 
@@ -110,26 +110,28 @@ class IncrementalMarkdownState:
             self._full_rebuild_only = True
             self._stable_source_chars = 0
             self._stable_tokens.clear()
-            self._stable_fence_token_ids.clear()
+            self._stable_block_token_ids.clear()
             markdown = build_markdown(source)
             return IncrementalMarkdownBuild(
                 markdown=markdown,
                 processed_chars=len(mutable_source) + len(source),
                 reused_chars=0,
-                cacheable_fence_token_ids=frozenset(),
+                cacheable_block_token_ids=frozenset(),
                 incremental=False,
             )
 
         self._stable_tokens.extend(newly_stable)
-        self._stable_fence_token_ids.update(
-            id(token) for token in newly_stable if getattr(token, "type", None) == "fence"
+        self._stable_block_token_ids.update(
+            id(token)
+            for token in newly_stable
+            if getattr(token, "type", None) in {"fence", "paragraph_open"}
         )
         self._stable_source_chars += stable_tail_chars
         return IncrementalMarkdownBuild(
             markdown=markdown,
             processed_chars=len(mutable_source),
             reused_chars=reused_chars,
-            cacheable_fence_token_ids=frozenset(self._stable_fence_token_ids),
+            cacheable_block_token_ids=frozenset(self._stable_block_token_ids),
             incremental=True,
         )
 

@@ -22,7 +22,7 @@ from typing import ClassVar, Protocol, cast
 
 from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
-from rich.markdown import CodeBlock, Heading
+from rich.markdown import CodeBlock, Heading, Paragraph
 from rich.markdown import Markdown as RichMarkdown
 from rich.segment import Segment
 from rich.style import Style as RichStyle
@@ -4083,7 +4083,7 @@ class StatusBar(Static):
         self._render_status()
 
 
-type _CodeBlockRenderCache = dict[int, tuple[int, tuple[Segment, ...]]]
+type _MarkdownBlockRenderCache = dict[int, tuple[int, tuple[Segment, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -4104,14 +4104,14 @@ class _AssistantCodeBlock(CodeBlock):
         info = str(getattr(token, "info", "") or "")
         lexer_name = info.partition(" ")[0] or "text"
         cacheable_token_ids: frozenset[int] = getattr(
-            markdown, "cacheable_fence_token_ids", frozenset()
+            markdown, "cacheable_block_token_ids", frozenset()
         )
         return cls(
             lexer_name,
             markdown.code_theme,
             native_ansi=bool(getattr(markdown, "native_ansi", False)),
             cache_key=id(token) if id(token) in cacheable_token_ids else None,
-            render_cache=getattr(markdown, "code_block_render_cache", None),
+            render_cache=getattr(markdown, "block_render_cache", None),
         )
 
     def __init__(
@@ -4121,7 +4121,7 @@ class _AssistantCodeBlock(CodeBlock):
         *,
         native_ansi: bool,
         cache_key: int | None,
-        render_cache: _CodeBlockRenderCache | None,
+        render_cache: _MarkdownBlockRenderCache | None,
     ) -> None:
         super().__init__(lexer_name, theme)
         self._native_ansi = native_ansi
@@ -4163,6 +4163,61 @@ class _AssistantCodeBlock(CodeBlock):
         yield from rendered
 
 
+class _AssistantParagraph(Paragraph):
+    """Reuse wrapping and styled segments for immutable paragraph tokens."""
+
+    _cache_key: int | None = None
+    _render_cache: _MarkdownBlockRenderCache | None = None
+
+    @classmethod
+    def create(cls, markdown: RichMarkdown, token: object) -> _AssistantParagraph:
+        """Attach the message's cache only to a certified immutable token.
+
+        Args:
+            markdown (RichMarkdown): Document supplying justification and cache ownership.
+            token (object): Parser token whose identity survives stable-prefix reuse.
+
+        Returns:
+            _AssistantParagraph: Paragraph with optional width-dependent render reuse.
+        """
+
+        paragraph = cls(justify=markdown.justify or "left")
+        cacheable: frozenset[int] = getattr(markdown, "cacheable_block_token_ids", frozenset())
+        if id(token) in cacheable:
+            paragraph._cache_key = id(token)
+            paragraph._render_cache = getattr(markdown, "block_render_cache", None)
+        return paragraph
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        """Render a paragraph, retaining at most one width per stable token.
+
+        Args:
+            console (Console): Rich renderer with the current message theme.
+            options (ConsoleOptions): Width and rendering options for this paragraph.
+
+        Yields:
+            Segment: Wrapped, styled paragraph output without inter-block spacing.
+        """
+
+        key, cache = self._cache_key, self._render_cache
+        if key is not None and cache is not None:
+            cached = cache.get(key)
+            if cached is not None and cached[0] == options.max_width:
+                yield from cached[1]
+                return
+        # Keep Rich's paragraph construction and Markdown's inter-block spacing.
+        # Only the expensive Text wrapping/segment rendering is memoized.
+        self.text.justify = self.justify
+        rendered = tuple(console.render(self.text, options))
+        if key is not None and cache is not None:
+            cache[key] = (options.max_width, rendered)
+        yield from rendered
+
+
 class _AssistantHeading(Heading):
     """Keep every heading left-aligned in a terminal conversation."""
 
@@ -4174,6 +4229,7 @@ class _AssistantMarkdown(RichMarkdown):
 
     elements: ClassVar = {
         **RichMarkdown.elements,
+        "paragraph_open": _AssistantParagraph,
         "heading_open": _AssistantHeading,
         "fence": _AssistantCodeBlock,
         "code_block": _AssistantCodeBlock,
@@ -4190,24 +4246,30 @@ class _AssistantMarkdown(RichMarkdown):
         super().__init__(source, code_theme=code_theme, hyperlinks=True)
         self._wisp_theme = theme
         self.native_ansi = native_ansi
-        self.cacheable_fence_token_ids: frozenset[int] = frozenset()
-        self.code_block_render_cache: _CodeBlockRenderCache | None = None
+        self.cacheable_block_token_ids: frozenset[int] = frozenset()
+        self.block_render_cache: _MarkdownBlockRenderCache | None = None
 
-    def enable_stable_fence_cache(
+    def enable_stable_block_cache(
         self,
         token_ids: frozenset[int],
-        render_cache: _CodeBlockRenderCache,
+        render_cache: _MarkdownBlockRenderCache,
     ) -> None:
-        """Reuse highlighted output only for immutable, closed fence tokens."""
+        """Reuse rendered paragraphs and highlighting for immutable blocks.
 
-        self.cacheable_fence_token_ids = token_ids
-        self.code_block_render_cache = render_cache
+        Args:
+            token_ids (frozenset[int]): Stable tokens certified by the incremental parser.
+            render_cache (_MarkdownBlockRenderCache): Per-message cache, cleared on
+                style changes, replacement, fallback, or settlement.
+        """
+
+        self.cacheable_block_token_ids = token_ids
+        self.block_render_cache = render_cache
 
     def release_render_cache(self) -> None:
-        """Stop retaining streaming-only highlighted segments after settlement."""
+        """Stop retaining streaming-only block segments after settlement."""
 
-        self.cacheable_fence_token_ids = frozenset()
-        self.code_block_render_cache = None
+        self.cacheable_block_token_ids = frozenset()
+        self.block_render_cache = None
 
     def __rich_console__(
         self,
@@ -4381,7 +4443,7 @@ class StreamMessage(Static):
         self._selection_visual: _SelectableMarkdownVisual | None = None
         self._incremental_markdown = IncrementalMarkdownState()
         self._markdown_render_config: _MarkdownRenderConfig | None = None
-        self._code_block_render_cache: _CodeBlockRenderCache = {}
+        self._block_render_cache: _MarkdownBlockRenderCache = {}
         self._last_markdown_processed_chars = 0
         self._last_markdown_reused_chars = 0
         self._last_markdown_incremental = False
@@ -4412,7 +4474,7 @@ class StreamMessage(Static):
     def notify_style_update(self) -> None:
         super().notify_style_update()
         self._markdown_render_config = None
-        self._code_block_render_cache.clear()
+        self._block_render_cache.clear()
         if self.is_mounted and self._source:
             self._render_source()
 
@@ -4451,7 +4513,7 @@ class StreamMessage(Static):
         """Release parser and highlighting state no longer needed after settlement."""
 
         self._incremental_markdown.release()
-        self._code_block_render_cache.clear()
+        self._block_render_cache.clear()
         visual = self._selection_visual
         if visual is None:
             return
@@ -4492,7 +4554,7 @@ class StreamMessage(Static):
 
     def _render_source(self) -> None:
         self._incremental_markdown.reset()
-        self._code_block_render_cache.clear()
+        self._block_render_cache.clear()
         self._last_markdown_processed_chars = len(self._source)
         self._last_markdown_reused_chars = 0
         self._last_markdown_incremental = False
@@ -4510,14 +4572,14 @@ class StreamMessage(Static):
             if not isinstance(markdown, _AssistantMarkdown):
                 raise TypeError("Markdown builder returned an unsupported renderable")
             if not build.incremental:
-                self._code_block_render_cache.clear()
-            markdown.enable_stable_fence_cache(
-                build.cacheable_fence_token_ids,
-                self._code_block_render_cache,
+                self._block_render_cache.clear()
+            markdown.enable_stable_block_cache(
+                build.cacheable_block_token_ids,
+                self._block_render_cache,
             )
         except Exception as error:
             self._incremental_markdown.reset()
-            self._code_block_render_cache.clear()
+            self._block_render_cache.clear()
             self._last_markdown_processed_chars = len(self._source)
             self._last_markdown_reused_chars = 0
             self._last_markdown_incremental = False

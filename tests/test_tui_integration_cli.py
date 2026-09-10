@@ -3489,7 +3489,7 @@ def test_textual_stream_completion_releases_incremental_markdown_caches() -> Non
             await app_instance.wait_for_stream_idle()
             await pilot.pause()
             stream = app_instance.query_one(StreamMessage)
-            cached_before = len(stream._code_block_render_cache)
+            cached_before = len(stream._block_render_cache)
             renderer.end_token_stream()
             await app_instance.wait_for_stream_idle()
             visual = stream._selection_visual
@@ -3498,8 +3498,8 @@ def test_textual_stream_completion_releases_incremental_markdown_caches() -> Non
             assert isinstance(renderable, _SafeAssistantMarkdown)
             return (
                 cached_before,
-                len(stream._code_block_render_cache),
-                renderable.markdown.code_block_render_cache is None,
+                len(stream._block_render_cache),
+                renderable.markdown.block_render_cache is None,
             )
 
     cached_before, cached_after, render_cache_released = anyio.run(scenario)

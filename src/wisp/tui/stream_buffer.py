@@ -28,7 +28,7 @@ _RENDER_COOLDOWN_MULTIPLIER = 2.0
 
 
 def _next_drain_delay(render_seconds: float | None) -> float:
-    """Bound stream cadence from the previous successful Markdown rebuild cost."""
+    """Bound cadence from source preparation cost, excluding later layout/paint."""
 
     if render_seconds is None:
         return _MIN_DRAIN_INTERVAL_SECONDS
