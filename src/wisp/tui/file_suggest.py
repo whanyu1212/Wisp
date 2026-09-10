@@ -362,12 +362,7 @@ class FileSuggest(Vertical):
         entry = self._entries.get(selected or "")
         if not isinstance(entry, ProjectDirectory):
             return
-        raw_path = entry.path
-        if expand:
-            self._expanded.add(raw_path)
-        else:
-            self._expanded.discard(raw_path)
-        self._tree_rows_cache = None
+        self._set_directory_expanded(entry.path, expanded=expand)
         self._render_tree()
 
     def activate(self, requested_path: str | None = None) -> FilePickerActivation:
@@ -390,11 +385,7 @@ class FileSuggest(Vertical):
             return FilePickerActivation(False)
         if self._mode is FilePickerMode.TREE and isinstance(entry, ProjectDirectory):
             raw_path = entry.path
-            if raw_path in self._expanded:
-                self._expanded.remove(raw_path)
-            else:
-                self._expanded.add(raw_path)
-            self._tree_rows_cache = None
+            self._set_directory_expanded(raw_path, expanded=raw_path not in self._expanded)
             self._render_tree()
             return FilePickerActivation(True)
         return FilePickerActivation(True, selected)
@@ -486,14 +477,31 @@ class FileSuggest(Vertical):
     def _tree_projection(self) -> tuple[str, ...]:
         return tuple(path for path, _depth in self._tree_rows())
 
+    def _set_directory_expanded(self, raw_path: str, *, expanded: bool) -> None:
+        """Invalidate tree rows and labels when directory expansion changes.
+
+        Args:
+            raw_path (str): Snapshot directory path without a trailing slash.
+            expanded (bool): Whether to show the directory's indexed children.
+        """
+
+        if expanded == (raw_path in self._expanded):
+            return
+        if expanded:
+            self._expanded.add(raw_path)
+        else:
+            self._expanded.remove(raw_path)
+        self._tree_rows_cache = None
+        # Empty or index-limited directories change their marker, not their rows.
+        self._tree_options_key = None
+
     def _reveal(self, display_path: str) -> None:
         raw_path = display_path.rstrip("/")
         parts = raw_path.split("/")
         for index in range(1, len(parts)):
             ancestor = "/".join(parts[:index])
-            if f"{ancestor}/" in self._entries and ancestor not in self._expanded:
-                self._expanded.add(ancestor)
-                self._tree_rows_cache = None
+            if f"{ancestor}/" in self._entries:
+                self._set_directory_expanded(ancestor, expanded=True)
 
     def _render_presentations(self) -> None:
         if (

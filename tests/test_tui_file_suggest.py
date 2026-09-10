@@ -509,6 +509,42 @@ def test_tree_directory_enter_and_left_right_only_expand_or_collapse() -> None:
     assert final_draft == "@src"
 
 
+def test_empty_tree_directory_marker_tracks_expansion_without_changing_rows() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            _set_paths(picker, ("empty/",))
+            editor = app.query_one("#input", PromptEditor)
+            await pilot.press("@", "tab")
+            await pilot.pause()
+            tree = picker.query_one("#file-picker-tree", OptionList)
+            assert tree.get_option_at_index(0).prompt == "▸ empty/"
+
+            for key, marker in (
+                ("enter", "▾"),
+                ("enter", "▸"),
+                ("right", "▾"),
+                ("left", "▸"),
+            ):
+                await pilot.press(key)
+                await pilot.pause()
+                assert picker.visible_paths == ("empty/",)
+                assert tree.get_option_at_index(0).prompt == f"{marker} empty/"
+                assert editor.value == "@"
+
+            # Repeating an already-applied state should still reuse the options.
+            for key in ("left", "right"):
+                await pilot.press(key)
+                await pilot.pause()
+                option = tree.get_option_at_index(0)
+                await pilot.press(key)
+                await pilot.pause()
+                assert tree.get_option_at_index(0) is option
+
+    anyio.run(scenario)
+
+
 def test_tree_directory_click_expands_without_stealing_editor_focus() -> None:
     async def scenario() -> tuple[str, tuple[str, ...], bool]:
         app = TextualTui()
