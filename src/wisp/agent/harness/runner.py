@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 
 import anyio
 
-from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
+from wisp.agent.loop import AgentLoopEvent, run_agent_loop
 from wisp.agent.messages import (
     Message,
     completion_event_has_history,
@@ -31,7 +31,7 @@ from wisp.events import (
 from wisp.providers.base import prepare_provider_history
 
 from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
-from .config import AgentHarnessConfig
+from .config import AgentHarnessConfig, _build_loop_config
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
@@ -398,6 +398,32 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
+        """Stream one invocation while retaining conversation and queue state.
+
+        Validate offsets before repairing history or accepting a prompt. Consume
+        the loop, retaining completed messages before yielding their events; after
+        each successful turn, drain the eligible queue and arm the next boundary.
+        Apply transcript replacements only when the next turn starts. Always
+        release run state, including when startup or stream cleanup fails.
+
+        Args:
+            prompt_message (Message | None): Detached prompt to append when consumed.
+            turn_offset (int): Number of turns preceding this invocation.
+            tool_iteration_offset (int): Number of earlier tool iterations.
+            defer_context_overflow_errors (bool): Whether the session handles overflow errors.
+            boundary_preparer (HarnessBoundaryPreparer | None): Session-owned boundary policy.
+            context_overflow_hook (ContextOverflowHook | None): Optional overflow recovery.
+
+        Yields:
+            AgentHarnessEvent: Loop and queue events in transcript publication order.
+                Consume or close the stream to release the guarded run lifetime.
+
+        Raises:
+            RuntimeError: Another invocation is active.
+            ValueError: An invocation offset is invalid.
+            Exception: Startup, execution, boundary, or cleanup failures propagate
+                without rolling back accepted input or retained completions.
+        """
         self._ensure_idle()
         validate_non_negative_integer(turn_offset, field="turn_offset")
         validate_non_negative_integer(tool_iteration_offset, field="tool_iteration_offset")
@@ -422,21 +448,11 @@ class AgentHarness:
         try:
             if prompt_message is not None:
                 self._messages.append(prompt_message)
-            config = AgentLoopConfig(
-                provider=self._config.provider,
-                tool_executor=self._config.tool_executor,
-                model=self._config.model,
-                tools=self._config.tools,
-                max_tool_iterations=self._config.max_tool_iterations,
+            config = _build_loop_config(
+                self._config,
                 cancellation_token=token,
-                effort=self._config.effort,
-                prompt_cache_key=self._config.prompt_cache_key,
-                context_window=self._config.context_window,
-                context_reserve_tokens=self._config.context_reserve_tokens,
-                context_pressure_threshold=self._config.context_pressure_threshold,
                 turn_offset=turn_offset,
                 tool_iteration_offset=tool_iteration_offset,
-                cost_estimator=self._config.cost_estimator,
                 defer_context_overflow_errors=defer_context_overflow_errors,
                 request_boundary_hook=boundary,
                 context_overflow_hook=boundary if context_overflow_hook is not None else None,
