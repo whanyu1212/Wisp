@@ -164,7 +164,7 @@ module graph or translate Textual widgets line by line.
 | Input/event coordination, command correlation, visible status, pending local submissions | `tui/shell.py`, `tui/state.py` | Reimplement as a terminal-independent Rust reducer driven by local actions and typed events. Python queue/run state remains authoritative. |
 | Session catalog, selection, history hydration, paging, detail lookup | `tui/shell.py`, `tui/history.py` | Port client correlation and viewport projection. Continue loading and validating durable state through Python RPC. |
 | Slash-command parsing and command catalog | `tui/commands.py`, `tui/shell.py` | Rust owns local dispatch and presentation; executable command metadata comes from Python. Local-only actions such as help and theme remain frontend-owned. |
-| Model lookup, ambiguity handling, effort filtering, selection persistence | `tui/shell.py` | Move effective semantics behind the backend contract in #460 and #405. Rust renders and submits selections without copying the catalog. |
+| Model lookup, ambiguity handling, effort filtering, selection persistence | `rpc/configure.py`, provider catalog, settings | Rust renders the backend catalog and requests persistence through `configure`; Python applies and saves resolved selections. Textual retains its existing persistence path. |
 | Credential status, API-key persistence, disconnect, device-code login | `tui/auth_commands.py`, `tui/connections.py` | Move behind the secure Python contract in #461. Rust owns masked entry and progress presentation only. |
 | Protected-path-aware snapshot construction and path ranking | `tui/file_index.py`, `tui/file_suggest.py` | Move safe discovery behind #462. Rust presents returned relative suggestions and may not independently walk the workspace. |
 | Update checking, install capability, and update execution | `tui/update_commands.py`, `wisp.update_check` | Keep Python-owned. Rust presents notices and requests supported actions according to the launcher/distribution contract. |
@@ -262,7 +262,7 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | No automatic fallback to Textual | Intentional; #470 closed this way | Acceptable difference |
 | Source-build only; no wheel binary | Current packaging | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)) |
 | Windows | Rejected before binary resolution | Acceptable difference; not a claimed target |
-| Model/effort picker interaction | Rust validates the catalog; picker UX is incomplete | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
+| Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
 | Protected-path-aware file suggestions | Backend-owned; Rust must not walk the workspace | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#462](https://github.com/whanyu1212/Wisp/issues/462)) |
 | Skills, command catalog, MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |
@@ -305,7 +305,7 @@ moving unrelated Python systems.
 #470 closed as a stage-2 hold because several reconsideration conditions still hold:
 
 - there is no comparative PTY input-to-frame measurement against Textual;
-- UX parity for model/effort pickers, file suggestions, skills, MCP, and keybindings is incomplete
+- UX parity for file suggestions, skills, MCP, and keybindings is incomplete
   ([#467](https://github.com/whanyu1212/Wisp/issues/467));
 - hardening, backpressure, and terminal-safety evidence is incomplete
   ([#468](https://github.com/whanyu1212/Wisp/issues/468));

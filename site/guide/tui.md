@@ -68,9 +68,29 @@ Textual does not currently expose Rust's direct naming, clone, tree-navigation, 
 Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
 enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
 persists the selection reported by the backend. If discovery fails, prompts and typed `/model`
-commands remain available while the bare picker reports the catalog as unavailable. Rust validates
-the same model-catalog contract but leaves picker interaction to
+commands remain available while the bare picker reports the catalog as unavailable.
+
+Rust also supports `/model` while idle. The picker groups models by provider, disables unavailable
+providers, and labels preview and legacy models. Use `Up`/`Down`, `PageUp`/`PageDown`, or `Home`/`End`
+to select a model, `Left`/`Right` to choose its reasoning effort (including the provider default),
+`Enter` to apply, `r` to refresh, and `Escape` or `Ctrl+C` to close. Navigating does not change the
+runtime. Closing after submitting a selection does not cancel its application. The picker requires
+at least 30 columns and 8 rows; a smaller terminal cannot apply a hidden selection.
+
+For direct selection, use `/model <model> [effort|-]` or
+`/model <provider>::<model> [effort|-]`. Custom model names pass through to the backend. `-` clears
+an explicit effort. `/provider <name>` switches providers and restores that provider's defaults;
+bare `/provider` reports the current provider. These commands are rejected while a run is active,
+so they cannot become steering or follow-up messages.
+
+Successful Rust selections update the live session and save user defaults for later launches.
+Existing environment, CLI, and project settings keep their normal precedence over saved defaults.
+If saving fails, the applied live selection remains active and a warning is shown. Catalog discovery
+runs in the background; a failed catalog does not prevent prompts or typed model commands. If a
+successful configuration cannot report its selection, the header marks the last confirmed selection
+until a fresh catalog succeeds. Other command-workflow parity remains tracked in
 [#467](https://github.com/whanyu1212/Wisp/issues/467).
+
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See
