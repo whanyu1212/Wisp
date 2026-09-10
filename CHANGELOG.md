@@ -37,6 +37,9 @@ JSONL-RPC clients. Stable installation instructions remain pinned to 0.1.0 until
 - Hardened harness startup and cleanup so failures release run state and permit reuse. Detached
   message snapshots and completion projections prevent caller or event-observer mutations from
   changing retained transcripts, queues, or cached session messages.
+- Fixed duplicate cancellation errors when cancelling immediately after a completed tool turn.
+  Added deterministic interruption and recovery checks at every emitted boundary of six harness
+  workflows, including tool settlement, queues, and transcript transitions.
 - **Breaking Python API cleanup:** removed the deprecated `wisp.agent.messages.SessionEntry(...)`
   factory as an explicit early-removal exception to the normal deprecation window. Construct
   `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` instead;

@@ -449,7 +449,12 @@ class AgentHarness:
             )
             loop_events = run_agent_loop(config, messages=provider_messages)
             while True:
-                if token.is_cancelled() and not draining_cancellation and not run.had_tool_calls:
+                if (
+                    token.is_cancelled()
+                    and not draining_cancellation
+                    and (not run.had_tool_calls or run.active_turn_completed)
+                ):
+                    # A completed tool turn has no outstanding batch to settle.
                     for cancellation_event in run.cancelled_events():
                         yield cancellation_event
                     return

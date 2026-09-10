@@ -10,6 +10,7 @@ import pytest
 import wisp.agent.harness.boundaries as agent_boundary_module
 import wisp.agent.harness.runner as agent_harness_module
 from tests.agent_runtime import (
+    assert_cancellation_settled,
     assert_settled_tool_calls,
     assert_tool_result_pairing,
     assert_turn_terminals,
@@ -2325,6 +2326,43 @@ def test_harness_drains_steering_one_at_a_time_across_turn_boundaries() -> None:
         "steer one",
         "steer two",
     ]
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_harness_cancellation_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None:
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="unused")],
+        ]
+    )
+    harness = _harness(
+        provider,
+        executor=ImmediatePreparedExecutor() if prepared else RecordingToolExecutor(),
+        tools=(ToolSpec(name="read", description="Read", input_schema={"type": "object"}),),
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        async for event in harness.prompt("initial"):
+            events.append(event)
+            if isinstance(event, TurnCompleted):
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+    assert_cancellation_settled(events)
+    assert len(provider.calls) == 1
+    assert len([event for event in events if isinstance(event, TurnCompleted)]) == 1
+    assert not harness.is_running
+    assert not harness.cancel()
 
 
 def test_harness_cancellation_at_turn_boundary_preserves_steering() -> None:
