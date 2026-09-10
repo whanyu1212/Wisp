@@ -12,7 +12,7 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
-## 0.2.0rc1 — pending publication
+## 0.2.0rc1 — 2026-09-10
 
 Release candidate for the 0.2 minor line; not a new stable release. Textual remains the default TUI.
 See the [0.2 upgrade guide](site/guide/upgrading.md) before updating Python integrations or external
