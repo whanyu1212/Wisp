@@ -18,7 +18,7 @@ from textual.containers import Vertical
 from textual.content import Content, Span
 from textual.message import Message
 from textual.widgets import OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from wisp.tui.file_index import (
     ProjectDirectory,
@@ -117,6 +117,9 @@ class FileSuggest(Vertical):
         # during selection repair and rendering.
         self._visible_fuzzy: tuple[ScoredPath, ...] = ()
         self._visible_tree: tuple[str, ...] = ()
+        self._tree_rows_cache: tuple[tuple[str, int], ...] | None = None
+        self._fuzzy_options_key: tuple[tuple[ScoredPath, ...], int] | None = None
+        self._tree_options_key: tuple[tuple[tuple[str, int], ...], int] | None = None
         self._mode = FilePickerMode.FUZZY
         self._query = ""
         self._mention_active = False
@@ -180,6 +183,7 @@ class FileSuggest(Vertical):
         )
         self._corpus = tuple(self._entries)
         self._children = self._snapshot_children(snapshot)
+        self._tree_rows_cache = None
         valid_directories = {
             entry.path for entry in self._entries.values() if isinstance(entry, ProjectDirectory)
         }
@@ -284,10 +288,12 @@ class FileSuggest(Vertical):
         self._mention_active = True
         self._query = query
 
-        if query_changed:
+        if new_session or query_changed:
             self._refresh_fuzzy_projection()
         matches = self._visible_fuzzy
-        if query_changed and self._selected_path not in {match.path for match in matches}:
+        if (new_session or query_changed) and self._selected_path not in {
+            match.path for match in matches
+        }:
             self._selected_path = matches[0].path if matches else self._tree_fallback()
         elif self._selected_path is None:
             self._selected_path = matches[0].path if matches else self._tree_fallback()
@@ -361,6 +367,7 @@ class FileSuggest(Vertical):
             self._expanded.add(raw_path)
         else:
             self._expanded.discard(raw_path)
+        self._tree_rows_cache = None
         self._render_tree()
 
     def activate(self, requested_path: str | None = None) -> FilePickerActivation:
@@ -387,6 +394,7 @@ class FileSuggest(Vertical):
                 self._expanded.remove(raw_path)
             else:
                 self._expanded.add(raw_path)
+            self._tree_rows_cache = None
             self._render_tree()
             return FilePickerActivation(True)
         return FilePickerActivation(True, selected)
@@ -397,12 +405,12 @@ class FileSuggest(Vertical):
         return self._selected_path
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_list not in {self._fuzzy, self._tree}:
+        if event.option_list is not self._active_options:
             return
         self._sync_selected(event.option_list)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_list not in {self._fuzzy, self._tree}:
+        if event.option_list is not self._active_options:
             return
         event.stop()
         path = event.option.id
@@ -421,6 +429,21 @@ class FileSuggest(Vertical):
         path = options.get_option_at_index(highlighted).id
         if path is not None:
             self._selected_path = path
+
+    def _render_highlight(self, options: OptionList) -> None:
+        """Update selection without rebuilding rows or scanning a large tree.
+
+        Args:
+            options (OptionList): Active presentation with current option IDs.
+        """
+
+        selected = self._selected_path
+        try:
+            index = options.get_option_index(selected) if selected is not None else None
+        except OptionDoesNotExist:
+            index = None
+        if options.highlighted != index:
+            options.highlighted = index
 
     def _tree_fallback(self) -> str | None:
         root_children = self._children.get("", ())
@@ -441,7 +464,9 @@ class FileSuggest(Vertical):
 
         self._visible_fuzzy = filter_paths(self._corpus, self._query)
 
-    def _tree_rows(self) -> list[tuple[str, int]]:
+    def _tree_rows(self) -> tuple[tuple[str, int], ...]:
+        if self._tree_rows_cache is not None:
+            return self._tree_rows_cache
         rows: list[tuple[str, int]] = []
 
         def visit(parent: str, depth: int) -> None:
@@ -455,7 +480,8 @@ class FileSuggest(Vertical):
                     visit(raw_path, depth + 1)
 
         visit("", 0)
-        return rows
+        self._tree_rows_cache = tuple(rows)
+        return self._tree_rows_cache
 
     def _tree_projection(self) -> tuple[str, ...]:
         return tuple(path for path, _depth in self._tree_rows())
@@ -465,8 +491,9 @@ class FileSuggest(Vertical):
         parts = raw_path.split("/")
         for index in range(1, len(parts)):
             ancestor = "/".join(parts[:index])
-            if f"{ancestor}/" in self._entries:
+            if f"{ancestor}/" in self._entries and ancestor not in self._expanded:
                 self._expanded.add(ancestor)
+                self._tree_rows_cache = None
 
     def _render_presentations(self) -> None:
         if (
@@ -476,53 +503,61 @@ class FileSuggest(Vertical):
             or self._status is None
         ):
             return
-        self._render_fuzzy()
-        if self._mode is FilePickerMode.TREE and self._selected_path is not None:
-            self._reveal(self._selected_path)
-        self._render_tree()
+        # The hidden mode is rebuilt lazily. Caret-only events and repeated
+        # snapshots must not create thousands of invisible Option objects.
+        if self._mode is FilePickerMode.FUZZY:
+            self._render_fuzzy()
+        else:
+            if self._selected_path is not None:
+                self._reveal(self._selected_path)
+            self._render_tree()
         self._fuzzy.display = self._mode is FilePickerMode.FUZZY
         self._tree.display = self._mode is FilePickerMode.TREE
         mode_name = "Fuzzy" if self._mode is FilePickerMode.FUZZY else "Tree"
         other_name = "Tree" if self._mode is FilePickerMode.FUZZY else "Fuzzy"
-        self._header.update(f"[{mode_name}]  Tab: {other_name}")
-        self._status.update(self._status_text())
+        header = f"[{mode_name}]  Tab: {other_name}"
+        if self._header.content != header:
+            self._header.update(header)
+        status = self._status_text()
+        if self._status.content != status:
+            self._status.update(status)
 
     def _render_fuzzy(self) -> None:
         fuzzy = self._fuzzy
         if fuzzy is None:
             return
         matches = self._visible_fuzzy
-        fuzzy.clear_options()
         content_width = max(1, self._max_width - 4)
-        if matches:
+        key = (matches, content_width)
+        if self._fuzzy_options_key != key:
+            fuzzy.clear_options()
             fuzzy.add_options(
                 [
                     Option(self._render_fuzzy_path(match, content_width), id=match.path)
                     for match in matches
                 ]
             )
-        selected_index = next(
-            (index for index, match in enumerate(matches) if match.path == self._selected_path),
-            None,
-        )
-        fuzzy.highlighted = selected_index
+            self._fuzzy_options_key = key
+        self._render_highlight(fuzzy)
 
     def _render_tree(self) -> None:
         tree = self._tree
         if tree is None:
             return
         rows = self._tree_rows()
-        self._visible_tree = tuple(path for path, _depth in rows)
-        tree.clear_options()
         width = max(1, self._max_width - 4)
-        tree.add_options(
-            [Option(self._render_tree_path(path, depth, width), id=path) for path, depth in rows]
-        )
-        selected_index = next(
-            (index for index, (path, _depth) in enumerate(rows) if path == self._selected_path),
-            None,
-        )
-        tree.highlighted = selected_index
+        key = (rows, width)
+        if self._tree_options_key != key:
+            self._visible_tree = tuple(path for path, _depth in rows)
+            tree.clear_options()
+            tree.add_options(
+                [
+                    Option(self._render_tree_path(path, depth, width), id=path)
+                    for path, depth in rows
+                ]
+            )
+            self._tree_options_key = key
+        self._render_highlight(tree)
 
     def _render_fuzzy_path(self, match: ScoredPath, width: int) -> Content:
         text = _truncate_to_cell_width(match.path, width)
