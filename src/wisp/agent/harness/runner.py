@@ -16,6 +16,7 @@ from wisp.agent.messages import (
 )
 from wisp.agent.request_boundary import ContextOverflowHook
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
+from wisp.agent.validation import validate_non_negative_integer
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -396,6 +397,9 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
+        self._ensure_idle()
+        validate_non_negative_integer(turn_offset, field="turn_offset")
+        validate_non_negative_integer(tool_iteration_offset, field="tool_iteration_offset")
         self.repair_interrupted_tool_calls()
         # Every row already present when a run begins is durable history. New
         # assistant/tool rows appended during this invocation form the only live
@@ -408,42 +412,41 @@ class AgentHarness:
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
-        self._running = True
         token = SimpleCancellationToken()
-        self._current_token = token
-        if prompt_message is not None:
-            self._messages.append(prompt_message)
-
         run = _HarnessRunState()
-
-        config = AgentLoopConfig(
-            provider=self._config.provider,
-            tool_executor=self._config.tool_executor,
-            model=self._config.model,
-            tools=self._config.tools,
-            max_tool_iterations=self._config.max_tool_iterations,
-            cancellation_token=token,
-            effort=self._config.effort,
-            prompt_cache_key=self._config.prompt_cache_key,
-            context_window=self._config.context_window,
-            context_reserve_tokens=self._config.context_reserve_tokens,
-            context_pressure_threshold=self._config.context_pressure_threshold,
-            turn_offset=turn_offset,
-            tool_iteration_offset=tool_iteration_offset,
-            cost_estimator=self._config.cost_estimator,
-            defer_context_overflow_errors=defer_context_overflow_errors,
-            request_boundary_hook=boundary,
-            context_overflow_hook=boundary if context_overflow_hook is not None else None,
-        )
-        provider_messages = prepare_provider_history(
-            self._messages,
-            provider=self._config.provider,
-            effort=self._config.effort,
-            active_from=boundary.active_from,
-        )
-        loop_events = run_agent_loop(config, messages=provider_messages)
+        loop_events: AsyncGenerator[AgentLoopEvent, None] | None = None
         draining_cancellation = False
+        self._running = True
+        self._current_token = token
         try:
+            if prompt_message is not None:
+                self._messages.append(prompt_message)
+            config = AgentLoopConfig(
+                provider=self._config.provider,
+                tool_executor=self._config.tool_executor,
+                model=self._config.model,
+                tools=self._config.tools,
+                max_tool_iterations=self._config.max_tool_iterations,
+                cancellation_token=token,
+                effort=self._config.effort,
+                prompt_cache_key=self._config.prompt_cache_key,
+                context_window=self._config.context_window,
+                context_reserve_tokens=self._config.context_reserve_tokens,
+                context_pressure_threshold=self._config.context_pressure_threshold,
+                turn_offset=turn_offset,
+                tool_iteration_offset=tool_iteration_offset,
+                cost_estimator=self._config.cost_estimator,
+                defer_context_overflow_errors=defer_context_overflow_errors,
+                request_boundary_hook=boundary,
+                context_overflow_hook=boundary if context_overflow_hook is not None else None,
+            )
+            provider_messages = prepare_provider_history(
+                self._messages,
+                provider=self._config.provider,
+                effort=self._config.effort,
+                active_from=boundary.active_from,
+            )
+            loop_events = run_agent_loop(config, messages=provider_messages)
             while True:
                 if token.is_cancelled() and not draining_cancellation and not run.had_tool_calls:
                     for cancellation_event in run.cancelled_events():
@@ -537,11 +540,14 @@ class AgentHarness:
                 )
         finally:
             self._current_scope = None
-            with anyio.CancelScope(shield=True):
-                await loop_events.aclose()
-            if self._current_token is token:
-                self._current_token = None
-            self._running = False
+            try:
+                if loop_events is not None:
+                    with anyio.CancelScope(shield=True):
+                        await loop_events.aclose()
+            finally:
+                if self._current_token is token:
+                    self._current_token = None
+                self._running = False
 
     def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
         queue = self._queue_for(kind)

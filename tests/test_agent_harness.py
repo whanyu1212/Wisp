@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from typing import cast
 
 import anyio
@@ -15,6 +15,7 @@ from tests.agent_runtime import (
     assert_turn_terminals,
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
+from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent
 from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
@@ -926,6 +927,113 @@ def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
         ("user", "stop now")
     ]
     assert harness.is_running is False
+
+
+@pytest.mark.parametrize("field", ["turn_offset", "tool_iteration_offset"])
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_harness_invalid_offsets_leave_transcript_unchanged_and_allow_retry(
+    field: str, value: object
+) -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    interrupted = Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCallSnapshot(call_id="pending", name="read", arguments={}),),
+    )
+    harness = _harness(provider, messages=(interrupted,))
+    harness.steer("queued")
+    before = harness.messages
+    queued = harness.queued_messages
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match=field):
+            await anext(harness.prompt("invalid", **{field: value}))  # type: ignore[arg-type]
+        assert harness.messages == before
+        assert harness.queued_messages == queued
+        assert not harness.is_running
+        assert not harness.cancel()
+        assert provider.calls == []
+        harness.clear_queues()
+        events = [event async for event in harness.prompt("retry")]
+        assert isinstance(events[-1], TurnCompleted)
+        assert events[-1].outcome == "completed"
+        assert not harness.is_running
+
+    anyio.run(run)
+
+
+def test_harness_history_preparation_failure_releases_run_state() -> None:
+    class FailingReplayProvider(ScriptedProvider):
+        fail_preparation = True
+
+        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+            if self.fail_preparation:
+                raise RuntimeError("history preparation failed")
+            return True
+
+    provider = FailingReplayProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    harness = _harness(provider)
+    harness.follow_up("queued")
+    queued = harness.queued_messages
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="history preparation failed"):
+            await anext(harness.prompt("accepted"))
+        assert not harness.is_running
+        assert not harness.cancel()
+        assert [message.content for message in harness.messages] == ["accepted"]
+        assert harness.queued_messages == queued
+        provider.fail_preparation = False
+        harness.clear_queues()
+        events = [event async for event in harness.continue_()]
+        assert isinstance(events[-1], TurnCompleted)
+        assert events[-1].outcome == "completed"
+        assert not harness.is_running
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("exit_mode", ["close", "error"])
+def test_harness_cleanup_failure_releases_run_state(
+    monkeypatch: pytest.MonkeyPatch, exit_mode: str
+) -> None:
+    async def failing_loop(
+        config: AgentLoopConfig, *, messages: Sequence[Message]
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        try:
+            yield TurnStarted(turn=1)
+            raise ValueError("execution failed")
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    harness = _harness(provider)
+
+    async def run() -> None:
+        with monkeypatch.context() as patch:
+            patch.setattr(agent_harness_module, "run_agent_loop", failing_loop)
+            events = harness.prompt("first")
+            assert isinstance(await anext(events), TurnStarted)
+            with pytest.raises(RuntimeError, match="cleanup failed") as raised:
+                if exit_mode == "close":
+                    await events.aclose()
+                else:
+                    await anext(events)
+            if exit_mode == "error":
+                assert isinstance(raised.value.__context__, ValueError)
+            assert not harness.is_running
+            assert not harness.cancel()
+        retry = [event async for event in harness.prompt("retry")]
+        assert isinstance(retry[-1], TurnCompleted)
+        assert retry[-1].outcome == "completed"
+
+    anyio.run(run)
 
 
 def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> None:
