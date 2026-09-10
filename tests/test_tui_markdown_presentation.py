@@ -548,6 +548,60 @@ def test_streaming_markdown_falls_back_for_late_reference_definitions(
     assert action == "open_markdown_link('https://example.com/reference')"
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\r", "\r\n", "\v", "\f", "\x85"])
+def test_streaming_markdown_preserves_source_maps_for_unusual_line_endings(
+    separator: str,
+) -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            streamed, full = StreamMessage(), StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(streamed, full)
+            source = ""
+            for chunk in ("Stable.\n\nNext.\n\n", f"A{separator}B\n\nC\n\n", "D\n"):
+                source += chunk
+                await streamed.append_markdown(chunk)
+                await full.replace_markdown(source)
+                assert _segments(app, streamed) == _segments(app, full)
+            assert streamed.source == source
+            assert not streamed.last_markdown_incremental
+            # Completion may skip reconciliation when source already matches;
+            # the incremental presentation must therefore already be correct.
+            assert not streamed.needs_reconciliation(source)
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 31])
+@pytest.mark.parametrize(
+    "source",
+    [
+        _DOCUMENT,
+        "First.\n\nA\u2028B\n\nC\n\nD\n",
+        "[link][target]\n\nMiddle.\n\n[target]: https://example.com\n",
+        "[link][target]\n\nMiddle.\n\n[target]\x1b[0m: https://example.com\n",
+        "```ansi\n\x1b[31mred\x1b[0m\n```\n\nEnd.\n",
+        "A | B\n-- | --\n1 | 2\n\n- one\n  - nested\n\nEnd.\n",
+    ],
+)
+def test_streaming_markdown_matches_full_render_after_every_chunk(
+    chunk_size: int,
+    source: str,
+) -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            streamed, full = StreamMessage(), StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(streamed, full)
+            for start in range(0, len(source), chunk_size):
+                await streamed.append_markdown(source[start : start + chunk_size])
+                await full.replace_markdown(source[: start + chunk_size])
+                assert _segments(app, streamed) == _segments(app, full)
+            assert streamed.source == source
+
+    anyio.run(scenario)
+
+
 def test_streaming_markdown_caches_closed_fence_highlighting_by_width(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -8,6 +8,7 @@ rendering correctness.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -17,6 +18,10 @@ from typing import Protocol, cast
 # False positives only choose the safe complete-parse path; false negatives can
 # stale an earlier link, so keep this detector deliberately broad.
 _REFERENCE_DEFINITION_MARKER = "]:"
+# Python's splitlines, Markdown's newline normalization, and terminal-control
+# sanitization do not agree on these characters. Reuse requires source maps into
+# the original, unsanitized string; fail closed when that mapping is uncertain.
+_UNSAFE_SOURCE_MAP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 class _ParsedMarkdown(Protocol):
@@ -66,9 +71,13 @@ class IncrementalMarkdownState:
         if self._stable_source_chars > len(source):
             self.reset()
         mutable_source = source[self._stable_source_chars :]
-        if _REFERENCE_DEFINITION_MARKER in mutable_source:
+        if (
+            _REFERENCE_DEFINITION_MARKER in mutable_source
+            or _UNSAFE_SOURCE_MAP.search(mutable_source) is not None
+        ):
             # A late reference definition can change links in an already stable
-            # prefix. Keep such uncommon documents on Rich's complete parse path.
+            # prefix. Controls can also change grammar during sanitization, or
+            # invalidate source offsets. Keep both on the complete-parse path.
             self._full_rebuild_only = True
             self._stable_source_chars = 0
             self._stable_tokens.clear()
@@ -171,8 +180,8 @@ def _stable_token_cut(tokens: tuple[object, ...], source: str) -> tuple[int, int
 
     token_cut, stable_end_line = groups[-2]
     line_offsets = [0]
-    for line in source.splitlines(keepends=True):
-        line_offsets.append(line_offsets[-1] + len(line))
+    for line in source.split("\n")[:-1]:
+        line_offsets.append(line_offsets[-1] + len(line) + 1)
     if stable_end_line >= len(line_offsets):
         raise ValueError("Markdown token source map exceeds source lines")
     return token_cut, line_offsets[stable_end_line]
