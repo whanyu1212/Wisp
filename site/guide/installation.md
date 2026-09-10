@@ -24,9 +24,9 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
-Preparing to test the next minor release? Read the [0.2 upgrade preview](./upgrading) for candidate
-availability, Python API changes, and external RPC-client requirements. The commands above continue
-to install the published stable release.
+To try the published **0.2.0rc1** release candidate, follow the opt-in commands in the
+[0.2 upgrade guide](./upgrading). Read its Python API changes and external RPC-client requirements
+before updating. The commands above continue to install the published stable release.
 
 ## Updates
 

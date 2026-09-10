@@ -4,9 +4,11 @@ title: Upgrading to Wisp 0.2
 
 # Upgrading to Wisp 0.2
 
-**0.2.0rc1 is being prepared; it is not yet published.** The latest stable release remains 0.1.0.
+**0.2.0rc1 was published on September 10, 2026.** It is an opt-in release candidate, not a stable
+release. See the [release notes](https://github.com/whanyu1212/Wisp/releases/tag/v0.2.0rc1)
+and [PyPI package](https://pypi.org/project/wisp-ai/0.2.0rc1/).
+The latest stable release remains 0.1.0.
 This page describes the candidate's upgrade impact and the checks to complete before 0.2.0.
-The release-preparation PR does not publish a package or create a release tag.
 
 ## What changes for terminal users
 
@@ -62,11 +64,7 @@ frontend from the same checkout, using Cargo version `0.2.0-rc.1` for Python `0.
 
 ## Trying the candidate
 
-Until the candidate is published, use a source checkout and `uv sync --locked`; see
-[Development setup](../contributing/development). Do not replace stable installation instructions
-with an unpublished PyPI version.
-
-**After publication**, an explicit version pin opts into the candidate:
+An explicit version pin opts into the published candidate:
 
 ```bash
 uvx --from "wisp-ai==0.2.0rc1" wisp --version
