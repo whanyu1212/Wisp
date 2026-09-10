@@ -154,7 +154,13 @@ def _command_descriptor_from_rpc(descriptor: RpcCommandDescriptor) -> CommandDes
     )
 
 
-DEFAULT_TUI_COMMAND_CATALOG = TuiCommandCatalog(builtin_command_descriptors())
+DEFAULT_TUI_COMMAND_CATALOG = TuiCommandCatalog(
+    tuple(
+        descriptor
+        for descriptor in builtin_command_descriptors()
+        if descriptor.name in {command.value for command in TuiSlashCommandName}
+    )
+)
 
 TEXTUAL_LOCAL_COMMAND_DESCRIPTORS = (
     CommandDescriptor(

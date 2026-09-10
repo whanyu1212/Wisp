@@ -539,6 +539,24 @@ pub mod commands {
         AllSession,
     }
 
+    /// Backend execution mode, shared by command builders and frontend state.
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum AgentMode {
+        #[default]
+        Build,
+        Plan,
+    }
+
+    impl AgentMode {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Build => "build",
+                Self::Plan => "plan",
+            }
+        }
+    }
+
     /// Explicit model configuration; omitted fields retain the backend's semantics.
     #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
     pub struct ModelConfiguration {
@@ -580,6 +598,26 @@ pub mod commands {
     }
 
     impl WispTypedClientRpcCommands {
+        /// Change only the current process's execution mode.
+        pub fn configure_mode(
+            id: &str,
+            mode: AgentMode,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "configure", "id": id, "mode": mode, "clear_effort": false, "persist_model_selection": false}),
+            )
+        }
+
+        /// Discover the backend's frontend-neutral command metadata.
+        pub fn get_commands(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_commands", "id": id}))
+        }
+
+        /// Read current runtime state without becoming the active command.
+        pub fn get_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_state", "id": id}))
+        }
+
         /// Validate a model selection against the canonical configure contract.
         pub fn configure_model(
             id: &str,
@@ -949,6 +987,16 @@ pub mod events {
         generated::WispCurrentLiveEventOutput
     );
 
+    /// Command metadata needed for frontend discovery. Execution remains local to each frontend.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct CommandDescriptor {
+        pub name: String,
+        pub description: String,
+        pub slash_command: String,
+        pub slash_aliases: Vec<String>,
+        pub order: i64,
+    }
+
     /// Terminal result projected from a validated `rpc.command.finished` event.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum CommandFinishedOutcome {
@@ -1059,6 +1107,24 @@ pub mod events {
             self.wire_value()["schema_version"]
                 .as_u64()
                 .expect("validated event has a schema version") as u32
+        }
+
+        /// Project command discovery for one exact request.
+        pub fn command_catalog(&self, id: &str) -> Option<Vec<CommandDescriptor>> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.commands" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["commands"].clone()).ok()
+        }
+
+        /// Project only mode; other snapshot fields must not overwrite live frontend state.
+        pub fn agent_mode(&self, id: &str) -> Option<super::commands::AgentMode> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.state" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["state"]["mode"].clone()).ok()
         }
 
         /// Project the model catalog reported for one exact command.

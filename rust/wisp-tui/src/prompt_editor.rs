@@ -59,6 +59,33 @@ impl PromptEditor {
         display_width(&self.text[start..self.cursor])
     }
 
+    pub(crate) fn cursor_offset(&self) -> usize {
+        self.cursor
+    }
+
+    /// Replace only a command token, keeping its argument tail and editor limits intact.
+    pub(crate) fn replace_command_token(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> EditOutcome {
+        if range.start > range.end
+            || range.end > self.text.len()
+            || !self.text.is_char_boundary(range.start)
+            || !self.text.is_char_boundary(range.end)
+            || self.text.len() - range.len() + replacement.len() > MAX_PROMPT_BYTES
+        {
+            return EditOutcome {
+                rejected_limit: true,
+                ..EditOutcome::default()
+            };
+        }
+        self.text.replace_range(range.clone(), replacement);
+        self.cursor = range.start + replacement.len();
+        self.preferred_column = None;
+        EditOutcome::changed()
+    }
+
     pub fn line_count(&self) -> usize {
         self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
     }
@@ -348,6 +375,20 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn command_completion_overflow_and_invalid_boundaries_leave_draft_untouched() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&format!("/mo {}", "x".repeat(MAX_PROMPT_BYTES - 4)));
+        let before = editor.clone();
+        assert!(editor.replace_command_token(0..3, "/model").rejected_limit);
+        assert_eq!(editor, before);
+        editor.clear();
+        editor.insert_paste("/mo 候選");
+        let before = editor.clone();
+        assert!(editor.replace_command_token(0..5, "/model").rejected_limit);
+        assert_eq!(editor, before);
     }
 
     #[test]
