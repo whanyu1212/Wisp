@@ -141,7 +141,15 @@ def completion_event_has_history(
 def message_from_completion_event(
     event: MessageCompleted | ToolExecutionEnded,
 ) -> Message:
-    """Build the provider-visible message completed by a lifecycle event."""
+    """Build a detached provider-visible message from a lifecycle event.
+
+    Args:
+        event (MessageCompleted | ToolExecutionEnded): Completed assistant or
+            tool output to retain before exposing the event to consumers.
+
+    Returns:
+        Message: Message whose nested data cannot be mutated through the event.
+    """
 
     if isinstance(event, MessageCompleted):
         return Message(
@@ -154,7 +162,7 @@ def message_from_completion_event(
             cost=event.cost,
             context_observation=event.context_observation,
             created_at=event.timestamp,
-        )
+        ).model_copy(deep=True)
     return Message(
         role="tool",
         content=event.output,

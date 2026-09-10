@@ -16,17 +16,39 @@ execution cycle is documented in the sibling [loop README](../loop/README.md).
 
 For each invocation, the harness:
 
-1. Repairs interrupted assistant/tool exchanges in the existing transcript.
-2. Appends the new user message, if the caller supplied one.
-3. Normalizes the transcript for the configured provider.
-4. Creates an `AgentLoopConfig` and a boundary coordinator.
+1. Validates invocation offsets before repairing or appending transcript rows.
+2. Repairs interrupted assistant/tool exchanges and prepares the boundary coordinator.
+3. Enters the guarded run lifetime and appends the new user message, if supplied.
+4. Creates an `AgentLoopConfig` and normalizes a detached transcript for the provider.
 5. Streams `run_agent_loop` events to its caller.
 6. Appends completed assistant messages and terminal tool outputs to the in-memory transcript.
 7. After each completed turn, drains an eligible queue and prepares the next request boundary.
-8. Releases cancellation and running state when the stream ends or is closed.
+8. Releases cancellation and running state when the stream ends, fails, or is closed, even if
+   startup or inner-stream cleanup raises.
 
 The returned async generator is lazy: creating it does not append the prompt or mark the harness as
-running. The caller must consume or close it so the `finally` cleanup runs.
+running. `prompt_message()` snapshots its input at creation, so later caller mutations cannot change
+the pending prompt. The caller must consume or close the stream so the `finally` cleanup runs.
+
+Invalid offsets leave the transcript and queues unchanged. A valid prompt accepted before a runtime
+failure stays in the transcript; cleanup does not roll back accepted user input or completed tool
+output. Failures still propagate, but the harness returns to idle and can be reused.
+
+## Message ownership
+
+The harness copies incoming messages and returns detached transcript and queue snapshots. Message
+models are frozen, but nested JSON values such as tool arguments are not recursively immutable:
+callers may change their own copy without changing retained state.
+
+Completed events are converted to detached messages before exposure. The same conversion protects
+session persistence from later event-consumer mutations. Request-boundary callbacks receive detached
+context; their returned decisions are copied before handoff and copied into the transcript only when
+the next turn accepts the transition. Copies preserve runtime-only provider metadata.
+
+Internal queue-drain batches retain entry identity so edits during draining remain observable.
+Removing and re-enqueuing a message creates a new entry for a later boundary, not a member of the old
+batch. Count and byte inspection do not construct public deep snapshots, and the boundary coordinator
+reuses the already-detached public transcript snapshot rather than copying it again.
 
 ## Module map
 
@@ -81,6 +103,8 @@ the harness transcript.
 Preserve these rules when changing orchestration:
 
 - There is at most one live harness invocation.
+- Startup and cleanup failures release run state without silently swallowing the failure.
+- Caller-owned messages, returned snapshots, and completion events cannot mutate retained messages.
 - Completed assistant messages and terminal tool outputs are retained before their events are
   exposed to a caller that may close the stream.
 - Steering drains before follow-up, with FIFO order within each queue.

@@ -498,9 +498,7 @@ class AgentHarness:
                     # ToolResultReady copies the terminal tool payload; retain it now
                     # so closing at this visible boundary cannot lose output. Empty
                     # failed assistant completions settle lifecycle state only.
-                    self._messages.append(
-                        message_from_completion_event(event).model_copy(deep=True)
-                    )
+                    self._messages.append(message_from_completion_event(event))
                 yield event
 
                 if isinstance(event, TurnCompleted) and event.outcome == "cancelled":

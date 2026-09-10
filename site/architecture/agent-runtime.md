@@ -126,6 +126,18 @@ messages that were never exposed through queue events.
 The harness permits one live invocation. While it is running, callers use steering or follow-up
 rather than starting an overlapping prompt.
 
+### Failure recovery and message ownership
+
+Invocation offsets are validated before transcript mutation. Once a valid prompt is accepted,
+runtime failures do not silently remove it or completed tool results. Startup and stream-cleanup
+errors still release the running flag and cancellation handles, allowing a later invocation.
+
+The harness owns detached copies of incoming messages and exposes detached transcript and queue
+snapshots. Frozen message models can still contain mutable nested JSON, so copying at these
+boundaries prevents callers, completion-event observers, and session callbacks from modifying
+retained messages. Internal queue draining keeps entry identity; accounting does not build public
+snapshots. Transcript transitions remain deferred until the next accepted turn.
+
 ## Navigating the implementation
 
 ### `wisp.agent.loop`
