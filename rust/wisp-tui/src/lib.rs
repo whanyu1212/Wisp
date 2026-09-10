@@ -2361,13 +2361,29 @@ async fn run(cli: Cli) -> Result<(), Error> {
 
 fn validate_frontend_version(expected: &str) -> Result<(), Error> {
     let frontend = env!("CARGO_PKG_VERSION");
-    if expected == frontend {
+    if expected == python_package_version(frontend) {
         return Ok(());
     }
     Err(Error::FrontendVersionMismatch {
         expected: expected.to_owned(),
         frontend: frontend.to_owned(),
     })
+}
+
+/// Translate our Cargo prerelease spelling, without accepting a version range.
+fn python_package_version(cargo_version: &str) -> String {
+    let Some((release, prerelease)) = cargo_version.split_once('-') else {
+        return cargo_version.to_owned();
+    };
+    for (cargo_label, python_label) in [("alpha.", "a"), ("beta.", "b"), ("rc.", "rc")] {
+        if let Some(number) = prerelease.strip_prefix(cargo_label) {
+            if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+                return format!("{release}{python_label}{number}");
+            }
+        }
+    }
+    // Unknown suffixes must not silently become a matching stable release.
+    cargo_version.to_owned()
 }
 
 async fn receive_event(
@@ -6241,6 +6257,38 @@ mod tests {
             .unwrap();
         assert_eq!(control, LoopControl::Continue);
         assert!(live_ui.render_pending);
+    }
+
+    #[test]
+    fn cargo_prereleases_use_canonical_python_spelling() {
+        for (cargo, python) in [
+            ("0.2.0", "0.2.0"),
+            ("0.2.0-alpha.1", "0.2.0a1"),
+            ("0.2.0-beta.2", "0.2.0b2"),
+            ("0.2.0-rc.1", "0.2.0rc1"),
+            ("0.2.0-rc.12", "0.2.0rc12"),
+        ] {
+            assert_eq!(python_package_version(cargo), python);
+        }
+        for unsupported in ["0.2.0-dev.1", "0.2.0-rc.", "0.2.0-rc.1+local"] {
+            assert_eq!(python_package_version(unsupported), unsupported);
+        }
+    }
+
+    #[test]
+    fn frontend_version_requires_the_exact_python_release() {
+        let current = python_package_version(env!("CARGO_PKG_VERSION"));
+        assert!(validate_frontend_version(&current).is_ok());
+        for other in [
+            format!("{current}0"),
+            format!("{current}+local"),
+            "99.0.0".into(),
+        ] {
+            assert!(matches!(
+                validate_frontend_version(&other),
+                Err(Error::FrontendVersionMismatch { .. })
+            ));
+        }
     }
 
     #[tokio::test]
