@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 import pytest
@@ -32,6 +32,7 @@ from wisp.agent.tool_contracts import (
 )
 from wisp.events import (
     ErrorEvent,
+    MessageCompleted,
     MessageDelta,
     QueueMessageInjected,
     QueueMode,
@@ -597,6 +598,303 @@ def test_agent_harness_config_preserves_legacy_positional_field_order() -> None:
 
     assert config.max_pending_queue_messages == 0
     assert config.prompt_cache_key is None
+
+
+def _message_with_nested_arguments(*, role: Literal["user", "assistant"]) -> Message:
+    return Message(
+        role=role,
+        content="original",
+        tool_calls=(
+            ToolCallSnapshot(
+                call_id="nested",
+                name="read",
+                arguments={"paths": ["original.txt"]},
+                provider_call_id="native-call",
+            ),
+        ),
+    )
+
+
+def _append_nested_path(message: Message) -> None:
+    assert message.tool_calls is not None
+    paths = message.tool_calls[0].arguments["paths"]
+    assert isinstance(paths, list)
+    paths.append("changed.txt")
+
+
+@pytest.mark.parametrize("transition", ["replacement", "rebase", "overflow"])
+def test_harness_boundary_adoption_detaches_callback_and_provider_messages(transition: str) -> None:
+    class NativeProvider(ScriptedProvider):
+        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
+            return True
+
+    provider = NativeProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id=f"response-{index}"),
+                ProviderResponseFailed(message="too large", failure_kind="context_overflow")
+                if transition == "overflow" and index == 0
+                else ProviderResponseCompleted(content=str(index), response_id=f"response-{index}"),
+            ]
+            for index in range(2)
+        ]
+    )
+    original = _message_with_nested_arguments(role="assistant")
+    base = [
+        original,
+        Message(role="tool", content="read output", tool_call_id="nested", tool_name="read"),
+        Message(role="user", content="continue"),
+    ]
+    expected_base = tuple(message.model_copy(deep=True) for message in base)
+    expected_transcript: tuple[Message, ...] = ()
+    harness = _harness(provider)
+
+    class Preparer:
+        async def prepare_boundary(
+            self, *, context: agent_boundary_module.HarnessBoundaryContext
+        ) -> RequestBoundaryDecision | None:
+            nonlocal expected_transcript
+            if context.snapshot.turn != 1:
+                return None
+            if transition == "replacement":
+                expected_transcript = expected_base
+                return RequestBoundaryDecision(messages=base)
+            expected_transcript = (*expected_base, *context.snapshot.continuation_messages)
+            return RequestBoundaryDecision(
+                context_rebase=RequestContextRebase(
+                    base_messages=base,
+                    expected_continuation_messages=context.snapshot.continuation_messages,
+                )
+            )
+
+    class RecoverOverflow:
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> RequestBoundaryDecision:
+            nonlocal expected_transcript
+            expected_transcript = expected_base
+            return RequestBoundaryDecision(messages=base)
+
+    async def run() -> None:
+        async for event in harness.prompt(
+            "initial", boundary_preparer=Preparer(), context_overflow_hook=RecoverOverflow()
+        ):
+            if isinstance(event, TurnStarted) and event.turn == 2:
+                assert harness.messages == expected_transcript
+                _append_nested_path(original)
+                base.clear()
+                assert harness.messages == expected_transcript
+        assert len(provider.calls) == 2
+        assert provider.calls[1].messages[: len(expected_base)] == expected_base
+        _append_nested_path(provider.calls[1].messages[0])
+        assert harness.messages[: len(expected_base)] == expected_base
+
+    anyio.run(run)
+
+
+def test_boundary_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
+    original = _message_with_nested_arguments(role="user")
+    expected = original.model_copy(deep=True)
+    harness = _harness(ScriptedProvider([]), messages=(original,))
+    continuation = _message_with_nested_arguments(role="assistant")
+    expected_continuation = continuation.model_copy(deep=True)
+
+    class Preparer:
+        async def prepare_boundary(
+            self, *, context: agent_boundary_module.HarnessBoundaryContext
+        ) -> None:
+            _append_nested_path(context.messages[0])
+            _append_nested_path(context.injected_messages[0])
+            _append_nested_path(context.snapshot.continuation_messages[0])
+
+    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
+        get_messages=lambda: harness.messages,
+        provider=harness.config.provider,
+        effort=None,
+        active_from=0,
+        boundary_preparer=Preparer(),
+        context_overflow_hook=None,
+    )
+    coordinator.arm(
+        turn=1, had_tool_calls=True, injected_messages=(original,), stop_by_default=False
+    )
+    snapshot = RequestBoundarySnapshot(
+        turn=1,
+        tool_iterations=1,
+        had_tool_calls=True,
+        can_append_user_messages=True,
+        continuation_messages=(continuation,),
+    )
+
+    async def run() -> None:
+        decision = await coordinator.before_next_request(snapshot=snapshot)
+        assert harness.messages == (expected,)
+        assert original == expected
+        assert snapshot.continuation_messages == (expected_continuation,)
+        assert decision.extra_messages == (expected,)
+        _append_nested_path(decision.extra_messages[0])
+        assert original == expected
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("entry_point", ["constructor", "append", "replace"])
+def test_harness_transcript_inputs_and_snapshots_are_detached(entry_point: str) -> None:
+    original = _message_with_nested_arguments(role="assistant")
+    expected = original.model_copy(deep=True)
+    if entry_point == "constructor":
+        harness = _harness(ScriptedProvider([]), messages=(original,))
+    else:
+        harness = _harness(ScriptedProvider([]))
+        if entry_point == "append":
+            harness.append_message(original)
+        else:
+            harness.replace_messages((original,))
+    _append_nested_path(original)
+    assert harness.messages == (expected,)
+    snapshot = harness.messages
+    _append_nested_path(snapshot[0])
+    assert harness.messages == (expected,)
+    assert harness.messages[0].tool_calls is not None
+    assert harness.messages[0].tool_calls[0].provider_call_id == "native-call"
+
+
+@pytest.mark.parametrize("kind", ["steering", "follow_up"])
+def test_harness_queue_inputs_and_snapshots_are_detached(kind: QueueKind) -> None:
+    original = _message_with_nested_arguments(role="user")
+    expected = original.model_copy(deep=True)
+    size = len(expected.model_dump_json().encode("utf-8"))
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            max_pending_queue_bytes=size,
+        )
+    )
+    enqueue = harness.steer_message if kind == "steering" else harness.follow_up_message
+    enqueue(original)
+    _append_nested_path(original)
+    snapshot = harness.queued_messages
+    messages = snapshot.steering if kind == "steering" else snapshot.follow_up
+    assert messages == (expected,)
+    _append_nested_path(messages[0])
+    assert harness.pending_message_bytes == size
+    assert harness.pending_message_count == 1
+    with pytest.raises(RuntimeError, match="byte limit exceeded"):
+        enqueue(expected)
+    assert harness.clear_queue(kind) == (expected,)
+    assert harness.pending_message_count == 0
+    enqueue(expected)
+    assert harness.pending_message_bytes == size
+
+
+def test_harness_queue_accounting_does_not_construct_message_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(ScriptedProvider([]))
+    harness.steer("pending")
+    size = harness.pending_message_bytes
+
+    def unexpected_snapshot(self: AgentHarness) -> QueuedMessages:
+        raise AssertionError("queue accounting must not copy messages")
+
+    monkeypatch.setattr(AgentHarness, "queued_messages", property(unexpected_snapshot))
+    assert harness.pending_message_count == 1
+    assert harness.pending_message_bytes == size
+    assert harness.has_queued_messages()
+
+
+def test_harness_prompt_message_snapshots_input_without_starting_the_run() -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    harness = _harness(provider)
+    original = _message_with_nested_arguments(role="user")
+    expected = original.model_copy(deep=True)
+    events = harness.prompt_message(original)
+    _append_nested_path(original)
+    assert harness.messages == ()
+    assert not harness.is_running
+
+    async def run() -> None:
+        async for _ in events:
+            pass
+
+    anyio.run(run)
+    assert provider.calls[0].messages == (expected,)
+    assert harness.messages[0] == expected
+    _append_nested_path(provider.calls[0].messages[0])
+    assert harness.messages[0] == expected
+
+
+@pytest.mark.parametrize("close_at_completion", [False, True])
+def test_harness_retains_detached_completion_before_exposing_it(close_at_completion: bool) -> None:
+    call = ToolCall(call_id="call", name="read", arguments={"paths": ["original.txt"]})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
+        ]
+    )
+    harness = _harness(
+        provider,
+        tools=(ToolSpec(name="read", description="Read", input_schema={"type": "object"}),),
+    )
+
+    async def run() -> None:
+        events = harness.prompt("read")
+        async for event in events:
+            if isinstance(event, MessageCompleted) and event.tool_calls:
+                expected = harness.messages[-1]
+                paths = event.tool_calls[0].arguments["paths"]
+                assert isinstance(paths, list)
+                paths.append("changed.txt")
+                assert harness.messages[-1] == expected
+                if close_at_completion:
+                    await events.aclose()
+                    break
+        retained = next(message for message in harness.messages if message.tool_calls)
+        assert retained.tool_calls is not None
+        assert retained.tool_calls[0].arguments == {"paths": ["original.txt"]}
+        assert not harness.is_running
+
+    anyio.run(run)
+
+
+def test_harness_requeued_message_is_not_part_of_the_old_drain_snapshot() -> None:
+    provider = ScriptedProvider(
+        [
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content=str(index))]
+            for index in range(3)
+        ]
+    )
+    harness = _harness(provider)
+    harness.set_steering_mode("all")
+    harness.steer("first")
+    harness.steer("second")
+
+    async def run() -> None:
+        injected: list[str] = []
+        boundaries: list[tuple[str, ...]] = []
+        async for event in harness.prompt("start"):
+            if isinstance(event, QueueMessageInjected):
+                injected.append(event.content)
+                if event.content == "first":
+                    removed = harness.pop_latest_steering()
+                    assert removed is not None
+                    harness.steer_message(removed)
+            elif isinstance(event, QueueUpdated):
+                boundaries.append(event.steering)
+        assert injected == ["first", "second"]
+        assert boundaries == [("second",), ()]
+
+    anyio.run(run)
 
 
 def test_harness_prompt_owns_transcript_and_returns_immutable_snapshots() -> None:
