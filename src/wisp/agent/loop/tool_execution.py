@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
 
 import anyio
 
@@ -27,6 +27,8 @@ from wisp.events import (
 )
 from wisp.providers.base import ToolCallResult
 from wisp.providers.events import ToolCall
+
+from .stream_cleanup import closing_stream
 
 type CancellationCheck = Callable[[], bool]
 type ToolBatchEvent = (
@@ -216,10 +218,12 @@ async def _execute_tool_call(
         Exception: Executor errors propagate rather than becoming synthetic tool outputs.
     """
     lifecycle = ToolExecutionLifecycle(tool_call)
-    async for raw_event in executor.execute(tool_call):
-        event = lifecycle.accept(raw_event)
-        if not isinstance(event, ToolExecutionEnded):
-            yield event
+    async with closing_stream(executor.execute(tool_call)) as execution:
+        async for raw_event in execution:
+            event = lifecycle.accept(raw_event)
+            if not isinstance(event, ToolExecutionEnded):
+                # Approval arguments may alias the executor's pending inputs.
+                yield event.model_copy(deep=True)
 
     terminal = lifecycle.finish()
     yield terminal
@@ -413,7 +417,7 @@ async def _prepared_tool_batch_events(
                 yield ToolCallRequested(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
-                    arguments=dict(tool_call.arguments),
+                    arguments=deepcopy(dict(tool_call.arguments)),
                 )
             lifecycle = lifecycles.get(tool_call.call_id)
             if (
@@ -439,12 +443,11 @@ async def _prepared_tool_batch_events(
             yield result
 
     for tool_call in tool_calls:
-        arguments = dict(tool_call.arguments)
         requested_call_ids.add(tool_call.call_id)
         yield ToolCallRequested(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            arguments=arguments,
+            arguments=deepcopy(dict(tool_call.arguments)),
         )
         if is_cancelled():
             status.cancelled = True
@@ -453,7 +456,7 @@ async def _prepared_tool_batch_events(
         yield ToolExecutionStarted(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            arguments=arguments,
+            arguments=deepcopy(dict(tool_call.arguments)),
         )
         if is_cancelled():
             status.cancelled = True
@@ -462,42 +465,38 @@ async def _prepared_tool_batch_events(
         lifecycle = ToolExecutionLifecycle(tool_call)
         lifecycles[tool_call.call_id] = lifecycle
         prepared: PreparedToolExecution | None = None
-        preparation = executor.prepare(tool_call)
-        try:
-            async for raw_event in preparation:
-                if isinstance(raw_event, PreparedToolExecution):
+        async with closing_stream(executor.prepare(tool_call)) as preparation:
+            try:
+                async for raw_event in preparation:
+                    if isinstance(raw_event, PreparedToolExecution):
+                        if prepared is not None:
+                            raise ToolExecutionProtocolError(
+                                "Tool executor prepared more than one execution for "
+                                f"{tool_call.call_id}"
+                            )
+                        lifecycle.accept_prepared(raw_event)
+                        prepared = raw_event
+                        if is_cancelled():
+                            status.cancelled = True
+                            break
+                        continue
                     if prepared is not None:
                         raise ToolExecutionProtocolError(
-                            "Tool executor prepared more than one execution for "
+                            f"Tool executor emitted an event after preparing {tool_call.call_id}"
+                        )
+                    event = lifecycle.accept(raw_event)
+                    if isinstance(event, ToolExecutionEnded):
+                        raise ToolExecutionProtocolError(
+                            "Prepared tool executor emitted a terminal result "
+                            "during preparation for "
                             f"{tool_call.call_id}"
                         )
-                    lifecycle.accept_prepared(raw_event)
-                    prepared = raw_event
+                    yield event.model_copy(deep=True)
                     if is_cancelled():
                         status.cancelled = True
                         break
-                    continue
-                if prepared is not None:
-                    raise ToolExecutionProtocolError(
-                        f"Tool executor emitted an event after preparing {tool_call.call_id}"
-                    )
-                event = lifecycle.accept(raw_event)
-                if isinstance(event, ToolExecutionEnded):
-                    raise ToolExecutionProtocolError(
-                        "Prepared tool executor emitted a terminal result during preparation for "
-                        f"{tool_call.call_id}"
-                    )
-                yield event
-                if is_cancelled():
-                    status.cancelled = True
-                    break
-        except anyio.get_cancelled_exc_class():
-            status.cancelled = True
-        finally:
-            close_preparation = getattr(preparation, "aclose", None)
-            if callable(close_preparation):
-                with anyio.CancelScope(shield=True):
-                    await cast(Callable[[], Awaitable[None]], close_preparation)()
+            except anyio.get_cancelled_exc_class():
+                status.cancelled = True
         if status.cancelled:
             break
         if prepared is None:
@@ -638,7 +637,7 @@ class ToolBatch:
                 yield ToolCallRequested(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
-                    arguments=dict(tool_call.arguments),
+                    arguments=deepcopy(dict(tool_call.arguments)),
                 )
                 terminal, result = _truncated_tool_call_events(tool_call)
                 yield terminal
@@ -653,16 +652,19 @@ class ToolBatch:
 
         if isinstance(self.tool_executor, PreparedToolExecutor):
             status = _PreparedBatchStatus()
-            async for event in _prepared_tool_batch_events(
-                self.tool_executor,
-                self.tool_calls,
-                status,
-                is_cancelled=self.is_cancelled,
-            ):
-                yield event
-                if isinstance(event, ToolResultReady):
-                    results.append(_provider_result(event))
-                    self.on_result(event)
+            async with closing_stream(
+                _prepared_tool_batch_events(
+                    self.tool_executor,
+                    self.tool_calls,
+                    status,
+                    is_cancelled=self.is_cancelled,
+                )
+            ) as prepared_events:
+                async for event in prepared_events:
+                    yield event
+                    if isinstance(event, ToolResultReady):
+                        results.append(_provider_result(event))
+                        self.on_result(event)
             outcome = (
                 CancelledToolBatch(tuple(results))
                 if status.cancelled
@@ -675,11 +677,10 @@ class ToolBatch:
             if self.is_cancelled():
                 self.outcome = CancelledToolBatch(tuple(results))
                 return
-            arguments = dict(tool_call.arguments)
             yield ToolCallRequested(
                 call_id=tool_call.call_id,
                 name=tool_call.name,
-                arguments=arguments,
+                arguments=deepcopy(dict(tool_call.arguments)),
             )
             if self.is_cancelled():
                 self.outcome = CancelledToolBatch(tuple(results))
@@ -687,20 +688,23 @@ class ToolBatch:
             yield ToolExecutionStarted(
                 call_id=tool_call.call_id,
                 name=tool_call.name,
-                arguments=arguments,
+                arguments=deepcopy(dict(tool_call.arguments)),
             )
             if self.is_cancelled():
                 self.outcome = CancelledToolBatch(tuple(results))
                 return
 
             result_event: ToolResultReady | None = None
-            async for event in _execute_tool_call(self.tool_executor, tool_call):
-                yield event
-                if isinstance(event, ToolResultReady):
-                    result_event = event
-                if self.is_cancelled() and not isinstance(event, ToolExecutionEnded):
-                    self.outcome = CancelledToolBatch(tuple(results))
-                    return
+            async with closing_stream(
+                _execute_tool_call(self.tool_executor, tool_call)
+            ) as execution_events:
+                async for event in execution_events:
+                    yield event
+                    if isinstance(event, ToolResultReady):
+                        result_event = event
+                    if self.is_cancelled() and not isinstance(event, ToolExecutionEnded):
+                        self.outcome = CancelledToolBatch(tuple(results))
+                        return
             if result_event is None:
                 raise ToolExecutionProtocolError(
                     f"Tool executor produced no provider result for {tool_call.call_id}"
