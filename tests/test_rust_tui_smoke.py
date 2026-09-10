@@ -216,7 +216,9 @@ def test_rust_tui_cross_language_smoke(
                 else:
                     os.write(terminal_fd, b"hello rust\r")
                 prompt_sent = True
-            if exercise_prompt and not response_seen and b"fake response" in output:
+            # Streaming can draw "fake" and "response" in separate frames with
+            # cursor movements between them; the raw PTY bytes need not be adjacent.
+            if exercise_prompt and not response_seen and b"response" in output:
                 response_seen = True
             if (
                 exercise_prompt
