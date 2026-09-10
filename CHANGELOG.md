@@ -12,6 +12,28 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+## 0.2.0rc1 — pending publication
+
+Release candidate for the 0.2 minor line; not a new stable release. Textual remains the default TUI.
+See the [0.2 upgrade guide](site/guide/upgrading.md) before updating Python integrations or external
+JSONL-RPC clients. Stable installation instructions remain pinned to 0.1.0 until 0.2.0 is published.
+
+### Textual responsiveness and correctness
+
+- Preserved streamed output order when scrolling away from and returning to the live tail.
+- Prioritized pending input over Markdown drains and adopted capability-gated synchronized terminal
+  output to reduce partial-frame flicker on supported terminals.
+- Reused stable paragraph wrapping during streaming and lazily rebuilt file-picker presentations,
+  avoiding hidden-tree work and repeated option construction for unchanged queries.
+- Fixed bare `@` reopening with stale filtered results and stale expansion markers for directories
+  with no visible indexed children.
+- Used conservative full parsing when control characters or unusual line separators make incremental
+  Markdown source mapping unsafe, preserving complete final output.
+- Added reproducible responsiveness and rendering benchmarks. Results and measurement limitations
+  are recorded in `benchmarks/tui_responsiveness_evidence.md`; these are not a universal latency claim.
+
+### Python API and runtime
+
 - **Breaking Python API cleanup:** removed the deprecated `wisp.agent.messages.SessionEntry(...)`
   factory as an explicit early-removal exception to the normal deprecation window. Construct
   `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` instead;
@@ -21,9 +43,11 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   `wisp.agent.validation`, `context_budget`, `transcript_repair`, `tool_contracts`, and
   `request_boundary`; history normalization helpers live in `wisp.agent.history`. The old flat
   module paths and history-helper re-exports from `wisp.agent.messages` have been removed.
-- Recorded the #470 renderer decision: Textual remains the default TUI; the Rust frontend stays
-  experimental source-build opt-in on macOS and Linux. Explicit Rust selection does not fall back to
-  Textual, and Python distributions still do not bundle the binary.
+- Clarified harness/loop ownership, strengthened runtime invariant tests, hardened coding-agent
+  instructions, and refreshed the provider model catalog.
+
+### External frontends and live RPC
+
 - Added backend-owned connection-catalog, API-key, disconnect, and device-code RPC so Textual and
   external frontends never read or write credential files. The catalog advertises only available
   provider endpoints, and mutation completion remains authoritative if the secondary status refresh
@@ -32,6 +56,13 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
 - Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,
   model, availability, lifecycle, and effort discovery. Protocol v1 and v2 artifacts remain immutable.
+- External JSONL-RPC clients must handshake before sending commands and support live RPC v4 with
+  event schema v36. Persisted session compatibility is separate and is not reset by this release.
+- Recorded the #470 renderer decision: Textual remains the default TUI; the Rust frontend stays
+  experimental source-build opt-in on macOS and Linux. Explicit Rust selection does not fall back to
+  Textual, and Python distributions still do not bundle the binary.
+- Kept the experimental Rust frontend in exact package-version lockstep, translating Cargo's
+  `0.2.0-rc.1` spelling to Python's `0.2.0rc1` without accepting other release versions.
 
 ## 0.1.0 — 2026-08-23
 

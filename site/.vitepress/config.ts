@@ -59,6 +59,7 @@ export default withMermaid(
           text: 'v0.1.0',
           items: [
             { text: 'Changelog', link: 'https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md' },
+            { text: '0.2 upgrade preview', link: '/guide/upgrading' },
             { text: 'PyPI', link: 'https://pypi.org/project/wisp-ai/' },
           ],
         },
@@ -72,6 +73,7 @@ export default withMermaid(
               { text: 'Introduction', link: '/guide/' },
               { text: 'Installation', link: '/guide/installation' },
               { text: 'Quickstart', link: '/guide/quickstart' },
+              { text: 'Upgrading to 0.2', link: '/guide/upgrading' },
             ],
           },
           {
