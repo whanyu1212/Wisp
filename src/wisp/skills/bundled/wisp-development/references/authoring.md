@@ -2,7 +2,7 @@
 
 ## Source checkout
 
-For changes to Wisp itself, work in a source checkout. Read `AGENTS.md` when present, `CLAUDE.md`,
+For changes to Wisp itself, work in a source checkout. Read `AGENTS.md` when present,
 the relevant README sections, implementation, and tests before editing. Register built-in
 capabilities through `wisp.extensions.builtin.activate()` and keep changes in the narrowest owning
 layer.

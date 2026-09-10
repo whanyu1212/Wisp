@@ -95,6 +95,84 @@ def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FailedResponseAction:
+    """Classify a failed or overflowed model response without publishing events."""
+
+    message: str
+    kind: str
+    content: str
+    response_id: str | None
+    started: bool
+    had_streamed_delta: bool
+    raise_overflow: ContextOverflowError | None
+
+
+def _classify_failed_response(
+    config: AgentLoopConfig,
+    outcome: OverflowModelResponse | FailedModelResponse,
+) -> _FailedResponseAction:
+    """Map a typed model-response failure onto loop recovery fields.
+
+    Args:
+        config (AgentLoopConfig): Run configuration, including the optional overflow hook.
+        outcome (OverflowModelResponse | FailedModelResponse): Terminal model-response result.
+
+    Returns:
+        _FailedResponseAction: Display fields and whether the original overflow must be
+            re-raised after the opened message is closed. Recovery itself stays in the
+            runner so ContextOverflow is published before the hook runs.
+    """
+
+    if isinstance(outcome, OverflowModelResponse):
+        return _FailedResponseAction(
+            message=str(outcome.error),
+            kind="context_overflow",
+            content=outcome.content,
+            response_id=outcome.started_response_id,
+            started=outcome.started,
+            had_streamed_delta=outcome.had_streamed_delta,
+            raise_overflow=(outcome.error if config.context_overflow_hook is None else None),
+        )
+    failure = outcome.failed.response
+    kind = (
+        "context_overflow"
+        if failure.failure_kind == "context_overflow"
+        or is_context_overflow_message(failure.message)
+        else failure.failure_kind
+    )
+    return _FailedResponseAction(
+        message=failure.message,
+        kind=kind,
+        content=outcome.failed.content,
+        response_id=outcome.failed.response_id,
+        started=outcome.started,
+        had_streamed_delta=outcome.had_streamed_delta,
+        raise_overflow=None,
+    )
+
+
+def _context_overflow_event(config: AgentLoopConfig, *, turn: int, message: str) -> ContextOverflow:
+    """Build the public overflow event for the active turn.
+
+    Args:
+        config (AgentLoopConfig): Provider identity and configured context window.
+        turn (int): Number of the rejected turn.
+        message (str): Provider or raised overflow description.
+
+    Returns:
+        ContextOverflow: Event using the configured provider, model, and window.
+    """
+
+    return ContextOverflow(
+        turn=turn,
+        provider=config.provider.name,
+        model=config.model or config.provider.default_model,
+        context_window=config.context_window,
+        message=message,
+    )
+
+
 @dataclass(slots=True)
 class _AgentLoopState:
     """Turn counters plus the extracted continuation cursor/transcript."""
@@ -248,45 +326,21 @@ async def run_agent_loop(
                 return
 
             if isinstance(outcome, OverflowModelResponse | FailedModelResponse):
-                if isinstance(outcome, OverflowModelResponse):
-                    failure_message = str(outcome.error)
-                    failure_kind = "context_overflow"
-                    failure_content = outcome.content
-                    failure_response_id = outcome.started_response_id
-                else:
-                    failure = outcome.failed.response
-                    failure_message = failure.message
-                    failure_kind = (
-                        "context_overflow"
-                        if failure.failure_kind == "context_overflow"
-                        or is_context_overflow_message(failure.message)
-                        else failure.failure_kind
-                    )
-                    failure_content = outcome.failed.content
-                    failure_response_id = outcome.failed.response_id
+                action = _classify_failed_response(config, outcome)
                 # Close an opened message before recovery can start another turn.
-                if outcome.started:
+                if action.started:
                     yield MessageCompleted(
                         turn=turn,
-                        content=failure_content,
+                        content=action.content,
                         finish_reason="error",
-                        response_id=failure_response_id,
+                        response_id=action.response_id,
                     )
                 # Raised overflow without a hook retains its exception contract;
                 # the outer handler owns its terminal events and re-raises.
-                if (
-                    isinstance(outcome, OverflowModelResponse)
-                    and config.context_overflow_hook is None
-                ):
-                    raise outcome.error
-                if failure_kind == "context_overflow":
-                    yield ContextOverflow(
-                        turn=turn,
-                        provider=config.provider.name,
-                        model=config.model or config.provider.default_model,
-                        context_window=config.context_window,
-                        message=failure_message,
-                    )
+                if action.raise_overflow is not None:
+                    raise action.raise_overflow
+                if action.kind == "context_overflow":
+                    yield _context_overflow_event(config, turn=turn, message=action.message)
                     messages, retry = await at_context_overflow(
                         config,
                         state.continuation,
@@ -294,8 +348,8 @@ async def run_agent_loop(
                         tool_iterations=state.tool_iterations,
                         messages=messages,
                         context_budget=context_budget,
-                        had_streamed_delta=outcome.had_streamed_delta,
-                        message=failure_message,
+                        had_streamed_delta=action.had_streamed_delta,
+                        message=action.message,
                     )
                     if retry:
                         yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
@@ -303,11 +357,11 @@ async def run_agent_loop(
                         continue
                     if config.defer_context_overflow_errors:
                         return
-                yield ErrorEvent(message=failure_message)
+                yield ErrorEvent(message=action.message)
                 yield TurnCompleted(
                     turn=turn,
-                    outcome="cancelled" if failure_kind == "aborted" else "failed",
-                    finish_reason="cancelled" if failure_kind == "aborted" else "error",
+                    outcome="cancelled" if action.kind == "aborted" else "failed",
+                    finish_reason="cancelled" if action.kind == "aborted" else "error",
                 )
                 return
             if not isinstance(outcome, CompletedModelResponse):
@@ -393,17 +447,9 @@ async def run_agent_loop(
         # Cleanup cannot publish events into a closed consumer or recover a cancelled turn.
         if consumer_closed or response_cancelled:
             raise
-        overflow_error: ContextOverflowError | None = None
-        if isinstance(exc, ContextOverflowError):
-            overflow_error = exc
+        overflow_error = exc if isinstance(exc, ContextOverflowError) else None
         if overflow_error is not None:
-            yield ContextOverflow(
-                turn=turn,
-                provider=config.provider.name,
-                model=config.model or config.provider.default_model,
-                context_window=config.context_window,
-                message=str(overflow_error),
-            )
+            yield _context_overflow_event(config, turn=turn, message=str(overflow_error))
             if config.defer_context_overflow_errors:
                 if overflow_error is not exc:
                     raise overflow_error from exc

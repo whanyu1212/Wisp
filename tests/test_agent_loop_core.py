@@ -13,8 +13,8 @@ from unittest.mock import Mock
 import anyio
 import pytest
 
+import wisp.agent.loop.prepared_tools as prepared_tools_module
 import wisp.agent.loop.runner as agent_loop_module
-import wisp.agent.loop.tool_execution as tool_execution_module
 from tests.agent_runtime import (
     assert_continuation_invariants,
     assert_settled_tool_calls,
@@ -643,7 +643,7 @@ def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> 
 def test_prepared_tool_batch_enforces_bounded_live_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tool_execution_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
+    monkeypatch.setattr(prepared_tools_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="read", arguments={}) for index in range(1, 6)
     )

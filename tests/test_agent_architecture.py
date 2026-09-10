@@ -26,6 +26,8 @@ _PURE_AGENT_MODULES = (
     "loop/config.py",
     "loop/continuation.py",
     "loop/model_response.py",
+    "loop/prepared_tools.py",
+    "loop/provider_lifecycle.py",
     "loop/runner.py",
     "loop/stream_cleanup.py",
     "loop/tool_execution.py",
