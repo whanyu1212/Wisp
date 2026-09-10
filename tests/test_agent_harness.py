@@ -2027,6 +2027,68 @@ def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:
     ]
 
 
+@pytest.mark.parametrize("entry_point", ["prompt", "prompt_message", "continue_"])
+@pytest.mark.parametrize("tool_iteration_offset", [1, 2])
+def test_harness_invocation_offsets_preserve_turn_numbers_and_tool_limit(
+    entry_point: str, tool_iteration_offset: int
+) -> None:
+    call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="checking", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
+        ]
+    )
+    executor = RecordingToolExecutor()
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=executor,
+            tools=(
+                ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),
+            ),
+            max_tool_iterations=2,
+        ),
+        messages=(Message(role="user", content="existing task"),),
+    )
+
+    async def run() -> list[object]:
+        offsets = {"turn_offset": 7, "tool_iteration_offset": tool_iteration_offset}
+        if entry_point == "prompt":
+            stream = harness.prompt("next task", **offsets)
+        elif entry_point == "prompt_message":
+            stream = harness.prompt_message(Message(role="user", content="next task"), **offsets)
+        else:
+            stream = harness.continue_(**offsets)
+        events: list[object] = []
+        if tool_iteration_offset == 2:
+            with pytest.raises(RuntimeError, match="Maximum tool iterations exceeded: 2"):
+                async for event in stream:
+                    events.append(event)
+        else:
+            events.extend([event async for event in stream])
+        return events
+
+    events = anyio.run(run)
+    exhausted = tool_iteration_offset == 2
+    assert executor.calls == ([] if exhausted else [call])
+    assert [event.turn for event in events if isinstance(event, TurnStarted)] == (
+        [8] if exhausted else [8, 9]
+    )
+    terminal = events[-1]
+    assert isinstance(terminal, TurnCompleted)
+    assert terminal.outcome == ("failed" if exhausted else "completed")
+    assert not harness.is_running
+    assert not harness.cancel()
+    assert_turn_terminals(events)
+
+
 def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> None:
     first_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     second_call = ToolCall(call_id="call-2", name="lookup", arguments={})
