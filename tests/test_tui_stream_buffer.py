@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -40,6 +41,10 @@ class _App:
     def __init__(self) -> None:
         self.callbacks: list[object] = []
         self.priority_delay: tuple[float, float | None] = (0.0, None)
+        self.transcript = SimpleNamespace(is_following=True)
+
+    def note_transcript_update(self, _widget: StreamMessage) -> None:
+        pass
 
     def call_after_refresh(self, callback: object, _turn: object) -> bool:
         self.callbacks.append(callback)
@@ -85,6 +90,43 @@ def test_first_stream_write_is_scheduled_immediately() -> None:
     assert app.callbacks == [controller._drain]
     assert turn.drain_scheduled is True
     assert controller._pending_callbacks == 1
+
+
+def test_scroll_away_keeps_pending_and_new_fragments_in_arrival_order() -> None:
+    async def scenario() -> None:
+        app = _App()
+        controller = MarkdownStreamController(cast(Any, app))
+        turn = _turn()
+        controller._turn = turn
+
+        controller.append("A")
+        app.transcript.is_following = False
+        controller.append("β")
+        await controller._drain(turn)
+
+        assert "".join(turn.pending) == "Aβ"
+        assert turn.pending_bytes == len("Aβ".encode())
+        assert not turn.drain_scheduled
+        assert controller._pending_callbacks == 0
+        assert controller._idle.is_set()
+
+        # Returning and leaving again before the next drain must not reorder
+        # either batch or keep scheduling work while the reader is scrolled away.
+        app.transcript.is_following = True
+        controller.resume_if_deferred()
+        controller.append("C")
+        app.transcript.is_following = False
+        controller.append("D")
+        controller._cancel_drain(turn)
+        controller._queue_drain(turn, immediate=True)
+        await controller._drain(turn)
+
+        assert "".join(turn.pending) == "".join(turn.source_fragments) == "AβCD"
+        assert not turn.drain_scheduled
+        controller.discard()
+        assert controller._pending_callbacks == 0
+
+    asyncio.run(scenario())
 
 
 def test_large_pending_burst_respects_render_cost_backoff(

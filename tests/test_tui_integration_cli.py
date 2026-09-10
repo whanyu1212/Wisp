@@ -8801,6 +8801,41 @@ def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() 
     assert following is True
 
 
+def test_textual_streaming_preserves_pending_order_across_scroll_away() -> None:
+    async def scenario() -> None:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.return_to_latest()
+            await pilot.pause()
+            renderer.token_delta("visible ")
+            await app_instance.wait_for_stream_idle()
+
+            renderer.token_delta("A")
+            transcript.stop_following()
+            transcript.scroll_to(y=6, animate=False)
+            assert not transcript.is_following
+            renderer.token_delta("B")
+            # Let the already queued drain fire while following is disabled.
+            await app_instance.wait_for_stream_idle()
+            transcript.return_to_latest()
+            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
+
+            stream = next(
+                child for child in transcript.children if isinstance(child, StreamMessage)
+            )
+            # Completion would hide this defect by rebuilding from full source.
+            assert stream.source == "visible AB"
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            assert stream.source == "visible AB"
+
+    anyio.run(scenario)
+
+
 def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() -> None:
     async def scenario() -> dict[str, object]:
         app_instance, renderer = create_textual_tui()
