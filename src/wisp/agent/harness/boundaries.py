@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -60,7 +61,7 @@ class _ArmedRequestBoundary:
 class _HarnessBoundaryCoordinator:
     """Coordinate one run's request decisions and delayed transcript updates.
 
-    The runner supplies transcript snapshots and owns every transcript mutation.
+    The runner supplies detached transcript snapshots and owns every transcript mutation.
     It arms this coordinator after emitting queue effects, then consumes the
     prepared replacement when the loop starts the next turn.
     """
@@ -102,22 +103,27 @@ class _HarnessBoundaryCoordinator:
         if self.boundary_preparer is not None:
             decision = await self.boundary_preparer.prepare_boundary(
                 context=HarnessBoundaryContext(
-                    snapshot=snapshot,
-                    messages=tuple(
-                        message.model_copy(deep=True) for message in self.get_messages()
-                    ),
+                    snapshot=deepcopy(snapshot),
+                    messages=self.get_messages(),
                     active_from=self.active_from,
-                    injected_messages=boundary.injected_messages,
+                    injected_messages=tuple(
+                        message.model_copy(deep=True) for message in boundary.injected_messages
+                    ),
                     stop_by_default=boundary.stop_by_default,
                 )
             )
             if decision is not None:
+                decision = deepcopy(decision)
                 self._remember_transcript_transition(decision, snapshot.continuation_messages)
                 return decision
 
         if boundary.injected_messages:
             if snapshot.can_append_user_messages:
-                return RequestBoundaryDecision(extra_messages=boundary.injected_messages)
+                return RequestBoundaryDecision(
+                    extra_messages=tuple(
+                        message.model_copy(deep=True) for message in boundary.injected_messages
+                    )
+                )
             # Cursor-less structured history cannot be flattened into
             # extras. Replace from the complete normalized transcript,
             # retaining assistant/tool pairs atomically.
@@ -136,8 +142,11 @@ class _HarnessBoundaryCoordinator:
     ) -> RequestBoundaryDecision | None:
         if self.context_overflow_hook is None:
             raise RuntimeError("AgentHarness received context overflow without a recovery hook")
-        decision = await self.context_overflow_hook.recover_context_overflow(snapshot=snapshot)
+        decision = await self.context_overflow_hook.recover_context_overflow(
+            snapshot=deepcopy(snapshot)
+        )
         if decision is not None:
+            decision = deepcopy(decision)
             self._remember_transcript_transition(decision, snapshot.continuation_messages)
         return decision
 

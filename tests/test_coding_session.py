@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 
+import wisp.agent.harness.runner as harness_module
 import wisp.coding.session as session_module
 import wisp.coding.tool_execution as tool_execution
+from wisp.agent.harness import AgentHarness
+from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent
 from wisp.agent.messages import Message
 from wisp.agent.prompt import build_prompt_messages
 from wisp.agent.tool_contracts import ToolResultProcessingError
@@ -36,9 +39,11 @@ from wisp.events import (
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
+    TurnStarted,
     WispEvent,
 )
 from wisp.providers.base import (
+    Provider,
     ProviderProtocolError,
     ToolCall,
     ToolCallResult,
@@ -995,6 +1000,94 @@ def test_coding_session_keeps_operation_instructions_out_of_user_prompt(
     assert [message.content for message in persisted if message.role == "user"] == ["/init"]
 
 
+@pytest.mark.parametrize("phase", ["startup", "cleanup"])
+def test_coding_session_harness_failure_releases_state_and_retains_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    def fail_preparation(
+        messages: Sequence[Message],
+        *,
+        provider: Provider,
+        effort: str | None,
+        active_from: int | None = None,
+    ) -> tuple[Message, ...]:
+        raise RuntimeError("startup failed")
+
+    async def fail_cleanup(
+        config: AgentLoopConfig, *, messages: Sequence[Message]
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        try:
+            yield TurnStarted(turn=1)
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    async def run() -> None:
+        provider = ScriptedProvider(
+            [
+                [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content=answer)]
+                for answer in ("retried", "followed up")
+            ]
+        )
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=bus)
+        captured: list[AgentHarness] = []
+
+        async def queue_once(event: WispEvent) -> None:
+            if not captured:
+                assert agent._active_harness is not None
+                captured.append(agent._active_harness)
+                await agent.follow_up("pending follow-up")
+
+        bus.on("agent.started", queue_once)
+        observed: list[WispEvent] = []
+        with monkeypatch.context() as patch:
+            if phase == "startup":
+                patch.setattr(harness_module, "prepare_provider_history", fail_preparation)
+            else:
+                patch.setattr(harness_module, "run_agent_loop", fail_cleanup)
+            with pytest.raises(RuntimeError, match=f"{phase} failed"):
+                events = agent.run("first", session=session)
+                async for event in events:
+                    observed.append(event)
+                    if phase == "cleanup" and isinstance(event, TurnStarted):
+                        await events.aclose()
+            assert not captured[0].is_running
+            assert not captured[0].cancel()
+            assert agent._active_harness is None
+            assert not agent._operation_active
+        assert provider.calls == []
+        assert not any(isinstance(event, QueueMessageInjected) for event in observed)
+        assert [
+            message.content for message in session.read_messages() if message.role == "user"
+        ] == ["first"]
+        if phase == "startup":
+            assert [event.message for event in observed if isinstance(event, ErrorEvent)] == [
+                "startup failed"
+            ]
+            assert not any(isinstance(event, TurnCompleted) for event in observed)
+
+        with anyio.fail_after(2):
+            retried = [
+                event
+                async for event in agent.run(
+                    "retry", session=session, history=session.read_context_messages()
+                )
+            ]
+        assert [event.content for event in retried if isinstance(event, QueueMessageInjected)] == [
+            "pending follow-up"
+        ]
+        assert [
+            message.content for message in session.read_messages() if message.role == "user"
+        ] == ["first", "retry", "pending follow-up"]
+        assert len(provider.calls) == 2
+        completed = [event for event in retried if isinstance(event, AgentCompleted)]
+        assert len(completed) == 1 and completed[0].outcome == "completed"
+
+    anyio.run(run)
+
+
 def test_coding_session_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:
@@ -1033,6 +1126,12 @@ def test_coding_session_persists_completion_before_exposing_it(
                 assert persisted.tool_calls is not None
                 assert [call.call_id for call in persisted.tool_calls] == ["call-1"]
                 assert persisted.created_at == event.timestamp
+                assert event.tool_calls is not None
+                event.tool_calls[0].arguments["text"] = "changed by observer"
+                assert agent._active_harness is not None
+                retained = agent._active_harness.messages[-1]
+                assert retained.tool_calls is not None
+                assert retained.tool_calls[0].arguments == {"text": "hello"}
                 await events.aclose()
                 return event
 
@@ -1048,6 +1147,9 @@ def test_coding_session_persists_completion_before_exposing_it(
         "tool",
     ]
     repair = session.read_messages()[-1]
+    completed = session.read_messages()[-2]
+    assert completed.tool_calls is not None
+    assert completed.tool_calls[0].arguments == {"text": "hello"}
     assert repair.tool_call_id == "call-1"
     assert repair.content == INTERRUPTED_TOOL_RESULT_TEXT
     assert repair.is_error is True

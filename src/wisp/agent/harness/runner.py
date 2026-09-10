@@ -16,6 +16,7 @@ from wisp.agent.messages import (
 )
 from wisp.agent.request_boundary import ContextOverflowHook
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
+from wisp.agent.validation import validate_non_negative_integer
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -37,7 +38,7 @@ type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
 @dataclass(frozen=True, slots=True)
 class QueuedMessages:
-    """Immutable snapshot of harness-owned queued user messages."""
+    """Detached snapshot of harness-owned queued user messages."""
 
     steering: tuple[Message, ...] = ()
     follow_up: tuple[Message, ...] = ()
@@ -115,7 +116,7 @@ class AgentHarness:
         messages: Sequence[Message] = (),
     ) -> None:
         self._config = config
-        self._messages = list(messages)
+        self._messages = [message.model_copy(deep=True) for message in messages]
         self._current_token: SimpleCancellationToken | None = None
         self._current_scope: anyio.CancelScope | None = None
         self._running = False
@@ -129,8 +130,8 @@ class AgentHarness:
 
     @property
     def messages(self) -> tuple[Message, ...]:
-        """Return an immutable transcript snapshot."""
-        return tuple(self._messages)
+        """Return a detached transcript snapshot, including nested message data."""
+        return tuple(message.model_copy(deep=True) for message in self._messages)
 
     @property
     def is_running(self) -> bool:
@@ -139,16 +140,16 @@ class AgentHarness:
 
     @property
     def queued_messages(self) -> QueuedMessages:
-        """Return an immutable snapshot of both pending queues."""
+        """Return detached snapshots of both pending queues and their nested data."""
         return QueuedMessages(
-            steering=tuple(self._steering_queue),
-            follow_up=tuple(self._follow_up_queue),
+            steering=tuple(message.model_copy(deep=True) for message in self._steering_queue),
+            follow_up=tuple(message.model_copy(deep=True) for message in self._follow_up_queue),
         )
 
     @property
     def pending_message_count(self) -> int:
         """Return the total number of pending steering and follow-up messages."""
-        return self.queued_messages.count
+        return len(self._steering_queue) + len(self._follow_up_queue)
 
     @property
     def pending_message_bytes(self) -> int:
@@ -169,14 +170,14 @@ class AgentHarness:
         self._config = config
 
     def append_message(self, message: Message) -> None:
-        """Append restored or application-provided transcript state."""
+        """Append a detached copy of restored or application-provided state."""
         self._ensure_idle()
-        self._messages.append(message)
+        self._messages.append(message.model_copy(deep=True))
 
     def replace_messages(self, messages: Sequence[Message]) -> None:
-        """Replace the transcript between runs."""
+        """Replace the transcript with detached copies between runs."""
         self._ensure_idle()
-        self._messages = list(messages)
+        self._messages = [message.model_copy(deep=True) for message in messages]
 
     def repair_interrupted_tool_calls(self) -> tuple[Message, ...]:
         """Repair logical ordering and return synthetic results needing persistence."""
@@ -184,7 +185,7 @@ class AgentHarness:
         self._ensure_idle()
         plan = plan_interrupted_tool_repairs(self._messages)
         self._messages = list(plan.messages)
-        return plan.repairs
+        return tuple(message.model_copy(deep=True) for message in plan.repairs)
 
     def cancel(self) -> bool:
         """Request cooperative cancellation for the active run."""
@@ -200,10 +201,10 @@ class AgentHarness:
         return self.steer_message(Message(role="user", content=content))
 
     def steer_message(self, message: Message) -> QueueUpdated:
-        """Queue a user message for steering without changing the transcript."""
+        """Queue a detached user message for steering without changing the transcript."""
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
-        self._steering_queue.append(message)
+        self._steering_queue.append(message.model_copy(deep=True))
         return self.queue_updated_event()
 
     def follow_up(self, content: str) -> QueueUpdated:
@@ -211,10 +212,10 @@ class AgentHarness:
         return self.follow_up_message(Message(role="user", content=content))
 
     def follow_up_message(self, message: Message) -> QueueUpdated:
-        """Queue a user message for follow-up without changing the transcript."""
+        """Queue a detached user message for follow-up without changing the transcript."""
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
-        self._follow_up_queue.append(message)
+        self._follow_up_queue.append(message.model_copy(deep=True))
         return self.queue_updated_event()
 
     def set_steering_mode(self, mode: QueueMode) -> QueueUpdated:
@@ -327,7 +328,8 @@ class AgentHarness:
         """Create a run from an existing user message, preserving its metadata.
 
         Args:
-            message (Message): User message to append when iteration begins.
+            message (Message): User message to snapshot now and append when
+                iteration begins. Later caller mutations do not affect the run.
             turn_offset (int): Number of turns preceding this run.
             tool_iteration_offset (int): Number of earlier tool iterations.
             defer_context_overflow_errors (bool): Whether to defer overflow errors.
@@ -346,7 +348,7 @@ class AgentHarness:
         if message.role != "user":
             raise ValueError("AgentHarness prompts require a user message")
         return self._run(
-            prompt_message=message,
+            prompt_message=message.model_copy(deep=True),
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
@@ -396,6 +398,9 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
+        self._ensure_idle()
+        validate_non_negative_integer(turn_offset, field="turn_offset")
+        validate_non_negative_integer(tool_iteration_offset, field="tool_iteration_offset")
         self.repair_interrupted_tool_calls()
         # Every row already present when a run begins is durable history. New
         # assistant/tool rows appended during this invocation form the only live
@@ -408,42 +413,41 @@ class AgentHarness:
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
-        self._running = True
         token = SimpleCancellationToken()
-        self._current_token = token
-        if prompt_message is not None:
-            self._messages.append(prompt_message)
-
         run = _HarnessRunState()
-
-        config = AgentLoopConfig(
-            provider=self._config.provider,
-            tool_executor=self._config.tool_executor,
-            model=self._config.model,
-            tools=self._config.tools,
-            max_tool_iterations=self._config.max_tool_iterations,
-            cancellation_token=token,
-            effort=self._config.effort,
-            prompt_cache_key=self._config.prompt_cache_key,
-            context_window=self._config.context_window,
-            context_reserve_tokens=self._config.context_reserve_tokens,
-            context_pressure_threshold=self._config.context_pressure_threshold,
-            turn_offset=turn_offset,
-            tool_iteration_offset=tool_iteration_offset,
-            cost_estimator=self._config.cost_estimator,
-            defer_context_overflow_errors=defer_context_overflow_errors,
-            request_boundary_hook=boundary,
-            context_overflow_hook=boundary if context_overflow_hook is not None else None,
-        )
-        provider_messages = prepare_provider_history(
-            self._messages,
-            provider=self._config.provider,
-            effort=self._config.effort,
-            active_from=boundary.active_from,
-        )
-        loop_events = run_agent_loop(config, messages=provider_messages)
+        loop_events: AsyncGenerator[AgentLoopEvent, None] | None = None
         draining_cancellation = False
+        self._running = True
+        self._current_token = token
         try:
+            if prompt_message is not None:
+                self._messages.append(prompt_message)
+            config = AgentLoopConfig(
+                provider=self._config.provider,
+                tool_executor=self._config.tool_executor,
+                model=self._config.model,
+                tools=self._config.tools,
+                max_tool_iterations=self._config.max_tool_iterations,
+                cancellation_token=token,
+                effort=self._config.effort,
+                prompt_cache_key=self._config.prompt_cache_key,
+                context_window=self._config.context_window,
+                context_reserve_tokens=self._config.context_reserve_tokens,
+                context_pressure_threshold=self._config.context_pressure_threshold,
+                turn_offset=turn_offset,
+                tool_iteration_offset=tool_iteration_offset,
+                cost_estimator=self._config.cost_estimator,
+                defer_context_overflow_errors=defer_context_overflow_errors,
+                request_boundary_hook=boundary,
+                context_overflow_hook=boundary if context_overflow_hook is not None else None,
+            )
+            provider_messages = prepare_provider_history(
+                self.messages,
+                provider=self._config.provider,
+                effort=self._config.effort,
+                active_from=boundary.active_from,
+            )
+            loop_events = run_agent_loop(config, messages=provider_messages)
             while True:
                 if token.is_cancelled() and not draining_cancellation and not run.had_tool_calls:
                     for cancellation_event in run.cancelled_events():
@@ -484,7 +488,7 @@ class AgentHarness:
                 if isinstance(event, TurnStarted):
                     replacement = boundary.take_transcript_replacement()
                     if replacement is not None:
-                        self._messages = list(replacement)
+                        self._messages = [message.model_copy(deep=True) for message in replacement]
                         # The accepted request consumed these rows. Only later
                         # completions belong to the next boundary's active tail.
                         boundary.active_from = len(self._messages)
@@ -537,11 +541,14 @@ class AgentHarness:
                 )
         finally:
             self._current_scope = None
-            with anyio.CancelScope(shield=True):
-                await loop_events.aclose()
-            if self._current_token is token:
-                self._current_token = None
-            self._running = False
+            try:
+                if loop_events is not None:
+                    with anyio.CancelScope(shield=True):
+                        await loop_events.aclose()
+            finally:
+                if self._current_token is token:
+                    self._current_token = None
+                self._running = False
 
     def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
         queue = self._queue_for(kind)
