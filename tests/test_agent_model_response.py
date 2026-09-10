@@ -8,6 +8,8 @@ import pytest
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import (
     CompletedProviderResponse,
+    ModelResponseStream,
+    OverflowModelResponse,
     ProviderResponseLifecycle,
     iter_provider_events,
     open_provider_stream,
@@ -74,6 +76,38 @@ class _OverflowStream:
 
     async def __anext__(self) -> ProviderEvent:
         raise RuntimeError("maximum context length exceeded")
+
+
+class _CompletedStreamWithCloseError:
+    def __init__(self, close_message: str) -> None:
+        self._events = iter(
+            (
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            )
+        )
+        self.close_message = close_message
+
+    def __aiter__(self) -> AsyncIterator[ProviderEvent]:
+        return self
+
+    async def __anext__(self) -> ProviderEvent:
+        try:
+            return next(self._events)
+        except StopIteration as error:
+            raise StopAsyncIteration from error
+
+    async def aclose(self) -> None:
+        raise RuntimeError(self.close_message)
+
+
+class _ClosingOverflowProvider:
+    name = "closing-overflow"
+    default_model = "test"
+
+    def stream(self, messages: Sequence[Message], **kwargs: object) -> AsyncIterator[ProviderEvent]:
+        del messages, kwargs
+        return _CompletedStreamWithCloseError("maximum context length exceeded")
 
 
 def _config(*, provider: object | None = None, **kwargs: object) -> AgentLoopConfig:
@@ -209,6 +243,46 @@ def test_iter_provider_events_promotes_overflow_shaped_exceptions() -> None:
         with pytest.raises(ContextOverflowError, match="maximum context length exceeded"):
             async for _event in iter_provider_events(_OverflowStream()):
                 pass
+
+    anyio.run(run)
+
+
+def test_iter_provider_events_does_not_promote_overflow_shaped_close_after_terminal() -> None:
+    async def events() -> AsyncIterator[ProviderEvent]:
+        try:
+            yield ProviderResponseStarted(model="test")
+            yield ProviderResponseCompleted(content="done")
+        finally:
+            raise RuntimeError("maximum context length exceeded")
+
+    async def run() -> None:
+        received: list[ProviderEvent] = []
+        with pytest.raises(RuntimeError) as caught:
+            async for event in iter_provider_events(events()):
+                received.append(event)
+        assert type(caught.value) is RuntimeError
+        assert "maximum context length exceeded" in str(caught.value)
+        assert isinstance(received[-1], ProviderResponseCompleted)
+
+    anyio.run(run)
+
+
+def test_completed_response_does_not_classify_overflow_worded_close_as_overflow() -> None:
+    stream = ModelResponseStream(
+        config=_config(provider=_ClosingOverflowProvider()),
+        messages=(Message(role="user", content="go"),),
+        tool_results=(),
+        extra_messages=(),
+        previous_response_id=None,
+    )
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError) as caught:
+            _ = [event async for event in stream.events(turn=1)]
+        assert type(caught.value) is RuntimeError
+        assert "maximum context length exceeded" in str(caught.value)
+        assert stream.outcome is None
+        assert not isinstance(stream.outcome, OverflowModelResponse)
 
     anyio.run(run)
 

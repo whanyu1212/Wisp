@@ -24,6 +24,7 @@ from wisp.agent.tool_contracts import (
     ToolPreparationEvent,
 )
 from wisp.events import (
+    ContextOverflow,
     MessageCompleted,
     MessageDelta,
     ToolApprovalRequested,
@@ -409,6 +410,35 @@ def test_cancelled_turn_is_not_completed_twice_when_provider_close_fails(
                 if isinstance(event, MessageDelta):
                     token.cancel()
         assert provider.closed == 1
+        assert_turn_invariants(events)
+
+    anyio.run(run)
+
+
+def test_completed_turn_does_not_retry_overflow_worded_provider_close() -> None:
+    class ForbiddenOverflowHook:
+        async def recover_context_overflow(self, *, snapshot: object) -> None:
+            del snapshot
+            raise AssertionError("cleanup failure must not invoke overflow recovery")
+
+    provider = _ClosingProvider(close_failure=True, close_message="maximum context length exceeded")
+
+    async def run() -> None:
+        events: list[object] = []
+        with pytest.raises(RuntimeError) as caught:
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=_Executor(),
+                    context_overflow_hook=ForbiddenOverflowHook(),
+                ),
+                messages=(Message(role="user", content="go"),),
+            ):
+                events.append(event)
+        assert type(caught.value) is RuntimeError
+        assert "maximum context length exceeded" in str(caught.value)
+        assert provider.closed == 1
+        assert not any(isinstance(event, ContextOverflow) for event in events)
         assert_turn_invariants(events)
 
     anyio.run(run)

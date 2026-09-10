@@ -193,10 +193,13 @@ async def iter_provider_events(
 
     Raises:
         ContextOverflowError: Advancing the iterator raises an error whose message
-            matches a known overflow pattern; the original error is chained as its cause.
-        Exception: Non-overflow iterator errors propagate unchanged.
+            matches a known overflow pattern before a terminal event; the original
+            error is chained as its cause.
+        Exception: Non-overflow iterator errors and post-terminal cleanup errors
+            propagate unchanged.
     """
 
+    terminal_received = False
     async with closing_stream(aiter(stream)) as iterator:
         while True:
             try:
@@ -204,9 +207,13 @@ async def iter_provider_events(
             except StopAsyncIteration:
                 return
             except Exception as exc:
-                if is_context_overflow_message(str(exc)):
-                    raise ContextOverflowError(str(exc)) from exc
-                raise
+                # Async-generator finally/aclose errors surface on the anext after
+                # the last event. They are not a rejected request.
+                if terminal_received or not is_context_overflow_message(str(exc)):
+                    raise
+                raise ContextOverflowError(str(exc)) from exc
+            if isinstance(event, ProviderResponseCompleted | ProviderResponseFailed):
+                terminal_received = True
             yield event
 
 
@@ -775,8 +782,10 @@ class ModelResponseStream:
         Raises:
             ProviderProtocolError: Events violate lifecycle, identity, or tool-call rules.
             Exception: Unexpected provider or token errors propagate. Context overflow
-                becomes OverflowModelResponse; typed provider failure becomes
-                FailedModelResponse. An interrupted consumer may leave outcome unset.
+                during consumption becomes OverflowModelResponse; typed provider failure
+                becomes FailedModelResponse. Cleanup errors after a recorded terminal,
+                consumer closure, and cancellation keep their original exception.
+                An interrupted consumer may leave outcome unset.
         """
         lifecycle = ProviderResponseLifecycle()
         attempt_had_streamed_delta = False
@@ -845,30 +854,29 @@ class ModelResponseStream:
                 except GeneratorExit:
                     consumer_closed = True
                     raise
-        except ContextOverflowError as exc:
-            if consumer_closed or isinstance(self.outcome, CancelledModelResponse):
+        except Exception as exc:
+            # A recorded terminal means the provider already finished; aclose
+            # failures must not be rewritten into overflow recovery.
+            if (
+                consumer_closed
+                or isinstance(self.outcome, CancelledModelResponse)
+                or lifecycle.terminal is not None
+            ):
+                raise
+            if isinstance(exc, ContextOverflowError):
+                overflow_error = exc
+            elif is_context_overflow_message(str(exc)):
+                overflow_error = ContextOverflowError(str(exc))
+            else:
                 raise
             self.outcome = OverflowModelResponse(
-                error=exc,
+                error=overflow_error,
                 started=lifecycle.started,
                 content="".join(lifecycle.text),
                 started_response_id=lifecycle.started_response_id,
                 had_streamed_delta=attempt_had_streamed_delta,
             )
             return
-        except Exception as exc:
-            if consumer_closed or isinstance(self.outcome, CancelledModelResponse):
-                raise
-            if is_context_overflow_message(str(exc)):
-                self.outcome = OverflowModelResponse(
-                    error=ContextOverflowError(str(exc)),
-                    started=lifecycle.started,
-                    content="".join(lifecycle.text),
-                    started_response_id=lifecycle.started_response_id,
-                    had_streamed_delta=attempt_had_streamed_delta,
-                )
-                return
-            raise
 
         if _is_cancelled(self.config):
             for event in _cancelled_turn_events(turn):
