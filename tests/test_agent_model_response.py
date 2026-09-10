@@ -7,13 +7,15 @@ import pytest
 
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import (
-    CompletedProviderResponse,
     ModelResponseStream,
     OverflowModelResponse,
-    ProviderResponseLifecycle,
     iter_provider_events,
     open_provider_stream,
     project_usage_and_cost,
+)
+from wisp.agent.loop.provider_lifecycle import (
+    CompletedProviderResponse,
+    ProviderResponseLifecycle,
     resolve_provider_response_id,
 )
 from wisp.agent.messages import Message
