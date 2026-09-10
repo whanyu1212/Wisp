@@ -26,6 +26,15 @@ For each invocation, the harness:
 8. Releases cancellation and running state when the stream ends, fails, or is closed, even if
    startup or inner-stream cleanup raises.
 
+`config._build_loop_config` maps harness settings and invocation-specific hooks and offsets into
+the loop configuration. `_run` calls it after entering the guarded lifetime and accepting the prompt.
+
+`AgentHarness._next_loop_step` advances the loop within the cancellation scope and returns either
+an event or a control outcome. It interrupts the first cancelled advance and shields later advances
+to let tool settlement finish. `_HarnessRunState` retains that drain state across turns. `_run` owns
+every event yield, transcript update, queue injection, and boundary arm; no cancellation scope spans
+its public event yields.
+
 The returned async generator is lazy: creating it does not append the prompt or mark the harness as
 running. `prompt_message()` snapshots its input at creation, so later caller mutations cannot change
 the pending prompt. The caller must consume or close the stream so the `finally` cleanup runs.

@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
+from enum import Enum, auto
 
 import anyio
 
-from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
+from wisp.agent.loop import AgentLoopEvent, run_agent_loop
 from wisp.agent.messages import (
     Message,
     completion_event_has_history,
@@ -31,7 +32,7 @@ from wisp.events import (
 from wisp.providers.base import prepare_provider_history
 
 from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
-from .config import AgentHarnessConfig
+from .config import AgentHarnessConfig, _build_loop_config
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
@@ -83,11 +84,12 @@ def _cancelled_events(
 
 @dataclass(slots=True)
 class _HarnessRunState:
-    """Public turn lifecycle state retained for one primary loop invocation."""
+    """Turn lifecycle and cancellation drain state for one primary loop invocation."""
 
     active_turn: int | None = None
     active_turn_completed: bool = False
     had_tool_calls: bool = False
+    draining_cancellation: bool = False
 
     def observe(self, event: AgentLoopEvent) -> None:
         if isinstance(event, TurnStarted):
@@ -104,6 +106,14 @@ class _HarnessRunState:
             self.active_turn,
             active_turn_completed=self.active_turn_completed,
         )
+
+
+class _LoopStepAction(Enum):
+    """Control outcomes when advancing the loop produces no event to publish."""
+
+    CANCEL_AND_STOP = auto()
+    STREAM_ENDED = auto()
+    RETRY = auto()
 
 
 class AgentHarness:
@@ -398,6 +408,32 @@ class AgentHarness:
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
+        """Stream one invocation while retaining conversation and queue state.
+
+        Validate offsets before repairing history or accepting a prompt. Consume
+        the loop, retaining completed messages before yielding their events; after
+        each successful turn, drain the eligible queue and arm the next boundary.
+        Apply transcript replacements only when the next turn starts. Always
+        release run state, including when startup or stream cleanup fails.
+
+        Args:
+            prompt_message (Message | None): Detached prompt to append when consumed.
+            turn_offset (int): Number of turns preceding this invocation.
+            tool_iteration_offset (int): Number of earlier tool iterations.
+            defer_context_overflow_errors (bool): Whether the session handles overflow errors.
+            boundary_preparer (HarnessBoundaryPreparer | None): Session-owned boundary policy.
+            context_overflow_hook (ContextOverflowHook | None): Optional overflow recovery.
+
+        Yields:
+            AgentHarnessEvent: Loop and queue events in transcript publication order.
+                Consume or close the stream to release the guarded run lifetime.
+
+        Raises:
+            RuntimeError: Another invocation is active.
+            ValueError: An invocation offset is invalid.
+            Exception: Startup, execution, boundary, or cleanup failures propagate
+                without rolling back accepted input or retained completions.
+        """
         self._ensure_idle()
         validate_non_negative_integer(turn_offset, field="turn_offset")
         validate_non_negative_integer(tool_iteration_offset, field="tool_iteration_offset")
@@ -416,27 +452,16 @@ class AgentHarness:
         token = SimpleCancellationToken()
         run = _HarnessRunState()
         loop_events: AsyncGenerator[AgentLoopEvent, None] | None = None
-        draining_cancellation = False
         self._running = True
         self._current_token = token
         try:
             if prompt_message is not None:
                 self._messages.append(prompt_message)
-            config = AgentLoopConfig(
-                provider=self._config.provider,
-                tool_executor=self._config.tool_executor,
-                model=self._config.model,
-                tools=self._config.tools,
-                max_tool_iterations=self._config.max_tool_iterations,
+            config = _build_loop_config(
+                self._config,
                 cancellation_token=token,
-                effort=self._config.effort,
-                prompt_cache_key=self._config.prompt_cache_key,
-                context_window=self._config.context_window,
-                context_reserve_tokens=self._config.context_reserve_tokens,
-                context_pressure_threshold=self._config.context_pressure_threshold,
                 turn_offset=turn_offset,
                 tool_iteration_offset=tool_iteration_offset,
-                cost_estimator=self._config.cost_estimator,
                 defer_context_overflow_errors=defer_context_overflow_errors,
                 request_boundary_hook=boundary,
                 context_overflow_hook=boundary if context_overflow_hook is not None else None,
@@ -449,46 +474,17 @@ class AgentHarness:
             )
             loop_events = run_agent_loop(config, messages=provider_messages)
             while True:
-                if (
-                    token.is_cancelled()
-                    and not draining_cancellation
-                    and (not run.had_tool_calls or run.active_turn_completed)
-                ):
-                    # A completed tool turn has no outstanding batch to settle.
+                step = await self._next_loop_step(loop_events, token=token, run=run)
+                if step is _LoopStepAction.CANCEL_AND_STOP:
                     for cancellation_event in run.cancelled_events():
                         yield cancellation_event
                     return
-                start_cancellation = token.is_cancelled() and not draining_cancellation
-                if start_cancellation:
-                    draining_cancellation = True
-
-                scope = anyio.CancelScope(shield=draining_cancellation and not start_cancellation)
-                self._current_scope = None if draining_cancellation else scope
-                event: AgentLoopEvent | None = None
-                stream_ended = False
-                with scope:
-                    if start_cancellation:
-                        scope.cancel()
-                    try:
-                        event = await anext(loop_events)
-                    except StopAsyncIteration:
-                        stream_ended = True
-                if self._current_scope is scope:
-                    self._current_scope = None
-
-                if scope.cancel_called:
-                    draining_cancellation = True
-                if stream_ended:
-                    if draining_cancellation:
-                        for cancellation_event in run.cancelled_events():
-                            yield cancellation_event
-                        return
+                if step is _LoopStepAction.STREAM_ENDED:
                     break
-                if event is None:
-                    if draining_cancellation:
-                        continue
-                    raise RuntimeError("Agent loop produced no event")
+                if step is _LoopStepAction.RETRY:
+                    continue
 
+                event = step
                 run.observe(event)
                 if isinstance(event, TurnStarted):
                     replacement = boundary.take_transcript_replacement()
@@ -554,6 +550,70 @@ class AgentHarness:
                 if self._current_token is token:
                     self._current_token = None
                 self._running = False
+
+    async def _next_loop_step(
+        self,
+        loop_events: AsyncGenerator[AgentLoopEvent, None],
+        *,
+        token: SimpleCancellationToken,
+        run: _HarnessRunState,
+    ) -> AgentLoopEvent | _LoopStepAction:
+        """Advance the loop once, interrupting or draining cancellation as needed.
+
+        The first cancellation interrupts an unshielded advance; later advances
+        are shielded so outstanding tool results can settle. Draining lasts for
+        the invocation, independently of per-turn state. The scope exits before
+        returning, leaving retention, publication, and final cleanup to _run.
+
+        Args:
+            loop_events (AsyncGenerator[AgentLoopEvent, None]): Owned primary loop stream.
+            token (SimpleCancellationToken): Cancellation state for this invocation.
+            run (_HarnessRunState): Observed turn state and mutable cancellation drain state.
+
+        Returns:
+            AgentLoopEvent | _LoopStepAction: An event to retain and publish, or an
+            action to retry advancement, stop normally, or emit cancellation terminals.
+
+        Raises:
+            RuntimeError: Advancement produced no event outside cancellation draining.
+            Exception: Loop advancement failures propagate to the caller's cleanup.
+        """
+        if (
+            token.is_cancelled()
+            and not run.draining_cancellation
+            and (not run.had_tool_calls or run.active_turn_completed)
+        ):
+            # A completed tool turn has no outstanding batch to settle.
+            return _LoopStepAction.CANCEL_AND_STOP
+        start_cancellation = token.is_cancelled() and not run.draining_cancellation
+        if start_cancellation:
+            run.draining_cancellation = True
+
+        scope = anyio.CancelScope(shield=run.draining_cancellation and not start_cancellation)
+        self._current_scope = None if run.draining_cancellation else scope
+        event: AgentLoopEvent | None = None
+        stream_ended = False
+        with scope:
+            if start_cancellation:
+                scope.cancel()
+            try:
+                event = await anext(loop_events)
+            except StopAsyncIteration:
+                stream_ended = True
+        if self._current_scope is scope:
+            self._current_scope = None
+
+        if scope.cancel_called:
+            run.draining_cancellation = True
+        if stream_ended:
+            if run.draining_cancellation:
+                return _LoopStepAction.CANCEL_AND_STOP
+            return _LoopStepAction.STREAM_ENDED
+        if event is None:
+            if run.draining_cancellation:
+                return _LoopStepAction.RETRY
+            raise RuntimeError("Agent loop produced no event")
+        return event
 
     def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
         queue = self._queue_for(kind)
