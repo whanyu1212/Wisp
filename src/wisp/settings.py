@@ -316,7 +316,29 @@ def persist_user_model_selection(
     preserves every unrelated user setting.
     """
 
-    _persist_user_settings(
+    try_persist_user_model_selection(provider, model, effort, home_dir=home_dir)
+
+
+def try_persist_user_model_selection(
+    provider: str,
+    model: str | None,
+    effort: str | None,
+    *,
+    home_dir: Path | None = None,
+) -> bool:
+    """Save resolved model defaults without undoing an applied runtime change.
+
+    Args:
+        provider (str): Resolved provider identifier.
+        model (str | None): Configured model, or None to retain provider defaults.
+        effort (str | None): Resolved effort, or None to remove the saved override.
+        home_dir (Path | None): User home override, primarily for isolated callers.
+
+    Returns:
+        bool: Whether the atomic settings update succeeded. Failures also warn;
+        unreadable settings are preserved rather than replaced.
+    """
+    return _persist_user_settings(
         {"provider": provider, "model": model, "effort": effort},
         home_dir=home_dir,
         preference="model selection",
@@ -338,7 +360,7 @@ def _persist_user_settings(
     *,
     home_dir: Path | None,
     preference: str,
-) -> None:
+) -> bool:
     """Safely read, update, and atomically replace the user settings file.
 
     A missing or malformed file is treated like an empty settings document, matching
@@ -353,11 +375,11 @@ def _persist_user_settings(
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raw = None
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         _warn(
             f"could not read settings file {path} before writing, {preference} not persisted: {exc}"
         )
-        return
+        return False
     if raw is not None:
         try:
             parsed = json.loads(raw)
@@ -402,6 +424,8 @@ def _persist_user_settings(
         tmp_path.replace(path)
     except OSError as exc:
         _warn(f"could not write settings file {path}: {exc}")
+        return False
+    return True
 
 
 def _load_settings_file(

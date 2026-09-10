@@ -1,0 +1,205 @@
+{
+  "$defs": {
+    "RpcCapability": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "RpcHandshakeAccepted": {
+      "additionalProperties": false,
+      "description": "Successful backend response selecting one compatible live contract.",
+      "properties": {
+        "backend_package_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}(?![\\s\\S])",
+          "title": "Backend Package Version",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/RpcCapability"
+          },
+          "maxItems": 128,
+          "title": "Capabilities",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "event_schema_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Event Schema Version",
+          "type": "integer"
+        },
+        "limits": {
+          "$ref": "#/$defs/RpcTransportLimits"
+        },
+        "max_protocol_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Max Protocol Version",
+          "type": "integer"
+        },
+        "min_protocol_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Min Protocol Version",
+          "type": "integer"
+        },
+        "protocol_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Protocol Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "rpc.handshake.accepted",
+          "default": "rpc.handshake.accepted",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend_package_version",
+        "protocol_version",
+        "event_schema_version",
+        "min_protocol_version",
+        "max_protocol_version",
+        "capabilities",
+        "limits",
+        "type"
+      ],
+      "title": "RpcHandshakeAccepted",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "ordered-range",
+          "maximum_property": "max_protocol_version",
+          "minimum_property": "min_protocol_version"
+        },
+        {
+          "kind": "value-in-range",
+          "maximum_property": "max_protocol_version",
+          "minimum_property": "min_protocol_version",
+          "value_property": "protocol_version"
+        }
+      ]
+    },
+    "RpcHandshakeRejected": {
+      "additionalProperties": false,
+      "description": "Bounded pre-protocol response explaining why negotiation failed.",
+      "properties": {
+        "backend_package_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}(?![\\s\\S])",
+          "title": "Backend Package Version",
+          "type": "string"
+        },
+        "code": {
+          "$ref": "#/$defs/RpcHandshakeRejectionCode"
+        },
+        "event_schema_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Event Schema Version",
+          "type": "integer"
+        },
+        "max_protocol_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Max Protocol Version",
+          "type": "integer"
+        },
+        "message": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]{1,1000}(?![\\s\\S])",
+          "title": "Message",
+          "type": "string"
+        },
+        "min_protocol_version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Min Protocol Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "rpc.handshake.rejected",
+          "default": "rpc.handshake.rejected",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "backend_package_version",
+        "min_protocol_version",
+        "max_protocol_version",
+        "event_schema_version",
+        "type"
+      ],
+      "title": "RpcHandshakeRejected",
+      "type": "object",
+      "x-wisp-cross-field-invariants": [
+        {
+          "kind": "ordered-range",
+          "maximum_property": "max_protocol_version",
+          "minimum_property": "min_protocol_version"
+        }
+      ]
+    },
+    "RpcHandshakeRejectionCode": {
+      "enum": [
+        "event_schema_version_mismatch",
+        "invalid_handshake",
+        "protocol_version_mismatch",
+        "unsupported_capability"
+      ],
+      "type": "string"
+    },
+    "RpcTransportLimits": {
+      "additionalProperties": false,
+      "description": "Directional application-frame limits selected by the backend.",
+      "properties": {
+        "max_client_frame_bytes": {
+          "maximum": 67108864,
+          "minimum": 1,
+          "title": "Max Client Frame Bytes",
+          "type": "integer"
+        },
+        "max_server_frame_bytes": {
+          "maximum": 67108864,
+          "minimum": 1,
+          "title": "Max Server Frame Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_client_frame_bytes",
+        "max_server_frame_bytes"
+      ],
+      "title": "RpcTransportLimits",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "rpc.handshake.accepted": "#/$defs/RpcHandshakeAccepted",
+      "rpc.handshake.rejected": "#/$defs/RpcHandshakeRejected"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/RpcHandshakeAccepted"
+    },
+    {
+      "$ref": "#/$defs/RpcHandshakeRejected"
+    }
+  ],
+  "title": "RPC handshake response"
+}

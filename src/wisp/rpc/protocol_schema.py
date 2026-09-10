@@ -41,6 +41,7 @@ HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (1, "06581c7cdbed14f6af08e1e67b1e0cdf4c8a1288a64238c342a61d2f8ced5a75"),
     (2, "e84f38d40d6137fcfc2a57ebd6d9140efcddcf7b2f1535850790aa3af5e55955"),
     (3, "3421192b01974081b8fc52537aa23a8fd44ece09b11be8ae4c791dc7d1a82c7c"),
+    (4, "fc80ee4beaaad41c6534130bab3c277c0109b3831d34c4ad623d0417d92eed02"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -807,6 +808,23 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
     configure["allOf"] = cast(
         JsonValue,
         [
+            {
+                "if": {
+                    "properties": {"persist_model_selection": {"const": True}},
+                    "required": ["persist_model_selection"],
+                },
+                "then": {
+                    "anyOf": [
+                        {"required": ["provider"]},
+                        {"required": ["model"]},
+                        {"required": ["effort"]},
+                        {
+                            "properties": {"clear_effort": {"const": True}},
+                            "required": ["clear_effort"],
+                        },
+                    ]
+                },
+            },
             {
                 "anyOf": [
                     {"required": ["provider"]},

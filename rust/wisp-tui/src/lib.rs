@@ -2863,10 +2863,10 @@ mod tests {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 4,
+            "protocol_version": 5,
             "event_schema_version": 36,
-            "min_protocol_version": 4,
-            "max_protocol_version": 4,
+            "min_protocol_version": 5,
+            "max_protocol_version": 5,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })

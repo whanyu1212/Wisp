@@ -452,6 +452,7 @@ class RpcController:
         model: str | None = None,
         effort: str | None = None,
         clear_effort: bool = False,
+        persist_model_selection: bool = False,
         auto_compaction_enabled: bool | None = None,
         mode: AgentMode | None = None,
         command_id: str | None = None,
@@ -472,6 +473,11 @@ class RpcController:
         so there is no wire difference between "not specified" and "None."
         Pass ``clear_effort=True`` to explicitly reset effort back to the
         provider's own default.
+
+        ``persist_model_selection=True`` saves the resolved provider, model and
+        effort as user defaults after applying the selection. It requires a
+        selection mutation. Saving failures emit a warning event but do not undo
+        the live change or fail the configuration command.
         """
 
         selected_id = command_id or self._command_id_factory("configure")
@@ -482,6 +488,7 @@ class RpcController:
                 model=model,
                 effort=effort,
                 clear_effort=clear_effort,
+                persist_model_selection=persist_model_selection,
                 auto_compaction_enabled=auto_compaction_enabled,
                 mode=mode,
             )

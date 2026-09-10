@@ -1887,6 +1887,7 @@ def test_configure_command_serializes_effort_and_omits_when_unset() -> None:
         "type": "configure",
         "effort": "medium",
         "clear_effort": False,
+        "persist_model_selection": False,
     }
     assert rpc_command_from_json(line) == with_effort
 
@@ -1985,10 +1986,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2043,10 +2044,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2078,10 +2079,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2110,8 +2111,8 @@ print(json.dumps({
     "code": "protocol_version_mismatch",
     "message": "No compatible live RPC protocol version.",
     "backend_package_version": "0.1.0",
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "event_schema_version": 36,
 }), flush=True)
 """
@@ -2142,10 +2143,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2177,10 +2178,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)

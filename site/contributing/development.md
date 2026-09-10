@@ -50,7 +50,7 @@ working directory.
 The experimental frontend is exact-lockstep with the Python runtime. The current package and crate
 versions are `0.2.0rc1` (Python) and `0.2.0-rc.1` (Cargo); only the prerelease spelling differs.
 Rust translates `-alpha.N`, `-beta.N`, and `-rc.N` to Python's `aN`, `bN`, and `rcN` before the
-exact version comparison. The only accepted transport is live RPC v4 with event schema v36.
+exact version comparison. The only accepted transport is live RPC v5 with event schema v36.
 Python's models and committed schemas remain authoritative, and `wisp-protocol` generates its
 private Rust projections from those schemas at compile time. Package, protocol, event-schema, or
 generated-schema drift must fail a check or the startup handshake rather than degrade to another

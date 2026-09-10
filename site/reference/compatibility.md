@@ -41,11 +41,11 @@ Package organization beyond `wisp-ai` remains tracked by
 
 The proposed external frontend protocol is a separate compatibility domain. Python models remain
 its semantic source of truth, and deterministic current-version artifacts are checked in under
-`schemas/live-rpc/v4/`. Ordinary command envelopes inherit the selected connection version rather
+`schemas/live-rpc/v5/`. Ordinary command envelopes inherit the selected connection version rather
 than carrying their own version. Events continue to carry the independently negotiated
 `schema_version` described below.
 
-The v4 schema bundle contains handshake request and response messages, the complete typed-client
+The v5 schema bundle contains handshake request and response messages, the complete typed-client
 command output union, the complete current live event output union, deterministic conformance
 fixtures, and validation-only projections consumed by Rust type generation. Command schemas describe payloads
 produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
@@ -96,7 +96,7 @@ Schema bundles are repository build inputs and versioned GitHub release assets n
 `wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
 models and compile-time generated Serde crate define the contract for external frontends. Protocol
 v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version,
-v3 adds authoritative model-catalog discovery, and v4 adds backend-owned connection
+v3 adds authoritative model-catalog discovery, and v5 adds backend-owned connection
 workflows. All earlier bundles remain immutable.
 
 ## Deprecation and removal
@@ -188,7 +188,7 @@ A session file contains several independently versioned layers:
 | Session entry | v6 | unversioned and v1–v6 |
 | Persisted event envelope | v1 | v1 |
 | Event payload inside the envelope | v36 | v5–v36 for typed access |
-| Compaction record | v4 | v1–v4 |
+| Compaction record | v5 | v1–v5 |
 
 Historical session entries are normalized to current typed models in memory. Loading a session does
 not rewrite it; later appends use the current entry schema while preserving committed historical

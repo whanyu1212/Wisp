@@ -47,13 +47,13 @@ This is a minor release with an announced breaking API cleanup, not a patch rele
 Update external clients together with the backend:
 
 1. Send `rpc.handshake.request` as the first frame, before ordinary commands.
-2. Support **live RPC v4 and event schema v36**. Wait for `rpc.handshake.accepted` before sending
+2. Support **live RPC v5 and event schema v36**. Wait for `rpc.handshake.accepted` before sending
    commands; handle rejection as a connection failure rather than attempting legacy fallback.
 3. Honor negotiated directional frame limits and strict UTF-8, LF-terminated JSON framing.
 4. Use backend-owned model and connection catalogs. Credential mutations belong to backend RPC;
    frontends must not read or write Wisp credential files themselves.
 
-Use the checked-in `schemas/live-rpc/v4/` bundle and the typed Python transport as implementation
+Use the checked-in `schemas/live-rpc/v5/` bundle and the typed Python transport as implementation
 references. Versioned schema bundles are release assets, not part of the Python wheel API.
 Historical bundles remain immutable. These live-connection requirements do not change the
 backward-readability policy for persisted sessions.

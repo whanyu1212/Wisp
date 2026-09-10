@@ -211,7 +211,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
   passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
   and checks exact equality before spawning the backend. The backend repeats its Python package
   version in the handshake. This spelling conversion does not permit different release versions.
-- The only accepted live contract is RPC protocol v4 with event schema v36 and no negotiated
+- The only accepted live contract is RPC protocol v5 with event schema v36 and no negotiated
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
@@ -220,7 +220,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-The committed v4 schema manifest and generated projections define the current handshake fields,
+The committed v5 schema manifest and generated projections define the current handshake fields,
 frame limits, strict event variants, and UTF-8 JSON representation. See
 [Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 
@@ -256,7 +256,7 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | Bounded history paging, `/resume`, `/new` | Present in Rust | Acceptable difference while experimental |
 | `/clone`, `/tree`, `/unrevert`, `/name` | Present in Rust; not in Textual | Acceptable difference |
 | `/connect` API-key and device-code flows | Present in Rust | Acceptable difference while experimental |
-| Live RPC v4 / event schema v36 lockstep | Enforced at handshake | Acceptable difference while experimental |
+| Live RPC v5 / event schema v36 lockstep | Enforced at handshake | Acceptable difference while experimental |
 | Keyboard-only operation; no mouse | Intentional | Acceptable difference |
 | No transcript search | Intentional while experimental | Acceptable difference |
 | No automatic fallback to Textual | Intentional; #470 closed this way | Acceptable difference |

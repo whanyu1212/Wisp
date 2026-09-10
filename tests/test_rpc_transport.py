@@ -620,7 +620,13 @@ def test_sdk_style_configure_omits_none_fields_from_presence_metadata() -> None:
         )
     )
 
-    assert parsed.provided_fields == {"id", "type", "model", "clear_effort"}
+    assert parsed.provided_fields == {
+        "id",
+        "type",
+        "model",
+        "clear_effort",
+        "persist_model_selection",
+    }
 
 
 def test_message_read_preserves_null_presence_and_sdk_omission() -> None:
