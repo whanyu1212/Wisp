@@ -27,6 +27,7 @@ _PURE_AGENT_MODULES = (
     "loop/continuation.py",
     "loop/model_response.py",
     "loop/runner.py",
+    "loop/stream_cleanup.py",
     "loop/tool_execution.py",
 )
 _FORBIDDEN_IMPORTS = (

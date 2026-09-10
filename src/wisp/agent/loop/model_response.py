@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -41,6 +42,7 @@ from wisp.providers.events import (
 )
 
 from .continuation import provider_supports_continuation_messages
+from .stream_cleanup import closing_stream
 
 if TYPE_CHECKING:
     from .config import AgentLoopConfig
@@ -82,7 +84,8 @@ def open_provider_stream(
 
     Returns:
         AsyncIterator[provider_events.ProviderEvent]: Provider stream, not yet consumed.
-            Effort is omitted when unset; cache keys are sent only to supporting adapters.
+            The caller owns its lifetime and must close it when supported. Effort is omitted
+            when unset; cache keys are sent only to supporting adapters.
 
     Raises:
         Exception: Synchronous errors from the provider's stream factory propagate.
@@ -180,7 +183,7 @@ def open_provider_stream(
 async def iter_provider_events(
     stream: AsyncIterator[provider_events.ProviderEvent],
 ) -> AsyncIterator[provider_events.ProviderEvent]:
-    """Forward provider events and normalize overflow-shaped iterator errors.
+    """Forward provider events, normalize overflow errors, and close the owned iterator.
 
     Args:
         stream (AsyncIterator[provider_events.ProviderEvent]): Provider event source.
@@ -190,21 +193,28 @@ async def iter_provider_events(
 
     Raises:
         ContextOverflowError: Advancing the iterator raises an error whose message
-            matches a known overflow pattern; the original error is chained as its cause.
-        Exception: Non-overflow iterator errors propagate unchanged.
+            matches a known overflow pattern before a terminal event; the original
+            error is chained as its cause.
+        Exception: Non-overflow iterator errors and post-terminal cleanup errors
+            propagate unchanged.
     """
 
-    iterator = aiter(stream)
-    while True:
-        try:
-            event = await anext(iterator)
-        except StopAsyncIteration:
-            return
-        except Exception as exc:
-            if is_context_overflow_message(str(exc)):
+    terminal_received = False
+    async with closing_stream(aiter(stream)) as iterator:
+        while True:
+            try:
+                event = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            except Exception as exc:
+                # Async-generator finally/aclose errors surface on the anext after
+                # the last event. They are not a rejected request.
+                if terminal_received or not is_context_overflow_message(str(exc)):
+                    raise
                 raise ContextOverflowError(str(exc)) from exc
-            raise
-        yield event
+            if isinstance(event, ProviderResponseCompleted | ProviderResponseFailed):
+                terminal_received = True
+            yield event
 
 
 def unavailable_cost(
@@ -622,7 +632,7 @@ def project_completed_response(
         ToolCallSnapshot(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            arguments=dict(tool_call.arguments),
+            arguments=deepcopy(dict(tool_call.arguments)),
             provider_call_id=tool_call.provider_call_id,
             parse_error=tool_call.parse_error,
         )
@@ -772,11 +782,14 @@ class ModelResponseStream:
         Raises:
             ProviderProtocolError: Events violate lifecycle, identity, or tool-call rules.
             Exception: Unexpected provider or token errors propagate. Context overflow
-                becomes OverflowModelResponse; typed provider failure becomes
-                FailedModelResponse. An interrupted consumer may leave outcome unset.
+                during consumption becomes OverflowModelResponse; typed provider failure
+                becomes FailedModelResponse. Cleanup errors after a recorded terminal,
+                consumer closure, and cancellation keep their original exception.
+                An interrupted consumer may leave outcome unset.
         """
         lifecycle = ProviderResponseLifecycle()
         attempt_had_streamed_delta = False
+        consumer_closed = False
         try:
             provider_stream = open_provider_stream(
                 self.config,
@@ -785,73 +798,85 @@ class ModelResponseStream:
                 extra_messages=self.extra_messages,
                 previous_response_id=self.previous_response_id,
             )
-            async for provider_event in iter_provider_events(provider_stream):
-                if _is_cancelled(self.config):
-                    for event in _cancelled_turn_events(turn):
-                        yield event
-                    self.outcome = CancelledModelResponse()
-                    return
-                lifecycle.require_open()
-                if isinstance(provider_event, ProviderResponseStarted):
-                    lifecycle.start(provider_event)
-                    yield MessageStarted(turn=turn)
-                elif isinstance(provider_event, provider_events.ProviderRetrying):
-                    lifecycle.retry()
-                    yield ProviderRetrying(
-                        turn=turn,
-                        provider=self.config.provider.name,
-                        attempt=provider_event.attempt,
-                        max_attempts=provider_event.max_attempts,
-                        delay_seconds=provider_event.delay_seconds,
-                        reason=provider_event.reason,
-                        status_code=provider_event.status_code,
-                    )
-                elif isinstance(provider_event, ProviderTextDelta):
-                    lifecycle.add_text(provider_event.delta)
-                    attempt_had_streamed_delta = True
-                    yield MessageDelta(
-                        turn=turn,
-                        delta=provider_event.delta,
-                        content_index=provider_event.content_index,
-                    )
-                elif isinstance(provider_event, ProviderThinkingDelta):
-                    lifecycle.add_thinking(provider_event.delta)
-                    attempt_had_streamed_delta = True
-                    yield MessageDelta(
-                        turn=turn,
-                        delta=provider_event.delta,
-                        content_index=provider_event.content_index,
-                        content_kind="thinking",
-                    )
-                elif isinstance(provider_event, ProviderToolCallCompleted):
-                    lifecycle.add_tool_call(provider_event.tool_call)
-                elif isinstance(provider_event, ProviderResponseCompleted | ProviderResponseFailed):
-                    lifecycle.complete(provider_event)
-                else:
-                    event_type = type(provider_event).__name__
-                    raise ProviderProtocolError(
-                        f"Provider emitted unsupported event type: {event_type}"
-                    )
-        except ContextOverflowError as exc:
+            async with closing_stream(
+                iter_provider_events(provider_stream)
+            ) as provider_events_stream:
+                try:
+                    async for provider_event in provider_events_stream:
+                        if _is_cancelled(self.config):
+                            for event in _cancelled_turn_events(turn):
+                                yield event
+                            self.outcome = CancelledModelResponse()
+                            return
+                        lifecycle.require_open()
+                        if isinstance(provider_event, ProviderResponseStarted):
+                            lifecycle.start(provider_event)
+                            yield MessageStarted(turn=turn)
+                        elif isinstance(provider_event, provider_events.ProviderRetrying):
+                            lifecycle.retry()
+                            yield ProviderRetrying(
+                                turn=turn,
+                                provider=self.config.provider.name,
+                                attempt=provider_event.attempt,
+                                max_attempts=provider_event.max_attempts,
+                                delay_seconds=provider_event.delay_seconds,
+                                reason=provider_event.reason,
+                                status_code=provider_event.status_code,
+                            )
+                        elif isinstance(provider_event, ProviderTextDelta):
+                            lifecycle.add_text(provider_event.delta)
+                            attempt_had_streamed_delta = True
+                            yield MessageDelta(
+                                turn=turn,
+                                delta=provider_event.delta,
+                                content_index=provider_event.content_index,
+                            )
+                        elif isinstance(provider_event, ProviderThinkingDelta):
+                            lifecycle.add_thinking(provider_event.delta)
+                            attempt_had_streamed_delta = True
+                            yield MessageDelta(
+                                turn=turn,
+                                delta=provider_event.delta,
+                                content_index=provider_event.content_index,
+                                content_kind="thinking",
+                            )
+                        elif isinstance(provider_event, ProviderToolCallCompleted):
+                            lifecycle.add_tool_call(provider_event.tool_call)
+                        elif isinstance(
+                            provider_event, ProviderResponseCompleted | ProviderResponseFailed
+                        ):
+                            lifecycle.complete(provider_event)
+                        else:
+                            event_type = type(provider_event).__name__
+                            raise ProviderProtocolError(
+                                f"Provider emitted unsupported event type: {event_type}"
+                            )
+                except GeneratorExit:
+                    consumer_closed = True
+                    raise
+        except Exception as exc:
+            # A recorded terminal means the provider already finished; aclose
+            # failures must not be rewritten into overflow recovery.
+            if (
+                consumer_closed
+                or isinstance(self.outcome, CancelledModelResponse)
+                or lifecycle.terminal is not None
+            ):
+                raise
+            if isinstance(exc, ContextOverflowError):
+                overflow_error = exc
+            elif is_context_overflow_message(str(exc)):
+                overflow_error = ContextOverflowError(str(exc))
+            else:
+                raise
             self.outcome = OverflowModelResponse(
-                error=exc,
+                error=overflow_error,
                 started=lifecycle.started,
                 content="".join(lifecycle.text),
                 started_response_id=lifecycle.started_response_id,
                 had_streamed_delta=attempt_had_streamed_delta,
             )
             return
-        except Exception as exc:
-            if is_context_overflow_message(str(exc)):
-                self.outcome = OverflowModelResponse(
-                    error=ContextOverflowError(str(exc)),
-                    started=lifecycle.started,
-                    content="".join(lifecycle.text),
-                    started_response_id=lifecycle.started_response_id,
-                    had_streamed_delta=attempt_had_streamed_delta,
-                )
-                return
-            raise
 
         if _is_cancelled(self.config):
             for event in _cancelled_turn_events(turn):

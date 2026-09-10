@@ -44,6 +44,7 @@ from .model_response import (
     OverflowModelResponse,
     project_completed_response,
 )
+from .stream_cleanup import closing_stream
 from .tool_execution import CancelledToolBatch, ToolBatch
 
 type AgentLoopEvent = (
@@ -180,6 +181,8 @@ async def run_agent_loop(
     # this call never emitted a matching `TurnStarted`.
     turn = config.turn_offset
     turn_started = False
+    consumer_closed = False
+    response_cancelled = False
 
     try:
         while True:
@@ -227,8 +230,17 @@ async def run_agent_loop(
                 extra_messages=state.continuation.pending_extra_messages,
                 previous_response_id=state.continuation.previous_response_id,
             )
-            async for provider_event in response_stream.events(turn=turn):
-                yield provider_event
+            async with closing_stream(response_stream.events(turn=turn)) as response_events:
+                try:
+                    async for provider_event in response_events:
+                        if isinstance(provider_event, TurnCompleted):
+                            # Model cancellation settles the turn before stream cleanup.
+                            response_cancelled = True
+                            turn_started = False
+                        yield provider_event
+                except GeneratorExit:
+                    consumer_closed = True
+                    raise
             outcome = response_stream.outcome
             if outcome is None:
                 raise RuntimeError("Provider turn ended without a typed outcome")
@@ -342,8 +354,13 @@ async def run_agent_loop(
                     is_cancelled=lambda: _is_cancelled(config),
                     on_result=state.continuation.record_tool_result,
                 )
-                async for tool_event in tool_batch.events():
-                    yield tool_event
+                async with closing_stream(tool_batch.events()) as tool_events:
+                    try:
+                        async for tool_event in tool_events:
+                            yield tool_event
+                    except GeneratorExit:
+                        consumer_closed = True
+                        raise
                 tool_outcome = tool_batch.outcome
                 if tool_outcome is None:
                     raise RuntimeError("Tool round ended without a typed outcome")
@@ -373,6 +390,9 @@ async def run_agent_loop(
             if stop:
                 break
     except Exception as exc:
+        # Cleanup cannot publish events into a closed consumer or recover a cancelled turn.
+        if consumer_closed or response_cancelled:
+            raise
         overflow_error: ContextOverflowError | None = None
         if isinstance(exc, ContextOverflowError):
             overflow_error = exc
