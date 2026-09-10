@@ -147,7 +147,8 @@ snapshots. Transcript transitions remain deferred until the next accepted turn.
 | `runner.py` | Top-level turn lifecycle, context estimation, and provider/tool orchestration |
 | `model_response.py` | Provider stream adaptation and completion metadata |
 | `provider_lifecycle.py` | Provider response start, retry, tool-call, and terminal validation |
-| `tool_execution.py` | Tool scheduling, approvals, protocol validation, and cancellation settlement |
+| `tool_execution.py` | ToolBatch facade, sequential and truncated execution, and protocol validation |
+| `prepared_tools.py` | Prepared-executor scheduling, bounded parallelism, and cancellation settlement |
 | `continuation.py` | Native cursor, pending request data, and request-boundary transitions |
 | `stream_cleanup.py` | Owned iterator close and cleanup exception precedence |
 | `config.py` | Provider-neutral dependencies, limits, hooks, and cancellation contracts |
