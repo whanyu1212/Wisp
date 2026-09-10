@@ -24,6 +24,10 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
+Preparing to test the next minor release? Read the [0.2 upgrade preview](./upgrading) for candidate
+availability, Python API changes, and external RPC-client requirements. The commands above continue
+to install the published stable release.
+
 ## Updates
 
 Installed builds check PyPI at most once every six hours after TUI startup. When a newer applicable

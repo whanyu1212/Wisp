@@ -30,6 +30,9 @@ def test_runtime_and_project_package_versions_match() -> None:
     project = tomllib.loads((_REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert project["project"]["version"] == __version__
+    lock = tomllib.loads((_REPOSITORY_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    locked = next(package for package in lock["package"] if package["name"] == "wisp-ai")
+    assert locked["version"] == __version__
 
 
 def test_changelog_covers_every_explicit_event_schema() -> None:

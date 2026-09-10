@@ -116,10 +116,11 @@ A security, data-loss, legal, or ecosystem failure that cannot be mitigated may 
 removal. Such an exception must be called out prominently in release notes with the safest available
 migration or containment advice.
 
-::: warning Unreleased agent API cleanup exception
+::: warning 0.2 agent API cleanup exception
 The agent module reorganization removes the deprecated `wisp.agent.messages.SessionEntry(...)`
-factory before the normal deprecation window and breaking package boundary. This is a specific
-exception for the agent API cleanup; the normal policy continues to apply to other public APIs.
+factory before the normal deprecation window, at the 0.2 minor-release boundary. This is a specific
+early-removal exception for the agent API cleanup; the normal policy continues to apply to other
+public APIs. The [0.2 upgrade guide](../guide/upgrading) tracks candidate availability and migration.
 
 Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
 instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.

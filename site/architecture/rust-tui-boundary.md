@@ -207,9 +207,10 @@ experimental frontend is exact-lockstep rather than range-compatible:
 - Python models are the source of truth for the live command and event schema.
 - The committed schemas generate Rust data-transfer types at compile time; Rust types are not a
   handwritten second schema.
-- The Python package/runtime and `wisp-tui` crate are currently both version `0.1.0`. The launcher
-  passes the Python version to Rust, Rust checks it against `CARGO_PKG_VERSION` before spawning the
-  backend, and the backend repeats its package version in the handshake.
+- The Python package/runtime is `0.2.0rc1` and the `wisp-tui` crate is `0.2.0-rc.1`. The launcher
+  passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
+  and checks exact equality before spawning the backend. The backend repeats its Python package
+  version in the handshake. This spelling conversion does not permit different release versions.
 - The only accepted live contract is RPC protocol v4 with event schema v36 and no negotiated
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
