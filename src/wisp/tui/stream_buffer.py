@@ -28,7 +28,7 @@ _RENDER_COOLDOWN_MULTIPLIER = 2.0
 
 
 def _next_drain_delay(render_seconds: float | None) -> float:
-    """Bound stream cadence from the previous successful Markdown rebuild cost."""
+    """Bound cadence from source preparation cost, excluding later layout/paint."""
 
     if render_seconds is None:
         return _MIN_DRAIN_INTERVAL_SECONDS
@@ -49,7 +49,6 @@ class _StreamTurn:
     completed_content: str | None = None
     pending: list[str] = field(default_factory=list)
     pending_bytes: int = 0
-    deferred: list[str] = field(default_factory=list)
     drain_scheduled: bool = False
     drain_running: bool = False
     finalize_requested: bool = False
@@ -142,12 +141,13 @@ class MarkdownStreamController:
             self._last_completed_widget = None
 
         turn.source_fragments.append(delta)
-        if transcript is None or not transcript.is_following:
-            turn.deferred.append(delta)
-            self._app.note_transcript_update(turn.widget)
-            return
+        # Following gates rendering, never fragment order. A scheduled drain can
+        # outlive a scroll-away, so all unrendered text must share one FIFO buffer.
         turn.pending.append(delta)
         turn.pending_bytes += len(delta.encode("utf-8"))
+        if transcript is None or not transcript.is_following:
+            self._app.note_transcript_update(turn.widget)
+            return
         self._queue_drain(turn, immediate=not turn.has_written)
 
     def flush(self, completed_content: str | None = None) -> None:
@@ -195,11 +195,8 @@ class MarkdownStreamController:
         """Render buffered output when the reader returns to the transcript tail."""
 
         turn = self._turn
-        if turn is None or not turn.deferred:
+        if turn is None or not turn.pending:
             return
-        turn.pending.extend(turn.deferred)
-        turn.pending_bytes += sum(len(delta.encode("utf-8")) for delta in turn.deferred)
-        turn.deferred.clear()
         self._queue_drain(turn)
 
     @property
@@ -334,16 +331,15 @@ class MarkdownStreamController:
         try:
             if turn.discarded:
                 return
-            text = "".join(turn.pending)
-            turn.pending.clear()
-            turn.pending_bytes = 0
-            if not text:
+            if not turn.pending:
                 return
             transcript = self._app.transcript
             if transcript is None or not transcript.is_following:
-                turn.deferred.append(text)
                 self._app.note_transcript_update(turn.widget)
                 return
+            text = "".join(turn.pending)
+            turn.pending.clear()
+            turn.pending_bytes = 0
             self._anchor_stream_tail(turn, transcript)
             render_started: float | None = None
             render_seconds: float | None = None
@@ -399,7 +395,12 @@ class MarkdownStreamController:
             # wait_until_idle() cannot observe a transient idle state between stages.
             if turn.finalize_requested:
                 self._queue_finalize(turn)
-            elif turn.pending and not turn.discarded:
+            elif (
+                turn.pending
+                and not turn.discarded
+                and self._app.transcript is not None
+                and self._app.transcript.is_following
+            ):
                 self._queue_drain(turn)
             self._finish_callback()
 
@@ -443,7 +444,6 @@ class MarkdownStreamController:
                 return
             turn.pending.clear()
             turn.pending_bytes = 0
-            turn.deferred.clear()
             # Always reconcile from authoritative source. Besides repairing failed
             # incremental writes, this replaces provider deltas with the exact
             # MessageCompleted content when providers normalize their final text.

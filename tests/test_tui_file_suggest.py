@@ -6,6 +6,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from textual.widgets import OptionList
 
 from wisp.events import TrustRequested
 from wisp.tui.file_index import (
@@ -106,6 +107,91 @@ def test_query_from_value_rejects_out_of_range_cursor() -> None:
 
 
 # --- widget behavior -------------------------------------------------------
+
+
+def test_new_bare_mention_does_not_reuse_previous_filtered_results() -> None:
+    picker = FileSuggest()
+    _set_paths(picker, ("apple.py", "banana.py"))
+    picker.show_for("@apple", 6)
+    assert picker.visible_paths == ("apple.py",)
+    picker.show_for("", 0)
+
+    assert picker.show_for("@", 1) == 2
+    assert set(picker.visible_paths) == {"apple.py", "banana.py"}
+
+
+def test_unchanged_mentions_reuse_options_without_building_hidden_tree() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            _set_paths(picker, tuple(f"file_{index:05}.py" for index in range(10_000)))
+            picker.show_for("@file", 5)
+            await pilot.pause()
+            fuzzy = picker.query_one("#file-picker-fuzzy", OptionList)
+            tree = picker.query_one("#file-picker-tree", OptionList)
+            first_option = fuzzy.get_option_at_index(0)
+            assert tree.option_count == 0
+
+            picker.move_selection(1)
+            selected = picker.selected_path
+            for _ in range(3):
+                picker.show_for("@file trailing text", 5)
+            await pilot.pause()
+            assert picker.selected_path == selected
+            assert fuzzy.get_option_at_index(0) is first_option
+            assert tree.option_count == 0
+
+            picker.toggle_mode()
+            assert tree.option_count == 10_000
+            first_tree_option = tree.get_option_at_index(0)
+            picker.show_for("@file", 5)
+            assert tree.get_option_at_index(0) is first_tree_option
+            picker.toggle_mode()
+            assert fuzzy.get_option_at_index(0) is first_option
+
+    anyio.run(scenario)
+
+
+def test_hidden_tree_rebuilds_from_latest_snapshot_when_opened() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)):
+            picker = app.query_one("#file-suggest", FileSuggest)
+            _set_paths(picker, ("old.py",))
+            picker.show_for("@", 1)
+            picker.toggle_mode()
+            assert picker.visible_paths == ("old.py",)
+            picker.toggle_mode()
+            _set_paths(picker, ("new.py",))
+            picker.toggle_mode()
+            assert picker.visible_paths == ("new.py",)
+            assert not picker.activate("old.py").handled
+
+    anyio.run(scenario)
+
+
+def test_picker_resize_reformats_only_the_active_options() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            _set_paths(picker, ("long_directory_name/long_file_name.py",))
+            picker.show_for("@long", 5)
+            await pilot.pause()
+            fuzzy = picker.query_one("#file-picker-fuzzy", OptionList)
+            tree = picker.query_one("#file-picker-tree", OptionList)
+            first_option = fuzzy.get_option_at_index(0)
+            await pilot.resize_terminal(40, 24)
+            await pilot.pause()
+            resized_option = fuzzy.get_option_at_index(0)
+            assert resized_option is not first_option
+            assert resized_option.id == first_option.id
+            assert tree.option_count == 0
+            picker.show_for("@long", 5)
+            assert fuzzy.get_option_at_index(0) is resized_option
+
+    anyio.run(scenario)
 
 
 def test_show_for_without_corpus_is_logically_active_for_tree_toggle() -> None:
@@ -421,6 +507,42 @@ def test_tree_directory_enter_and_left_right_only_expand_or_collapse() -> None:
     assert "src/app.py" not in collapsed
     assert "src/app.py" in expanded_again
     assert final_draft == "@src"
+
+
+def test_empty_tree_directory_marker_tracks_expansion_without_changing_rows() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            _set_paths(picker, ("empty/",))
+            editor = app.query_one("#input", PromptEditor)
+            await pilot.press("@", "tab")
+            await pilot.pause()
+            tree = picker.query_one("#file-picker-tree", OptionList)
+            assert tree.get_option_at_index(0).prompt == "▸ empty/"
+
+            for key, marker in (
+                ("enter", "▾"),
+                ("enter", "▸"),
+                ("right", "▾"),
+                ("left", "▸"),
+            ):
+                await pilot.press(key)
+                await pilot.pause()
+                assert picker.visible_paths == ("empty/",)
+                assert tree.get_option_at_index(0).prompt == f"{marker} empty/"
+                assert editor.value == "@"
+
+            # Repeating an already-applied state should still reuse the options.
+            for key in ("left", "right"):
+                await pilot.press(key)
+                await pilot.pause()
+                option = tree.get_option_at_index(0)
+                await pilot.press(key)
+                await pilot.pause()
+                assert tree.get_option_at_index(0) is option
+
+    anyio.run(scenario)
 
 
 def test_tree_directory_click_expands_without_stealing_editor_focus() -> None:

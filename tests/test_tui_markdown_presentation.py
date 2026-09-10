@@ -19,6 +19,7 @@ from rich.console import (
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.syntax import Syntax
+from rich.text import Text
 from textual import events
 from textual.visual import RenderOptions
 
@@ -218,7 +219,8 @@ def test_assistant_markdown_renders_structure_in_one_widget() -> None:
     assert "•" in rendered
 
 
-def test_assistant_markdown_drag_selection_copies_rendered_structure() -> None:
+@pytest.mark.parametrize("streamed", [False, True])
+def test_assistant_markdown_drag_selection_copies_rendered_structure(streamed: bool) -> None:
     source = (
         "## Heading\n\n"
         "Paragraph with `inline code` and more text.\n\n"
@@ -232,8 +234,12 @@ def test_assistant_markdown_drag_selection_copies_rendered_structure() -> None:
         copied: list[str] = []
         app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
         async with app.run_test(size=(60, 24)) as pilot:
-            stream = StreamMessage(source)
+            stream = StreamMessage(None if streamed else source)
             await app.query_one("#transcript", Transcript).mount(stream)
+            if streamed:
+                for chunk in source.splitlines(keepends=True):
+                    await stream.append_markdown(chunk)
+                    _segments(app, stream)
             await pilot.pause()
 
             # Drag from the heading through the fenced code row. These pointer
@@ -548,6 +554,60 @@ def test_streaming_markdown_falls_back_for_late_reference_definitions(
     assert action == "open_markdown_link('https://example.com/reference')"
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\r", "\r\n", "\v", "\f", "\x85"])
+def test_streaming_markdown_preserves_source_maps_for_unusual_line_endings(
+    separator: str,
+) -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            streamed, full = StreamMessage(), StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(streamed, full)
+            source = ""
+            for chunk in ("Stable.\n\nNext.\n\n", f"A{separator}B\n\nC\n\n", "D\n"):
+                source += chunk
+                await streamed.append_markdown(chunk)
+                await full.replace_markdown(source)
+                assert _segments(app, streamed) == _segments(app, full)
+            assert streamed.source == source
+            assert not streamed.last_markdown_incremental
+            # Completion may skip reconciliation when source already matches;
+            # the incremental presentation must therefore already be correct.
+            assert not streamed.needs_reconciliation(source)
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 31])
+@pytest.mark.parametrize(
+    "source",
+    [
+        _DOCUMENT,
+        "First.\n\nA\u2028B\n\nC\n\nD\n",
+        "[link][target]\n\nMiddle.\n\n[target]: https://example.com\n",
+        "[link][target]\n\nMiddle.\n\n[target]\x1b[0m: https://example.com\n",
+        "```ansi\n\x1b[31mred\x1b[0m\n```\n\nEnd.\n",
+        "A | B\n-- | --\n1 | 2\n\n- one\n  - nested\n\nEnd.\n",
+    ],
+)
+def test_streaming_markdown_matches_full_render_after_every_chunk(
+    chunk_size: int,
+    source: str,
+) -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            streamed, full = StreamMessage(), StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(streamed, full)
+            for start in range(0, len(source), chunk_size):
+                await streamed.append_markdown(source[start : start + chunk_size])
+                await full.replace_markdown(source[: start + chunk_size])
+                assert _segments(app, streamed) == _segments(app, full)
+            assert streamed.source == source
+
+    anyio.run(scenario)
+
+
 def test_streaming_markdown_caches_closed_fence_highlighting_by_width(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -599,7 +659,7 @@ def test_streaming_markdown_releases_incremental_caches_after_settlement() -> No
             await app.query_one("#transcript", Transcript).mount(stream)
             await stream.append_markdown("```python\nprint('cached')\n```\n\nFollowing.\n")
             _segments(app, stream, width=80)
-            cached_before = len(stream._code_block_render_cache)
+            cached_before = len(stream._block_render_cache)
             stream.release_streaming_markdown_caches()
             visual = stream._selection_visual
             assert isinstance(visual, _SelectableMarkdownVisual)
@@ -607,8 +667,8 @@ def test_streaming_markdown_releases_incremental_caches_after_settlement() -> No
             assert isinstance(renderable, _SafeAssistantMarkdown)
             return (
                 cached_before,
-                len(stream._code_block_render_cache),
-                renderable.markdown.code_block_render_cache is None,
+                len(stream._block_render_cache),
+                renderable.markdown.block_render_cache is None,
             )
 
     cached_before, cached_after, render_cache_released = anyio.run(scenario)
@@ -616,6 +676,71 @@ def test_streaming_markdown_releases_incremental_caches_after_settlement() -> No
     assert cached_before == 1
     assert cached_after == 0
     assert render_cache_released
+
+
+def test_streaming_markdown_reuses_stable_paragraph_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renders = 0
+    original_render = Text.__rich_console__
+
+    def count_render(text: Text, console: Console, options: ConsoleOptions) -> RenderResult:
+        nonlocal renders
+        if text.plain.startswith("Stable paragraph"):
+            renders += 1
+        yield from original_render(text, console, options)
+
+    monkeypatch.setattr(Text, "__rich_console__", count_render)
+
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.append_markdown("Stable paragraph with **styled** text.\n\nTail")
+            _segments(app, stream, width=80)
+            initial = renders
+            assert initial == 1
+
+            await stream.append_markdown(" grows")
+            _segments(app, stream, width=80)
+            assert renders == initial
+            _segments(app, stream, width=40)
+            assert renders == initial + 1
+            _segments(app, stream, width=80)
+            assert renders == initial + 2
+            assert len(stream._block_render_cache) == 1
+
+            # Fallback must not retain any cache keyed by discarded tokens.
+            await stream.append_markdown("\n\n[ref]: https://example.com\n")
+            assert not stream._block_render_cache
+            assert not stream.last_markdown_incremental
+
+    anyio.run(scenario)
+
+
+def test_streaming_block_cache_invalidates_on_theme_change_and_replacement() -> None:
+    async def scenario() -> None:
+        app = TextualTui()
+        async with app.run_test(size=(80, 20)) as pilot:
+            stream, full = StreamMessage(), StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream, full)
+            source = "Stable **bold** [link](https://example.com).\n\nTail"
+            await stream.append_markdown(source)
+            _segments(app, stream)
+            assert stream._block_render_cache
+            app.theme = "wisp-light"
+            await pilot.pause()
+            assert not stream._block_render_cache
+            await stream.append_markdown(" grows")
+            await full.replace_markdown(source + " grows")
+            assert _segments(app, stream) == _segments(app, full)
+            assert stream._block_render_cache
+            await stream.replace_markdown("Replacement")
+            assert not stream._block_render_cache
+            assert "Stable" not in _plain(_segments(app, stream))
+
+    anyio.run(scenario)
 
 
 def test_streaming_markdown_reuses_theme_configuration_until_style_changes(

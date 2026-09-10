@@ -134,6 +134,20 @@ uv run python -m pstats profiles/tui-stream-300.prof
 
 `--mounted-history` remains accepted as a compatibility alias for `--retained-history`.
 
+Isolate stable-paragraph wrapping from source preparation and height measurement:
+
+```bash
+uv run python -m benchmarks.tui_markdown_blocks --runs 3 --updates 100 \
+  --output profiles/tui-markdown-blocks.json
+```
+
+This microbenchmark alternates the new paragraph cache with Rich's uncached paragraph element.
+Both conditions keep the same incremental parser, code-fence cache, and one-widget visual.
+It explicitly measures every update instead of relying on stream pacing, reports paragraph-wrap
+counts, and includes an open code fence as a negative control. It is not a terminal or input-latency
+measurement. See [Python TUI responsiveness evidence](./tui_responsiveness_evidence.md) for the
+initial results and remaining limits.
+
 Compare production Rich Markdown streaming with the literal-text floor through the same Textual
 controller, transcript, pacing, and follow behavior:
 
@@ -162,7 +176,8 @@ this total exposes whether the mutable tail remains bounded instead of charging 
 document on every drain; compare it only with identical streamed content.
 `markdown_renders` splits visual renders between the mutable streaming widget (`active`) and
 `StreamMessage` widgets mounted before streaming (`settled`). `markdown_drains` measures the
-coalesced source-to-renderable write already used by production pacing. `display_updates` counts
+coalesced source-to-renderable preparation already used by production pacing; it excludes the
+subsequent visual measurement, layout, and paint. `display_updates` counts
 attempted `LayoutUpdate`, `ChopsUpdate`, and other display-boundary calls. Chop-span totals separate
 input, terminal-emitted, and exact duplicate spans suppressed by `_DisplayedFrame`.
 `display_frame_fail_open_count` records partial updates safely passed through without exact-cell
