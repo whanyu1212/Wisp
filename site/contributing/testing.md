@@ -39,6 +39,29 @@ trust, set it via `monkeypatch.setenv`.
 Prefer `ScriptedProvider` / `FakeProvider` from `wisp.providers.fake` for new provider-facing tests
 rather than live models.
 
+## Harness interruption and recovery
+
+For changes to conversation orchestration, start with:
+
+```bash
+uv run pytest tests/test_agent_harness.py tests/test_agent_harness_interruptions.py \
+  tests/test_agent_runtime_invariants.py tests/test_coding_session.py tests/test_compaction.py
+```
+
+The interruption matrix records a normal event sequence for streaming, sequential and parallel
+tools, queues, transcript replacement, and context rebase. Each fresh run cancels or explicitly closes
+the stream after one emitted event boundary. Failure notes name the scenario, action, event type,
+and occurrence; a single pytest case exercises all boundaries for its scenario and action.
+
+Cancellation must settle its event stream. Explicit closure cannot publish terminal events, so the
+test instead checks retained state and continues the same harness. Both paths check output retention,
+queue ordering, and tool-result repair without duplicates. Separate fault cases cover provider/tool
+exceptions, boundary preparation failure, and rejection of a stale rebase.
+
+These deterministic fixtures complement targeted in-flight cancellation tests; they do not enumerate
+every task interleaving or replace provider-adapter tests. For the ownership and lifecycle contracts,
+see [Agent runtime architecture](../architecture/agent-runtime.md).
+
 ## Rust workspace and handoff
 
 Use the repository's pinned Rust 1.85.0 toolchain for the Rust protocol and experimental TUI gates:
