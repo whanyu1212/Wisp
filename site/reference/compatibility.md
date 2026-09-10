@@ -41,11 +41,11 @@ Package organization beyond `wisp-ai` remains tracked by
 
 The proposed external frontend protocol is a separate compatibility domain. Python models remain
 its semantic source of truth, and deterministic current-version artifacts are checked in under
-`schemas/live-rpc/v4/`. Ordinary command envelopes inherit the selected connection version rather
+`schemas/live-rpc/v5/`. Ordinary command envelopes inherit the selected connection version rather
 than carrying their own version. Events continue to carry the independently negotiated
 `schema_version` described below.
 
-The v4 schema bundle contains handshake request and response messages, the complete typed-client
+The v5 schema bundle contains handshake request and response messages, the complete typed-client
 command output union, the complete current live event output union, deterministic conformance
 fixtures, and validation-only projections consumed by Rust type generation. Command schemas describe payloads
 produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
@@ -96,8 +96,8 @@ Schema bundles are repository build inputs and versioned GitHub release assets n
 `wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
 models and compile-time generated Serde crate define the contract for external frontends. Protocol
 v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version,
-v3 adds authoritative model-catalog discovery, and v4 adds backend-owned connection
-workflows. All earlier bundles remain immutable.
+v3 adds authoritative model-catalog discovery, v4 adds backend-owned connection workflows,
+and v5 adds opt-in persistence for model configuration. All earlier bundles remain immutable.
 
 ## Deprecation and removal
 

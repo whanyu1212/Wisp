@@ -12,10 +12,10 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v4 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v4/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v5 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v5/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 4;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 5;
 /// The current Wisp event schema version.
 pub const EVENT_SCHEMA_VERSION: u32 = 36;
 /// The fixed maximum payload size for either handshake frame.
@@ -151,22 +151,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v4/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v5/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v4/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v5/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v4/commands.schema.json"
+        "../../../schemas/live-rpc/v5/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v4/events.schema.json"
+        "../../../schemas/live-rpc/v5/events.schema.json"
     ))
 });
 
@@ -428,7 +428,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v4/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v5/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -463,7 +463,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v4/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v5/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -523,7 +523,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v4/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -537,6 +537,19 @@ pub mod commands {
         Once,
         ToolSession,
         AllSession,
+    }
+
+    /// Explicit model configuration; omitted fields retain the backend's semantics.
+    #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+    pub struct ModelConfiguration {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub effort: Option<String>,
+        pub clear_effort: bool,
+        pub persist_model_selection: bool,
     }
 
     /// One active agent queue addressed by the live RPC protocol.
@@ -567,6 +580,18 @@ pub mod commands {
     }
 
     impl WispTypedClientRpcCommands {
+        /// Validate a model selection against the canonical configure contract.
+        pub fn configure_model(
+            id: &str,
+            configuration: &ModelConfiguration,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::to_value(configuration)
+                .expect("model configuration contains only JSON scalar fields");
+            value["type"] = serde_json::json!("configure");
+            value["id"] = serde_json::json!(id);
+            deserialize(value)
+        }
+
         /// Request the backend-authoritative provider and model catalog.
         pub fn get_model_catalog(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_model_catalog", "id": id}))
@@ -916,7 +941,7 @@ pub mod commands {
 
 pub mod events {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v4/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(

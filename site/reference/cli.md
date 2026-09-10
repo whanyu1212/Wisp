@@ -84,7 +84,7 @@ Provider and model defaults for the dedicated command come from configuration an
 
 `rust` is an experimental, macOS/Linux-only frontend. [#470](https://github.com/whanyu1212/Wisp/issues/470)
 closed with Textual as the default; Rust remains opt-in and is not a supported or shipped product
-path. It requires the Python package version, Rust crate version, live RPC v4, and event schema v36
+path. It requires the Python package version, Rust crate version, live RPC v5, and event schema v36
 to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls back to Textual when
 the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
 do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)

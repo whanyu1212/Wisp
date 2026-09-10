@@ -142,8 +142,8 @@ def test_server_hello_requires_and_reports_the_complete_contract() -> None:
     with pytest.raises(ValidationError, match="protocol_version"):
         RpcHandshakeResponseAdapter.validate_json(
             '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
-            '"event_schema_version":36,"min_protocol_version":4,'
-            '"max_protocol_version":4,"capabilities":[],"limits":'
+            '"event_schema_version":36,"min_protocol_version":5,'
+            '"max_protocol_version":5,"capabilities":[],"limits":'
             '{"max_client_frame_bytes":1024,"max_server_frame_bytes":1024}}'
         )
 
@@ -173,7 +173,10 @@ def test_negotiation_selects_highest_common_versions_and_capability_intersection
     ("client", "backend_capabilities", "expected_code"),
     [
         (
-            _client_hello(min_protocol_version=5, max_protocol_version=5),
+            _client_hello(
+                min_protocol_version=LIVE_RPC_PROTOCOL_VERSION + 1,
+                max_protocol_version=LIVE_RPC_PROTOCOL_VERSION + 1,
+            ),
             ("streaming.text",),
             "protocol_version_mismatch",
         ),
@@ -213,8 +216,8 @@ def test_negotiation_returns_bounded_structured_rejections(
 def test_server_handshake_adapter_parses_complete_success_and_rejection() -> None:
     success = RpcHandshakeResponseAdapter.validate_json(
         '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
-        '"protocol_version":4,"event_schema_version":36,'
-        '"min_protocol_version":4,"max_protocol_version":4,'
+        '"protocol_version":5,"event_schema_version":36,'
+        '"min_protocol_version":5,"max_protocol_version":5,'
         '"capabilities":[],"limits":{"max_client_frame_bytes":1024,'
         '"max_server_frame_bytes":2048}}'
     )

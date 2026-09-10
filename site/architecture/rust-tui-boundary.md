@@ -164,7 +164,7 @@ module graph or translate Textual widgets line by line.
 | Input/event coordination, command correlation, visible status, pending local submissions | `tui/shell.py`, `tui/state.py` | Reimplement as a terminal-independent Rust reducer driven by local actions and typed events. Python queue/run state remains authoritative. |
 | Session catalog, selection, history hydration, paging, detail lookup | `tui/shell.py`, `tui/history.py` | Port client correlation and viewport projection. Continue loading and validating durable state through Python RPC. |
 | Slash-command parsing and command catalog | `tui/commands.py`, `tui/shell.py` | Rust owns local dispatch and presentation; executable command metadata comes from Python. Local-only actions such as help and theme remain frontend-owned. |
-| Model lookup, ambiguity handling, effort filtering, selection persistence | `tui/shell.py` | Move effective semantics behind the backend contract in #460 and #405. Rust renders and submits selections without copying the catalog. |
+| Model lookup, ambiguity handling, effort filtering, selection persistence | `rpc/configure.py`, provider catalog, settings | Rust renders the backend catalog and requests persistence through `configure`; Python applies and saves resolved selections. Textual retains its existing persistence path. |
 | Credential status, API-key persistence, disconnect, device-code login | `tui/auth_commands.py`, `tui/connections.py` | Move behind the secure Python contract in #461. Rust owns masked entry and progress presentation only. |
 | Protected-path-aware snapshot construction and path ranking | `tui/file_index.py`, `tui/file_suggest.py` | Move safe discovery behind #462. Rust presents returned relative suggestions and may not independently walk the workspace. |
 | Update checking, install capability, and update execution | `tui/update_commands.py`, `wisp.update_check` | Keep Python-owned. Rust presents notices and requests supported actions according to the launcher/distribution contract. |
@@ -211,7 +211,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
   passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
   and checks exact equality before spawning the backend. The backend repeats its Python package
   version in the handshake. This spelling conversion does not permit different release versions.
-- The only accepted live contract is RPC protocol v4 with event schema v36 and no negotiated
+- The only accepted live contract is RPC protocol v5 with event schema v36 and no negotiated
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
@@ -220,7 +220,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-The committed v4 schema manifest and generated projections define the current handshake fields,
+The committed v5 schema manifest and generated projections define the current handshake fields,
 frame limits, strict event variants, and UTF-8 JSON representation. See
 [Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 
@@ -256,13 +256,13 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | Bounded history paging, `/resume`, `/new` | Present in Rust | Acceptable difference while experimental |
 | `/clone`, `/tree`, `/unrevert`, `/name` | Present in Rust; not in Textual | Acceptable difference |
 | `/connect` API-key and device-code flows | Present in Rust | Acceptable difference while experimental |
-| Live RPC v4 / event schema v36 lockstep | Enforced at handshake | Acceptable difference while experimental |
+| Live RPC v5 / event schema v36 lockstep | Enforced at handshake | Acceptable difference while experimental |
 | Keyboard-only operation; no mouse | Intentional | Acceptable difference |
 | No transcript search | Intentional while experimental | Acceptable difference |
 | No automatic fallback to Textual | Intentional; #470 closed this way | Acceptable difference |
 | Source-build only; no wheel binary | Current packaging | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)) |
 | Windows | Rejected before binary resolution | Acceptable difference; not a claimed target |
-| Model/effort picker interaction | Rust validates the catalog; picker UX is incomplete | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
+| Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
 | Protected-path-aware file suggestions | Backend-owned; Rust must not walk the workspace | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#462](https://github.com/whanyu1212/Wisp/issues/462)) |
 | Skills, command catalog, MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |
@@ -305,7 +305,7 @@ moving unrelated Python systems.
 #470 closed as a stage-2 hold because several reconsideration conditions still hold:
 
 - there is no comparative PTY input-to-frame measurement against Textual;
-- UX parity for model/effort pickers, file suggestions, skills, MCP, and keybindings is incomplete
+- UX parity for file suggestions, skills, MCP, and keybindings is incomplete
   ([#467](https://github.com/whanyu1212/Wisp/issues/467));
 - hardening, backpressure, and terminal-safety evidence is incomplete
   ([#468](https://github.com/whanyu1212/Wisp/issues/468));

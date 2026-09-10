@@ -36,6 +36,121 @@ def test_command_log_ignores_incomplete_records(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
+def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
+    binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
+    if binary_value is None:
+        pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
+    binary = Path(binary_value).resolve(strict=True)
+    # conftest gives both execve children the same isolated home and project.
+    settings_path = Path.home() / ".wisp" / "settings.json"
+
+    def run_selection(*, restart: bool, picker_only: bool = False) -> None:
+        environment = {
+            **os.environ,
+            "WISP_RUST_TUI_BINARY": str(binary),
+            "WISP_TRUST": "1",
+        }
+        for key in ("WISP_PROVIDER", "WISP_MODEL", "WISP_EFFORT"):
+            environment.pop(key, None)
+        if not restart:
+            environment["WISP_PROVIDER"] = "fake"
+        child_pid, terminal_fd = pty.fork()
+        if child_pid == 0:
+            os.execve(
+                sys.executable,
+                [
+                    sys.executable,
+                    "-m",
+                    "wisp",
+                    "tui",
+                    "--renderer",
+                    "rust",
+                    "--session-dir",
+                    str(tmp_path / ("restart" if restart else "initial")),
+                ],
+                environment,
+            )
+        fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+        initial_terminal = termios.tcgetattr(terminal_fd)
+        output = bytearray()
+        status: int | None = None
+        submitted = restart
+        picker_phase = "startup" if picker_only else "done"
+        quit_sent = False
+        deadline = time.monotonic() + 25
+        try:
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([terminal_fd], [], [], 0.05)
+                if readable:
+                    try:
+                        output.extend(os.read(terminal_fd, 65536))
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                ready = b"Type a prompt below to start." in output
+                if picker_phase == "startup" and ready and b"fake/fake" in output:
+                    os.write(terminal_fd, b"/model\r")
+                    picker_phase = "loading"
+                    output.clear()
+                elif picker_phase == "loading" and b"Current:" in output:
+                    # The fake provider is hidden; select the first real catalog model
+                    # and its first effort level. Configuration makes no provider request.
+                    os.write(terminal_fd, b"\x1b[C\r")
+                    picker_phase = "applying"
+                    submitted = True
+                    output.clear()
+                elif picker_phase == "applying" and b"Model selection applied." in output:
+                    saved = json.loads(settings_path.read_text())
+                    assert saved["provider"] != "fake" and saved["model"]
+                    assert saved["effort"]
+                    picker_phase = "done"
+                elif not submitted and not picker_only and ready and b"fake/fake" in output:
+                    os.write(terminal_fd, b"/model fake::custom-model effort\r")
+                    submitted = True
+                    output.clear()
+                applied = (
+                    ready and b"fake/custom-model" in output and b"effort" in output
+                    if restart
+                    else b"Model selection applied." in output
+                )
+                if submitted and applied and not quit_sent:
+                    os.write(terminal_fd, b"\x03")
+                    quit_sent = True
+                waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
+                if waited_pid == child_pid:
+                    status = waited_status
+                    break
+            assert status is not None, f"Rust model selection timed out: {bytes(output)!r}"
+            assert submitted and quit_sent, bytes(output)
+            if not picker_only:
+                assert b"custom-model" in output and b"effort" in output, bytes(output)
+            assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
+            assert termios.tcgetattr(terminal_fd) == initial_terminal
+        finally:
+            if status is None:
+                try:
+                    os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(child_pid, 0)
+            os.close(terminal_fd)
+
+    run_selection(restart=False, picker_only=True)
+    run_selection(restart=False)
+    assert json.loads(settings_path.read_text()) == {
+        "provider": "fake",
+        "model": "custom-model",
+        "effort": "effort",
+    }
+    # No provider/model/effort environment overrides: prove defaults are restored.
+    run_selection(restart=True)
+
+
+@pytest.mark.process
 @pytest.mark.parametrize(
     ("exercise_prompt", "expected_exit"),
     [(True, 0), (False, 1)],
@@ -101,7 +216,9 @@ def test_rust_tui_cross_language_smoke(
                 else:
                     os.write(terminal_fd, b"hello rust\r")
                 prompt_sent = True
-            if exercise_prompt and not response_seen and b"fake response" in output:
+            # Streaming can draw "fake" and "response" in separate frames with
+            # cursor movements between them; the raw PTY bytes need not be adjacent.
+            if exercise_prompt and not response_seen and b"response" in output:
                 response_seen = True
             if (
                 exercise_prompt
@@ -170,10 +287,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -438,10 +555,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -541,8 +658,13 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and b"Type a prompt below to start." in output
-                and command_types[:3]
-                == ["get_messages", "get_connection_catalog", "get_queue_state"]
+                and command_types[:4]
+                == [
+                    "get_messages",
+                    "get_connection_catalog",
+                    "get_model_catalog",
+                    "get_queue_state",
+                ]
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"prompt-kept-running\r")
@@ -635,9 +757,10 @@ for line in sys.stdin:
         if command["type"] in {"prompt", "steer", "follow_up", "pop_queue", "cancel", "shutdown"}
     ]
     assert phase == "shutdown sent", bytes(output)
-    assert command_types[:3] == [
+    assert command_types[:4] == [
         "get_messages",
         "get_connection_catalog",
+        "get_model_catalog",
         "get_queue_state",
     ]
     assert [command["type"] for command in lifecycle_commands] == [
@@ -720,10 +843,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 4,
+    "protocol_version": 5,
     "event_schema_version": 36,
-    "min_protocol_version": 4,
-    "max_protocol_version": 4,
+    "min_protocol_version": 5,
+    "max_protocol_version": 5,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -903,8 +1026,13 @@ for line in sys.stdin:
             now = time.monotonic()
             if (
                 phase == "startup"
-                and command_types[:3]
-                == ["get_messages", "get_connection_catalog", "get_queue_state"]
+                and command_types[:4]
+                == [
+                    "get_messages",
+                    "get_connection_catalog",
+                    "get_model_catalog",
+                    "get_queue_state",
+                ]
                 and b"Type a prompt below to start." in output
             ):
                 os.write(terminal_fd, b"/name client-requested\r")

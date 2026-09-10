@@ -124,26 +124,29 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
+        "missing protocol schema directory: v4",
     )
 
     (directory / "commands.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("commands.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "protocol schema hash mismatch: v4/commands.schema.json",
-        "protocol schema dialect mismatch: v4/commands.schema.json",
+        "protocol schema hash mismatch: v5/commands.schema.json",
+        "protocol schema dialect mismatch: v5/commands.schema.json",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
+        "missing protocol schema directory: v4",
     )
 
     write_protocol_artifacts(directory)
     (directory / "obsolete.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("obsolete.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "unexpected protocol artifact set: v4",
+        "unexpected protocol artifact set: v5",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
+        "missing protocol schema directory: v4",
     )
 
 
@@ -189,6 +192,7 @@ def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
         "missing protocol schema directory: v4",
+        "missing protocol schema directory: v5",
     )
 
     monkeypatch.setattr(
@@ -227,7 +231,7 @@ def test_git_history_check_reports_modified_committed_version_artifacts(
 def test_protocol_version_directories_cannot_be_cross_written(tmp_path: Path) -> None:
     assert protocol_schema_directory(tmp_path, protocol_version=3) == tmp_path / "v3"
 
-    with pytest.raises(RuntimeError, match="refusing to write protocol v4 into v2"):
+    with pytest.raises(RuntimeError, match="refusing to write protocol v5 into v2"):
         write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=2))
 
 
@@ -419,6 +423,8 @@ def test_typed_command_output_validates_but_none_is_never_a_wire_value() -> None
             "full_content": True,
         },
         {"type": "configure", "clear_effort": False},
+        {"type": "configure", "persist_model_selection": True},
+        {"type": "configure", "mode": "plan", "persist_model_selection": True},
         {
             "type": "configure",
             "clear_effort": True,
@@ -445,6 +451,8 @@ def test_command_schema_rejects_semantically_invalid_typed_output(
         {"type": "cancel", "target_id": ""},
         {"type": "get_messages", "entry_ids": []},
         {"type": "configure", "clear_effort": False},
+        {"type": "configure", "persist_model_selection": True},
+        {"type": "configure", "mode": "plan", "persist_model_selection": True},
         {
             "type": "configure",
             "clear_effort": True,

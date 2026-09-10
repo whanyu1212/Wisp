@@ -20,6 +20,7 @@ from wisp.rpc.inspection import rpc_model_catalog_snapshot
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError
+from wisp.settings import try_persist_user_model_selection
 
 
 def handle_rpc_configure_command(
@@ -154,6 +155,14 @@ def handle_rpc_configure_command(
         if has_auto_compaction_enabled:
             configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
             configure_overrides.has_auto_compaction_enabled = True
+    if command.persist_model_selection and not try_persist_user_model_selection(
+        selected_provider.name, selected_model, selected_effort
+    ):
+        write_event(
+            ErrorEvent(
+                message="Model selection applied for this run; could not save user defaults."
+            )
+        )
     if model_catalog is not None:
         write_event(RpcModelCatalogReported(command_id=command_id, catalog=model_catalog))
     elif model_catalog_error is not None:

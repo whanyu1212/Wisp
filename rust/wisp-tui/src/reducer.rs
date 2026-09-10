@@ -3,14 +3,20 @@
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::ProtocolDecodeError;
-use wisp_protocol::events::{ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress};
+use wisp_protocol::events::{
+    ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress, ModelCatalogSnapshot,
+};
 
 use crate::tool_cards::{BoundedText, ToolCallInput, ToolResultInput, bounded_identity};
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
-use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
+use wisp_protocol::commands::{
+    ApprovalScope, ModelConfiguration, QueueKind, WispTypedClientRpcCommands,
+};
 
 mod event_projection;
+mod model_selection;
+use model_selection::ModelOperation;
 
 pub use event_projection::EventProjectionError;
 
@@ -614,6 +620,9 @@ pub struct UiState {
     pub selected_session: Option<SessionIdentity>,
     pub session_operation: Option<SessionOperation>,
     pub connection_catalog: ConnectionCatalogSnapshot,
+    pub model_catalog: Option<ModelCatalogSnapshot>,
+    pub model_selection_stale: bool,
+    model_operation: Option<ModelOperation>,
     connection_operation: Option<ConnectionOperation>,
     connection_catalog_reload_pending: bool,
     pub queue: QueueState,
@@ -666,6 +675,9 @@ impl UiState {
                 providers: Vec::new(),
             },
             connection_operation: None,
+            model_catalog: None,
+            model_selection_stale: false,
+            model_operation: None,
             connection_catalog_reload_pending: false,
             queue: QueueState::default(),
             current_command: None,
@@ -695,6 +707,7 @@ impl UiState {
 
     pub(crate) fn editor_editable(&self) -> bool {
         !self.exit_requested
+            && !self.model_configuration_active()
             && self.input_ready
             && self.session_operation.is_none()
             && match self.current_command.as_ref() {
@@ -818,6 +831,8 @@ pub enum CommandKind {
     NavigateSessionTree,
     UnrevertSessionTree,
     GetConnectionCatalog,
+    GetModelCatalog,
+    Configure,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -846,6 +861,8 @@ impl CommandKind {
             Self::NavigateSessionTree => "navigate_session_tree",
             Self::UnrevertSessionTree => "unrevert_session_tree",
             Self::GetConnectionCatalog => "get_connection_catalog",
+            Self::GetModelCatalog => "get_model_catalog",
+            Self::Configure => "configure",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -900,6 +917,11 @@ pub enum BackendEvent {
         command_id: String,
         catalog: ConnectionCatalogSnapshot,
     },
+    ModelCatalogReported {
+        command_id: String,
+        catalog: ModelCatalogSnapshot,
+    },
+    Diagnostic(String),
     DeviceCodeReported {
         command_id: String,
         challenge: DeviceCodeChallenge,
@@ -985,6 +1007,13 @@ pub enum UiAction {
     StartupHydration,
     OpenConnectionPanel,
     LoadConnectionCatalog,
+    LoadModelCatalog,
+    OpenModelPicker,
+    ConfigureModel(ModelConfiguration),
+    RejectModelRequest {
+        command_id: String,
+        error: String,
+    },
     StoreApiKey {
         provider: String,
         api_key: ApiKey,
@@ -1056,6 +1085,11 @@ pub enum UiEffect {
     SendSecretCommand(SecretCommand),
     ShowConnectionPanel(ConnectionCatalogSnapshot),
     ConnectionCatalogUpdated(ConnectionCatalogSnapshot),
+    ShowModelPicker,
+    ModelCatalogUpdated(ModelCatalogSnapshot),
+    InvalidateModelCatalog,
+    ModelCatalogUnavailable,
+    ModelConfigurationApplied,
     ShowDeviceCode(DeviceCodeChallenge),
     DeviceCodeProgress(DeviceCodeProgress),
     FinishDeviceCode,
@@ -1082,6 +1116,7 @@ pub enum UiEffect {
     HistoryWindowChanged,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
     Notice(String),
+    Diagnostic(String),
     RequestRender,
     Exit,
 }
@@ -1117,6 +1152,14 @@ pub fn reduce(
             UiEffect::RequestRender,
         ]),
         UiAction::LoadConnectionCatalog => load_connection_catalog(state, ids),
+        UiAction::LoadModelCatalog => Ok(model_selection::load(state, ids)?),
+        UiAction::OpenModelPicker => Ok(model_selection::open(state, ids)?),
+        UiAction::ConfigureModel(configuration) => {
+            Ok(model_selection::configure(state, configuration, ids)?)
+        }
+        UiAction::RejectModelRequest { command_id, error } => {
+            Ok(model_selection::reject(state, &command_id, error))
+        }
         UiAction::StoreApiKey { provider, api_key } => store_api_key(state, provider, api_key, ids),
         UiAction::DisconnectProvider { provider } => disconnect_provider(state, provider, ids),
         UiAction::BeginDeviceCode { provider } => begin_device_code(state, provider, ids),
@@ -1164,6 +1207,7 @@ pub fn reduce(
         UiAction::Cancel => cancel(state, ids),
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
+            state.model_operation = None;
             state.view_status = ViewStatus::Error;
             state.transcript.finish_active_response();
             state
@@ -3563,6 +3607,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = model_selection::observe(state, &event, ids)? {
+        return Ok(effects);
+    }
     if let Some(mut effects) = handle_history_backend_event(state, &event) {
         if state.post_prompt_session_sync_pending
             && state.post_prompt_stats_command_id.is_none()
@@ -3582,6 +3629,9 @@ fn handle_backend_event(
         return Ok(effects);
     }
     match event {
+        BackendEvent::Diagnostic(message) => {
+            Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
+        }
         BackendEvent::MessageStarted { turn } => {
             state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
@@ -3679,7 +3729,9 @@ fn handle_backend_event(
             state.provider = Some(provider);
             state.model = model;
             state.effort = effort;
-            reload_connection_catalog_after_configuration(state, ids)
+            let mut effects = reload_connection_catalog_after_configuration(state, ids)?;
+            effects.extend(model_selection::invalidate(state, ids)?);
+            Ok(effects)
         }
         BackendEvent::QueueUpdated {
             steering,
@@ -3703,6 +3755,7 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ConnectionCatalogReported { .. }
+        | BackendEvent::ModelCatalogReported { .. }
         | BackendEvent::DeviceCodeReported { .. }
         | BackendEvent::DeviceCodeProgress { .. }
         | BackendEvent::SessionsReported { .. }
@@ -3808,6 +3861,12 @@ mod tests {
             | UiEffect::ReplaceTranscript
             | UiEffect::HistoryWindowChanged
             | UiEffect::OpenExactDetail(_)
+            | UiEffect::ShowModelPicker
+            | UiEffect::ModelCatalogUpdated(_)
+            | UiEffect::InvalidateModelCatalog
+            | UiEffect::ModelCatalogUnavailable
+            | UiEffect::ModelConfigurationApplied
+            | UiEffect::Diagnostic(_)
             | UiEffect::Notice(_)
             | UiEffect::RequestRender
             | UiEffect::Exit => None,
@@ -5162,14 +5221,15 @@ mod tests {
         assert_eq!(state.model.as_deref(), Some("claude-test"));
         assert_eq!(state.effort.as_deref(), Some("high"));
         assert!(state.connection_catalog.providers.is_empty());
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                UiEffect::SendCommand(_),
-                UiEffect::ConnectionCatalogUpdated(_),
-                UiEffect::RequestRender
-            ]
-        ));
+        let commands: Vec<_> = effects.iter().filter_map(command_value).collect();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["type"], "get_connection_catalog");
+        assert_eq!(commands[1]["type"], "get_model_catalog");
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::InvalidateModelCatalog))
+        );
     }
 
     #[test]
@@ -7000,11 +7060,9 @@ mod tests {
         )
         .unwrap();
         assert!(state.connection_catalog_reload_pending);
-        assert!(
-            effects
-                .iter()
-                .all(|effect| !matches!(effect, UiEffect::SendCommand(_)))
-        );
+        let commands: Vec<_> = effects.iter().filter_map(command_value).collect();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["type"], "get_model_catalog");
 
         let challenge = DeviceCodeChallenge {
             provider: "openai-codex".into(),

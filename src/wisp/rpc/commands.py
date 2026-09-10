@@ -418,6 +418,7 @@ class ConfigureCommand(RpcCommandModel):
     # provider's own default: it has no default value that `exclude_none`
     # would ever drop, since `False` is not `None`.
     clear_effort: bool = False
+    persist_model_selection: bool = False
 
     @model_validator(mode="after")
     def _validate_mutation(self) -> ConfigureCommand:
@@ -434,6 +435,13 @@ class ConfigureCommand(RpcCommandModel):
             raise ValueError("configure commands require an effective mutation")
         if self.clear_effort and self.effort is not None:
             raise ValueError("configure commands cannot set and clear effort together")
+        if self.persist_model_selection and not (
+            self.provider is not None
+            or self.model is not None
+            or self.effort is not None
+            or self.clear_effort
+        ):
+            raise ValueError("persist_model_selection requires a model selection mutation")
         return self
 
 

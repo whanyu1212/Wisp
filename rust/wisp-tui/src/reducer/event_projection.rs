@@ -55,12 +55,25 @@ impl BackendEvent {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         let command_id = match event_type.as_str() {
-            "rpc.connection_catalog" | "rpc.device_code" | "rpc.device_code.progress" => {
+            "rpc.connection_catalog"
+            | "rpc.model_catalog"
+            | "rpc.device_code"
+            | "rpc.device_code.progress" => {
                 exact_string_field(&value, &event_type, "command_id", 256)?
             }
             _ => return Self::from_projection_value(&value),
         };
         match event_type.as_str() {
+            "rpc.model_catalog" => event
+                .model_catalog(&command_id)
+                .map(|catalog| Self::ModelCatalogReported {
+                    command_id,
+                    catalog,
+                })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "catalog",
+                }),
             "rpc.connection_catalog" => event
                 .connection_catalog(&command_id)
                 .map(|catalog| Self::ConnectionCatalogReported {
@@ -99,6 +112,19 @@ impl BackendEvent {
     pub fn from_projection_value(value: &Value) -> Result<Self, EventProjectionError> {
         let event_type = string_field(value, "<unknown>", "type")?;
         let projected = match event_type.as_str() {
+            "error" => Self::Diagnostic(super::bounded_session_text(
+                &string_field(value, &event_type, "message")?,
+                super::SESSION_NOTICE_MAX_BYTES,
+            )),
+            "rpc.model_catalog" => {
+                let event = wisp_protocol::events::deserialize(value.clone()).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "catalog",
+                    }
+                })?;
+                return Self::from_live(&event);
+            }
             "message.started" => Self::MessageStarted {
                 turn: u64_field(value, &event_type, "turn")?,
             },
