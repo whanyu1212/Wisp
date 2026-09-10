@@ -539,6 +539,19 @@ pub mod commands {
         AllSession,
     }
 
+    /// Explicit model configuration; omitted fields retain the backend's semantics.
+    #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+    pub struct ModelConfiguration {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub effort: Option<String>,
+        pub clear_effort: bool,
+        pub persist_model_selection: bool,
+    }
+
     /// One active agent queue addressed by the live RPC protocol.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum QueueKind {
@@ -567,6 +580,18 @@ pub mod commands {
     }
 
     impl WispTypedClientRpcCommands {
+        /// Validate a model selection against the canonical configure contract.
+        pub fn configure_model(
+            id: &str,
+            configuration: &ModelConfiguration,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::to_value(configuration)
+                .expect("model configuration contains only JSON scalar fields");
+            value["type"] = serde_json::json!("configure");
+            value["id"] = serde_json::json!(id);
+            deserialize(value)
+        }
+
         /// Request the backend-authoritative provider and model catalog.
         pub fn get_model_catalog(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_model_catalog", "id": id}))

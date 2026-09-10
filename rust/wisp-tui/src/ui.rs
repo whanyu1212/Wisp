@@ -160,9 +160,21 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
     if let Some(provider) = state.provider.as_deref() {
         details.push_str("  •  ");
         details.push_str(provider);
-        if let Some(model) = state.model.as_deref() {
+        if let Some(model) = state
+            .model_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.selection.effective_model.as_deref())
+            .or(state.model.as_deref())
+        {
             details.push('/');
             details.push_str(model);
+        }
+        if let Some(effort) = state.effort.as_deref() {
+            details.push_str(" · ");
+            details.push_str(effort);
+        }
+        if state.model_selection_stale {
+            details.push_str(" (last confirmed; selection unavailable)");
         }
     }
     if let Some(session) = state.selected_session.as_ref() {
@@ -184,7 +196,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
         ),
         Span::raw(" • "),
         Span::styled(
-            state.view_status.as_str(),
+            if state.model_configuration_active() {
+                "configuring"
+            } else {
+                state.view_status.as_str()
+            },
             status_style.add_modifier(Modifier::BOLD),
         ),
     ];

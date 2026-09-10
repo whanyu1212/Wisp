@@ -40,6 +40,43 @@ fn every_python_command_fixture_round_trips_in_rust() {
 }
 
 #[test]
+fn model_configuration_builder_validates_persistence_and_effort_shapes() {
+    use commands::{ModelConfiguration, WispTypedClientRpcCommands};
+    let configuration = ModelConfiguration {
+        provider: Some("custom-provider".into()),
+        model: Some("custom-model".into()),
+        clear_effort: true,
+        persist_model_selection: true,
+        ..Default::default()
+    };
+    let command = WispTypedClientRpcCommands::configure_model("selection", &configuration).unwrap();
+    let value = command.to_value().unwrap();
+    assert_eq!(value["persist_model_selection"], true);
+    assert_eq!(value["clear_effort"], true);
+    assert!(value.get("effort").is_none());
+    let conflict = ModelConfiguration {
+        effort: Some("high".into()),
+        ..configuration
+    };
+    assert!(WispTypedClientRpcCommands::configure_model("selection", &conflict).is_err());
+    let no_selection = ModelConfiguration {
+        persist_model_selection: true,
+        ..Default::default()
+    };
+    assert!(WispTypedClientRpcCommands::configure_model("selection", &no_selection).is_err());
+    assert!(
+        WispTypedClientRpcCommands::configure_model(
+            "selection",
+            &ModelConfiguration {
+                provider: Some("alpha".into()),
+                ..Default::default()
+            }
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn secret_commands_redact_debug_output() {
     let command = commands::WispTypedClientRpcCommands::store_api_key(
         "store-1",

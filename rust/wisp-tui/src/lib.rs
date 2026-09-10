@@ -8,6 +8,7 @@ mod detail_view;
 mod framing;
 pub mod history;
 mod markdown;
+mod model_picker;
 mod process;
 mod prompt_editor;
 pub mod reducer;
@@ -30,6 +31,7 @@ use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use detail_view::DetailView;
 use framing::FrameReader;
+use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
 use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
@@ -421,6 +423,8 @@ struct LiveUi {
     session_picker: Option<SessionPicker>,
     session_tree_picker: Option<SessionTreePicker>,
     connection_panel: Option<ConnectionPanel>,
+    model_picker: Option<ModelPicker>,
+    rendered_model_picker: bool,
 }
 
 impl Default for LiveUi {
@@ -442,6 +446,8 @@ impl Default for LiveUi {
             session_picker: None,
             session_tree_picker: None,
             connection_panel: None,
+            model_picker: None,
+            rendered_model_picker: false,
         }
     }
 }
@@ -540,6 +546,15 @@ impl LiveUi {
                     let value = serde_json::to_value(&command)?;
                     let command_type = value.get("type").and_then(|value| value.as_str());
                     let payload = Bytes::from(serde_json::to_vec(&value)?);
+                    if payload.len() > limit
+                        && matches!(command_type, Some("configure" | "get_model_catalog"))
+                    {
+                        let command_id = value["id"].as_str().expect("model request ID").to_owned();
+                        pending.extend(reducer::reduce(&mut self.state, UiAction::RejectModelRequest {
+                            command_id, error: format!("Model request exceeds the negotiated {limit}-byte frame limit; input was kept."),
+                        }, &mut self.ids)?);
+                        continue;
+                    }
                     if payload.len() > limit && command_type == Some("get_session_stats") {
                         self.notice = Some(format!(
                             "Skipped session stats refresh because the negotiated {limit}-byte RPC frame limit is too small."
@@ -574,6 +589,42 @@ impl LiveUi {
                         panel.update_catalog(catalog);
                         self.render_pending = true;
                     }
+                }
+                UiEffect::ShowModelPicker => {
+                    self.rendered_model_picker = false;
+                    self.model_picker = Some(ModelPicker::loading());
+                    self.render_pending = true;
+                }
+                UiEffect::ModelCatalogUpdated(catalog) => {
+                    self.rendered_model_picker = false;
+                    if let Some(picker) = &mut self.model_picker {
+                        picker.update_catalog(catalog);
+                    }
+                    self.render_pending = true;
+                }
+                UiEffect::InvalidateModelCatalog => {
+                    self.rendered_model_picker = false;
+                    if let Some(picker) = &mut self.model_picker {
+                        picker.invalidate();
+                    }
+                    self.render_pending = true;
+                }
+                UiEffect::ModelCatalogUnavailable => {
+                    self.rendered_model_picker = false;
+                    if let Some(picker) = &mut self.model_picker {
+                        picker.unavailable();
+                    }
+                    self.render_pending = true;
+                }
+                UiEffect::ModelConfigurationApplied => {
+                    self.rendered_model_picker = false;
+                    self.model_picker = None;
+                    self.editor.clear();
+                    // Preserve any backend warning, including failed persistence.
+                    if self.notice.is_none() {
+                        self.notice = Some("Model selection applied.".into());
+                    }
+                    self.render_pending = true;
                 }
                 UiEffect::ShowDeviceCode(challenge) => {
                     if let Some(panel) = self.connection_panel.as_mut() {
@@ -735,6 +786,17 @@ impl LiveUi {
                         self.render_pending = true;
                     }
                 }
+                UiEffect::Diagnostic(message) => {
+                    let notice = self.notice.get_or_insert_with(String::new);
+                    let separator = if notice.is_empty() { "" } else { "; " };
+                    for character in separator.chars().chain(message.chars()) {
+                        if notice.len() + character.len_utf8() > 1024 {
+                            break;
+                        }
+                        notice.push(character);
+                    }
+                    self.render_pending = true;
+                }
                 UiEffect::Notice(notice) => {
                     self.notice = Some(notice);
                     self.render_pending = true;
@@ -798,6 +860,8 @@ impl LiveUi {
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
         ) {
+            self.model_picker = None;
+            self.rendered_model_picker = false;
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
             self.browse_selected = None;
@@ -944,6 +1008,7 @@ impl LiveUi {
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
         let mut rendered_decision_context = None;
+        let mut rendered_model_picker = false;
         terminal.draw(|frame| {
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = match self.state.view_status {
@@ -960,7 +1025,20 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            if let Some(panel) = &self.connection_panel {
+            if let Some(picker) = self
+                .model_picker
+                .as_ref()
+                .filter(|_| ui::decision_context_visible(frame.area()))
+            {
+                rendered_model_picker = true;
+                model_picker::render(
+                    frame,
+                    frame.area(),
+                    picker,
+                    self.state.model_configuration_active(),
+                    self.notice.as_deref(),
+                );
+            } else if let Some(panel) = &self.connection_panel {
                 connection_panel::render(frame, frame.area(), panel);
             } else if let Some(picker) = &self.session_tree_picker {
                 session_tree_picker::render(frame, frame.area(), picker);
@@ -981,6 +1059,7 @@ impl LiveUi {
             }
         })?;
         self.rendered_decision_context = rendered_decision_context;
+        self.rendered_model_picker = rendered_model_picker;
         self.render_pending = false;
         let rendered_browse_selection = self.browse_selected;
         self.reconcile_browse_selection();
@@ -1439,6 +1518,106 @@ impl LiveUi {
         self.dispatch(action, writer, limit).await
     }
 
+    async fn dispatch_model_action(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match self.reduced_action_frame_limit_notice(&action, "model request", limit) {
+            Ok(Some(_)) => {
+                self.notice = Some(format!(
+                    "Model request exceeds the negotiated {limit}-byte limit. Edit the command or close the picker."
+                ));
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
+            Err(error) => {
+                self.notice = Some(render_top_level_error(&error));
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
+            Ok(None) => {}
+        }
+        self.notice = None;
+        self.dispatch(action, writer, limit).await
+    }
+
+    async fn handle_model_command(
+        &mut self,
+        command: ModelCommand,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.state.can_select_model() {
+            self.notice = Some("Wait for the current operation before changing models.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        match command {
+            ModelCommand::Picker => {
+                self.dispatch_model_action(UiAction::OpenModelPicker, writer, limit)
+                    .await
+            }
+            ModelCommand::Configure(configuration) => {
+                self.dispatch_model_action(UiAction::ConfigureModel(configuration), writer, limit)
+                    .await
+            }
+            ModelCommand::ProviderStatus => {
+                self.notice = Some(format!(
+                    "Provider: {}{}",
+                    self.state.provider.as_deref().unwrap_or("unknown"),
+                    if self.state.model_selection_stale {
+                        " (last confirmed; use /model to refresh)"
+                    } else {
+                        ""
+                    }
+                ));
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            ModelCommand::Invalid(usage) => {
+                self.notice = Some(usage.into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+        }
+    }
+
+    async fn handle_model_picker_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.rendered_model_picker && !is_escape(key) && !is_ctrl_c(key) {
+            return Ok(LoopControl::Continue);
+        }
+        let applying = self.state.model_configuration_active();
+        let action = self
+            .model_picker
+            .as_mut()
+            .expect("open picker")
+            .handle_key(key, applying);
+        self.render_pending = true;
+        match action {
+            ModelPickerAction::Close => {
+                self.model_picker = None;
+                self.rendered_model_picker = false;
+                Ok(LoopControl::Continue)
+            }
+            ModelPickerAction::Refresh => {
+                self.dispatch_model_action(UiAction::LoadModelCatalog, writer, limit)
+                    .await
+            }
+            ModelPickerAction::Apply(configuration) => {
+                self.dispatch_model_action(UiAction::ConfigureModel(configuration), writer, limit)
+                    .await
+            }
+            ModelPickerAction::None => Ok(LoopControl::Continue),
+        }
+    }
+
     async fn handle_connection_panel_key(
         &mut self,
         key: KeyEvent,
@@ -1746,6 +1925,10 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match input {
+            Input::Key(key) if self.model_picker.is_some() => {
+                self.handle_model_picker_key(key, writer, limit).await
+            }
+            Input::Paste(_) if self.model_picker.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.connection_panel.is_some() => {
                 self.handle_connection_panel_key(key, writer, limit).await
             }
@@ -1823,6 +2006,15 @@ impl LiveUi {
                     }
                     None => Ok(LoopControl::Continue),
                 }
+            }
+            Input::Key(key)
+                if key.code == KeyCode::Enter
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
+                    && model_picker::command(self.editor.text()).is_some() =>
+            {
+                let command =
+                    model_picker::command(self.editor.text()).expect("recognized model command");
+                self.handle_model_command(command, writer, limit).await
             }
             Input::Key(key)
                 if self.editor_editable()
@@ -1972,6 +2164,7 @@ impl LiveUi {
             }
             Input::Redraw => {
                 self.rendered_decision_context = None;
+                self.rendered_model_picker = false;
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
@@ -2174,6 +2367,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     &writer_tx,
                     max_client_frame,
                 )
+                .await?;
+            live_ui
+                .dispatch(UiAction::LoadModelCatalog, &writer_tx, max_client_frame)
                 .await?;
             let mut redraw = interval(FRAME_INTERVAL);
             redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -2887,6 +3083,250 @@ mod tests {
         };
         live_ui.editor.insert_paste(draft);
         live_ui
+    }
+
+    fn model_test_ui(draft: &str) -> LiveUi {
+        let mut ui = LiveUi {
+            state: UiState::new("alpha".into(), None, None),
+            ..LiveUi::default()
+        };
+        ui.editor.insert_paste(draft);
+        ui
+    }
+
+    fn draw_model_test(ui: &mut LiveUi, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        ui.draw(
+            &mut terminal,
+            &ConnectionInfo {
+                backend_version: "test".into(),
+                protocol_version: 5,
+                event_schema_version: 36,
+            },
+        )
+        .unwrap();
+        terminal
+    }
+
+    #[tokio::test]
+    async fn model_commands_during_prompt_are_never_queued() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        for command in ["/model", "/model beta::one high", "/provider beta"] {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::ALT] {
+                let mut ui = active_prompt_ui(command);
+                ui.handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+                    &writer,
+                    8192,
+                )
+                .await
+                .unwrap();
+                assert!(receiver.try_recv().is_err());
+                assert_eq!(ui.editor.text(), command);
+                assert!(ui.notice.as_deref().unwrap().contains("Wait"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hidden_picker_cannot_apply_and_closing_does_not_reopen_on_late_catalog() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = model_test_ui("/model");
+        ui.dispatch_model_action(UiAction::OpenModelPicker, &writer, 8192)
+            .await
+            .unwrap();
+        receiver.try_recv().unwrap();
+        ui.apply_effects(
+            vec![UiEffect::ModelCatalogUpdated(model_picker::tests::catalog())],
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw_model_test(&mut ui, 30, 8);
+        assert!(ui.rendered_model_picker);
+        draw_model_test(&mut ui, 29, 7);
+        assert!(!ui.rendered_model_picker);
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_err());
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.model_picker.is_none());
+        ui.apply_effects(
+            vec![UiEffect::ModelCatalogUpdated(model_picker::tests::catalog())],
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.model_picker.is_none());
+        assert_eq!(ui.editor.text(), "/model");
+    }
+
+    #[tokio::test]
+    async fn refresh_preflight_failure_keeps_picker_usable_and_draft_intact() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = model_test_ui("/model");
+        let mut picker = ModelPicker::loading();
+        picker.update_catalog(model_picker::tests::catalog());
+        ui.model_picker = Some(picker);
+        draw_model_test(&mut ui, 80, 24);
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            &writer,
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(ui.editor.text(), "/model");
+        assert!(matches!(
+            ui.model_picker
+                .as_mut()
+                .unwrap()
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false),
+            ModelPickerAction::Apply(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refreshed_selection_must_be_drawn_before_enter_can_apply() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = model_test_ui("/model");
+        ui.model_picker = Some(ModelPicker::loading());
+        ui.apply_effects(
+            vec![UiEffect::ModelCatalogUpdated(model_picker::tests::catalog())],
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw_model_test(&mut ui, 80, 24);
+        let mut catalog = model_picker::tests::catalog();
+        catalog.providers[1].available = false;
+        ui.apply_effects(vec![UiEffect::ModelCatalogUpdated(catalog)], &writer, 8192)
+            .await
+            .unwrap();
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_err());
+        draw_model_test(&mut ui, 80, 24);
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_ok());
+        assert!(ui.state.model_configuration_active());
+    }
+
+    #[tokio::test]
+    async fn failed_save_diagnostic_survives_success_and_failed_catalog_recovery() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = model_test_ui("/model custom");
+        let ModelCommand::Configure(configuration) =
+            model_picker::command(ui.editor.text()).unwrap()
+        else {
+            panic!()
+        };
+        ui.dispatch_model_action(
+            UiAction::ConfigureModel(configuration.clone()),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        receiver.try_recv().unwrap();
+        // A repeated Enter cannot issue a second configure.
+        ui.dispatch(UiAction::ConfigureModel(configuration), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+        ui.notice = None;
+        for message in [
+            "Could not save user defaults.",
+            "Model catalog unavailable.",
+        ] {
+            ui.dispatch(
+                UiAction::BackendEvent(BackendEvent::Diagnostic(message.into())),
+                &writer,
+                8192,
+            )
+            .await
+            .unwrap();
+        }
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "configure-1".into(),
+                command_type: "configure".into(),
+                ok: true,
+                error: None,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.text(), "");
+        assert!(ui.state.editor_editable());
+        receiver.try_recv().unwrap();
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "get_model_catalog-2".into(),
+                command_type: "get_model_catalog".into(),
+                ok: false,
+                error: Some("unavailable".into()),
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(
+            ui.notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Could not save user defaults.")
+        );
+        let terminal = draw_model_test(&mut ui, 80, 24);
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Could not save user defaults."));
+    }
+
+    #[tokio::test]
+    async fn repeated_diagnostics_remain_bounded_at_utf8_boundary() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let mut ui = model_test_ui("");
+        for _ in 0..20 {
+            ui.apply_effects(vec![UiEffect::Diagnostic("界".repeat(400))], &writer, 8192)
+                .await
+                .unwrap();
+            assert!(ui.notice.as_ref().unwrap().len() <= 1024);
+        }
     }
 
     fn connection_catalog() -> wisp_protocol::events::ConnectionCatalogSnapshot {

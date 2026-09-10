@@ -397,8 +397,10 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                     let mut value = command.to_value().map_err(|error| error.to_string())?;
                     normalize_trace_command(&mut value);
                     // Python's trace controller intentionally omits auxiliary
-                    // connection-catalog refreshes from shared command traces.
-                    if value["type"] != "get_connection_catalog" {
+                    // connection/model catalog refreshes from shared command traces.
+                    if value["type"] != "get_connection_catalog"
+                        && value["type"] != "get_model_catalog"
+                    {
                         commands.push(value);
                     }
                 }
@@ -416,6 +418,12 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::ReplaceTranscript
                 | UiEffect::HistoryWindowChanged
                 | UiEffect::OpenExactDetail(_)
+                | UiEffect::ShowModelPicker
+                | UiEffect::ModelCatalogUpdated(_)
+                | UiEffect::InvalidateModelCatalog
+                | UiEffect::ModelCatalogUnavailable
+                | UiEffect::ModelConfigurationApplied
+                | UiEffect::Diagnostic(_)
                 | UiEffect::Notice(_)
                 | UiEffect::RequestRender => {}
                 UiEffect::Exit => exited = true,
