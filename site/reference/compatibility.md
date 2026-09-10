@@ -96,8 +96,8 @@ Schema bundles are repository build inputs and versioned GitHub release assets n
 `wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
 models and compile-time generated Serde crate define the contract for external frontends. Protocol
 v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version,
-v3 adds authoritative model-catalog discovery, and v5 adds backend-owned connection
-workflows. All earlier bundles remain immutable.
+v3 adds authoritative model-catalog discovery, v4 adds backend-owned connection workflows,
+and v5 adds opt-in persistence for model configuration. All earlier bundles remain immutable.
 
 ## Deprecation and removal
 
@@ -188,7 +188,7 @@ A session file contains several independently versioned layers:
 | Session entry | v6 | unversioned and v1–v6 |
 | Persisted event envelope | v1 | v1 |
 | Event payload inside the envelope | v36 | v5–v36 for typed access |
-| Compaction record | v5 | v1–v5 |
+| Compaction record | v4 | v1–v4 |
 
 Historical session entries are normalized to current typed models in memory. Loading a session does
 not rewrite it; later appends use the current entry schema while preserving committed historical
