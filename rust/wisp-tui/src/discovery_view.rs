@@ -1,6 +1,7 @@
 //! Skill selection and read-only MCP inspection over backend snapshots.
 
 use crate::{
+    mouse::Rows,
     reducer::{UiAction, UiState},
     session_picker::terminal_row,
     theme::Palette,
@@ -52,6 +53,27 @@ impl DiscoveryView {
         }
     }
 
+    pub fn select_mouse(&mut self, index: usize, state: &UiState) -> bool {
+        let Self::Skills(view) = self else {
+            return false;
+        };
+        let Some(entry) = state
+            .skills
+            .snapshot
+            .as_ref()
+            .and_then(|catalog| catalog.entries.get(index))
+        else {
+            return false;
+        };
+        if view.rendered.is_none() || view.diagnostics || !entry.is_invocable() {
+            return false;
+        }
+        view.selected = index;
+        view.selected_name = Some(entry.name.clone());
+        view.rendered = None;
+        true
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, state: &UiState) -> DiscoveryAction {
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
@@ -83,7 +105,7 @@ impl DiscoveryView {
         state: &UiState,
         notice: Option<&str>,
         palette: Palette,
-    ) {
+    ) -> Rows {
         match self {
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
@@ -123,6 +145,7 @@ impl DiscoveryView {
                     rows.push("MCP status unavailable.".into());
                 }
                 view.render(frame, inner, &rows);
+                Rows::default()
             }
         }
     }
@@ -194,7 +217,7 @@ impl SkillsView {
         state: &UiState,
         notice: Option<&str>,
         palette: Palette,
-    ) {
+    ) -> Rows {
         self.rendered = None;
         let block = Block::default()
             .borders(Borders::ALL)
@@ -259,7 +282,7 @@ impl SkillsView {
                 status.push("Skill catalog unavailable.".into());
             }
             self.report.render(frame, inner, &status);
-            return;
+            return Rows::default();
         }
         let [header, list] =
             Layout::vertical([Constraint::Length(status.len() as u16), Constraint::Min(0)])
@@ -276,15 +299,15 @@ impl SkillsView {
         self.page_size = usize::from(list.height / 2);
         let Some(catalog) = catalog else {
             frame.render_widget(Paragraph::new("Skill catalog unavailable."), list);
-            return;
+            return Rows::default();
         };
         if catalog.entries.is_empty() {
             frame.render_widget(Paragraph::new("No skills discovered."), list);
-            return;
+            return Rows::default();
         }
         // A two-line choice must fit completely before Enter can use its identity.
         if list.height < 2 || list.width < 2 {
-            return;
+            return Rows::default();
         }
         let width = usize::from(list.width.saturating_sub(2));
         let items = catalog.entries.iter().map(|entry| {
@@ -318,6 +341,7 @@ impl SkillsView {
             .get(self.selected)
             .filter(|entry| entry.is_invocable())
             .map(|entry| entry.name.clone());
+        Rows::new(list, selection.offset(), catalog.entries.len(), 2)
     }
 }
 
@@ -387,7 +411,9 @@ mod tests {
     fn draw(view: &mut DiscoveryView, state: &UiState, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), state, None, Palette::default()))
+            .draw(|frame| {
+                view.render(frame, frame.area(), state, None, Palette::default());
+            })
             .unwrap();
         terminal
             .backend()

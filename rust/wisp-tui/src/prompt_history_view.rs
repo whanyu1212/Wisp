@@ -1,8 +1,8 @@
 //! Search and selection over process-local prompt history; the draft stays in LiveUi.
 
 use crate::{
-    prompt_editor::PromptEditor, prompt_history::PromptHistory, session_picker::terminal_row,
-    theme::Palette,
+    mouse::Rows, prompt_editor::PromptEditor, prompt_history::PromptHistory,
+    session_picker::terminal_row, theme::Palette,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -47,6 +47,20 @@ impl PromptHistoryView {
 
     pub fn invalidate_selection(&mut self) {
         self.rendered = None;
+    }
+
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        let Some(id) = self
+            .matches
+            .get(index)
+            .copied()
+            .filter(|_| self.rendered.is_some())
+        else {
+            return false;
+        };
+        self.selected = Some(id);
+        self.invalidate_selection();
+        true
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, history: &PromptHistory) -> HistoryAction {
@@ -131,7 +145,7 @@ impl PromptHistoryView {
         area: Rect,
         history: &PromptHistory,
         palette: Palette,
-    ) {
+    ) -> Rows {
         self.invalidate_selection();
         let block = Block::default()
             .borders(Borders::ALL)
@@ -175,10 +189,10 @@ impl PromptHistoryView {
                 }),
                 list_area,
             );
-            return;
+            return Rows::default();
         }
         if list_area.height == 0 || list_area.width < 3 {
-            return;
+            return Rows::default();
         }
         let rows = self
             .matches
@@ -199,6 +213,7 @@ impl PromptHistoryView {
             &mut state,
         );
         self.rendered = self.selected;
+        Rows::new(list_area, state.offset(), self.matches.len(), 1)
     }
 }
 
@@ -210,7 +225,9 @@ mod tests {
     fn draw(view: &mut PromptHistoryView, history: &PromptHistory) -> String {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), history, Palette::default()))
+            .draw(|frame| {
+                view.render(frame, frame.area(), history, Palette::default());
+            })
             .unwrap();
         terminal
             .backend()

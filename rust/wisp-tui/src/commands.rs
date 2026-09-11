@@ -1,6 +1,7 @@
 //! Local command routing and presentation over backend-owned discovery metadata.
 
 use crate::model_picker::{self, ModelCommand};
+use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
 use crate::theme::{self, Palette};
 use ratatui::{
@@ -275,6 +276,15 @@ impl Completion {
         self.invalidate();
     }
 
+    pub fn select_mouse(&mut self, index: usize, count: usize) -> bool {
+        if self.rendered.is_none() || index >= count {
+            return false;
+        }
+        self.selected = index;
+        self.invalidate();
+        true
+    }
+
     pub fn mark_rendered(&mut self, name: String) {
         self.rendered = Some(name);
     }
@@ -310,7 +320,7 @@ pub(crate) fn render_completion(
     area: Rect,
     view: &CompletionView<'_>,
     palette: Palette,
-) {
+) -> Rows {
     let items = view.items.iter().map(|item| {
         ListItem::new(format!(
             "{}  {}",
@@ -326,6 +336,7 @@ pub(crate) fn render_completion(
         area,
         &mut state,
     );
+    Rows::new(area, state.offset(), view.items.len(), 1)
 }
 
 #[derive(Default)]
@@ -376,6 +387,9 @@ pub(crate) fn help_rows(
             Line::raw("Tab fuzzy/tree; ←/→ folders; Esc close; Tab at a dismissed reference refreshes."),
             Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
             Line::raw("Ctrl+T toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores."),
+            Line::raw("WISP_TUI_MOUSE=1 enables mouse navigation (off by default)."),
+            Line::raw("Wheel scrolls; click selects; Enter activates. Outside click closes a popup."),
+            Line::raw("Approvals/trust remain keyboard-only. Drag selection and copy are not implemented."),
         ])
         .collect()
 }

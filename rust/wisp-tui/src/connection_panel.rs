@@ -1,4 +1,4 @@
-//! Fixed, keyboard-only provider connection panel.
+//! Provider connection panel with keyboard activation and pointer selection.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot};
 
+use crate::mouse::Rows;
 use crate::reducer::{API_KEY_MAX_BYTES, ApiKey};
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
@@ -325,13 +326,19 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel, palette: Palette) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    panel: &mut ConnectionPanel,
+    palette: Palette,
+) -> Rows {
     match &mut panel.mode {
         ConnectionPanelMode::Picker { selected } => {
             render_picker(frame, area, &panel.catalog, *selected, palette)
         }
         ConnectionPanelMode::ApiKey { provider, value } => {
-            render_api_key(frame, area, provider, value, palette)
+            render_api_key(frame, area, provider, value, palette);
+            Rows::default()
         }
         ConnectionPanelMode::DeviceCode {
             provider,
@@ -339,16 +346,32 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel, pa
             user_code,
             attempt,
             scroll,
-        } => render_device_code(
-            frame,
-            area,
-            provider,
-            verification_uri.as_deref(),
-            user_code.as_deref(),
-            *attempt,
-            scroll,
-            palette,
-        ),
+        } => {
+            render_device_code(
+                frame,
+                area,
+                provider,
+                verification_uri.as_deref(),
+                user_code.as_deref(),
+                *attempt,
+                scroll,
+                palette,
+            );
+            Rows::default()
+        }
+    }
+}
+
+impl ConnectionPanel {
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        let ConnectionPanelMode::Picker { selected } = &mut self.mode else {
+            return false;
+        };
+        if index >= methods(&self.catalog).len() {
+            return false;
+        }
+        *selected = Some(index);
+        true
     }
 }
 
@@ -358,7 +381,7 @@ fn render_picker(
     catalog: &ConnectionCatalogSnapshot,
     selected: Option<usize>,
     palette: Palette,
-) {
+) -> Rows {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -402,6 +425,12 @@ fn render_picker(
         .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
+    Rows::new(
+        chunks[0].inner(ratatui::layout::Margin::new(1, 1)),
+        start,
+        methods.len(),
+        1,
+    )
 }
 
 fn method_line(
@@ -670,7 +699,9 @@ mod tests {
         let mut seen = String::new();
         for _ in 0..rows.len() {
             terminal
-                .draw(|frame| render(frame, frame.area(), &mut panel, Palette::default()))
+                .draw(|frame| {
+                    render(frame, frame.area(), &mut panel, Palette::default());
+                })
                 .unwrap();
             seen.push_str(
                 &terminal
@@ -691,7 +722,9 @@ mod tests {
         }
         panel.handle_key(key(KeyCode::Home));
         terminal
-            .draw(|frame| render(frame, frame.area(), &mut panel, Palette::default()))
+            .draw(|frame| {
+                render(frame, frame.area(), &mut panel, Palette::default());
+            })
             .unwrap();
         assert!(terminal.backend().to_string().contains("Open"));
         assert_eq!(

@@ -1,4 +1,4 @@
-//! Bounded, keyboard-only persisted-session tree picker.
+//! Bounded session-tree picker with keyboard activation and pointer selection.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -9,6 +9,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::mouse::Rows;
 use crate::reducer::{
     SESSION_TREE_RETAINED_LIMIT, SessionTreeNode, SessionTreeNodeKind, SessionTreePage,
 };
@@ -86,6 +87,10 @@ impl SessionTreePicker {
         Ok(())
     }
 
+    pub fn at_page_end(&self) -> bool {
+        self.selected == self.node_count().checked_sub(1)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> SessionTreePickerAction {
         if key.modifiers != KeyModifiers::NONE {
             return SessionTreePickerAction::None;
@@ -116,7 +121,7 @@ impl SessionTreePicker {
                 self.move_by(-(PAGE_STEP as isize));
                 SessionTreePickerAction::None
             }
-            KeyCode::PageDown if self.selected == self.node_count().checked_sub(1) => self
+            KeyCode::PageDown if self.at_page_end() => self
                 .pages
                 .back()
                 .and_then(|page| page.next_after_entry_id.clone())
@@ -160,7 +165,12 @@ impl SessionTreePicker {
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker, palette: Palette) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    picker: &SessionTreePicker,
+    palette: Palette,
+) -> Rows {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -224,6 +234,27 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker, pal
         .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
+    let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
+    Rows::new(
+        Rect {
+            y: inner.y.saturating_add(marker_rows as u16),
+            height: inner.height.saturating_sub(marker_rows as u16),
+            ..inner
+        },
+        start,
+        picker.node_count(),
+        1,
+    )
+}
+
+impl SessionTreePicker {
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        if index >= self.node_count() {
+            return false;
+        }
+        self.selected = Some(index);
+        true
+    }
 }
 
 fn tree_line(
@@ -373,7 +404,9 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(1, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &picker, Palette::default()))
+            .draw(|frame| {
+                render(frame, frame.area(), &picker, Palette::default());
+            })
             .unwrap();
     }
 }

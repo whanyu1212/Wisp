@@ -339,6 +339,7 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
         return FakeProcess()
 
     monkeypatch.setenv("WISP_LAUNCHER_TEST_SENTINEL", "inherited")
+    monkeypatch.setenv("WISP_TUI_MOUSE", "1")
     monkeypatch.setenv("WISP_RUST_TUI_BINARY", str(binary))
     monkeypatch.setattr(rust_launcher, "resolve_rust_tui_binary", lambda: binary)
     monkeypatch.setattr(rust_launcher, "_preflight_tui_options", fake_preflight)
@@ -351,6 +352,7 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
     argv, environment, process_group = calls[0]
     assert argv == rust_launcher.rust_tui_command(binary, _options(tmp_path))
     assert environment["WISP_LAUNCHER_TEST_SENTINEL"] == "inherited"
+    assert environment["WISP_TUI_MOUSE"] == "1"
     assert "WISP_RUST_TUI_BINARY" not in environment
     assert process_group == 0
     assert os.environ["WISP_LAUNCHER_TEST_SENTINEL"] == "inherited"

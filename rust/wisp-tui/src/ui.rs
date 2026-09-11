@@ -1,5 +1,6 @@
 use crate::detail_view::{DetailView, DetailViewRow};
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
+use crate::mouse;
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
@@ -38,7 +39,12 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
-fn composer_height(state: &UiState, editor: &PromptEditor) -> u16 {
+fn header_height(area: Rect) -> u16 {
+    // Keep one editable row plus its borders, the transcript borders and footer.
+    area.height.saturating_sub(6).min(3)
+}
+
+fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
     if editable(state) {
         let queue_rows = if state.active_prompt_editable() {
             state
@@ -55,7 +61,12 @@ fn composer_height(state: &UiState, editor: &PromptEditor) -> u16 {
                 .saturating_add(2),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
-        .clamp(3, MAX_COMPOSER_HEIGHT)
+        .clamp(
+            3,
+            area.height
+                .saturating_sub(header_height(area) + 3)
+                .clamp(3, MAX_COMPOSER_HEIGHT),
+        )
     } else if matches!(
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -75,7 +86,7 @@ pub(crate) fn file_picker_area(area: Rect, state: &UiState, editor: &PromptEdito
     // than hide all choices or change the transcript's layout to make room.
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(state, editor) + 1)
+        .saturating_sub(composer_height(area, state, editor) + 1)
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -155,7 +166,7 @@ pub fn render_interactive(
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
     palette: Palette,
-) -> bool {
+) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
     if !decision_context_visible(area) {
@@ -165,7 +176,7 @@ pub fn render_interactive(
                 .wrap(Wrap { trim: true }),
             area,
         );
-        return false;
+        return mouse::Conversation::default();
     }
 
     let decision_pending = matches!(
@@ -183,17 +194,17 @@ pub fn render_interactive(
             render_header(frame, chunks[0], state, connection, palette);
         }
         render_composer(frame, chunks[1], state, editor, composer_focused, palette);
-        return false;
+        return mouse::Conversation::default();
     }
 
-    let composer_height = composer_height(state, editor);
+    let composer_height = composer_height(area, state, editor);
     let completion_height = completion.map_or(0, |view| {
         (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 4))
     });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(header_height(area)),
             Constraint::Min(if completion_height > 0 { 0 } else { 2 }),
             Constraint::Length(completion_height),
             Constraint::Length(composer_height),
@@ -211,12 +222,18 @@ pub fn render_interactive(
         browse_selected,
         palette,
     );
-    if let Some(view) = completion.filter(|_| completion_height > 0) {
-        crate::commands::render_completion(frame, chunks[2], view, palette);
-    }
-    render_composer(frame, chunks[3], state, editor, composer_focused, palette);
+    let completion_rows = completion
+        .filter(|_| completion_height > 0)
+        .map(|view| crate::commands::render_completion(frame, chunks[2], view, palette))
+        .unwrap_or_default();
+    let editor = render_composer(frame, chunks[3], state, editor, composer_focused, palette);
     render_footer(frame, chunks[4], state, notice, palette);
-    completion_height > 0
+    mouse::Conversation {
+        transcript: chunks[1],
+        editor,
+        completion: completion_rows,
+        completion_visible: completion_height > 0,
+    }
 }
 
 fn render_header(
@@ -602,7 +619,7 @@ fn render_composer(
     editor: &PromptEditor,
     focused: bool,
     palette: Palette,
-) {
+) -> Option<mouse::Editor> {
     let queued_total = state
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
@@ -700,7 +717,12 @@ fn render_composer(
         if focused && cursor_x < editor_area.right() && cursor_y < editor_area.bottom() {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
-        return;
+        return Some(mouse::Editor {
+            area: editor_area,
+            revision: editor.revision(),
+            first_line: vertical_scroll,
+            column_starts: display_text.column_starts,
+        });
     }
 
     if matches!(
@@ -715,7 +737,7 @@ fn render_composer(
             _ => unreachable!("decision rows require a decision view"),
         };
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
-        return;
+        return None;
     }
 
     let message = if let Some(operation) = state.session_operation.as_ref() {
@@ -739,6 +761,7 @@ fn render_composer(
             .wrap(Wrap { trim: true }),
         area,
     );
+    None
 }
 
 fn queue_preview_lines(state: &UiState, max_rows: usize, width: usize) -> Vec<Line<'static>> {
@@ -782,6 +805,7 @@ fn bounded_queue_preview(content: &str, width: usize) -> String {
 struct ComposerVisibleText {
     text: String,
     cursor_horizontal_scroll: usize,
+    column_starts: Vec<usize>,
 }
 
 fn composer_visible_text(
@@ -797,6 +821,7 @@ fn composer_visible_text(
     let visible_width = width.max(1);
     let visible_height = height.max(1);
     let mut cursor_horizontal_scroll = horizontal_scroll;
+    let mut column_starts = Vec::new();
     for (index, line) in source_text
         .split('\n')
         .skip(vertical_scroll)
@@ -810,11 +835,13 @@ fn composer_visible_text(
         if index == cursor_visible_row {
             cursor_horizontal_scroll = window.effective_start;
         }
+        column_starts.push(window.effective_start);
         visible.push_str(&window.text);
     }
     ComposerVisibleText {
         text: visible,
         cursor_horizontal_scroll,
+        column_starts,
     }
 }
 

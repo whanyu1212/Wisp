@@ -52,13 +52,13 @@ WISP_TUI_RENDERER=rust wisp
 The Rust TUI negotiates and validates live RPC v6/event schema v37, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
-`/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts
+`/resume` opens a picker for up to 50 persisted sessions (or accepts
 one exact session ID); `/new` deselects the current session and clears the local transcript after the
 backend confirms it. Startup and resumed history install the newest 200-message page atomically;
 reaching an edge loads additional 75-message pages while retaining at most 1,200 logical transcript
 rows. An omission row marks history that remains outside the retained window.
 
-`/connect` opens a keyboard-only provider connection panel. Use arrow keys to select a provider,
+`/connect` opens a provider connection panel. Use arrow keys to select a provider,
 `Enter` to start its available API-key or device-code flow, `d` to disconnect stored credentials,
 `r` to refresh, and `Escape` to close or cancel. API-key entry is masked. Device login displays the
 short-lived user code and verification URL but never stores them in prompt or session history.
@@ -73,7 +73,8 @@ history loads. Navigating to a user-message node likewise restores its editable 
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
 This is still experimental and source-build only: current Python distributions do not include the Rust
-binary, and it intentionally omits Textual features such as transcript search and mouse controls.
+binary. Native text selection/copy and transcript search remain unavailable; mouse navigation is
+experimental opt-in as described below.
 Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
 Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
 enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
@@ -112,7 +113,7 @@ Approvals and project-trust requests take precedence over popups. A refreshed se
 drawn before it can be activated. Popups are centered and capped at 100×28; at the minimum 30×8
 terminal size they can fill the screen. Short decision layouts prioritize readable controls while
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
-read longer challenges. Popup dismissal by mouse is not supported yet.
+read longer challenges. Pointer navigation requires the opt-in described below.
 
 The Rust composer supports `@` project-file references while idle or streaming. Type `@` at a token
 boundary to open a composer-anchored popup, then type to fuzzy-filter the paths. `Up`/`Down` select;
@@ -131,8 +132,8 @@ must be shortened. Discovery failures preserve the draft; close and reopen to re
 
 The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
 it can cover the header or upper composer rows rather than rearranging the conversation. Approval and
-trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse interaction
-remains unsupported, and modified submission shortcuts retain their existing meanings.
+trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse selection is
+opt-in, and modified submission shortcuts retain their existing meanings.
 
 Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Orchid, Ember, Storm, Grove,
 Wave, Paper, and Dawn palettes as Textual. The picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
@@ -154,6 +155,40 @@ The conversion starts with Textual's Rec.709 grayscale and minimally adjusts nat
 needed to retain a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse
 video as well as a marker; status labels, approval action words, and diff `+`/`-` signs remain visible
 without hue. The theme choice can still be changed and remembered while monochrome is active.
+
+Rust mouse navigation is **off by default**. Enable it for a launch with:
+
+```bash
+WISP_TUI_MOUSE=1 wisp tui --renderer rust
+```
+
+`1`, `true`, and `on` enable capture (case-insensitive); unset, `0`, and other values leave it off.
+This is Rust-local presentation state, not a backend setting or persisted preference.
+
+- Wheel/trackpad reports over the conversation scroll three lines without moving composer focus.
+  Reading earlier content remains anchored while output streams; paging uses the existing bounded
+  history requests. Over an open popup, the wheel moves its selection or scrolls its report instead.
+  It does not scroll the conversation behind the popup. The session tree requests its next page
+  when wheeling past the last retained node.
+- Left-click a visible picker row to select it. **Clicks do not activate choices**: use `Enter` to
+  apply a model/theme, insert a file/skill reference, or navigate a session. Model selection remains
+  locked while an application is pending. In the file tree, select a directory and use `Enter` or
+  `Right` to expand it.
+- A left click outside a popup dismisses it like `Escape`, including cancelling an active device
+  login or rolling back a theme preview. That click is consumed, never passed to the background.
+- With no popup open, click in the main composer to position its cursor at a grapheme boundary.
+  Tabs, wide/combining characters, and horizontal/vertical editor scrolling retain their source
+  positions. At the minimum 30×8 size, a tall draft keeps one editable row; header details may be
+  omitted. Stale coordinates after resize, text replacement, or catalog refresh cannot select a
+  new unseen target.
+
+Approvals and project-trust decisions remain **keyboard-only**; mouse input is ignored during those
+decisions and when a failed cancellation response requires keyboard recovery. Drag selection,
+clipboard copy, horizontal wheel actions, and middle/right-click actions
+are not implemented. Capture can interfere with terminal-native text selection: leave it off for
+that workflow, or use your terminal's documented modifier override where supported. Only button and
+SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
+terminal after exit or failure.
 
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
