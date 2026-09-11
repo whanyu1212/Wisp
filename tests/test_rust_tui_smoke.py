@@ -112,14 +112,15 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     except OSError as exc:
                         if exc.errno != errno.EIO:
                             raise
-                if not context_redrawn and b"ctx ~" in output:
+                if not context_redrawn and b"ctx" in output and b"~" in output:
                     # Context readiness replaces a loading hint. Request one full frame;
                     # differential writes can omit letters shared by the two hints.
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 121, 0, 0))
                     context_redrawn = True
                     output.clear()
                     continue
-                ready = b"Type a prompt below to start." in output
+                # Hydration can show the prompt hint before the startup reads finish.
+                ready = context_redrawn and b"Type a prompt below to start." in output
                 if picker_phase == "startup" and ready and b"fake/fake" in output:
                     os.write(terminal_fd, b"/model\r")
                     picker_phase = "loading"
@@ -241,12 +242,12 @@ def test_rust_tui_cross_language_smoke(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx ~" in output:
+            if not context_redrawn and b"ctx" in output and b"~" in output:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 81, 0, 0))
                 context_redrawn = True
                 output.clear()
                 continue
-            if not prompt_sent and b"Type a prompt below to start." in output:
+            if context_redrawn and not prompt_sent and b"Type a prompt below to start." in output:
                 if not exercise_prompt:
                     rust_process_group = os.tcgetpgrp(terminal_fd)
                     os.kill(rust_process_group, signal.SIGKILL)
@@ -854,6 +855,8 @@ from wisp.events import (
     ProjectConfigApplied,
     QueueUpdated,
     RpcCommandFinished,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
     RpcMessagesReported,
     RpcSessionCloned,
     RpcSessionForked,
@@ -910,6 +913,11 @@ for line in sys.stdin:
     command_type = command["type"]
     if command_type == "get_session_stats":
         report_stats(command, current_session)
+    elif command_type == "get_connection_catalog":
+        emit(RpcConnectionCatalogReported(
+            command_id=command["id"], catalog=RpcConnectionCatalogSnapshot(),
+        ))
+        finish(command)
     elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command["id"],
@@ -1058,6 +1066,7 @@ for line in sys.stdin:
     status: int | None = None
     phase = "startup"
     phase_started = time.monotonic()
+    context_redrawn = False
     deadline = time.monotonic() + 25
     try:
         while time.monotonic() < deadline:
@@ -1068,6 +1077,11 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
+            if not context_redrawn and b"ctx" in output and b"~" in output:
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 111, 0, 0))
+                context_redrawn = True
+                output.clear()
+                continue
             commands = (
                 [json.loads(line) for line in command_log.read_text().splitlines()]
                 if command_log.exists()
@@ -1077,6 +1091,7 @@ for line in sys.stdin:
             now = time.monotonic()
             if (
                 phase == "startup"
+                and context_redrawn
                 and command_types[:6]
                 == [
                     "get_messages",
@@ -1326,6 +1341,7 @@ for line in sys.stdin:
     output = bytearray()
     status: int | None = None
     phase = "startup"
+    context_redrawn = False
     deadline = time.monotonic() + 20
     try:
         while time.monotonic() < deadline:
@@ -1336,9 +1352,15 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
+            if not context_redrawn and b"ctx" in output and b"~" in output:
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
+                context_redrawn = True
+                output.clear()
+                continue
             commands = _complete_logged_commands(command_log)
             if (
                 phase == "startup"
+                and context_redrawn
                 and b"Type a prompt below to start." in output
                 and b"plan" in output
             ):
@@ -1375,7 +1397,7 @@ for line in sys.stdin:
             ):
                 # Resize after the request so the next frame contains the whole confirmed
                 # notice, even when only "build" -> "plan" otherwise changes on screen.
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "plan confirmed"
                 output.clear()
             elif phase == "plan confirmed" and b"plan mode enabled." in output:
@@ -1403,7 +1425,7 @@ for line in sys.stdin:
                 and sum(command["type"] == "get_messages" for command in commands) >= 2
             ):
                 # A full frame avoids depending on terminal diff boundaries inside "cancelled".
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 103, 0, 0))
                 phase = "cancel confirmed"
                 output.clear()
             elif phase == "cancel confirmed" and b"cancelled" in output:
