@@ -116,6 +116,11 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
+The Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,
+and compaction details; during a run, session totals show the last refreshed snapshot.
+When idle, `/context auto on|off` changes automatic compaction for the current process,
+and `/compact [instructions]` compacts the selected session. Ctrl-C cancels manual compaction.
+
 RPC mode and the in-process SDK expose the same command, event, session, trust, and approval
 contracts the built-in interfaces use. See
 [Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces) and the

@@ -47,6 +47,80 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn context_during_prompt_is_cached_and_dismissal_preserves_ownership() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/context", true);
+    let active = ui.state.current_command.clone();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.context_view.is_some());
+    assert!(receiver.try_recv().is_err());
+    assert!(draw(&mut ui, 30, 8).contains("Context"));
+    ui.editor.insert_paste("preserved draft");
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.context_view.is_none());
+    assert_eq!(ui.state.current_command, active);
+    assert_eq!(ui.editor.text(), "preserved draft");
+    assert!(receiver.try_recv().is_err());
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::TrustRequested {
+            request_id: "trust-1".into(),
+            project_path: "/project".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.context_view.is_none());
+}
+
+#[tokio::test]
+async fn compact_preflight_preserves_input_and_bare_command_cancels_its_own_id() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/compact", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/compact");
+    assert!(receiver.try_recv().is_err());
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "session-1".into(),
+        session_path: "/session-1.jsonl".into(),
+        session_name: None,
+    });
+    ui.handle_input(key(KeyCode::Enter), &writer, 1)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/compact");
+    assert!(ui.state.current_command.is_none());
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let command = frame(&mut receiver);
+    assert_eq!(command["type"], "compact");
+    assert!(command.get("instructions").is_none());
+    assert!(ui.editor.text().is_empty());
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let cancel = frame(&mut receiver);
+    assert_eq!(cancel["type"], "cancel");
+    assert_eq!(cancel["target_id"], command["id"]);
+}
+
+#[tokio::test]
 async fn partial_enter_completes_then_exact_enter_opens_help() {
     let (writer, mut receiver) = mpsc::channel(8);
     let mut ui = ui("/he", false);

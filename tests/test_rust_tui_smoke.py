@@ -17,6 +17,30 @@ import pytest
 
 from wisp import __version__
 
+# Shared by the deliberately small inline backends below; use real event models so
+# the Rust projection is checked against Python's complete live wire contract.
+_CONTEXT_STATS_BACKEND = """
+from wisp.events import (
+    ContextBudget, ContextEstimate, SessionStats, SessionStatsReported, TokenUsage,
+    CompactionPolicyStatus, SessionCostSummary, RpcCommandFinished,
+)
+
+def report_stats(command, session_id=None, enabled=True):
+    budget = ContextBudget(estimate=ContextEstimate(system_tokens=100,
+        message_tokens=2800, tool_schema_tokens=100, total_tokens=3000),
+        context_window=10000, reserve_tokens=1000)
+    stats = SessionStats(session_id=session_id, entry_count=4, active_message_count=4,
+        compaction_count=0, usage_record_count=1,
+        usage=TokenUsage(input_tokens=2900, output_tokens=100, total_tokens=3000),
+        context=budget, compaction=CompactionPolicyStatus(auto_compaction_enabled=enabled,
+        threshold_eligible=True, threshold_ineligible_reason=None),
+        cost=SessionCostSummary(known_usd="0.0123", complete=False,
+            priced_record_count=1, unpriced_record_count=1))
+    print(SessionStatsReported(command_id=command["id"], stats=stats).model_dump_json(), flush=True)
+    print(RpcCommandFinished(command_id=command["id"],
+        command_type="get_session_stats", ok=True).model_dump_json(), flush=True)
+"""
+
 
 def _complete_logged_commands(path: Path) -> list[dict[str, object]]:
     """Ignore a final record until the backend finishes writing its newline."""
@@ -77,6 +101,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         submitted = restart
         picker_phase = "startup" if picker_only else "done"
         quit_sent = False
+        context_redrawn = False
         deadline = time.monotonic() + 25
         try:
             while time.monotonic() < deadline:
@@ -87,6 +112,13 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     except OSError as exc:
                         if exc.errno != errno.EIO:
                             raise
+                if not context_redrawn and b"ctx ~" in output:
+                    # Context readiness replaces a loading hint. Request one full frame;
+                    # differential writes can omit letters shared by the two hints.
+                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 121, 0, 0))
+                    context_redrawn = True
+                    output.clear()
+                    continue
                 ready = b"Type a prompt below to start." in output
                 if picker_phase == "startup" and ready and b"fake/fake" in output:
                     os.write(terminal_fd, b"/model\r")
@@ -194,6 +226,7 @@ def test_rust_tui_cross_language_smoke(
     initial_terminal = termios.tcgetattr(terminal_fd)
     output = bytearray()
     status: int | None = None
+    context_redrawn = False
     deadline = time.monotonic() + 20
     prompt_sent = False
     response_seen = False
@@ -208,6 +241,11 @@ def test_rust_tui_cross_language_smoke(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
+            if not context_redrawn and b"ctx ~" in output:
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 81, 0, 0))
+                context_redrawn = True
+                output.clear()
+                continue
             if not prompt_sent and b"Type a prompt below to start." in output:
                 if not exercise_prompt:
                     rust_process_group = os.tcgetpgrp(terminal_fd)
@@ -272,7 +310,8 @@ def test_rust_tui_renders_bounded_tool_and_process_cards(tmp_path: Path) -> None
     binary = Path(binary_value).resolve(strict=True)
     backend = tmp_path / "tool_backend.py"
     backend.write_text(
-        """
+        _CONTEXT_STATS_BACKEND
+        + """
 import json
 import sys
 
@@ -302,7 +341,9 @@ for line in sys.stdin:
     command = json.loads(line)
     command_type = command["type"]
     command_id = command["id"]
-    if command_type == "get_messages":
+    if command_type == "get_session_stats":
+        report_stats(command)
+    elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command_id,
             session_id=command.get("session_id"),
@@ -524,7 +565,8 @@ def test_rust_tui_queue_lifecycle_over_pty(tmp_path: Path) -> None:
     backend = tmp_path / "queue_backend.py"
     command_log = tmp_path / "commands.jsonl"
     backend.write_text(
-        """
+        _CONTEXT_STATS_BACKEND
+        + """
 import json
 import sys
 from pathlib import Path
@@ -571,7 +613,9 @@ for line in sys.stdin:
     with command_log.open("a", encoding="utf-8") as log:
         log.write(json.dumps(command, sort_keys=True) + "\\n")
     command_type = command["type"]
-    if command_type == "get_messages":
+    if command_type == "get_session_stats":
+        report_stats(command)
+    elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command["id"],
             session_id=command.get("session_id"),
@@ -799,7 +843,8 @@ def test_rust_tui_session_workflows_over_pty(tmp_path: Path) -> None:
     backend = tmp_path / "session_backend.py"
     command_log = tmp_path / "session_commands.jsonl"
     backend.write_text(
-        """
+        _CONTEXT_STATS_BACKEND
+        + """
 import json
 import sys
 from datetime import UTC, datetime
@@ -863,7 +908,9 @@ for line in sys.stdin:
     with command_log.open("a", encoding="utf-8") as log:
         log.write(json.dumps(command, sort_keys=True) + "\\n")
     command_type = command["type"]
-    if command_type == "get_messages":
+    if command_type == "get_session_stats":
+        report_stats(command, current_session)
+    elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command["id"],
             session_id=current_session,
@@ -1165,7 +1212,8 @@ def test_rust_tui_command_discovery_and_modes_over_pty(tmp_path: Path) -> None:
     command_log = tmp_path / "commands.jsonl"
     backend = tmp_path / "commands_backend.py"
     backend.write_text(
-        """
+        _CONTEXT_STATS_BACKEND
+        + """
 import json
 import sys
 from pathlib import Path
@@ -1173,12 +1221,14 @@ from wisp.events import (
     RpcCommandDescriptor, RpcCommandFinished, RpcCommandsReported,
     RpcMessagesReported, RpcStateReported, RpcStateSnapshot,
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
+    CompactionStarted, CompactionCompleted, ContextEstimated,
 )
 from wisp.runtime.builtin_commands import builtin_command_descriptors
 
 log_path = Path(sys.argv[1])
 mode = "plan"
 active = None
+auto_compaction = True
 
 def emit(event):
     print(event.model_dump_json(), flush=True)
@@ -1200,8 +1250,13 @@ for line in sys.stdin:
     with log_path.open("a") as log:
         log.write(json.dumps(command) + "\\n")
     kind = command["type"]
-    if kind == "get_messages":
-        emit(RpcMessagesReported(command_id=command["id"]))
+    if kind == "get_session_stats":
+        report_stats(command, "context-session", auto_compaction)
+        continue
+    elif kind == "get_messages":
+        emit(RpcMessagesReported(command_id=command["id"], session_id="context-session",
+                                 session_path=Path("/context-session.jsonl"),
+                                 active_leaf_id="leaf"))
     elif kind == "get_connection_catalog":
         emit(RpcConnectionCatalogReported(command_id=command["id"],
                                          catalog=RpcConnectionCatalogSnapshot()))
@@ -1219,9 +1274,27 @@ for line in sys.stdin:
             pending_steering_count=0, pending_follow_up_count=0,
         )))
     elif kind == "configure":
-        mode = command["mode"]
+        mode = command.get("mode", mode)
+        auto_compaction = command.get("auto_compaction_enabled", auto_compaction)
+    elif kind == "compact":
+        active = command
+        emit(CompactionStarted(session_id="context-session", source_entry_count=4))
+        continue
+    elif kind == "cancel":
+        finish(command)
+        if active:
+            emit(CompactionCompleted(session_id="context-session", outcome="cancelled",
+                replaced_entry_count=2, retained_entry_count=2, error="Compaction cancelled"))
+            emit(RpcCommandFinished(command_id=active["id"], command_type=active["type"],
+                ok=False, error="RPC command cancelled: user request"))
+            active = None
+        continue
     elif kind == "prompt":
         active = command
+        emit(ContextEstimated(turn=1, provider="fake", budget=ContextBudget(
+            estimate=ContextEstimate(system_tokens=100, message_tokens=3800,
+                tool_schema_tokens=100, total_tokens=4000),
+            context_window=10000, reserve_tokens=1000)))
         continue
     elif kind == "shutdown":
         if active:
@@ -1283,7 +1356,8 @@ for line in sys.stdin:
                 phase = "help"
                 output.clear()
             elif phase == "help" and b"Commands" in output and b"/build" in output:
-                assert b"/compact" not in output
+                assert b"/context" in output
+                assert b"/compact" in output
                 os.write(terminal_fd, b"\x1b")
                 phase = "closed"
                 output.clear()
@@ -1305,10 +1379,53 @@ for line in sys.stdin:
                 phase = "plan confirmed"
                 output.clear()
             elif phase == "plan confirmed" and b"plan mode enabled." in output:
+                os.write(terminal_fd, b"/context\r")
+                phase = "context"
+                output.clear()
+            elif phase == "context" and b"Context" in output and b"0.0123" in output:
+                os.write(terminal_fd, b"\x1b")
+                phase = "context closed"
+                output.clear()
+            elif phase == "context closed" and b"WISP" in output:
+                os.write(terminal_fd, b"/context auto off\r")
+                phase = "auto disabled"
+                output.clear()
+            elif phase == "auto disabled" and b"Automatic compaction disabled." in output:
+                os.write(terminal_fd, b"/compact Keep the constraints\r")
+                phase = "compacting"
+                output.clear()
+            elif phase == "compacting" and b"Compacting (manual)" in output:
+                os.write(terminal_fd, b"\x03")
+                phase = "cancelled"
+                output.clear()
+            elif (
+                phase == "cancelled"
+                and sum(command["type"] == "get_messages" for command in commands) >= 2
+            ):
+                # A full frame avoids depending on terminal diff boundaries inside "cancelled".
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                phase = "cancel confirmed"
+                output.clear()
+            elif phase == "cancel confirmed" and b"cancelled" in output:
                 os.write(terminal_fd, b"keep running\r")
                 phase = "running"
                 output.clear()
             elif phase == "running" and b"queue steer:0 later:0" in output:
+                stats_before_cached_view = sum(
+                    command["type"] == "get_session_stats" for command in commands
+                )
+                os.write(terminal_fd, b"/context\r")
+                phase = "cached context"
+                output.clear()
+            elif phase == "cached context" and b"snapshot" in output:
+                assert (
+                    sum(command["type"] == "get_session_stats" for command in commands)
+                    == stats_before_cached_view
+                )
+                os.write(terminal_fd, b"\x1b")
+                phase = "cached closed"
+                output.clear()
+            elif phase == "cached closed" and b"WISP" in output:
                 os.write(terminal_fd, b"/quit\r")
                 phase = "quit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
@@ -1333,7 +1450,16 @@ for line in sys.stdin:
         os.close(terminal_fd)
     commands = _complete_logged_commands(command_log)
     configure = [command for command in commands if command["type"] == "configure"]
-    assert [command["mode"] for command in configure] == ["build", "plan"]
+    assert [command["mode"] for command in configure if "mode" in command] == ["build", "plan"]
+    assert [
+        command["auto_compaction_enabled"]
+        for command in configure
+        if "auto_compaction_enabled" in command
+    ] == [False]
+    compact = next(command for command in commands if command["type"] == "compact")
+    assert compact["instructions"] == "Keep the constraints"
+    cancel = next(command for command in commands if command["type"] == "cancel")
+    assert cancel["target_id"] == compact["id"]
     assert all(command["persist_model_selection"] is False for command in configure)
     assert [
         command["type"]

@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+mod context;
+
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fmt;
@@ -727,6 +729,28 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_session_stats", "id": id}))
         }
 
+        /// Compact the selected persisted session using optional summary guidance.
+        pub fn compact(
+            id: &str,
+            instructions: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut command = serde_json::json!({"type": "compact", "id": id});
+            if let Some(instructions) = instructions {
+                command["instructions"] = serde_json::json!(instructions);
+            }
+            deserialize(command)
+        }
+
+        /// Change automatic compaction for the current process only.
+        pub fn configure_auto_compaction(
+            id: &str,
+            enabled: bool,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "configure", "id": id,
+                "auto_compaction_enabled": enabled, "clear_effort": false,
+                "persist_model_selection": false}))
+        }
+
         /// Construct a bounded persisted-session catalog request.
         pub fn get_sessions(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_sessions", "id": id, "limit": 50}))
@@ -978,6 +1002,11 @@ pub mod commands {
 }
 
 pub mod events {
+    pub use crate::context::{
+        CompactionCompleted, CompactionOutcome, CompactionPolicyStatus, CompactionReason,
+        CompactionStarted, ContextAccountingMethod, ContextBudget, ContextEstimate,
+        ContextEstimated, SessionCostSummary, SessionStats, SessionTokenUsage,
+    };
     mod generated {
         typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-events.schema.json");
     }
@@ -1092,6 +1121,40 @@ pub mod events {
     impl WispCurrentLiveEventOutput {
         fn wire_value(&self) -> serde_json::Value {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
+        }
+
+        /// Project a statistics snapshot for one exact command.
+        pub fn session_stats(&self, id: &str) -> Option<SessionStats> {
+            let value = self.wire_value();
+            if value["type"] != "session.stats" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["stats"].clone()).ok()
+        }
+
+        /// Project the budget at a provider request boundary.
+        pub fn context_estimated(&self) -> Option<ContextEstimated> {
+            let value = self.wire_value();
+            if value["type"] != "context.estimated" {
+                return None;
+            }
+            serde_json::from_value(value).ok()
+        }
+
+        pub fn compaction_started(&self) -> Option<CompactionStarted> {
+            let value = self.wire_value();
+            if value["type"] != "compaction.started" {
+                return None;
+            }
+            serde_json::from_value(value).ok()
+        }
+
+        pub fn compaction_completed(&self) -> Option<CompactionCompleted> {
+            let value = self.wire_value();
+            if value["type"] != "compaction.completed" {
+                return None;
+            }
+            serde_json::from_value(value).ok()
         }
 
         /// Return the stable event discriminator for diagnostic display.

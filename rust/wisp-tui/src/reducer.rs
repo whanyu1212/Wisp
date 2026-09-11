@@ -16,6 +16,7 @@ use wisp_protocol::commands::{
 
 pub use wisp_protocol::commands::AgentMode;
 mod command_controls;
+mod context;
 use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
 mod model_selection;
@@ -629,7 +630,7 @@ pub struct UiState {
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
-    post_prompt_stats_command_id: Option<String>,
+    pub(crate) context: context::ContextState,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -689,7 +690,7 @@ impl UiState {
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
-            post_prompt_stats_command_id: None,
+            context: context::ContextState::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -811,6 +812,7 @@ impl UiState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandKind {
     Prompt,
+    Compact,
     Steer,
     FollowUp,
     PopQueue,
@@ -843,6 +845,7 @@ impl CommandKind {
     pub fn prefix(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
+            Self::Compact => "compact",
             Self::Steer => "steer",
             Self::FollowUp => "follow_up",
             Self::PopQueue => "pop_queue",
@@ -886,6 +889,13 @@ pub enum MessageContentKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
+    SessionStatsReported {
+        command_id: String,
+        stats: Box<wisp_protocol::events::SessionStats>,
+    },
+    ContextEstimated(wisp_protocol::events::ContextEstimated),
+    CompactionStarted(wisp_protocol::events::CompactionStarted),
+    CompactionCompleted(wisp_protocol::events::CompactionCompleted),
     MessageStarted {
         turn: u64,
     },
@@ -1011,6 +1021,9 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
+    LoadContext,
+    ConfigureAutoCompaction(bool),
+    Compact(Option<String>),
     Steer(String),
     FollowUp(String),
     RestoreNewestQueueDraft,
@@ -1064,7 +1077,7 @@ pub enum UiAction {
         command_id: String,
         limit: usize,
     },
-    SkipPostPromptStats {
+    SkipStatsRefresh {
         command_id: String,
     },
     LoadOlderHistory,
@@ -1106,6 +1119,7 @@ pub enum UiEffect {
     ModelConfigurationApplied,
     CommandCatalogChanged,
     ModeConfigurationApplied,
+    AutoCompactionConfigured,
     ShowDeviceCode(DeviceCodeChallenge),
     DeviceCodeProgress(DeviceCodeProgress),
     FinishDeviceCode,
@@ -1156,7 +1170,12 @@ pub fn reduce(
     action: UiAction,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    match action {
+    let mut effects = match action {
+        UiAction::LoadContext => Ok(context::request(state)),
+        UiAction::ConfigureAutoCompaction(enabled) => {
+            Ok(context::configure_auto(state, enabled, ids)?)
+        }
+        UiAction::Compact(instructions) => Ok(context::compact(state, instructions, ids)?),
         UiAction::Submit(content) => submit(state, content, ids),
         UiAction::Steer(content) => queue_submission(state, QueueKind::Steering, content, ids),
         UiAction::FollowUp(content) => queue_submission(state, QueueKind::FollowUp, content, ids),
@@ -1200,9 +1219,7 @@ pub fn reduce(
         UiAction::RejectPostPromptSessionSync { command_id, limit } => {
             reject_post_prompt_session_sync(state, &command_id, limit)
         }
-        UiAction::SkipPostPromptStats { command_id } => {
-            skip_post_prompt_stats(state, &command_id, ids)
-        }
+        UiAction::SkipStatsRefresh { command_id } => Ok(context::skip(state, &command_id, ids)?),
         UiAction::LoadOlderHistory => load_older_history(state, ids),
         UiAction::LoadNewerHistory => load_newer_history(state, ids),
         UiAction::ReloadLatestHistory => reload_latest_history(state, ids),
@@ -1226,6 +1243,7 @@ pub fn reduce(
         UiAction::Cancel => cancel(state, ids),
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
+            state.context.close();
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
@@ -1237,7 +1255,9 @@ pub fn reduce(
                 .settle_unresolved_tools("event stream closed");
             Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
         }
-    }
+    }?;
+    effects.extend(context::refresh_if_ready(state, ids)?);
+    Ok(effects)
 }
 
 fn submit(
@@ -1282,6 +1302,7 @@ fn submit(
     });
     state.pending_approval = None;
     state.cancel_requested = false;
+    state.context.operation_started();
     state.transcript.append_prompt(content);
     Ok(vec![
         UiEffect::SendCommand(command),
@@ -1919,18 +1940,6 @@ fn reject_post_prompt_session_sync(
     ])
 }
 
-fn skip_post_prompt_stats(
-    state: &mut UiState,
-    command_id: &str,
-    ids: &mut impl CommandIdSource,
-) -> Result<Vec<UiEffect>, ReduceError> {
-    if state.post_prompt_stats_command_id.as_deref() != Some(command_id) {
-        return Ok(Vec::new());
-    }
-    state.post_prompt_stats_command_id = None;
-    Ok(start_post_prompt_session_sync(state, ids)?)
-}
-
 fn history_session_id(state: &UiState) -> Option<&str> {
     state
         .history
@@ -1941,11 +1950,12 @@ fn history_session_id(state: &UiState) -> Option<&str> {
 }
 
 fn session_sync_pending(state: &UiState) -> bool {
-    state.post_prompt_session_sync_pending
+    state.post_prompt_session_sync_pending || state.context.loading()
 }
 
 fn can_request_history(state: &UiState, allow_during_prompt: bool) -> bool {
     state.history_request.is_none()
+        && !session_sync_pending(state)
         && state.session_operation.is_none()
         && match state.current_command.as_ref() {
             None => true,
@@ -2219,9 +2229,13 @@ fn cancel(
 }
 
 fn restore_active_or_idle(state: &mut UiState) {
-    if state.current_command.is_some() {
+    if let Some(command) = &state.current_command {
         state.view_status = ViewStatus::Running;
-        state.interaction_status = InteractionStatus::Running;
+        state.interaction_status = if command.command_type == ActiveCommandType::Compact {
+            InteractionStatus::Compacting
+        } else {
+            InteractionStatus::Running
+        };
     } else {
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -2266,6 +2280,7 @@ fn commit_session_and_hydrate(
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     let id = ids.next_id(CommandKind::GetMessages);
     let command = WispTypedClientRpcCommands::get_messages(&id, Some(&selected.session_id))?;
+    state.context.invalidate();
     state.selected_session = Some(selected.clone());
     state.last_session = Some(selected.session_id.clone());
     state.transcript = SharedTranscript::default();
@@ -2645,6 +2660,7 @@ fn handle_session_backend_event(
                 .map(|session| session.session_id.clone());
             clear_queue_cache(state);
             install_history_snapshot(state, report);
+            state.context.invalidate();
             state.input_ready = true;
             vec![
                 UiEffect::ReplaceTranscript,
@@ -2885,6 +2901,7 @@ fn handle_session_backend_event(
         }
         SessionOperation::CreatingSession { command_id } => match event {
             BackendEvent::CommandFinished { ok: true, .. } => {
+                state.context.invalidate();
                 state.transcript = SharedTranscript::default();
                 state.selected_session = None;
                 state.last_session = None;
@@ -3641,6 +3658,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = context::observe(state, &event, ids)? {
+        return Ok(effects);
+    }
     if let Some(effects) = command_controls::observe(state, &event, ids)? {
         return Ok(effects);
     }
@@ -3649,7 +3669,7 @@ fn handle_backend_event(
     }
     if let Some(mut effects) = handle_history_backend_event(state, &event) {
         if state.post_prompt_session_sync_pending
-            && state.post_prompt_stats_command_id.is_none()
+            && !state.context.loading()
             && state.history_request.is_none()
         {
             effects.extend(start_post_prompt_session_sync(state, ids)?);
@@ -3667,6 +3687,14 @@ fn handle_backend_event(
     }
     match event {
         BackendEvent::Diagnostic(message) => {
+            if state
+                .current_command
+                .as_ref()
+                .is_some_and(|command| command.command_type == ActiveCommandType::Compact)
+            {
+                state.context.compaction_notice = Some(message);
+                return Ok(vec![UiEffect::RequestRender]);
+            }
             Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
         }
         BackendEvent::MessageStarted { turn } => {
@@ -3763,6 +3791,9 @@ fn handle_backend_event(
             model,
             effort,
         } => {
+            if state.provider.as_deref() != Some(provider.as_str()) || state.model != model {
+                state.context.invalidate();
+            }
             state.provider = Some(provider);
             state.model = model;
             state.effort = effort;
@@ -3793,7 +3824,11 @@ fn handle_backend_event(
             state.queue.remove_first(kind, &content);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::ConnectionCatalogReported { .. }
+        BackendEvent::SessionStatsReported { .. }
+        | BackendEvent::ContextEstimated(_)
+        | BackendEvent::CompactionStarted(_)
+        | BackendEvent::CompactionCompleted(_)
+        | BackendEvent::ConnectionCatalogReported { .. }
         | BackendEvent::ModelCatalogReported { .. }
         | BackendEvent::CommandCatalogReported { .. }
         | BackendEvent::ModeReported { .. }
@@ -3815,12 +3850,6 @@ fn handle_backend_event(
             ok,
             error,
         } => {
-            if state.post_prompt_stats_command_id.as_deref() == Some(command_id.as_str())
-                && command_type == "get_session_stats"
-            {
-                state.post_prompt_stats_command_id = None;
-                return start_post_prompt_session_sync(state, ids);
-            }
             if let Some(effects) =
                 handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
             {
@@ -3832,10 +3861,14 @@ fn handle_backend_event(
             if !matches_current {
                 return Ok(Vec::new());
             }
-            let stats_id = ids.next_id(CommandKind::GetSessionStats);
-            let stats = WispTypedClientRpcCommands::get_session_stats(&stats_id)?;
             state.post_prompt_session_sync_pending = true;
-            state.post_prompt_stats_command_id = Some(stats_id);
+            state.context.compaction = None;
+            if command_type == "compact" && (!ok || state.context.compaction_notice.is_none()) {
+                state.context.compaction_notice = Some(bounded_session_text(
+                    error.as_deref().unwrap_or("Compaction finished."),
+                    SESSION_NOTICE_MAX_BYTES,
+                ));
+            }
             state.current_command = None;
             state.pending_approval = None;
             state.pending_trust_request_id = None;
@@ -3857,12 +3890,12 @@ fn handle_backend_event(
                 && error
                     .as_deref()
                     .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
-            state.view_status = if ok || was_cancelled {
+            state.view_status = if ok || was_cancelled || command_type == "compact" {
                 ViewStatus::Idle
             } else {
                 ViewStatus::Error
             };
-            Ok(vec![UiEffect::SendCommand(stats), UiEffect::RequestRender])
+            context::start_refresh(state, true, ids)
         }
     }
 }
@@ -3909,6 +3942,7 @@ mod tests {
             | UiEffect::ModelConfigurationApplied
             | UiEffect::CommandCatalogChanged
             | UiEffect::ModeConfigurationApplied
+            | UiEffect::AutoCompactionConfigured
             | UiEffect::Diagnostic(_)
             | UiEffect::Notice(_)
             | UiEffect::RequestRender
@@ -5650,6 +5684,12 @@ mod tests {
             Some("fork name")
         );
 
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_session_stats-1", "get_session_stats", false)),
+            &mut ids,
+        )
+        .unwrap();
         state.history.active_leaf_id = Some("leaf-2".into());
         reduce(
             &mut state,
