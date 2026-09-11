@@ -116,7 +116,13 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
-The Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,
+Wisp currently ships two terminal frontends over the same Python runtime. `wisp` launches Textual,
+the default and supported TUI. `wisp tui --renderer rust` is an experimental source-build client for
+presentation performance on macOS and Linux; it never silently falls back to Textual, and it does
+not replace the agent. A later default switch would be an explicit decision, not implied by new
+Rust features. See the [TUI guide](https://whanyu1212.github.io/Wisp/guide/tui).
+
+The experimental Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,
 and compaction details; during a run, session totals show the last refreshed snapshot.
 When idle, `/context auto on|off` changes automatic compaction for the current process,
 and `/compact [instructions]` compacts the selected session. Ctrl-C cancels manual compaction.

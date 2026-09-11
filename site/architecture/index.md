@@ -15,7 +15,8 @@ only the live controls its transport can support. See
 ```mermaid
 flowchart LR
   CLI[CLI] --> Host
-  TUI[TUI] --> Host
+  Textual[Textual TUI] --> Host
+  Rust[Rust TUI] --> Host
   RPC[JSONL RPC] --> Host
   SDK[SDK] --> Host
   Host[RPC command host] --> Session[CodingSession]
@@ -40,10 +41,11 @@ request-boundary handshake, and source navigation.
 
 ## Terminal frontend boundary
 
-Textual is Wisp's current interactive terminal frontend and remains supported. Wisp has accepted an
-experiment to add an optional Rust terminal frontend over the same Python JSONL-RPC runtime. The
-experiment changes presentation ownership, not runtime authority: Python continues to own providers,
-tools, trust, approvals, sessions, configuration, and every durable or safety-sensitive decision.
+Wisp is in a dual-frontend period, not a rewrite of the agent in Rust. Textual is the default and
+supported interactive TUI. An experimental Rust client talks to the same Python JSONL-RPC runtime.
+The experiment changes presentation ownership, not runtime authority: Python continues to own
+providers, tools, trust, approvals, sessions, configuration, and every durable or safety-sensitive
+decision. Features may land in Rust first without changing the default.
 
 The [Rust terminal frontend boundary](./rust-tui-boundary) records the process topology, subsystem
 ownership, migration map, compatibility rules, failure ownership, and the closed [#470](https://github.com/whanyu1212/Wisp/issues/470)
@@ -51,7 +53,8 @@ renderer decision. Textual remains the default and supported frontend. Rust is a
 opt-in, not a shipped or default interface. Supported opt-in (stage 3) requires
 [#467](https://github.com/whanyu1212/Wisp/issues/467),
 [#468](https://github.com/whanyu1212/Wisp/issues/468), and
-[#469](https://github.com/whanyu1212/Wisp/issues/469).
+[#469](https://github.com/whanyu1212/Wisp/issues/469). A later default switch requires a new
+explicit issue.
 
 ## Resumed transcript hydration
 

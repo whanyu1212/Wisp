@@ -10,12 +10,17 @@ consumed—not because it has a different agent implementation.
 
 | Interface | Start it | Output | Best for |
 |---|---|---|---|
-| Textual TUI | `wisp` or `wisp tui` | Fullscreen terminal UI | Interactive repository work |
+| Textual TUI | `wisp` or `wisp tui` | Fullscreen terminal UI | Interactive repository work (default) |
+| Experimental Rust TUI | `wisp tui --renderer rust` | Fullscreen terminal UI | Source-build presentation client; same Python runtime |
 | Line TUI | `wisp tui --line` | Incremental terminal text | Simple terminals and debugging |
 | Print | `wisp -p "PROMPT"` | Assistant text on stdout; events on stderr | One-shot prompts and scripts |
 | JSON | `wisp -p "PROMPT" --mode json` | One `WispEvent` JSON object per line | Typed one-shot automation |
 | JSONL RPC | `wisp --mode rpc` | Commands on stdin; typed events/results on stdout | Long-lived clients and custom UIs |
 | Python SDK | Import `InProcessWisp` | Typed async Python API | In-process applications and tests |
+
+The fullscreen TUI currently has two clients. Textual is the default. The Rust renderer is an
+experimental opt-in over the same Python JSONL-RPC backend: it does not replace the agent, and it
+does not become the default until a later explicit decision. See [TUI](./tui) for how they coexist.
 
 ## Shared semantics, different controls
 
