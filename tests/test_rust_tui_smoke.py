@@ -107,6 +107,8 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         status: int | None = None
         submitted = restart
         picker_phase = "startup" if picker_only else "done"
+        picker_width = 121
+        next_picker_frame = 0.0
         quit_sent = False
         context_redrawn = False
         deadline = time.monotonic() + 25
@@ -133,9 +135,28 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     picker_phase = "loading"
                     output.clear()
                 elif picker_phase == "loading" and b"Current:" in output:
-                    # The fake provider is hidden; select the first real catalog model
-                    # and its first effort level. Configuration makes no provider request.
-                    os.write(terminal_fd, b"\x1b[C\r")
+                    # The fake provider is hidden; inspect the first real catalog model
+                    # before staging effort. Configuration makes no provider request.
+                    picker_phase = "effort"
+                    output.clear()
+                elif (
+                    picker_phase == "effort"
+                    and b"Effort:" in output
+                    and b"Default" in output
+                    and b"apply" in output
+                ):
+                    os.write(terminal_fd, b"\x1b[C")
+                    # Do not race navigation with a resize. If an intervening redraw
+                    # rejects the key, the next unchanged frame retries it.
+                    next_picker_frame = time.monotonic() + 0.1
+                    output.clear()
+                elif (
+                    picker_phase == "effort"
+                    and b"Effort:" in output
+                    and b"Default" not in output
+                    and b"apply" in output
+                ):
+                    os.write(terminal_fd, b"\r")
                     picker_phase = "applying"
                     submitted = True
                     output.clear()
@@ -156,11 +177,21 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                 if submitted and applied and not quit_sent:
                     os.write(terminal_fd, b"\x03")
                     quit_sent = True
+                if picker_phase == "effort" and time.monotonic() >= next_picker_frame:
+                    # Observe the staged effort in a full frame before activating it.
+                    picker_width = 123 if picker_width == 122 else 122
+                    fcntl.ioctl(
+                        terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, picker_width, 0, 0)
+                    )
+                    next_picker_frame = time.monotonic() + 0.1
+                    output.clear()
                 waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
                 if waited_pid == child_pid:
                     status = waited_status
                     break
-            assert status is not None, f"Rust model selection timed out: {bytes(output)!r}"
+            assert status is not None, (
+                f"Rust model selection timed out in {picker_phase!r}: {bytes(output)!r}"
+            )
             assert submitted and quit_sent, bytes(output)
             if not picker_only:
                 assert b"custom-model" in output and b"effort" in output, bytes(output)
@@ -806,6 +837,16 @@ for line in sys.stdin:
                 phase = "history restored"
             elif phase == "history restored" and all(
                 marker in output[phase_output_offset:]
+                for marker in (b"history exact first", b"needle second")
+            ):
+                # The footer remains visible under history, so closing it need not
+                # repaint the input hint. Wait until restore has consumed Enter before
+                # resizing, which invalidates the popup's activation readiness.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
+                phase = "history restored frame"
+            elif phase == "history restored frame" and all(
+                marker in output[phase_output_offset:]
                 for marker in (b"history", b"exact", b"first", b"needle", b"second", b"Enter send")
             ):
                 assert command_types.count("prompt") == 1, "history must not submit"
@@ -1301,6 +1342,7 @@ from wisp.events import (
     RpcMessagesReported, RpcStateReported, RpcStateSnapshot,
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
     CompactionStarted, CompactionCompleted, ContextEstimated, SkillInvoked,
+    MessageStarted, MessageDelta,
     RpcMcpStatusReported, RpcMcpStatusSnapshot, RpcMcpServerSnapshot,
 )
 from wisp.runtime.builtin_commands import builtin_command_descriptors
@@ -1341,6 +1383,7 @@ for line in sys.stdin:
         emit(RpcMcpStatusReported(command_id=command["id"], status=RpcMcpStatusSnapshot(
             servers=(RpcMcpServerSnapshot(name="search", status="connected",
                 tool_names=("mcp__search__query",)),))))
+        emit(MessageDelta(turn=1, delta="LIVEBG\\n"))
     elif kind == "get_messages":
         emit(RpcMessagesReported(command_id=command["id"], session_id="context-session",
                                  session_path=Path("/context-session.jsonl"),
@@ -1379,6 +1422,7 @@ for line in sys.stdin:
         continue
     elif kind == "prompt":
         active = command
+        emit(MessageStarted(turn=1))
         emit(SkillInvoked(session_id="context-session", message_entry_id="skill-message",
             invocation=SkillInvocationEvidence(name="review", original_content=command["prompt"],
                 request="keep running", content_sha256="0" * 64),
@@ -1458,6 +1502,9 @@ for line in sys.stdin:
                 assert b"/context" in output
                 assert b"/compact" in output
                 os.write(terminal_fd, b"\x1b")
+                # Closing a popup leaves the background's unchanged cells out of
+                # differential writes. Resize to inspect the full restored frame.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "closed"
                 output.clear()
             elif phase == "closed" and b"Type a prompt below to start." in output:
@@ -1474,7 +1521,7 @@ for line in sys.stdin:
             ):
                 # Resize after the request so the next frame contains the whole confirmed
                 # notice, even when only "build" -> "plan" otherwise changes on screen.
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 103, 0, 0))
                 phase = "plan confirmed"
                 output.clear()
             elif phase == "plan confirmed" and b"plan mode enabled." in output:
@@ -1483,6 +1530,7 @@ for line in sys.stdin:
                 output.clear()
             elif phase == "context" and b"Context" in output and b"0.0123" in output:
                 os.write(terminal_fd, b"\x1b")
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
                 phase = "context closed"
                 output.clear()
             elif phase == "context closed" and b"WISP" in output:
@@ -1502,7 +1550,7 @@ for line in sys.stdin:
                 and sum(command["type"] == "get_messages" for command in commands) >= 2
             ):
                 # A full frame avoids depending on terminal diff boundaries inside "cancelled".
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 103, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 105, 0, 0))
                 phase = "cancel confirmed"
                 output.clear()
             elif phase == "cancel confirmed" and b"cancelled" in output:
@@ -1522,6 +1570,7 @@ for line in sys.stdin:
                     == stats_before_cached_view
                 )
                 os.write(terminal_fd, b"\x1b")
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
                 phase = "cached closed"
                 output.clear()
             elif phase == "cached closed" and b"WISP" in output:
@@ -1532,10 +1581,13 @@ for line in sys.stdin:
             elif phase == "mcp" and b"MCP servers" in output:
                 # The new overlay can reuse individual terminal cells from the
                 # transcript. Inspect a full frame, not differential writes.
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 107, 0, 0))
                 phase = "mcp ready"
                 output.clear()
-            elif phase == "mcp ready" and b"mcp__search__query" in output:
+            elif phase == "mcp ready" and b"mcp__search__query" in output and b"LIVEBG" in output:
+                # LIVEBG fits in the exposed transcript margin. Both markers must
+                # appear in this full frame while the popup still owns input.
+                assert b"MCP" in output and b"servers" in output
                 assert b"connected" in output
                 os.write(terminal_fd, b"r")
                 phase = "mcp refresh"
@@ -1545,13 +1597,11 @@ for line in sys.stdin:
                 and sum(command["type"] == "get_mcp_status" for command in commands) == 2
             ):
                 os.write(terminal_fd, b"\x03")
-                phase = "mcp closed"
-                output.clear()
-            elif phase == "mcp closed" and b"WISP" in output:
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 105, 0, 0))
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 108, 0, 0))
                 phase = "prompt restored"
                 output.clear()
             elif phase == "prompt restored" and b"/skill:review" in output and b"keep" in output:
+                assert b"LIVEBG" in output
                 assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/quit\r")
                 phase = "quit"
@@ -1574,8 +1624,12 @@ for line in sys.stdin:
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            # Release the PTY before reaping: macOS can otherwise leave a killed
+            # child waiting for terminal teardown after a failed screen assertion.
+            os.close(terminal_fd)
             os.waitpid(child_pid, 0)
-        os.close(terminal_fd)
+        else:
+            os.close(terminal_fd)
     commands = _complete_logged_commands(command_log)
     configure = [command for command in commands if command["type"] == "configure"]
     assert [command["mode"] for command in configure if "mode" in command] == ["build", "plan"]
