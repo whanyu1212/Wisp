@@ -18,6 +18,7 @@ use wisp_protocol::{
 
 pub(crate) enum Command {
     Help,
+    History,
     Mode(AgentMode),
     Context,
     Skills,
@@ -34,6 +35,7 @@ pub(crate) enum Command {
 fn usage(name: &str) -> Option<&'static str> {
     Some(match name {
         "help" => "/help",
+        "history" => "/history",
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
@@ -93,10 +95,13 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let tail = &trimmed[token.len()..];
     let normalized = format!("/{canonical}{tail}");
     Some(match canonical {
-        "help" | "plan" | "build" | "quit" | "skills" | "mcp" if !tail.trim().is_empty() => {
+        "help" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
+            if !tail.trim().is_empty() =>
+        {
             Command::Invalid(format!("Usage: {syntax}"))
         }
         "help" => Command::Help,
+        "history" => Command::History,
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
         "plan" => Command::Mode(AgentMode::Plan),
@@ -436,7 +441,8 @@ pub(crate) mod tests {
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [
             "help", "plan", "build", "model", "provider", "connect", "resume", "new", "name",
-            "clone", "tree", "unrevert", "context", "compact", "skills", "mcp", "history", "quit",
+            "clone", "tree", "unrevert", "context", "compact", "skills", "mcp", "history",
+            "update", "quit",
         ]
         .into_iter()
         .enumerate()
@@ -622,7 +628,8 @@ pub(crate) mod tests {
         assert!(text.contains("/context [auto on|off]"));
         assert!(text.contains("/skills"));
         assert!(text.contains("/mcp"));
-        assert!(!text.contains("/history"));
+        assert!(text.contains("/history"));
+        assert!(!text.contains("/update"));
         assert!(text.contains("Aliases: /exit, :q"));
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
@@ -634,7 +641,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .items
                 .iter()
-                .all(|item| item.spelling() != "/history")
+                .all(|item| item.spelling() != "/update")
         );
         assert!(completion.view(None, None).is_none());
     }

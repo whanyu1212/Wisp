@@ -1129,6 +1129,7 @@ pub enum UiAction {
 #[derive(Debug)]
 pub enum UiEffect {
     SendCommand(WispTypedClientRpcCommands),
+    RecordPromptHistory(String),
     SendSecretCommand(SecretCommand),
     ShowConnectionPanel(ConnectionCatalogSnapshot),
     ConnectionCatalogUpdated(ConnectionCatalogSnapshot),
@@ -1328,9 +1329,10 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state.transcript.append_prompt(content);
+    state.transcript.append_prompt(content.clone());
     Ok(vec![
         UiEffect::SendCommand(command),
+        UiEffect::RecordPromptHistory(content),
         UiEffect::RequestRender,
     ])
 }
@@ -3424,7 +3426,7 @@ fn handle_queue_command_finished(
             return None;
         }
         return Some(if ok {
-            Vec::new()
+            vec![UiEffect::RecordPromptHistory(pending.content)]
         } else {
             vec![UiEffect::RestoreDraft {
                 content: pending.content,
@@ -3952,7 +3954,8 @@ mod tests {
             UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
             UiEffect::SendCommittedHydration { command, .. } => Some(command.to_value().unwrap()),
             UiEffect::SendPostPromptSessionSync(command) => Some(command.to_value().unwrap()),
-            UiEffect::SendSecretCommand(_)
+            UiEffect::RecordPromptHistory(_)
+            | UiEffect::SendSecretCommand(_)
             | UiEffect::ShowConnectionPanel(_)
             | UiEffect::ConnectionCatalogUpdated(_)
             | UiEffect::ShowDeviceCode(_)

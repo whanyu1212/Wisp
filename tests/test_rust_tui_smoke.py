@@ -572,6 +572,8 @@ def test_rust_tui_queue_lifecycle_over_pty(tmp_path: Path) -> None:
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
     binary = Path(binary_value).resolve(strict=True)
+    project = tmp_path / "project"
+    project.mkdir()
     backend = tmp_path / "queue_backend.py"
     command_log = tmp_path / "commands.jsonl"
     backend.write_text(
@@ -675,6 +677,7 @@ for line in sys.stdin:
 
     child_pid, terminal_fd = pty.fork()
     if child_pid == 0:
+        os.chdir(project)
         os.execve(
             str(binary),
             [
@@ -699,7 +702,7 @@ for line in sys.stdin:
     restore_output_offset: int | None = None
     queue_update_output_offset: int | None = None
     idle_output_offset: int | None = None
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 30
     try:
         while time.monotonic() < deadline:
             readable, _, _ = select.select([terminal_fd], [], [], 0.05)
@@ -726,7 +729,10 @@ for line in sys.stdin:
                 ]
             ):
                 phase_output_offset = len(output)
-                os.write(terminal_fd, b"prompt-kept-running\r")
+                os.write(
+                    terminal_fd,
+                    b"\x1b[200~history exact first\nneedle second\x1b[201~\r",
+                )
                 phase = "prompt sent"
             elif (
                 phase == "prompt sent"
@@ -784,6 +790,42 @@ for line in sys.stdin:
                 and idle_output_offset is not None
                 and b"idle" in output[idle_output_offset:]
             ):
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\x12")
+                phase = "history opened"
+            elif phase == "history opened" and all(
+                marker in output[phase_output_offset:]
+                for marker in (b"Prompt", b"history", b"Enter restore")
+            ):
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\x1b[200~needle\x1b[201~")
+                phase = "history filtered"
+            elif phase == "history filtered" and b"needle" in output[phase_output_offset:]:
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\r")
+                phase = "history restored"
+            elif phase == "history restored" and all(
+                marker in output[phase_output_offset:]
+                for marker in (b"history", b"exact", b"first", b"needle", b"second", b"Enter send")
+            ):
+                assert command_types.count("prompt") == 1, "history must not submit"
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\x05 edited")
+                phase = "restored prompt edited"
+            elif phase == "restored prompt edited" and b"edited" in output[phase_output_offset:]:
+                assert command_types.count("prompt") == 1, "editing must not submit"
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\r")
+                phase = "restored prompt sent"
+            elif phase == "restored prompt sent" and command_types.count("prompt") == 2:
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"\x03")
+                phase = "second cancel sent"
+            elif (
+                phase == "second cancel sent"
+                and command_types.count("cancel") == 2
+                and b"idle" in output[phase_output_offset:]
+            ):
                 os.write(terminal_fd, b"\x03")
                 phase = "shutdown sent"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
@@ -831,10 +873,16 @@ for line in sys.stdin:
         "follow_up",
         "pop_queue",
         "cancel",
+        "prompt",
+        "cancel",
         "shutdown",
     ]
-    prompt, steer, follow_up, pop_queue, cancel, _shutdown = lifecycle_commands
-    assert prompt["prompt"] == "prompt-kept-running"
+    prompt, steer, follow_up, pop_queue, cancel, recalled, second_cancel, _shutdown = (
+        lifecycle_commands
+    )
+    assert prompt["prompt"] == "history exact first\nneedle second"
+    assert recalled["prompt"] == "history exact first\nneedle second edited"
+    assert second_cancel["target_id"] == recalled["id"]
     assert steer["content"] == "steer-via-enter"
     assert follow_up["content"] == "follow-up-via-alt-enter"
     assert pop_queue["kind"] == "follow_up"

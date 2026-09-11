@@ -11,6 +11,7 @@ transcript-benchmark = ["nix/resource"]
 
 [dependencies]
 bytes.workspace = true
+caseless.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 nix.workspace = true

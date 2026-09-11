@@ -16,6 +16,10 @@ mod markdown;
 mod model_picker;
 mod process;
 mod prompt_editor;
+mod prompt_history;
+#[cfg(test)]
+mod prompt_history_tests;
+mod prompt_history_view;
 pub mod reducer;
 mod session_picker;
 mod session_tree_picker;
@@ -44,6 +48,8 @@ use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
 use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
+use prompt_history::PromptHistory;
+use prompt_history_view::{HistoryAction, PromptHistoryView};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use reducer::{
@@ -422,6 +428,8 @@ struct LiveUi {
     detail_view: DetailView,
     browse_selected: Option<TranscriptEntryId>,
     editor: PromptEditor,
+    prompt_history: PromptHistory,
+    prompt_history_view: Option<PromptHistoryView>,
     ids: SequentialCommandIds,
     notice: Option<String>,
     render_pending: bool,
@@ -449,6 +457,8 @@ impl Default for LiveUi {
             detail_view: DetailView::default(),
             browse_selected: None,
             editor: PromptEditor::default(),
+            prompt_history: PromptHistory::default(),
+            prompt_history_view: None,
             ids: SequentialCommandIds::default(),
             notice: None,
             render_pending: true,
@@ -494,6 +504,7 @@ impl LiveUi {
     }
 
     fn defer_queue_recovery(&mut self, content: String, local_order: Option<u64>) {
+        self.prompt_history_view = None;
         assert!(
             self.deferred_queue_recovery_can_accept(&content),
             "deferred recoveries must stay within runtime queue limits"
@@ -525,6 +536,7 @@ impl LiveUi {
         let Some(recovery) = self.deferred_queue_recovery.first() else {
             return false;
         };
+        self.prompt_history_view = None;
         let outcome = self.editor.prepend_restored(&recovery.content);
         self.notice = if outcome.rejected_limit {
             Some(
@@ -610,7 +622,16 @@ impl LiveUi {
                     let value = serde_json::to_value(command.into_inner())?;
                     send_payload(writer, Bytes::from(serde_json::to_vec(&value)?), limit).await?;
                 }
+                UiEffect::RecordPromptHistory(prompt) => {
+                    if self.prompt_history.record(prompt) {
+                        if let Some(view) = &mut self.prompt_history_view {
+                            view.sync(&self.prompt_history);
+                            self.render_pending = true;
+                        }
+                    }
+                }
                 UiEffect::ShowConnectionPanel(catalog) => {
+                    self.prompt_history_view = None;
                     self.session_picker = None;
                     self.session_tree_picker = None;
                     self.connection_panel = Some(ConnectionPanel::new(catalog));
@@ -623,6 +644,7 @@ impl LiveUi {
                     }
                 }
                 UiEffect::ShowModelPicker => {
+                    self.prompt_history_view = None;
                     self.rendered_model_picker = false;
                     self.model_picker = Some(ModelPicker::loading());
                     self.render_pending = true;
@@ -656,11 +678,13 @@ impl LiveUi {
                     }
                 }
                 UiEffect::ModeConfigurationApplied | UiEffect::AutoCompactionConfigured => {
+                    self.prompt_history_view = None;
                     self.editor.clear();
                     self.completion.dismiss();
                     self.render_pending = true;
                 }
                 UiEffect::ModelConfigurationApplied => {
+                    self.prompt_history_view = None;
                     self.rendered_model_picker = false;
                     self.model_picker = None;
                     self.editor.clear();
@@ -700,6 +724,7 @@ impl LiveUi {
                     content,
                     local_order: None,
                 } => {
+                    self.prompt_history_view = None;
                     let outcome = self.editor.prepend_restored(&content);
                     if outcome.rejected_limit {
                         self.defer_queue_recovery(content, None);
@@ -727,12 +752,14 @@ impl LiveUi {
                     sessions,
                     selected_session_id,
                 } => {
+                    self.prompt_history_view = None;
                     self.session_tree_picker = None;
                     self.session_picker =
                         Some(SessionPicker::new(sessions, selected_session_id.as_deref()));
                     self.render_pending = true;
                 }
                 UiEffect::ShowSessionTreePage { page, append } => {
+                    self.prompt_history_view = None;
                     self.session_picker = None;
                     if append {
                         if let Some(picker) = self.session_tree_picker.as_mut() {
@@ -755,6 +782,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::RestoreSessionDraft(content) => {
+                    self.prompt_history_view = None;
                     let outcome = self.editor.insert_paste(&content);
                     self.notice = if outcome.rejected_limit {
                         Some(
@@ -909,6 +937,7 @@ impl LiveUi {
             self.command_help = None;
             self.context_view = None;
             self.discovery_view = None;
+            self.prompt_history_view = None;
             self.completion.dismiss();
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1062,6 +1091,9 @@ impl LiveUi {
         if let Some(view) = &mut self.discovery_view {
             view.invalidate_selection();
         }
+        if let Some(view) = &mut self.prompt_history_view {
+            view.invalidate_selection();
+        }
         terminal.draw(|frame| {
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = match self.state.view_status {
@@ -1079,6 +1111,12 @@ impl LiveUi {
                 };
             }
             if let Some(view) = self
+                .prompt_history_view
+                .as_mut()
+                .filter(|_| ui::decision_context_visible(frame.area()))
+            {
+                view.render(frame, frame.area(), &self.prompt_history);
+            } else if let Some(view) = self
                 .discovery_view
                 .as_mut()
                 .filter(|_| ui::decision_context_visible(frame.area()))
@@ -1650,6 +1688,16 @@ impl LiveUi {
         self.completion.dismiss();
         match command {
             Command::Quit => Ok(LoopControl::Exit),
+            Command::History => {
+                if self.editor_editable() {
+                    self.editor.clear();
+                    self.open_prompt_history();
+                } else {
+                    self.notice = Some("Prompt history is unavailable while Wisp is busy.".into());
+                    self.render_pending = true;
+                }
+                Ok(LoopControl::Continue)
+            }
             Command::Help => {
                 self.command_help = Some(Help::default());
                 self.editor.clear();
@@ -2203,6 +2251,37 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    fn open_prompt_history(&mut self) {
+        self.prompt_history_view = Some(PromptHistoryView::new(&self.prompt_history));
+        self.completion.dismiss();
+        self.notice = None;
+        self.render_pending = true;
+    }
+
+    fn handle_prompt_history_key(&mut self, key: KeyEvent) {
+        let action = self
+            .prompt_history_view
+            .as_mut()
+            .expect("open prompt history")
+            .handle_key(key, &self.prompt_history);
+        match action {
+            HistoryAction::Close => self.prompt_history_view = None,
+            HistoryAction::Restore(id) => {
+                if let Some(entry) = self.prompt_history.entry(id) {
+                    let outcome = self.editor.restore_prompt(&entry.prompt);
+                    self.update_edit_notice(outcome);
+                    if !outcome.rejected_limit {
+                        self.prompt_history_view = None;
+                        self.completion.sync(&self.editor);
+                        self.completion.dismiss();
+                    }
+                }
+            }
+            HistoryAction::None => {}
+        }
+        self.render_pending = true;
+    }
+
     async fn handle_input(
         &mut self,
         input: Input,
@@ -2211,6 +2290,18 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         self.completion.sync(&self.editor);
         match input {
+            Input::Key(key) if self.prompt_history_view.is_some() => {
+                self.handle_prompt_history_key(key);
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(pasted) if self.prompt_history_view.is_some() => {
+                self.prompt_history_view
+                    .as_mut()
+                    .expect("open prompt history")
+                    .paste(&pasted, &self.prompt_history);
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if self.discovery_view.is_some() => {
                 let action = self
                     .discovery_view
@@ -2302,6 +2393,14 @@ impl LiveUi {
                 self.handle_browse_key(key, writer, limit).await
             }
             Input::Paste(_) if self.browse_selected.is_some() => Ok(LoopControl::Continue),
+            Input::Key(key)
+                if self.editor_editable()
+                    && key.code == KeyCode::Char('r')
+                    && key.modifiers == KeyModifiers::CONTROL =>
+            {
+                self.open_prompt_history();
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if is_browse_key(key) => {
                 self.enter_or_cycle_browse();
                 Ok(LoopControl::Continue)
@@ -2454,6 +2553,9 @@ impl LiveUi {
             }
             Input::Redraw => {
                 self.completion.invalidate();
+                if let Some(view) = &mut self.prompt_history_view {
+                    view.invalidate_selection();
+                }
                 if let Some(view) = &mut self.discovery_view {
                     view.invalidate_selection();
                 }
