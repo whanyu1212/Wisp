@@ -12,6 +12,14 @@ A fullscreen Textual TUI built on the same RPC controller other integrations use
 active, a spinning `Working…` row stays at the live transcript tail as assistant output and tool
 cards appear, and changes labels for retries, approvals, trust, or compaction.
 
+::: info Two terminal frontends
+Wisp currently ships two terminal clients over the same Python runtime. Textual is the default and
+supported product TUI. The Rust client is an experimental opt-in for presentation performance:
+source-build, macOS and Linux, with no silent fallback. It is not a rewrite of the agent, and it is
+not the default until a later explicit decision. See the
+[terminal frontend boundary](../architecture/rust-tui-boundary).
+:::
+
 The footer shows the working directory plus plan/queued state on the left, the active shortcut in the
 center, and the model, billing route, and context percentage on the right. At narrow widths it
 progressively drops the shortcut, model, and working directory while preserving plan/queued state and
@@ -27,11 +35,13 @@ compact billing and context fields.
 
 ## Experimental Rust TUI
 
-Textual remains Wisp's default and full-featured TUI. [#470](https://github.com/whanyu1212/Wisp/issues/470)
-closed with that default: Rust stays an experimental opt-in on macOS and Linux, source-build only,
-with no fallback and no stage-3 supported-opt-in claim. [#467](https://github.com/whanyu1212/Wisp/issues/467),
+The two frontends coexist during this period. Features may land in Rust first without changing the
+default. [#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the supported
+product TUI; Rust stays an experimental opt-in on macOS and Linux, source-build only, with no
+fallback and no stage-3 supported-opt-in claim. [#467](https://github.com/whanyu1212/Wisp/issues/467),
 [#468](https://github.com/whanyu1212/Wisp/issues/468), and
-[#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage.
+[#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage. A
+default switch requires a new explicit issue.
 
 ```bash
 wisp tui --renderer rust

@@ -11,9 +11,10 @@ title: Rust terminal frontend boundary
 | Tracking | [#456](https://github.com/whanyu1212/Wisp/issues/456), [#457](https://github.com/whanyu1212/Wisp/issues/457), [#463](https://github.com/whanyu1212/Wisp/issues/463), [#470](https://github.com/whanyu1212/Wisp/issues/470) |
 | Renderer decision | Closed by [#470](https://github.com/whanyu1212/Wisp/issues/470): Textual remains the default; Rust remains experimental opt-in |
 
-Wisp has an optional Rust terminal frontend over the existing Python JSONL-RPC runtime. The language
-boundary is fixed: Rust does not become the default, Textual is not removed, and the agent runtime
-stays in Python.
+Wisp currently ships two terminal frontends over the existing Python JSONL-RPC runtime. That is a
+dual-frontend period, not a transition of the product from Python to Rust. The language boundary is
+fixed: Rust does not become the default, Textual is not removed, and the agent runtime stays in
+Python.
 
 The #463 slice started as a transport-only experiment. The current experimental frontend accepts
 prompts, approvals, trust answers, cancellation, steering and follow-up queues, bounded session
