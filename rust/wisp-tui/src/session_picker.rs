@@ -3,13 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::reducer::SessionSummary;
+use crate::theme::Palette;
 
 pub const SESSION_PICKER_LIMIT: usize = 50;
 const PAGE_STEP: usize = 10;
@@ -79,7 +80,7 @@ impl SessionPicker {
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette: Palette) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -93,7 +94,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker) {
     let lines = if picker.sessions.is_empty() {
         vec![Line::styled(
             "No persisted sessions.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         )]
     } else {
         picker
@@ -102,13 +103,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker) {
             .enumerate()
             .skip(start)
             .take(height)
-            .map(|(index, session)| session_line(session, picker.selected == Some(index), width))
+            .map(|(index, session)| {
+                session_line(session, picker.selected == Some(index), width, palette)
+            })
             .collect()
     };
     frame.render_widget(
         Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .title(" resume session ")
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -120,12 +124,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker) {
             "↑/↓ move · PgUp/PgDn · Home/End · Enter select · Esc cancel"
         })
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray)),
+        .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
 }
 
-fn session_line(session: &SessionSummary, selected: bool, width: usize) -> Line<'static> {
+fn session_line(
+    session: &SessionSummary,
+    selected: bool,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
     let label = session
         .name
         .as_deref()
@@ -143,10 +152,7 @@ fn session_line(session: &SessionSummary, selected: bool, width: usize) -> Line<
         width,
     );
     let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
+        palette.selection()
     } else {
         Style::default()
     };
@@ -243,7 +249,7 @@ mod tests {
         path.session_path = format!("/{}\n{}", "prefix".repeat(20), "界".repeat(100));
 
         for session in [named, path] {
-            let line = session_line(&session, true, 12);
+            let line = session_line(&session, true, 12, Palette::default());
             let content = line
                 .spans
                 .iter()

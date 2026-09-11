@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -13,6 +13,7 @@ use crate::reducer::{
     SESSION_TREE_RETAINED_LIMIT, SessionTreeNode, SessionTreeNodeKind, SessionTreePage,
 };
 use crate::session_picker::terminal_row;
+use crate::theme::Palette;
 
 const PAGE_STEP: usize = 10;
 const RETAINED_PAGE_LIMIT: usize = 2;
@@ -159,7 +160,7 @@ impl SessionTreePicker {
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker, palette: Palette) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -176,13 +177,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker) {
     if picker.earlier_nodes_omitted {
         lines.push(Line::styled(
             terminal_row("… earlier nodes omitted; reopen /tree to restart", width),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         ));
     }
     if picker.node_count() == 0 {
         lines.push(Line::styled(
             "No persisted tree nodes.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         ));
     } else {
         let active_leaf_id = picker
@@ -201,6 +202,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker) {
                         picker.selected == Some(index),
                         active_leaf_id == Some(node.entry_id.as_str()),
                         width,
+                        palette,
                     )
                 }),
         );
@@ -209,6 +211,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker) {
         Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .title(" session tree ")
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -218,12 +221,18 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionTreePicker) {
             "↑/↓ move · PgUp/PgDn · Home/End · Enter navigate · f fork user · Esc close",
         )
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray)),
+        .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
 }
 
-fn tree_line(node: &SessionTreeNode, selected: bool, active: bool, width: usize) -> Line<'static> {
+fn tree_line(
+    node: &SessionTreeNode,
+    selected: bool,
+    active: bool,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
     let role_or_kind = node.role.as_deref().unwrap_or_else(|| node.kind.as_str());
     let parent = node
         .parent_id
@@ -248,12 +257,9 @@ fn tree_line(node: &SessionTreeNode, selected: bool, active: bool, width: usize)
         width,
     );
     let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
+        palette.selection()
     } else if active {
-        Style::default().fg(Color::Green)
+        Style::default().fg(palette.success)
     } else {
         Style::default()
     };
@@ -341,7 +347,7 @@ mod tests {
 
         let mut node = picker.selected_node().unwrap().clone();
         node.preview = "unsafe\u{1b}[2J界界界界".into();
-        let line = tree_line(&node, true, true, 16);
+        let line = tree_line(&node, true, true, 16, Palette::default());
         let content = line
             .spans
             .iter()
@@ -367,7 +373,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(1, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &picker))
+            .draw(|frame| render(frame, frame.area(), &picker, Palette::default()))
             .unwrap();
     }
 }

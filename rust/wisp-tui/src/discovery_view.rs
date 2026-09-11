@@ -3,13 +3,13 @@
 use crate::{
     reducer::{UiAction, UiState},
     session_picker::terminal_row,
+    theme::Palette,
     ui::sanitize_for_terminal,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -82,12 +82,14 @@ impl DiscoveryView {
         area: Rect,
         state: &UiState,
         notice: Option<&str>,
+        palette: Palette,
     ) {
         match self {
-            Self::Skills(view) => view.render(frame, area, state, notice),
+            Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
                 let block = Block::default()
                     .borders(Borders::ALL)
+                    .border_style(palette.border())
                     .title(" MCP servers ")
                     .title_bottom(" ↑↓ PgUp/PgDn · r refresh · Esc close ");
                 let inner = block.inner(area);
@@ -185,10 +187,18 @@ impl SkillsView {
         DiscoveryAction::None
     }
 
-    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, state: &UiState, notice: Option<&str>) {
+    fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        state: &UiState,
+        notice: Option<&str>,
+        palette: Palette,
+    ) {
         self.rendered = None;
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(palette.border())
             .title(if self.diagnostics {
                 " Skill diagnostics "
             } else {
@@ -298,7 +308,7 @@ impl SkillsView {
         let mut selection = ListState::default().with_selected(Some(self.selected));
         frame.render_stateful_widget(
             List::new(items)
-                .highlight_style(Style::default().fg(Color::Cyan))
+                .highlight_style(palette.selection())
                 .highlight_symbol("› "),
             list,
             &mut selection,
@@ -377,7 +387,7 @@ mod tests {
     fn draw(view: &mut DiscoveryView, state: &UiState, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), state, None))
+            .draw(|frame| view.render(frame, frame.area(), state, None, Palette::default()))
             .unwrap();
         terminal
             .backend()

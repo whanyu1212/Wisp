@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use wisp_protocol::commands::ModelConfiguration;
 use wisp_protocol::events::{ModelCatalogSnapshot, ModelLifecycle};
 
 use crate::session_picker::terminal_row;
+use crate::theme::Palette;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ModelPickerAction {
@@ -278,6 +279,7 @@ pub fn render(
     picker: &ModelPicker,
     applying: bool,
     notice: Option<&str>,
+    palette: Palette,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -362,11 +364,9 @@ pub fn render(
                         }
                     };
                     let style = if picker.selected == Some(index) {
-                        Style::default()
-                            .bg(Color::Blue)
-                            .add_modifier(Modifier::BOLD)
+                        palette.selection()
                     } else if !available {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(palette.muted)
                     } else {
                         Style::default()
                     };
@@ -378,8 +378,12 @@ pub fn render(
         vec![Line::from("Catalog unavailable. Press r to retry.")]
     };
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().title(" model ").borders(Borders::ALL)),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(" model ")
+                .borders(Borders::ALL)
+                .border_style(palette.border()),
+        ),
         chunks[1],
     );
     let effort = picker
@@ -556,7 +560,16 @@ pub(crate) mod tests {
         for (width, height) in [(30, 8), (80, 24)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| render(frame, frame.area(), &picker, false, None))
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        &picker,
+                        false,
+                        None,
+                        Palette::default(),
+                    )
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer();
             assert_eq!(buffer.content.len(), usize::from(width * height));
@@ -566,7 +579,12 @@ pub(crate) mod tests {
                     .iter()
                     .all(|cell| !cell.symbol().chars().any(char::is_control))
             );
-            assert!(buffer.content.iter().any(|cell| cell.bg == Color::Blue));
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.bg == Palette::default().primary)
+            );
         }
     }
 }

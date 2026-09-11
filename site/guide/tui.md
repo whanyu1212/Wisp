@@ -105,7 +105,7 @@ Rust pickers, help, context, skills/MCP, prompt history, and retained tool detai
 conversation. Output continues updating behind the popup; closing it preserves the draft and
 scroll intent. Keys and paste go to the focused popup, and its editor owns the cursor. Escape closes
 the popup (and cancels a device login when one is active). Existing Ctrl+C behavior remains: it
-closes help, history, context, discovery, model and connection views, while session/tree/detail views
+closes theme, help, history, context, discovery, model and connection views, while session/tree/detail views
 retain the normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
@@ -133,6 +133,27 @@ The file popup is painted over the transcript, capped at 100 columns and 12 rows
 it can cover the header or upper composer rows rather than rearranging the conversation. Approval and
 trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse interaction
 remains unsupported, and modified submission shortcuts retain their existing meanings.
+
+Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Orchid, Ember, Storm, Grove,
+Wave, Paper, and Dawn palettes as Textual. The picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
+or `Home`/`End`; `Enter` applies the displayed choice, while `Escape` or `Ctrl+C` restores the
+committed theme. Streaming continues behind it. A new approval, trust request, or presented workflow
+cancels the preview without saving it. `Ctrl+T` switches between Paper and the last committed dark
+theme, including when starting from Dawn; it is ignored while the theme picker owns a preview.
+These are local presentation actions, never prompts or runtime configuration commands.
+
+Both frontends share `~/.wisp/tui.json` (`theme` and `last_dark_theme`). Choosing a theme in Rust also
+sets the next Textual launch's preference, and vice versa. Rust preserves unrelated keys and writes
+atomically. Missing, unknown, or unusable preferences fall back to Vapor; unreadable, non-UTF-8,
+non-regular, or over-64-KiB documents are not overwritten. A save failure leaves the live selection
+active and reports a warning; critical approval/cancellation recovery notices retain priority.
+Presentation preferences never enter `settings.json`, RPC, or session history.
+
+Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
+The conversion starts with Textual's Rec.709 grayscale and minimally adjusts native foregrounds when
+needed to retain a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse
+video as well as a marker; status labels, approval action words, and diff `+`/`-` signs remain visible
+without hue. The theme choice can still be changed and remembered while monochrome is active.
 
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,

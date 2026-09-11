@@ -1,6 +1,7 @@
 //! Read-only presentation of backend context budgets and session totals.
 
 use crate::reducer::UiState;
+use crate::theme::Palette;
 use crate::ui::sanitize_for_terminal;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -225,9 +226,10 @@ impl ContextView {
         .min(self.row_count.saturating_sub(self.page_height));
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, state: &UiState) {
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(palette.border())
             .title(" Context ")
             .title_bottom(" ↑↓ PgUp/PgDn · r refresh · Esc close ");
         let inner = block.inner(area);
@@ -337,12 +339,12 @@ mod tests {
         let mut view = ContextView::default();
         let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state))
+            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
             .unwrap();
         assert!(view.row_count > rows(&state).len());
         view.scroll(KeyCode::End);
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state))
+            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
             .unwrap();
         let text: String = terminal
             .backend()
@@ -358,7 +360,7 @@ mod tests {
         assert!(joined.contains("whenidle)"), "{text:?}");
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state))
+            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
             .unwrap();
         assert_eq!(view.offset, 0);
     }

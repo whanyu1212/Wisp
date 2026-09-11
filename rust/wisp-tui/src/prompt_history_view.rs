@@ -2,12 +2,12 @@
 
 use crate::{
     prompt_editor::PromptEditor, prompt_history::PromptHistory, session_picker::terminal_row,
+    theme::Palette,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
@@ -125,10 +125,17 @@ impl PromptHistoryView {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, history: &PromptHistory) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        history: &PromptHistory,
+        palette: Palette,
+    ) {
         self.invalidate_selection();
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(palette.border())
             .title(" Prompt history ")
             .title_bottom(" Enter restore · Esc/Ctrl-R close ");
         let inner = block.inner(area);
@@ -187,7 +194,7 @@ impl PromptHistoryView {
         frame.render_stateful_widget(
             List::new(rows)
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().fg(Color::Cyan)),
+                .highlight_style(palette.selection()),
             list_area,
             &mut state,
         );
@@ -203,7 +210,7 @@ mod tests {
     fn draw(view: &mut PromptHistoryView, history: &PromptHistory) -> String {
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), history))
+            .draw(|frame| view.render(frame, frame.area(), history, Palette::default()))
             .unwrap();
         terminal
             .backend()

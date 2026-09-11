@@ -28,6 +28,11 @@ mod session_picker;
 mod session_tree_picker;
 mod syntax;
 mod terminal;
+mod theme;
+mod theme_picker;
+mod theme_preferences;
+#[cfg(test)]
+mod theme_tests;
 mod tool_cards;
 mod tool_detail;
 mod transcript;
@@ -69,6 +74,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use terminal::{PanicHookGuard, TerminalGuard};
+use theme::Palette;
+use theme_picker::{ThemePicker, ThemePickerAction};
+use theme_preferences::{ThemePreferences, ThemeSelection};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
@@ -416,6 +424,7 @@ enum RenderedDecisionContext {
 /// Presentation priority only; each view keeps its own asynchronous lifecycle state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverlayKind {
+    Theme,
     PromptHistory,
     Discovery,
     Context,
@@ -441,6 +450,10 @@ struct DeferredQueueRecovery {
 
 struct LiveUi {
     state: UiState,
+    theme: ThemeSelection,
+    theme_preferences: Option<ThemePreferences>,
+    theme_picker: Option<ThemePicker>,
+    no_color: bool,
     transcript_viewport: TranscriptViewport,
     transcript_row_cache: TranscriptRowCache,
     detail_view: DetailView,
@@ -472,6 +485,10 @@ impl Default for LiveUi {
     fn default() -> Self {
         Self {
             state: UiState::unconfigured(),
+            theme: ThemeSelection::default(),
+            theme_preferences: None,
+            theme_picker: None,
+            no_color: false,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
             detail_view: DetailView::default(),
@@ -660,6 +677,7 @@ impl LiveUi {
                     }
                 }
                 UiEffect::ShowConnectionPanel(catalog) => {
+                    self.theme_picker = None;
                     self.invalidate_overlay(OverlayKind::Connection);
                     self.prompt_history_view = None;
                     self.session_picker = None;
@@ -675,6 +693,7 @@ impl LiveUi {
                     }
                 }
                 UiEffect::ShowModelPicker => {
+                    self.theme_picker = None;
                     self.invalidate_overlay(OverlayKind::Model);
                     self.prompt_history_view = None;
                     self.rendered_model_picker = false;
@@ -739,12 +758,14 @@ impl LiveUi {
                 UiEffect::ShowDeviceCode(challenge) => {
                     self.invalidate_overlay(OverlayKind::Connection);
                     if let Some(panel) = self.connection_panel.as_mut() {
-                        panel.show_device_code(
+                        if panel.show_device_code(
                             &challenge.provider,
                             challenge.verification_uri,
                             challenge.user_code,
-                        );
-                        self.render_pending = true;
+                        ) {
+                            self.theme_picker = None;
+                            self.render_pending = true;
+                        }
                     }
                 }
                 UiEffect::DeviceCodeProgress(progress) => {
@@ -774,6 +795,7 @@ impl LiveUi {
                         self.defer_queue_recovery(content, None);
                     } else {
                         if outcome.changed {
+                            self.theme_picker = None;
                             self.recovered_queue_recovery = true;
                         }
                         self.notice = if outcome.ignored_controls > 0 {
@@ -796,6 +818,7 @@ impl LiveUi {
                     sessions,
                     selected_session_id,
                 } => {
+                    self.theme_picker = None;
                     self.invalidate_overlay(OverlayKind::Session);
                     self.prompt_history_view = None;
                     self.session_tree_picker = None;
@@ -811,6 +834,8 @@ impl LiveUi {
                         if let Some(picker) = self.session_tree_picker.as_mut() {
                             if let Err(notice) = picker.append(page) {
                                 self.notice = Some(notice.into());
+                            } else {
+                                self.theme_picker = None;
                             }
                         } else {
                             self.notice = Some(
@@ -819,6 +844,7 @@ impl LiveUi {
                             );
                         }
                     } else {
+                        self.theme_picker = None;
                         self.session_tree_picker = Some(SessionTreePicker::new(page));
                     }
                     self.render_pending = true;
@@ -830,6 +856,9 @@ impl LiveUi {
                 UiEffect::RestoreSessionDraft(content) => {
                     self.prompt_history_view = None;
                     let outcome = self.editor.insert_paste(&content);
+                    if outcome.changed {
+                        self.theme_picker = None;
+                    }
                     self.notice = if outcome.rejected_limit {
                         Some(
                             "The restored session prompt exceeds the editor limit; it was not truncated or inserted."
@@ -900,6 +929,7 @@ impl LiveUi {
                         .map(|detail| detail.presentation.clone())
                     {
                         self.detail_view.open(entry_id, &presentation);
+                        self.theme_picker = None;
                         self.browse_selected = None;
                         self.render_pending = true;
                     }
@@ -991,6 +1021,7 @@ impl LiveUi {
             self.prompt_history_view = None;
             self.completion.dismiss();
             self.file_picker.dismiss();
+            self.theme_picker = None;
             self.state.project_files.set_open(false);
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1143,7 +1174,9 @@ impl LiveUi {
         ) {
             return None;
         }
-        if self.prompt_history_view.is_some() {
+        if self.theme_picker.is_some() {
+            Some(OverlayKind::Theme)
+        } else if self.prompt_history_view.is_some() {
             Some(OverlayKind::PromptHistory)
         } else if self.discovery_view.is_some() {
             Some(OverlayKind::Discovery)
@@ -1179,12 +1212,16 @@ impl LiveUi {
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
         let overlay = self.active_overlay();
+        let palette = self.palette();
         let mut rendered_decision_context = None;
         let mut rendered_model_picker = false;
         let mut rendered_overlay = None;
         let mut rendered_completion = None;
         self.completion.sync(&self.editor);
         self.file_picker.invalidate();
+        if let Some(picker) = &mut self.theme_picker {
+            picker.invalidate();
+        }
         if let Some(view) = &mut self.discovery_view {
             view.invalidate_selection();
         }
@@ -1212,6 +1249,7 @@ impl LiveUi {
                 self.browse_selected,
                 overlay.is_none() && self.browse_selected.is_none(),
                 completion_view.as_ref(),
+                palette,
             );
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = self.current_decision_context();
@@ -1228,28 +1266,35 @@ impl LiveUi {
             {
                 if let Some(area) = ui::file_picker_area(frame.area(), &self.state, &self.editor) {
                     self.file_picker
-                        .render(frame, area, &self.state.project_files);
+                        .render(frame, area, &self.state.project_files, palette);
                 }
             }
             let Some((kind, area)) = overlay.zip(ui::overlay_area(frame.area())) else {
                 return;
             };
-            ui::clear_overlay(frame, area);
+            ui::clear_overlay(frame, area, palette);
             match kind {
+                OverlayKind::Theme => self.theme_picker.as_mut().expect("active theme").render(
+                    frame,
+                    area,
+                    palette,
+                    self.no_color,
+                ),
                 OverlayKind::PromptHistory => self
                     .prompt_history_view
                     .as_mut()
                     .expect("active history")
-                    .render(frame, area, &self.prompt_history),
+                    .render(frame, area, &self.prompt_history, palette),
                 OverlayKind::Discovery => self
                     .discovery_view
                     .as_mut()
                     .expect("active discovery")
-                    .render(frame, area, &self.state, self.notice.as_deref()),
+                    .render(frame, area, &self.state, self.notice.as_deref(), palette),
                 OverlayKind::Context => self.context_view.as_mut().expect("active context").render(
                     frame,
                     area,
                     &self.state,
+                    palette,
                 ),
                 OverlayKind::Help => commands::render_help(
                     frame,
@@ -1258,6 +1303,7 @@ impl LiveUi {
                     self.state.command_catalog.as_deref(),
                     self.state.command_catalog_loading(),
                     self.state.command_catalog_error.as_deref(),
+                    palette,
                 ),
                 OverlayKind::Model => {
                     rendered_model_picker = true;
@@ -1267,12 +1313,14 @@ impl LiveUi {
                         self.model_picker.as_ref().expect("active model"),
                         self.state.model_configuration_active(),
                         self.notice.as_deref(),
+                        palette,
                     );
                 }
                 OverlayKind::Connection => connection_panel::render(
                     frame,
                     area,
                     self.connection_panel.as_mut().expect("active connection"),
+                    palette,
                 ),
                 OverlayKind::SessionTree => session_tree_picker::render(
                     frame,
@@ -1280,15 +1328,21 @@ impl LiveUi {
                     self.session_tree_picker
                         .as_ref()
                         .expect("active session tree"),
+                    palette,
                 ),
                 OverlayKind::Session => session_picker::render(
                     frame,
                     area,
                     self.session_picker.as_ref().expect("active session picker"),
+                    palette,
                 ),
-                OverlayKind::Detail => {
-                    ui::render_detail_overlay(frame, area, &self.state, &mut self.detail_view)
-                }
+                OverlayKind::Detail => ui::render_detail_overlay(
+                    frame,
+                    area,
+                    &self.state,
+                    &mut self.detail_view,
+                    palette,
+                ),
             }
             rendered_overlay = Some(kind);
         })?;
@@ -1791,6 +1845,17 @@ impl LiveUi {
         self.completion.dismiss();
         match command {
             Command::Quit => Ok(LoopControl::Exit),
+            Command::Theme(selection) => {
+                self.editor.clear();
+                if let Some(theme) = selection {
+                    self.theme.select(theme);
+                    self.finish_theme_change();
+                } else {
+                    self.theme_picker = Some(ThemePicker::new(self.theme.active));
+                    self.invalidate_theme_presentation();
+                }
+                Ok(LoopControl::Continue)
+            }
             Command::History => {
                 if self.editor_editable() {
                     self.editor.clear();
@@ -2385,7 +2450,7 @@ impl LiveUi {
         self.render_pending = true;
     }
 
-    /// Observe already-buffered policy changes before using a displayed file choice.
+    /// Observe buffered policy/workflow changes before committing a displayed choice.
     async fn handle_received_input(
         &mut self,
         input: Input,
@@ -2393,8 +2458,11 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        if self.file_picker.is_open()
-            && matches!(&input, Input::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Right))
+        let theme_enter = self.active_overlay() == Some(OverlayKind::Theme)
+            && matches!(&input, Input::Key(key) if key.code == KeyCode::Enter);
+        if theme_enter
+            || (self.file_picker.is_open()
+                && matches!(&input, Input::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Right)))
         {
             // Snapshot the prefix length: continuous output must not turn an
             // activation into an unbounded drain. Preserve backend FIFO ordering.
@@ -2410,6 +2478,11 @@ impl LiveUi {
                     return Ok(LoopControl::Exit);
                 }
             }
+        }
+        if theme_enter && self.active_overlay() != Some(OverlayKind::Theme) {
+            // This key belonged to the displaced preview, not a restored draft or
+            // a replacement workflow that the user has not yet seen.
+            return Ok(LoopControl::Continue);
         }
         self.handle_input(input, writer, limit).await
     }
@@ -2475,12 +2548,62 @@ impl LiveUi {
         true
     }
 
+    fn palette(&self) -> Palette {
+        let preview = (self.active_overlay() == Some(OverlayKind::Theme))
+            .then(|| self.theme_picker.as_ref().map(ThemePicker::preview))
+            .flatten();
+        preview.unwrap_or(self.theme.active).palette(self.no_color)
+    }
+
+    fn invalidate_theme_presentation(&mut self) {
+        self.rendered_overlay = None;
+        self.rendered_decision_context = None;
+        self.rendered_model_picker = false;
+        self.completion.invalidate();
+        self.file_picker.invalidate();
+        if let Some(view) = &mut self.discovery_view {
+            view.invalidate_selection();
+        }
+        if let Some(view) = &mut self.prompt_history_view {
+            view.invalidate_selection();
+        }
+        self.render_pending = true;
+    }
+
+    fn finish_theme_change(&mut self) {
+        let saved = self
+            .theme_preferences
+            .as_ref()
+            .is_some_and(|store| store.save(self.theme).is_ok());
+        if !self.unsendable_current_response() {
+            self.notice = Some(format!(
+                "Theme: {}{}",
+                self.theme.active.label,
+                if saved {
+                    ""
+                } else {
+                    " (could not save; active for this run)"
+                }
+            ));
+        }
+        self.invalidate_theme_presentation();
+    }
+
     async fn handle_focused_input(
         &mut self,
         input: Input,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if matches!(&input, Input::Key(key) if key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL)
+        {
+            // Like Textual, a preview cannot accidentally be committed by toggling.
+            if self.theme_picker.is_none() {
+                self.theme.toggle();
+                self.finish_theme_change();
+            }
+            return Ok(LoopControl::Continue);
+        }
         self.completion.sync(&self.editor);
         let overlay = self.active_overlay();
         let decision_pending = matches!(
@@ -2499,6 +2622,7 @@ impl LiveUi {
                         matches!(key.code, KeyCode::Enter | KeyCode::Char('f'))
                     }
                     OverlayKind::Model
+                    | OverlayKind::Theme
                     | OverlayKind::Session
                     | OverlayKind::PromptHistory
                     | OverlayKind::Discovery => key.code == KeyCode::Enter,
@@ -2516,6 +2640,25 @@ impl LiveUi {
             }
         }
         match input {
+            Input::Key(key) if overlay == Some(OverlayKind::Theme) => {
+                let action = self
+                    .theme_picker
+                    .as_mut()
+                    .expect("open theme")
+                    .handle_key(key);
+                match action {
+                    ThemePickerAction::Close => self.theme_picker = None,
+                    ThemePickerAction::Apply(theme) => {
+                        self.theme_picker = None;
+                        self.theme.select(theme);
+                        self.finish_theme_change();
+                    }
+                    ThemePickerAction::None => {}
+                }
+                self.invalidate_theme_presentation();
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::Theme) => Ok(LoopControl::Continue),
             Input::Key(key) if overlay == Some(OverlayKind::PromptHistory) => {
                 self.handle_prompt_history_key(key);
                 Ok(LoopControl::Continue)
@@ -2579,7 +2722,9 @@ impl LiveUi {
                         .dispatch(UiAction::LoadCommandCatalog, writer, limit)
                         .await;
                 } else {
-                    let rows = commands::help_rows(self.state.command_catalog.as_deref()).len();
+                    let rows =
+                        commands::help_rows(self.state.command_catalog.as_deref(), self.palette())
+                            .len();
                     self.command_help
                         .as_mut()
                         .expect("open help")
@@ -2981,6 +3126,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 return Err(Error::ContractMismatch { protocol, events });
             }
 
+            let theme_preferences = ThemePreferences::from_environment();
+            let theme = theme_preferences.as_ref().map(ThemePreferences::load).unwrap_or_default();
+            let no_color = std::env::var_os("NO_COLOR").is_some();
             let mut terminal = TerminalGuard::enter()?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
             let (input_stop_tx, input_stop_rx) = watch::channel(false);
@@ -2990,7 +3138,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 protocol_version: protocol,
                 event_schema_version: events,
             };
-            let mut live_ui = LiveUi::default();
+            let mut live_ui = LiveUi { theme, theme_preferences, no_color, ..LiveUi::default() };
             let mut transport_closed_diagnostic = None;
             let loop_result = async {
             live_ui

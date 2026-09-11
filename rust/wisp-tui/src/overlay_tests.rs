@@ -9,7 +9,8 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 9] = [
+const KINDS: [OverlayKind; 10] = [
+    OverlayKind::Theme,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
     OverlayKind::Context,
@@ -88,6 +89,7 @@ fn tree(id: &str) -> reducer::SessionTreePage {
 
 fn open(ui: &mut LiveUi, kind: OverlayKind) {
     match kind {
+        OverlayKind::Theme => ui.theme_picker = Some(ThemePicker::new(ui.theme.active)),
         OverlayKind::PromptHistory => {
             ui.prompt_history.record("earlier prompt".into());
             ui.open_prompt_history();
@@ -262,6 +264,7 @@ fn popup_clear_is_opaque_and_geometry_stays_bounded() {
             let mut isolated = Terminal::new(TestBackend::new(width, height)).unwrap();
             isolated
                 .draw(|frame| {
+                    ui::clear_overlay(frame, popup, ui.palette());
                     commands::render_help(
                         frame,
                         popup,
@@ -269,6 +272,7 @@ fn popup_clear_is_opaque_and_geometry_stays_bounded() {
                         None,
                         false,
                         None,
+                        ui.palette(),
                     )
                 })
                 .unwrap();
@@ -709,6 +713,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
         let mut isolated = Terminal::new(TestBackend::new(width, 24)).unwrap();
         isolated
             .draw(|frame| {
+                ui::clear_overlay(frame, popup, ui.palette());
                 commands::render_help(
                     frame,
                     popup,
@@ -716,6 +721,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
                     None,
                     false,
                     None,
+                    ui.palette(),
                 )
             })
             .unwrap();

@@ -1,6 +1,6 @@
 """Persisted TUI theme choice.
 
-Theme is a *presentation* concern owned entirely by the Textual client: the RPC
+Theme is a *presentation* concern shared by the Textual and Rust clients: the RPC
 subprocess renders nothing, so this deliberately does not live in ``WispSettings``
 and never crosses the subprocess boundary (see ``tui/launch.py``). It is stored
 beside the other user-local client state in ``~/.wisp/`` rather than in the
