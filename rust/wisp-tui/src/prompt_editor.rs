@@ -63,8 +63,8 @@ impl PromptEditor {
         self.cursor
     }
 
-    /// Replace only a command token, keeping its argument tail and editor limits intact.
-    pub(crate) fn replace_command_token(
+    /// Replace an exact UTF-8 range atomically, preserving surrounding text and limits.
+    pub(crate) fn replace_range(
         &mut self,
         range: std::ops::Range<usize>,
         replacement: &str,
@@ -74,6 +74,13 @@ impl PromptEditor {
             || !self.text.is_char_boundary(range.start)
             || !self.text.is_char_boundary(range.end)
             || self.text.len() - range.len() + replacement.len() > MAX_PROMPT_BYTES
+            || self.line_count()
+                - self.text[range.clone()]
+                    .bytes()
+                    .filter(|b| *b == b'\n')
+                    .count()
+                + replacement.bytes().filter(|b| *b == b'\n').count()
+                > MAX_PROMPT_LINES
         {
             return EditOutcome {
                 rejected_limit: true,
@@ -412,12 +419,12 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste(&format!("/mo {}", "x".repeat(MAX_PROMPT_BYTES - 4)));
         let before = editor.clone();
-        assert!(editor.replace_command_token(0..3, "/model").rejected_limit);
+        assert!(editor.replace_range(0..3, "/model").rejected_limit);
         assert_eq!(editor, before);
         editor.clear();
         editor.insert_paste("/mo 候選");
         let before = editor.clone();
-        assert!(editor.replace_command_token(0..5, "/model").rejected_limit);
+        assert!(editor.replace_range(0..5, "/model").rejected_limit);
         assert_eq!(editor, before);
     }
 

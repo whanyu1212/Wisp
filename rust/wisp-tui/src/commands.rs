@@ -341,6 +341,12 @@ pub(crate) fn help_rows(catalog: Option<&[CommandDescriptor]>) -> Vec<Line<'stat
             Some(rows)
         })
         .flatten()
+        .chain([
+            Line::styled("@ project files", Style::default().fg(Color::Cyan)),
+            Line::raw("Type @ to find paths; ↑↓ select, Enter insert (not submit)."),
+            Line::raw("Tab fuzzy/tree; ←/→ folders; Esc close; Tab at a dismissed reference refreshes."),
+            Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
+        ])
         .collect()
 }
 
@@ -517,7 +523,7 @@ pub(crate) mod tests {
         assert!(completion.replacement(item, &editor).is_none());
         completion.mark_rendered(item.spelling().into_owned());
         let (range, replacement) = completion.replacement(item, &editor).unwrap();
-        editor.replace_command_token(range, &replacement);
+        editor.replace_range(range, &replacement);
         assert_eq!(editor.text(), "/skill:build 候選  arguments");
         assert!(classify(editor.text(), Some(&catalog)).is_none());
         completion.invalidate();
@@ -541,7 +547,7 @@ pub(crate) mod tests {
         let item = completion.view(None, Some(&skills)).unwrap().items[0];
         completion.mark_rendered(item.spelling().into_owned());
         let (range, replacement) = completion.replacement(item, &editor).unwrap();
-        editor.replace_command_token(range, &replacement);
+        editor.replace_range(range, &replacement);
         assert_eq!(editor.text(), "/skill:review ");
         assert!(classify("/skill:unknown request", None).is_none());
     }
@@ -603,7 +609,7 @@ pub(crate) mod tests {
         assert!(completion.replacement(model, &editor).is_none());
         completion.mark_rendered(model.spelling().into_owned());
         let (range, text) = completion.replacement(model, &editor).unwrap();
-        assert!(editor.replace_command_token(range, &text).changed);
+        assert!(editor.replace_range(range, &text).changed);
         assert_eq!(editor.text(), "  /model 候選 arguments");
         completion.sync(&editor);
         completion.dismiss();

@@ -10,6 +10,7 @@ mod connection_panel;
 mod context_view;
 mod detail_view;
 mod discovery_view;
+mod file_picker;
 mod framing;
 pub mod history;
 mod markdown;
@@ -45,6 +46,7 @@ use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
+use file_picker::{FilePicker, PickerAction};
 use framing::FrameReader;
 use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
@@ -463,6 +465,7 @@ struct LiveUi {
     context_view: Option<context_view::ContextView>,
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
+    file_picker: FilePicker,
 }
 
 impl Default for LiveUi {
@@ -493,6 +496,7 @@ impl Default for LiveUi {
             context_view: None,
             discovery_view: None,
             completion: Completion::default(),
+            file_picker: FilePicker::default(),
         }
     }
 }
@@ -596,7 +600,13 @@ impl LiveUi {
                     if payload.len() > limit
                         && (matches!(
                             command_type,
-                            Some("get_commands" | "get_state" | "get_skills" | "get_mcp_status")
+                            Some(
+                                "get_commands"
+                                    | "get_state"
+                                    | "get_skills"
+                                    | "get_mcp_status"
+                                    | "get_project_files"
+                            )
                         ) || (command_type == Some("configure")
                             && (value.get("mode").is_some()
                                 || value.get("auto_compaction_enabled").is_some())))
@@ -696,6 +706,12 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
+                UiEffect::ProjectFilesChanged => {
+                    self.file_picker
+                        .sync_snapshot(self.state.project_files.snapshot.as_ref());
+                    self.file_picker.invalidate();
+                    self.render_pending = true;
+                }
                 UiEffect::SkillCatalogChanged => {
                     self.invalidate_overlay(OverlayKind::Discovery);
                     self.completion.invalidate();
@@ -974,6 +990,8 @@ impl LiveUi {
             self.discovery_view = None;
             self.prompt_history_view = None;
             self.completion.dismiss();
+            self.file_picker.dismiss();
+            self.state.project_files.set_open(false);
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
             self.browse_selected = None;
@@ -1016,7 +1034,11 @@ impl LiveUi {
             self.unsendable_response_context = None;
             self.notice = None;
         }
-        self.apply_effects(effects, writer, limit).await
+        let control = self.apply_effects(effects, writer, limit).await?;
+        if control != LoopControl::Exit {
+            self.sync_file_picker(writer, limit).await?;
+        }
+        Ok(control)
     }
 
     fn automatic_decision_label(&self, action: &UiAction) -> Option<&'static str> {
@@ -1162,6 +1184,7 @@ impl LiveUi {
         let mut rendered_overlay = None;
         let mut rendered_completion = None;
         self.completion.sync(&self.editor);
+        self.file_picker.invalidate();
         if let Some(view) = &mut self.discovery_view {
             view.invalidate_selection();
         }
@@ -1196,6 +1219,16 @@ impl LiveUi {
             if overlay.is_none() && completion_visible {
                 if let Some(view) = completion_view {
                     rendered_completion = Some(view.items[view.selected].spelling().into_owned());
+                }
+            }
+            if overlay.is_none()
+                && self.editor_editable()
+                && self.browse_selected.is_none()
+                && self.file_picker.is_open()
+            {
+                if let Some(area) = ui::file_picker_area(frame.area(), &self.state, &self.editor) {
+                    self.file_picker
+                        .render(frame, area, &self.state.project_files);
                 }
             }
             let Some((kind, area)) = overlay.zip(ui::overlay_area(frame.area())) else {
@@ -1934,7 +1967,7 @@ impl LiveUi {
                 .completion
                 .replacement(view.items[view.selected], &self.editor)
             {
-                let outcome = self.editor.replace_command_token(range, &replacement);
+                let outcome = self.editor.replace_range(range, &replacement);
                 self.update_edit_notice(outcome);
                 self.completion.sync(&self.editor);
                 self.completion.dismiss();
@@ -2352,7 +2385,97 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    /// Observe already-buffered policy changes before using a displayed file choice.
+    async fn handle_received_input(
+        &mut self,
+        input: Input,
+        events: &mut mpsc::Receiver<QueuedEvent>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.file_picker.is_open()
+            && matches!(&input, Input::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Right))
+        {
+            // Snapshot the prefix length: continuous output must not turn an
+            // activation into an unbounded drain. Preserve backend FIFO ordering.
+            for _ in 0..events.len() {
+                let Ok(event) = events.try_recv() else {
+                    break;
+                };
+                if self
+                    .dispatch(UiAction::BackendEvent(event.event), writer, limit)
+                    .await?
+                    == LoopControl::Exit
+                {
+                    return Ok(LoopControl::Exit);
+                }
+            }
+        }
+        self.handle_input(input, writer, limit).await
+    }
+
     async fn handle_input(
+        &mut self,
+        input: Input,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.sync_file_picker(writer, limit).await?;
+        let control = self.handle_focused_input(input, writer, limit).await?;
+        if control != LoopControl::Exit {
+            self.sync_file_picker(writer, limit).await?;
+        }
+        Ok(control)
+    }
+
+    /// Keep discovery lazy and single-flight as the editable reference gains/loses focus.
+    async fn sync_file_picker(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<(), Error> {
+        self.file_picker.sync_editor(&self.editor);
+        if !self.editor_editable()
+            || self.active_overlay().is_some()
+            || self.browse_selected.is_some()
+        {
+            self.file_picker.dismiss();
+        }
+        let open = self.file_picker.is_open();
+        if open != self.state.project_files.is_open() {
+            let effects = reducer::reduce(
+                &mut self.state,
+                UiAction::SetProjectFilesOpen(open),
+                &mut self.ids,
+            )?;
+            self.apply_effects(effects, writer, limit).await?;
+        }
+        self.file_picker
+            .sync_snapshot(self.state.project_files.snapshot.as_ref());
+        Ok(())
+    }
+
+    fn handle_file_picker_key(&mut self, key: KeyEvent) -> bool {
+        match self.file_picker.handle_key(key) {
+            PickerAction::Ignored => return false,
+            PickerAction::Consumed => {}
+            PickerAction::Replace(range, mut replacement) => {
+                if self.editor.text()[range.end..].is_empty() {
+                    replacement.push(' ');
+                }
+                let outcome = self.editor.replace_range(range, &replacement);
+                self.update_edit_notice(outcome);
+                if !outcome.rejected_limit {
+                    self.file_picker.sync_editor(&self.editor);
+                    self.file_picker.dismiss();
+                }
+            }
+        }
+        self.render_pending = true;
+        true
+    }
+
+    async fn handle_focused_input(
         &mut self,
         input: Input,
         writer: &mpsc::Sender<WriterMessage>,
@@ -2418,7 +2541,7 @@ impl LiveUi {
                         return self.dispatch(action, writer, limit).await;
                     }
                     DiscoveryAction::InsertSkill(prefix) => {
-                        let outcome = self.editor.replace_command_token(0..0, &prefix);
+                        let outcome = self.editor.replace_range(0..0, &prefix);
                         self.update_edit_notice(outcome);
                         if !outcome.rejected_limit {
                             self.discovery_view = None;
@@ -2500,6 +2623,9 @@ impl LiveUi {
                 self.handle_browse_key(key, writer, limit).await
             }
             Input::Paste(_) if !decision_pending && self.browse_selected.is_some() => {
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key) if self.editor_editable() && self.handle_file_picker_key(key) => {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key)
@@ -2663,6 +2789,7 @@ impl LiveUi {
             Input::Redraw => {
                 self.rendered_overlay = None;
                 self.completion.invalidate();
+                self.file_picker.invalidate();
                 if let Some(view) = &mut self.prompt_history_view {
                     view.invalidate_selection();
                 }
@@ -2888,7 +3015,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 match input_rx.try_recv() {
                     Ok(input) => {
                         if live_ui
-                            .handle_input(input, &writer_tx, max_client_frame)
+                            .handle_received_input(input, &mut event_rx, &writer_tx, max_client_frame)
                             .await?
                             == LoopControl::Exit
                         {
@@ -2903,7 +3030,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     input = input_rx.recv() => {
                         match input {
                             Some(input) => {
-                                if live_ui.handle_input(input, &writer_tx, max_client_frame).await?
+                                if live_ui.handle_received_input(input, &mut event_rx, &writer_tx, max_client_frame).await?
                                     == LoopControl::Exit
                                 {
                                     break Ok(());

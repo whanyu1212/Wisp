@@ -427,6 +427,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::ModelConfigurationApplied
                 | UiEffect::CommandCatalogChanged
                 | UiEffect::SkillCatalogChanged
+                | UiEffect::ProjectFilesChanged
                 | UiEffect::ModeConfigurationApplied
                 | UiEffect::AutoCompactionConfigured
                 | UiEffect::Diagnostic(_)

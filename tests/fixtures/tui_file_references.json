@@ -1,0 +1,7 @@
+[
+  {"path": "src/main.rs", "reference": "@src/main.rs"},
+  {"path": "src/example file.py", "reference": "@\"src/example file.py\""},
+  {"path": "src/资料 \"example\".py", "reference": "@\"src/资料 \\\"example\\\".py\""},
+  {"path": "src/é👩‍💻.py", "reference": "@src/é👩‍💻.py"},
+  {"path": "src/", "reference": "@src/"}
+]

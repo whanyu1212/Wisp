@@ -21,6 +21,7 @@ mod discovery;
 use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
 mod model_selection;
+pub(crate) mod project_files;
 use model_selection::ModelOperation;
 
 pub use event_projection::EventProjectionError;
@@ -634,6 +635,7 @@ pub struct UiState {
     pub(crate) context: context::ContextState,
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
+    pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -696,6 +698,7 @@ impl UiState {
             context: context::ContextState::default(),
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
+            project_files: project_files::ProjectFiles::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -828,6 +831,7 @@ pub enum CommandKind {
     GetSessionStats,
     GetSkills,
     GetMcpStatus,
+    GetProjectFiles,
     GetSessions,
     NewSession,
     SelectSession,
@@ -863,6 +867,7 @@ impl CommandKind {
             Self::GetSessionStats => "get_session_stats",
             Self::GetSkills => "get_skills",
             Self::GetMcpStatus => "get_mcp_status",
+            Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
             Self::NewSession => "new_session",
             Self::SelectSession => "select_session",
@@ -898,6 +903,11 @@ pub enum MessageContentKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
+    ProjectFilesReported {
+        command_id: String,
+        snapshot: project_files::ProjectFilesReport,
+    },
+    ProjectFilesInvalidated(u64),
     SkillCatalogReported {
         command_id: String,
         catalog: discovery::SkillReport,
@@ -1041,6 +1051,7 @@ pub enum UiAction {
     Submit(String),
     LoadSkills,
     LoadMcpStatus,
+    SetProjectFilesOpen(bool),
     LoadContext,
     ConfigureAutoCompaction(bool),
     Compact(Option<String>),
@@ -1140,6 +1151,7 @@ pub enum UiEffect {
     ModelConfigurationApplied,
     CommandCatalogChanged,
     SkillCatalogChanged,
+    ProjectFilesChanged,
     ModeConfigurationApplied,
     AutoCompactionConfigured,
     ShowDeviceCode(DeviceCodeChallenge),
@@ -1195,6 +1207,10 @@ pub fn reduce(
     let mut effects = match action {
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
+        UiAction::SetProjectFilesOpen(open) => {
+            state.project_files.set_open(open);
+            Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
+        }
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
@@ -1270,6 +1286,7 @@ pub fn reduce(
             state.context.close();
             state.skills.close();
             state.mcp.close();
+            state.project_files.close();
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
@@ -1283,6 +1300,7 @@ pub fn reduce(
         }
     }?;
     effects.extend(context::refresh_if_ready(state, ids)?);
+    effects.extend(project_files::refresh_if_ready(state, ids)?);
     Ok(effects)
 }
 
@@ -3685,6 +3703,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = state.project_files.observe(&event) {
+        return Ok(effects);
+    }
     if let Some(effects) = discovery::observe(state, &event) {
         return Ok(effects);
     }
@@ -3854,7 +3875,9 @@ fn handle_backend_event(
             state.queue.remove_first(kind, &content);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::SkillCatalogReported { .. }
+        BackendEvent::ProjectFilesReported { .. }
+        | BackendEvent::ProjectFilesInvalidated(_)
+        | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)
         | BackendEvent::McpStatusReported { .. }
         | BackendEvent::SessionStatsReported { .. }
@@ -3976,6 +3999,7 @@ mod tests {
             | UiEffect::ModelConfigurationApplied
             | UiEffect::CommandCatalogChanged
             | UiEffect::SkillCatalogChanged
+            | UiEffect::ProjectFilesChanged
             | UiEffect::ModeConfigurationApplied
             | UiEffect::AutoCompactionConfigured
             | UiEffect::Diagnostic(_)
