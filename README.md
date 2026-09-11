@@ -128,6 +128,14 @@ Tab or Enter accepts a suggestion, then Enter submits it. `/mcp` shows server st
 registered tools, and connection errors. Press `r` in either browser to refresh, and
 Esc or Ctrl-C to close. Both browsers remain available while a prompt is running.
 
+Press Ctrl-R or use `/history` to search prompts submitted in the current Rust TUI run,
+including accepted steering and follow-ups. Search ignores case and repeated whitespace.
+Enter replaces your draft with the selected prompt without submitting it; Esc, Ctrl-C,
+or Ctrl-R closes history and preserves your draft. History survives session switches,
+but is cleared when the TUI exits. It retains up to 100 unique prompts within a 4 MiB
+text budget; older entries are evicted first. Search covers the first 16,384 normalized
+characters of each prompt, while restoration keeps the complete original text.
+
 RPC mode and the in-process SDK expose the same command, event, session, trust, and approval
 contracts the built-in interfaces use. See
 [Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces) and the

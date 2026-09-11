@@ -408,6 +408,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 UiEffect::RestoreDraft { content, .. } => restored_drafts.push(content),
                 UiEffect::RestoreSessionDraft(content) => restored_drafts.push(content),
                 UiEffect::SendSecretCommand(_)
+                | UiEffect::RecordPromptHistory(_)
                 | UiEffect::ShowConnectionPanel(_)
                 | UiEffect::ConnectionCatalogUpdated(_)
                 | UiEffect::ShowDeviceCode(_)

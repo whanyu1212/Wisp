@@ -708,12 +708,12 @@ fn composer_visible_text(
     }
 }
 
-struct SourceDisplayColumnWindow {
-    text: String,
-    effective_start: usize,
+pub(crate) struct SourceDisplayColumnWindow {
+    pub text: String,
+    pub effective_start: usize,
 }
 
-fn source_display_column_window(
+pub(crate) fn source_display_column_window(
     line: &str,
     start: usize,
     width: usize,
@@ -805,7 +805,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState, notice: Opt
             Style::default().fg(Color::DarkGray),
         ),
         None => (
-            "Enter send • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-C quit".into(),
+            "Enter send • Ctrl-R history • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-C quit".into(),
             Style::default().fg(Color::DarkGray),
         ),
     };

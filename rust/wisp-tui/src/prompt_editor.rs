@@ -144,6 +144,17 @@ impl PromptEditor {
         self.insert_text(pasted)
     }
 
+    /// Replace the whole draft atomically, keeping the original on limit rejection.
+    pub(crate) fn restore_prompt(&mut self, prompt: &str) -> EditOutcome {
+        let mut replacement = Self::default();
+        let mut outcome = replacement.insert_paste(prompt);
+        if !outcome.rejected_limit {
+            *self = replacement;
+            outcome.changed = true;
+        }
+        outcome
+    }
+
     /// Whether a restored queued draft can precede the current draft without overflow.
     pub fn can_prepend_restored(&self, restored: &str) -> bool {
         let (safe, _) = safe_prompt_text(restored);
@@ -375,6 +386,25 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn whole_prompt_restore_replaces_exact_text_or_keeps_the_entire_editor() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("original\ndraft");
+        editor.handle_key(key(KeyCode::Left));
+        let before = editor.clone();
+        for oversized in [
+            "x".repeat(MAX_PROMPT_BYTES + 1),
+            "\n".repeat(MAX_PROMPT_LINES),
+        ] {
+            assert!(editor.restore_prompt(&oversized).rejected_limit);
+            assert_eq!(editor, before);
+        }
+        let exact = "  e\u{301}\n👩‍💻\tlast  ";
+        assert!(editor.restore_prompt(exact).changed);
+        assert_eq!(editor.text(), exact);
+        assert_eq!(editor.cursor_offset(), exact.len());
     }
 
     #[test]
