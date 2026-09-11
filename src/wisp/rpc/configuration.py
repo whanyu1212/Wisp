@@ -15,6 +15,7 @@ from wisp.events import ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import ProviderRegistry
 from wisp.skills.lifecycle import discover_skill_catalog
+from wisp.tools.context import ToolContext
 
 type RuntimeBuilder = Callable[[WispConfig], Awaitable[WispRuntime]]
 
@@ -77,12 +78,23 @@ class RpcProjectConfiguration:
         *,
         runtime: WispRuntime,
         agent: CodingSession,
+        reserve_protected_paths: Callable[[tuple[str, ...]], None] | None = None,
     ) -> ProjectConfigApplied | None:
         """Apply the trusted project layer and return its frontend event, if changed.
 
         The active session store is intentionally not relocated. Its path was
         selected before the first prompt and changing it mid-process would split
         one logical session across stores.
+
+        Args:
+            runtime (WispRuntime): Live runtime whose provider configuration is adopted.
+            agent (CodingSession): Session reconfigured after successful adoption.
+            reserve_protected_paths (Callable | None): Reserves candidate secrets before
+                adoption can change the auth store. Protection survives later failure.
+
+        Returns:
+            ProjectConfigApplied | None: Updated frontend configuration, or None when
+                the trusted configuration is unchanged.
         """
 
         if self.startup_trusted:
@@ -98,6 +110,14 @@ class RpcProjectConfiguration:
                 ),
                 abandon_on_cancel=True,
             )
+        if reserve_protected_paths is not None:
+            # Reserve before building/adopting providers: adoption can change the
+            # auth store before cleanup or agent reconfiguration succeeds.
+            protected_context = await anyio.to_thread.run_sync(
+                partial(ToolContext.from_config, trusted_config, cwd=agent.tool_context.cwd),
+                abandon_on_cancel=True,
+            )
+            reserve_protected_paths(protected_context.protected_paths)
         skill_catalog = await discover_skill_catalog(
             project_root=self.project_context_root,
             trusted=True,

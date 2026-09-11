@@ -23,8 +23,8 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> String {
         &mut terminal,
         &ConnectionInfo {
             backend_version: "test".into(),
-            protocol_version: 5,
-            event_schema_version: 36,
+            protocol_version: 6,
+            event_schema_version: 37,
         },
     )
     .unwrap();

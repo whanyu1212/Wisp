@@ -599,4 +599,6 @@ class FileSuggest(Vertical):
             notes.append("entry limit reached; indexed view may omit entries")
         if snapshot.truncation.depth_limit_reached:
             notes.append("depth limit reached; descendants may be omitted")
+        if snapshot.truncation.enumeration_limit_reached:
+            notes.append("scan limit reached; indexed view may omit entries")
         return " · ".join(notes)

@@ -167,7 +167,7 @@ module graph or translate Textual widgets line by line.
 | Slash-command parsing and command catalog | `tui/commands.py`, `tui/shell.py` | Rust owns local dispatch and presentation; executable command metadata comes from Python. Local-only actions such as help and theme remain frontend-owned. |
 | Model lookup, ambiguity handling, effort filtering, selection persistence | `rpc/configure.py`, provider catalog, settings | Rust renders the backend catalog and requests persistence through `configure`; Python applies and saves resolved selections. Textual retains its existing persistence path. |
 | Credential status, API-key persistence, disconnect, device-code login | `tui/auth_commands.py`, `tui/connections.py` | Move behind the secure Python contract in #461. Rust owns masked entry and progress presentation only. |
-| Protected-path-aware snapshot construction and path ranking | `tui/file_index.py`, `tui/file_suggest.py` | Move safe discovery behind #462. Rust presents returned relative suggestions and may not independently walk the workspace. |
+| Protected-path-aware snapshots and local path ranking | `project_files.py`, `rpc/project_files.py`, `tui/file_index.py` | Shared Python traversal now serves `get_project_files`; Rust ranks safe relative paths locally and does not walk the workspace. |
 | Update checking, install capability, and update execution | `tui/update_commands.py`, `wisp.update_check` | Keep Python-owned. Rust presents notices and requests supported actions according to the launcher/distribution contract. |
 | Terminal lifecycle, composer, overlays, pickers, mouse, focus, resize | Textual app, controllers, and widgets | Reimplement behavior in Rust. Do not port Textual private APIs, CSS, widget identity, or compositor workarounds. |
 | Streaming cadence, transcript window, history viewport, card identity | Textual stream/history/transcript controllers | Reimplement bounded client-side state in Rust and validate semantic behavior with #459 traces. |
@@ -212,7 +212,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
   passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
   and checks exact equality before spawning the backend. The backend repeats its Python package
   version in the handshake. This spelling conversion does not permit different release versions.
-- The only accepted live contract is RPC protocol v5 with event schema v36 and no negotiated
+- The only accepted live contract is RPC protocol v6 with event schema v37 and no negotiated
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
@@ -221,7 +221,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-The committed v5 schema manifest and generated projections define the current handshake fields,
+The committed v6 schema manifest and generated projections define the current handshake fields,
 frame limits, strict event variants, and UTF-8 JSON representation. See
 [Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 
@@ -257,14 +257,14 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | Bounded history paging, `/resume`, `/new` | Present in Rust | Acceptable difference while experimental |
 | `/clone`, `/tree`, `/unrevert`, `/name` | Present in Rust; not in Textual | Acceptable difference |
 | `/connect` API-key and device-code flows | Present in Rust | Acceptable difference while experimental |
-| Live RPC v5 / event schema v36 lockstep | Enforced at handshake | Acceptable difference while experimental |
+| Live RPC v6 / event schema v37 lockstep | Enforced at handshake | Acceptable difference while experimental |
 | Keyboard-only operation; no mouse | Intentional | Acceptable difference |
 | No transcript search | Intentional while experimental | Acceptable difference |
 | No automatic fallback to Textual | Intentional; #470 closed this way | Acceptable difference |
 | Source-build only; no wheel binary | Current packaging | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)) |
 | Windows | Rejected before binary resolution | Acceptable difference; not a claimed target |
 | Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
-| Protected-path-aware file suggestions | Backend-owned; Rust must not walk the workspace | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#462](https://github.com/whanyu1212/Wisp/issues/462)) |
+| Protected-path-aware file suggestions | Bounded snapshot RPC implemented; Rust picker UI remains | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, and graceful exit are present in Rust | Acceptable difference while experimental |
 | Skills and MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |

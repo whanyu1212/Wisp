@@ -1,0 +1,24 @@
+{
+  "event_schema_version": 37,
+  "fixed_handshake_frame_bytes": 65536,
+  "live_protocol_version": 6,
+  "maximum_application_frame_bytes": 67108864,
+  "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_format_version": 1,
+  "schema_hashes": {
+    "client-handshake.schema.json": "941b8ba8dfcd00bd4e39db1c0b24ce99cf3e2ff9d7f5052a777d67f94503779b",
+    "commands.schema.json": "48278f9a0b2e4b6d0d0961c3547d7abf8222767750c17247e262c559a071cc92",
+    "events.schema.json": "f68e9aa6577af56b39df61ac99757d165493226664e81741b0a770f9e557a931",
+    "rust-commands.schema.json": "ba733170ef17d80331ed1aa77ca38e9853e5e03872c637019b27020763e86aa5",
+    "rust-events.schema.json": "00b5cf927d581c2d7e17616b52f5d4bf4149e09b8dd6d4312e186f3712b10a20",
+    "server-handshake.schema.json": "18b1599fd48239366fafd919593e082209c52635b28c770aeb4c62979cce4356"
+  },
+  "schemas": {
+    "client_handshake": "client-handshake.schema.json",
+    "commands": "commands.schema.json",
+    "events": "events.schema.json",
+    "rust_commands": "rust-commands.schema.json",
+    "rust_events": "rust-events.schema.json",
+    "server_handshake": "server-handshake.schema.json"
+  }
+}

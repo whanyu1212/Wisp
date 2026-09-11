@@ -19,6 +19,12 @@ from pydantic import (
 )
 
 from wisp.agent.mode import AgentMode
+from wisp.project_files import (
+    MAX_PROJECT_FILES,
+    MAX_PROJECT_PATH_CHARS,
+    PROJECT_PATH_PATTERN,
+    is_display_safe_path,
+)
 from wisp.skills.models import (
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
@@ -27,7 +33,7 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[36] = 36
+EVENT_SCHEMA_VERSION: Literal[37] = 37
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -55,6 +61,7 @@ TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
 RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION = 34
 RPC_MODEL_CATALOG_SCHEMA_VERSION = 35
 RPC_CONNECTION_CATALOG_SCHEMA_VERSION = 36
+RPC_PROJECT_FILES_SCHEMA_VERSION = 37
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32
 MAX_RPC_CONNECTION_METHODS = 64
@@ -149,6 +156,7 @@ class WispEvent(BaseModel):
         34,
         35,
         36,
+        37,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -1280,6 +1288,51 @@ def _validate_package_skill_schema(
         )
 
 
+class RpcProjectFile(BaseModel):
+    """Display-safe relative metadata; never authorization for a file operation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, regex_engine="python-re")
+
+    path: str = Field(min_length=1, max_length=MAX_PROJECT_PATH_CHARS, pattern=PROJECT_PATH_PATTERN)
+    kind: Literal["file", "directory"]
+
+    @field_validator("path")
+    @classmethod
+    def _require_display_safe_path(cls, value: str) -> str:
+        if not is_display_safe_path(value):
+            raise ValueError("Project paths must be display-safe relative UTF-8")
+        return value
+
+
+class RpcProjectFilesReported(WispEvent):
+    """One bounded, non-persisted snapshot for a discovery request."""
+
+    type: Literal["rpc.project_files"] = "rpc.project_files"
+    command_id: str = Field(min_length=1, max_length=256)
+    generation: int = Field(ge=1, le=2**53 - 1, strict=True)
+    entries: tuple[RpcProjectFile, ...] = Field(max_length=MAX_PROJECT_FILES)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_PROJECT_FILES_SCHEMA_VERSION:
+            raise ValueError("Project file reports require schema_version 37 or newer")
+        return self
+
+
+class ProjectFilesInvalidated(WispEvent):
+    """Previously returned file metadata is obsolete after a policy transition."""
+
+    type: Literal["project_files.invalidated"] = "project_files.invalidated"
+    generation: int = Field(ge=1, le=2**53 - 1, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_PROJECT_FILES_SCHEMA_VERSION:
+            raise ValueError("Project file invalidation requires schema_version 37 or newer")
+        return self
+
+
 class RpcSkillsReported(WispEvent):
     """Immediate, non-persisted skill catalog snapshot returned over RPC."""
 
@@ -1779,6 +1832,8 @@ type KnownWispEvent = Annotated[
     | RpcDeviceCodeReported
     | RpcDeviceCodeProgressReported
     | RpcSkillsReported
+    | RpcProjectFilesReported
+    | ProjectFilesInvalidated
     | RpcMcpStatusReported
     | SkillCatalogUpdated
     | RpcMessagesReported
@@ -1911,6 +1966,10 @@ def _require_current_schema(data: JsonObject) -> None:
             "RPC connection events require schema_version "
             f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
         )
+    if data.get("type") in {"rpc.project_files", "project_files.invalidated"} and (
+        version < RPC_PROJECT_FILES_SCHEMA_VERSION
+    ):
+        raise ValueError("Project file events require schema_version 37 or newer")
     if data.get("type") == "rpc.mcp" and version < MCP_STATUS_SCHEMA_VERSION:
         raise ValueError(
             f"RPC MCP status events require schema_version {MCP_STATUS_SCHEMA_VERSION} or newer"

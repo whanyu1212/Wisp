@@ -1986,22 +1986,22 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 5,
-    "event_schema_version": 36,
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
+    "protocol_version": 6,
+    "event_schema_version": 37,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 started = {
-    "schema_version": 36,
+    "schema_version": 37,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
-    "schema_version": 36,
+    "schema_version": 37,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -2044,10 +2044,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 5,
-    "event_schema_version": 36,
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
+    "protocol_version": 6,
+    "event_schema_version": 37,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2079,10 +2079,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 5,
-    "event_schema_version": 36,
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
+    "protocol_version": 6,
+    "event_schema_version": 37,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2111,9 +2111,9 @@ print(json.dumps({
     "code": "protocol_version_mismatch",
     "message": "No compatible live RPC protocol version.",
     "backend_package_version": "0.1.0",
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
-    "event_schema_version": 36,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
+    "event_schema_version": 37,
 }), flush=True)
 """
         with pytest.raises(RpcHandshakeError, match="No compatible") as error:
@@ -2143,10 +2143,10 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 5,
-    "event_schema_version": 36,
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
+    "protocol_version": 6,
+    "event_schema_version": 37,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2178,16 +2178,16 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 5,
-    "event_schema_version": 36,
-    "min_protocol_version": 5,
-    "max_protocol_version": 5,
+    "protocol_version": 6,
+    "event_schema_version": 37,
+    "min_protocol_version": 6,
+    "max_protocol_version": 6,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "schema_version": 36,
+    "schema_version": 37,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

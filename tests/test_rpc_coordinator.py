@@ -1805,3 +1805,47 @@ def test_coordinator_owns_running_and_queued_cancellation() -> None:
         assert missing_result.outcome == "missing"
 
     anyio.run(scenario)
+
+
+def test_discovery_does_not_remove_history_read_session_ordering_barrier() -> None:
+    async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _input_command({"type": "prompt", "id": "prompt", "prompt": "hello"}),
+                _input_command({"type": "get_project_files", "id": "files"}),
+                _input_command(
+                    {"type": "get_messages", "id": "history", "allow_during_prompt": True}
+                ),
+                _input_command({"type": "select_session", "id": "select", "session_id": "next"}),
+                _RpcCommandCompleted("prompt", "prompt", True, (), 1),
+                _RpcCommandCompleted("history", "get_messages", True, None, 0),
+                _RpcCommandCompleted("select", "select_session", True, (), 5),
+                _RpcCommandCompleted("files", "get_project_files", True, None, 0),
+                _RpcInputClosed(),
+            ]
+        )
+        state = _RpcSessionState(session=None, history=(), entry_count=0)
+        coordinator = RpcCoordinator(state)
+        dispatched: list[str] = []
+
+        async def dispatch(
+            command: ParsedRpcCommand, running: _RpcRunningCommand | None
+        ) -> _RpcDispatchResult:
+            command_id = str(command.command_id)
+            dispatched.append(command_id)
+            if command_id in {"files", "history"}:
+                assert running is not None and running.command_id == "prompt"
+            elif command_id == "select":
+                assert running is None
+                # The history read has settled, but file discovery is still alive.
+                assert set(coordinator.auxiliary_commands) == {"files"}
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, command.command_type, anyio.CancelScope())
+            )
+
+        assert not await coordinator.run(receiver, dispatch=dispatch, reject=_ignore_reject)
+        assert dispatched == ["prompt", "files", "history", "select"]
+        assert state.entry_count == 5
+        assert not coordinator.auxiliary_commands
+
+    anyio.run(scenario)

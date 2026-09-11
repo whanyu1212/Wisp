@@ -24,6 +24,7 @@ type _SequentialRpcCommandType = Literal[
     "begin_device_code",
     "get_session_stats",
     "get_messages",
+    "get_project_files",
     "get_sessions",
     "new_session",
     "select_session",
@@ -167,6 +168,17 @@ class RpcCoordinator:
         self._completion_event_writer = completion_event_writer
         self._completion_event_renderer = completion_event_renderer
 
+    def _ordered_auxiliary_pending(self) -> bool:
+        return any(
+            command.command_type != "get_project_files"
+            for command in self.auxiliary_commands.values()
+        )
+
+    def _cancel_discovery(self) -> None:
+        for command in self.auxiliary_commands.values():
+            if command.command_type == "get_project_files":
+                command.cancel_scope.cancel()
+
     def _shutdown_is_next(self) -> bool:
         return bool(self.queued_commands) and self.queued_commands[0].command_type == "shutdown"
 
@@ -214,7 +226,7 @@ class RpcCoordinator:
                     return True
             if (
                 self.running_command is None
-                and not self.auxiliary_commands
+                and not self._ordered_auxiliary_pending()
                 and self.pending_prompt_queue_commands
             ):
                 if await self._dispatch(
@@ -225,8 +237,9 @@ class RpcCoordinator:
                 continue
             if (
                 self.running_command is None
-                and not self.auxiliary_commands
+                and not self._ordered_auxiliary_pending()
                 and self.queued_commands
+                and not (self._shutdown_is_next() and self.auxiliary_commands)
             ):
                 if await self._dispatch(
                     self._pop_queued_command(self.queued_commands), dispatch=dispatch
@@ -293,6 +306,7 @@ class RpcCoordinator:
         if isinstance(event, self._input_closed_type):
             if not self.input_closed:
                 self.input_closed = True
+                self._cancel_discovery()
                 for handler in self._input_closed_handlers:
                     handler()
                 if (
@@ -368,6 +382,13 @@ class RpcCoordinator:
             return False
         selected_type = command.command_type
         running = self.running_command
+        if selected_type == "shutdown":
+            self._cancel_discovery()
+        if selected_type == "get_project_files" and (
+            self.input_closed or any(c.command_type == "shutdown" for c in self.queued_commands)
+        ):
+            await reject(command, "Project file discovery unavailable during shutdown")
+            return False
         if running is None and selected_type == "shutdown":
             await self._enqueue_command(
                 command,
@@ -388,7 +409,7 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if (
+        if selected_type == "get_project_files" or (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and command.allows_prompt_read
@@ -421,7 +442,7 @@ class RpcCoordinator:
             else:
                 self._release_command_bytes(command_bytes)
             return result.should_shutdown
-        auxiliary_read_pending = bool(self.auxiliary_commands)
+        auxiliary_read_pending = self._ordered_auxiliary_pending()
         new_session_waits_for_ordered_operation = selected_type == "new_session" and (
             auxiliary_read_pending
             or (

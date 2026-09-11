@@ -22,6 +22,7 @@ from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
 from wisp.events import (
     RpcCommandFinished,
+    RpcProjectFilesReported,
     SkillCatalogUpdated,
     TrustRequested,
     TrustResolved,
@@ -45,6 +46,7 @@ from wisp.rpc.execution import (
     rpc_session_state,
 )
 from wisp.rpc.inspection import rpc_skill_catalog_snapshot
+from wisp.rpc.project_files import RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -377,6 +379,7 @@ class RpcHost:
         self.runtime = runtime
         self.sessions = sessions
         self.agent = agent
+        self.project_files = RpcProjectFiles(agent.tool_context)
         self.approval_policy = approval_policy
         self.trust_gate = trust_gate
         self.configure_overrides = configure_overrides
@@ -482,7 +485,24 @@ class RpcHost:
                 host._publish_event(event)
 
         async def rebuild_agent_for_trusted_project() -> None:
-            event = await project_configuration.apply_trusted_project(runtime=runtime, agent=agent)
+            assert host is not None
+            try:
+                async with host._event_render_lock:
+                    invalidated = host.project_files.begin_policy_transition()
+
+                    async def invalidation_events() -> AsyncIterator[WispEvent]:
+                        yield invalidated
+
+                    # Keep invalidation observable once its generation changed.
+                    with anyio.CancelScope(shield=True):
+                        await host._render_events(invalidation_events())
+                event = await project_configuration.apply_trusted_project(
+                    runtime=runtime,
+                    agent=agent,
+                    reserve_protected_paths=host.project_files.reserve_protected_paths,
+                )
+            finally:
+                host.project_files.settle_policy(agent.tool_context)
             if event is not None:
                 publish_event(event)
             publish_event(SkillCatalogUpdated(catalog=rpc_skill_catalog_snapshot(agent)))
@@ -564,6 +584,8 @@ class RpcHost:
                 trust_gate=self.trust_gate,
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
+                project_files=self.project_files,
+                publish_project_files=self._publish_project_files,
                 write_event=write_event,
                 render_events=self._render_event_stream,
                 defer_until_after_flush=after_flush.append,
@@ -603,6 +625,8 @@ class RpcHost:
                 trust_gate=self.trust_gate,
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
+                project_files=self.project_files,
+                publish_project_files=self._publish_project_files,
                 write_event=buffered_events.append,
                 render_events=self._render_event_stream,
             )
@@ -653,6 +677,24 @@ class RpcHost:
         self._pending_published_events -= 1
         if self._pending_published_events == 0:
             self._published_events_drained.set()
+
+    async def _publish_project_files(
+        self, report: RpcProjectFilesReported, scope: anyio.CancelScope
+    ) -> bool:
+        """Commit only a current result, serialized against policy invalidation."""
+
+        async with self._event_render_lock:
+            if scope.cancel_called or not self.project_files.is_current(report.generation):
+                return False
+
+            async def events() -> AsyncIterator[WispEvent]:
+                yield report
+
+            # Publication commits here. Once bytes can reach the client, finish
+            # this report even if cancellation arrives while output is blocked.
+            with anyio.CancelScope(shield=True):
+                await self._render_events(events())
+            return True
 
     async def _render_event_stream(self, events: AsyncIterator[WispEvent]) -> None:
         async def serialized_events() -> AsyncIterator[WispEvent]:

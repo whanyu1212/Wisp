@@ -103,6 +103,7 @@ export default withMermaid(
               { text: 'CLI', link: '/reference/cli' },
               { text: 'Python SDK', link: '/reference/sdk' },
               { text: 'SDK capability audit', link: '/reference/sdk-capability-audit' },
+              { text: 'Project file discovery', link: '/reference/project-files' },
               { text: 'Compatibility & versioning', link: '/reference/compatibility' },
               { text: 'Configuration', link: '/reference/configuration' },
               { text: 'Environment variables', link: '/reference/environment' },

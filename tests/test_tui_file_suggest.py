@@ -660,7 +660,7 @@ def test_tree_expansion_uses_snapshot_only(monkeypatch: pytest.MonkeyPatch) -> N
             picker = app.query_one("#file-suggest", FileSuggest)
             picker.set_snapshot(_tree_snapshot())
             monkeypatch.setattr(
-                "wisp.tui.file_index.os.scandir",
+                "wisp.project_files.os.scandir",
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("filesystem scan")),
             )
             await pilot.press("@", "s", "r", "c", "tab", "right")

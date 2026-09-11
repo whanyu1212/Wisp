@@ -42,6 +42,7 @@ HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (2, "e84f38d40d6137fcfc2a57ebd6d9140efcddcf7b2f1535850790aa3af5e55955"),
     (3, "3421192b01974081b8fc52537aa23a8fd44ece09b11be8ae4c791dc7d1a82c7c"),
     (4, "fc80ee4beaaad41c6534130bab3c277c0109b3831d34c4ad623d0417d92eed02"),
+    (5, "37dc90b7fe06005444def1710af98be7b6b8fddb4231ff161dc119365fdcafc2"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -426,6 +427,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_session_tree": {},
     "get_sessions": {},
     "get_skills": {},
+    "get_project_files": {},
     "get_state": {},
     "init": {},
     "navigate_session_tree": {"entry_id": "entry-1"},
@@ -623,6 +625,13 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "rpc.sessions": {"command_id": "command-1"},
     "rpc.skills": {"command_id": "command-1", "catalog": {}},
+    "rpc.project_files": {
+        "command_id": "command-1",
+        "generation": 1,
+        "entries": [],
+        "truncated": False,
+    },
+    "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
     "session.saved": {"session_id": "session-1", "path": Path("fixture.jsonl")},
     "session.stats": {"command_id": "command-1", "stats": _SESSION_STATS},
