@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "name": "automatic_compaction_preserves_prompt",
+  "description": "Automatic compaction finishes within the prompt; steering still reaches its queue.",
+  "initial": {
+    "provider": "fake",
+    "model": null,
+    "effort": null,
+    "view": null,
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    }
+  },
+  "inputs": [
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "compaction.started",
+        "schema_version": 36,
+        "timestamp": "2026-09-11T00:00:00Z",
+        "session_id": "session-1",
+        "reason": "threshold",
+        "source_entry_count": 4,
+        "trigger_budget": {
+          "estimate": {
+            "method": "chars_div_4_v1",
+            "system_tokens": 100,
+            "message_tokens": 2800,
+            "tool_schema_tokens": 100,
+            "total_tokens": 3000
+          },
+          "observed_tokens": null,
+          "observed_is_current": false,
+          "trailing_estimated_tokens": null,
+          "effective_tokens": 3000,
+          "accounting_method": "fully_estimated",
+          "context_window": 10000,
+          "reserve_tokens": 1000,
+          "remaining_tokens": null,
+          "estimated_percent": null,
+          "over_budget": null
+        }
+      },
+      "clock_ms": 0
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "compaction.completed",
+        "schema_version": 36,
+        "timestamp": "2026-09-11T00:00:00Z",
+        "session_id": "session-1",
+        "reason": "threshold",
+        "outcome": "completed",
+        "compaction_id": "compaction-1",
+        "replaced_entry_count": 2,
+        "retained_entry_count": 2,
+        "provider": null,
+        "model": null,
+        "usage": null,
+        "cost": null,
+        "error": null,
+        "will_retry": false
+      },
+      "clock_ms": 10
+    },
+    {
+      "type": "local.steer",
+      "content": "steer now",
+      "clock_ms": 20
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.updated",
+        "schema_version": 34,
+        "steering": [
+          "steer now"
+        ],
+        "follow_up": []
+      },
+      "clock_ms": 30
+    },
+    {
+      "type": "rpc.event",
+      "event": {
+        "type": "queue.message.injected",
+        "schema_version": 34,
+        "kind": "steering",
+        "content": "steer now"
+      },
+      "clock_ms": 40
+    }
+  ],
+  "expected": {
+    "commands": [
+      {
+        "type": "steer",
+        "id": "steer-1",
+        "content": "steer now"
+      }
+    ],
+    "view": {
+      "status": "running",
+      "input_mode": "running",
+      "input_ready": true,
+      "queued_steering": 0,
+      "queued_follow_ups": 0,
+      "provider": "fake",
+      "model": null,
+      "mode": "build",
+      "last_session": null
+    },
+    "interaction": {
+      "status": "running",
+      "current_command_id": "prompt-1",
+      "current_command_type": "prompt",
+      "pending_approval_call_id": null,
+      "pending_trust_request_id": null,
+      "cancel_requested": false,
+      "exit_requested": false
+    },
+    "retained_text": null,
+    "restored_drafts": []
+  }
+}

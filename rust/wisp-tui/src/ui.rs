@@ -214,6 +214,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
         Span::styled(
             if state.configuration_active() {
                 "configuring"
+            } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
+                "compacting"
             } else {
                 state.view_status.as_str()
             },
@@ -228,10 +230,21 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
         )));
     }
     let title = Line::from(title);
+    if let Some(reason) = state.context.compaction {
+        details = format!("Compacting ({})…", reason.as_str());
+    } else if let Some(notice) = &state.context.compaction_notice {
+        details = notice.clone();
+    }
+    let context = crate::context_view::indicator(state, usize::from(area.width.saturating_sub(4)));
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(&details))
             .alignment(Alignment::Center)
-            .block(Block::default().title(title).borders(Borders::ALL)),
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_bottom(Line::raw(format!(" {context} ")).right_aligned())
+                    .borders(Borders::ALL),
+            ),
         area,
     );
 }
@@ -265,7 +278,9 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let lines = if rows.is_empty() {
-        let message = if editable(state) {
+        let message = if state.context.loading() {
+            "Refreshing context… You can keep editing your draft."
+        } else if editable(state) {
             "Type a prompt below to start."
         } else {
             ""

@@ -7,6 +7,7 @@ mod cli;
 mod command_tests;
 mod commands;
 mod connection_panel;
+mod context_view;
 mod detail_view;
 mod framing;
 pub mod history;
@@ -432,6 +433,7 @@ struct LiveUi {
     model_picker: Option<ModelPicker>,
     rendered_model_picker: bool,
     command_help: Option<Help>,
+    context_view: Option<context_view::ContextView>,
     completion: Completion,
 }
 
@@ -457,6 +459,7 @@ impl Default for LiveUi {
             model_picker: None,
             rendered_model_picker: false,
             command_help: None,
+            context_view: None,
             completion: Completion::default(),
         }
     }
@@ -558,7 +561,9 @@ impl LiveUi {
                     let payload = Bytes::from(serde_json::to_vec(&value)?);
                     if payload.len() > limit
                         && (matches!(command_type, Some("get_commands" | "get_state"))
-                            || (command_type == Some("configure") && value.get("mode").is_some()))
+                            || (command_type == Some("configure")
+                                && (value.get("mode").is_some()
+                                    || value.get("auto_compaction_enabled").is_some())))
                     {
                         pending.extend(reducer::reduce(&mut self.state, UiAction::BackendEvent(BackendEvent::CommandFinished {
                             command_id: value["id"].as_str().expect("control request ID").into(),
@@ -588,7 +593,7 @@ impl LiveUi {
                             .to_owned();
                         pending.extend(reducer::reduce(
                             &mut self.state,
-                            UiAction::SkipPostPromptStats { command_id },
+                            UiAction::SkipStatsRefresh { command_id },
                             &mut self.ids,
                         )?);
                         continue;
@@ -638,7 +643,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
-                UiEffect::ModeConfigurationApplied => {
+                UiEffect::ModeConfigurationApplied | UiEffect::AutoCompactionConfigured => {
                     self.editor.clear();
                     self.completion.dismiss();
                     self.render_pending = true;
@@ -890,6 +895,7 @@ impl LiveUi {
             self.model_picker = None;
             self.rendered_model_picker = false;
             self.command_help = None;
+            self.context_view = None;
             self.completion.dismiss();
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1056,7 +1062,13 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            if let Some(help) = self
+            if let Some(view) = self
+                .context_view
+                .as_mut()
+                .filter(|_| ui::decision_context_visible(frame.area()))
+            {
+                view.render(frame, frame.area(), &self.state);
+            } else if let Some(help) = self
                 .command_help
                 .as_ref()
                 .filter(|_| ui::decision_context_visible(frame.area()))
@@ -1617,6 +1629,38 @@ impl LiveUi {
                 self.dispatch(UiAction::LoadCommandCatalog, writer, limit)
                     .await
             }
+            Command::Context => {
+                self.context_view = Some(context_view::ContextView::default());
+                self.editor.clear();
+                self.render_pending = true;
+                self.dispatch(UiAction::LoadContext, writer, limit).await
+            }
+            Command::AutoCompaction(enabled) => {
+                self.notice = None;
+                self.dispatch(UiAction::ConfigureAutoCompaction(enabled), writer, limit)
+                    .await
+            }
+            Command::Compact(instructions) => {
+                let action = UiAction::Compact(instructions);
+                if let Some(notice) =
+                    self.reduced_action_frame_limit_notice(&action, "compaction command", limit)?
+                {
+                    self.notice = Some(notice);
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                let was_idle = self.state.current_command.is_none();
+                self.notice = None;
+                let control = self.dispatch(action, writer, limit).await?;
+                if was_idle
+                    && self.state.current_command.as_ref().is_some_and(|command| {
+                        command.command_type == reducer::ActiveCommandType::Compact
+                    })
+                {
+                    self.editor.clear();
+                }
+                Ok(control)
+            }
             Command::Mode(mode) => {
                 self.notice = None;
                 self.dispatch(UiAction::ConfigureMode(mode), writer, limit)
@@ -2121,6 +2165,22 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         self.completion.sync(&self.editor);
         match input {
+            Input::Key(key) if self.context_view.is_some() => {
+                if is_escape(key) || is_ctrl_c(key) {
+                    self.context_view = None;
+                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+                    self.render_pending = true;
+                    return self.dispatch(UiAction::LoadContext, writer, limit).await;
+                } else {
+                    self.context_view
+                        .as_mut()
+                        .expect("open context")
+                        .scroll(key.code);
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if self.context_view.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.command_help.is_some() => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.command_help = None;
@@ -6229,7 +6289,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_blocked_commands_keep_notice_and_editor_text() {
-        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let (writer_tx, mut writer_rx) = mpsc::channel(4);
         let mut live_ui = LiveUi::default();
         live_ui
             .dispatch_session_action(
@@ -6282,6 +6342,24 @@ mod tests {
         let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
             panic!("startup history completion must refresh queue state");
         };
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("startup completion must refresh context");
+        };
+        let stats: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(stats["type"], "get_session_stats");
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: stats["id"].as_str().unwrap().into(),
+                    command_type: "get_session_stats".into(),
+                    ok: false,
+                    error: Some("unavailable in this history test".into()),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
         live_ui
             .dispatch(
                 UiAction::ReloadLatestHistory,

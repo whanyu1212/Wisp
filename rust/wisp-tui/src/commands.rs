@@ -15,6 +15,9 @@ use wisp_protocol::{commands::AgentMode, events::CommandDescriptor};
 pub(crate) enum Command {
     Help,
     Mode(AgentMode),
+    Context,
+    AutoCompaction(bool),
+    Compact(Option<String>),
     Quit,
     Model(ModelCommand),
     Session(SessionCommand),
@@ -27,6 +30,8 @@ fn usage(name: &str) -> Option<&'static str> {
         "help" => "/help",
         "plan" => "/plan",
         "build" => "/build",
+        "context" => "/context [auto on|off]",
+        "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
         "provider" => "/provider [name]",
@@ -86,6 +91,13 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         "help" => Command::Help,
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
+        "context" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] => Command::Context,
+            ["auto", "on"] => Command::AutoCompaction(true),
+            ["auto", "off"] => Command::AutoCompaction(false),
+            _ => Command::Invalid(format!("Usage: {syntax}")),
+        },
+        "compact" => Command::Compact((!tail.trim().is_empty()).then(|| tail.trim().to_owned())),
         "quit" => Command::Quit,
         "model" | "provider" => {
             Command::Model(model_picker::command(&normalized).expect("known model command"))
@@ -363,7 +375,7 @@ pub(crate) mod tests {
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [
             "help", "plan", "build", "model", "provider", "connect", "resume", "new", "name",
-            "clone", "tree", "unrevert", "compact", "quit",
+            "clone", "tree", "unrevert", "context", "compact", "skills", "quit",
         ]
         .into_iter()
         .enumerate()
@@ -404,7 +416,7 @@ pub(crate) mod tests {
             assert!(matches!(classify(quit, None), Some(Command::Quit)));
         }
         assert!(
-            matches!(classify("/compact instructions", Some(&catalog())), Some(Command::Invalid(message)) if message.contains("not available"))
+            matches!(classify("/compact instructions", Some(&catalog())), Some(Command::Compact(Some(instructions))) if instructions == "instructions")
         );
         assert!(
             matches!(classify("/name  release  候選", None), Some(Command::Session(SessionCommand::Name(name))) if name == "release  候選")
@@ -459,7 +471,9 @@ pub(crate) mod tests {
             .join("\n");
         assert!(text.contains("/connect\n"));
         assert!(!text.contains("/connect ["));
-        assert!(!text.contains("/compact"));
+        assert!(text.contains("/compact [instructions]"));
+        assert!(text.contains("/context [auto on|off]"));
+        assert!(!text.contains("/skills"));
         assert!(text.contains("Aliases: /exit, :q"));
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
@@ -471,7 +485,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .items
                 .iter()
-                .all(|item| item.name != "compact")
+                .all(|item| item.name != "skills")
         );
         assert!(completion.view(None).is_none());
     }

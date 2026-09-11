@@ -54,6 +54,94 @@ impl BackendEvent {
     pub fn from_live(event: &WispCurrentLiveEventOutput) -> Result<Self, EventProjectionError> {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
+        match event_type.as_str() {
+            "session.stats" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let mut stats = event.session_stats(&command_id).ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "stats",
+                    }
+                })?;
+                if stats
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > SESSION_ID_MAX_BYTES)
+                {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type,
+                        field: "stats.session_id",
+                        limit: SESSION_ID_MAX_BYTES,
+                    });
+                }
+                // All retained prose is bounded independently of the negotiated wire limit.
+                if let Some(policy) = &mut stats.compaction {
+                    policy.threshold_ineligible_reason = policy
+                        .threshold_ineligible_reason
+                        .as_ref()
+                        .map(|reason| super::bounded_session_text(reason, 1024));
+                }
+                if stats.cost.known_usd.len() > 128 {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type,
+                        field: "stats.cost.known_usd",
+                        limit: 128,
+                    });
+                }
+                return Ok(Self::SessionStatsReported {
+                    command_id,
+                    stats: Box::new(stats),
+                });
+            }
+            "context.estimated" => {
+                let mut estimate = event.context_estimated().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "budget",
+                    }
+                })?;
+                estimate.provider = exact_string_field(&value, &event_type, "provider", 256)?;
+                if estimate
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.len() > 1024)
+                {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type,
+                        field: "model",
+                        limit: 1024,
+                    });
+                }
+                return Ok(Self::ContextEstimated(estimate));
+            }
+            "compaction.started" => {
+                let mut started = event.compaction_started().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "compaction",
+                    }
+                })?;
+                started.session_id =
+                    exact_string_field(&value, &event_type, "session_id", SESSION_ID_MAX_BYTES)?;
+                return Ok(Self::CompactionStarted(started));
+            }
+            "compaction.completed" => {
+                let mut completed = event.compaction_completed().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "compaction",
+                    }
+                })?;
+                completed.session_id =
+                    exact_string_field(&value, &event_type, "session_id", SESSION_ID_MAX_BYTES)?;
+                completed.error = completed
+                    .error
+                    .as_ref()
+                    .map(|error| super::bounded_session_text(error, 1024));
+                return Ok(Self::CompactionCompleted(completed));
+            }
+            _ => {}
+        }
         let command_id = match event_type.as_str() {
             "rpc.connection_catalog"
             | "rpc.model_catalog"
@@ -142,7 +230,13 @@ impl BackendEvent {
                 &string_field(value, &event_type, "message")?,
                 super::SESSION_NOTICE_MAX_BYTES,
             )),
-            "rpc.model_catalog" | "rpc.commands" | "rpc.state" => {
+            "rpc.model_catalog"
+            | "rpc.commands"
+            | "rpc.state"
+            | "session.stats"
+            | "context.estimated"
+            | "compaction.started"
+            | "compaction.completed" => {
                 let event = wisp_protocol::events::deserialize(value.clone()).map_err(|_| {
                     EventProjectionError::InvalidField {
                         event_type: event_type.clone(),

@@ -38,6 +38,7 @@ impl UiState {
             && self.session_operation.is_none()
             && self.connection_operation.is_none()
             && self.history_request.is_none()
+            && !super::session_sync_pending(self)
             && !self.configuration_active()
     }
 }
@@ -193,6 +194,7 @@ pub(super) fn observe(
             };
             let mut effects = Vec::new();
             if applied {
+                state.context.invalidate();
                 effects.push(UiEffect::ModelConfigurationApplied);
             }
             if invalidated {

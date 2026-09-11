@@ -1,0 +1,126 @@
+{
+  "session.stats": {
+    "type": "session.stats",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "command_id": "stats-1",
+    "stats": {
+      "session_id": "session-1",
+      "entry_count": 4,
+      "active_message_count": 4,
+      "compaction_count": 0,
+      "usage_record_count": 1,
+      "usage": {
+        "input_tokens": 2900,
+        "output_tokens": 100,
+        "total_tokens": 3000,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null,
+        "reasoning_output_tokens": null
+      },
+      "context": {
+        "estimate": {
+          "method": "chars_div_4_v1",
+          "system_tokens": 100,
+          "message_tokens": 2800,
+          "tool_schema_tokens": 100,
+          "total_tokens": 3000
+        },
+        "observed_tokens": null,
+        "observed_is_current": false,
+        "trailing_estimated_tokens": null,
+        "effective_tokens": 3000,
+        "accounting_method": "fully_estimated",
+        "context_window": 10000,
+        "reserve_tokens": 1000,
+        "remaining_tokens": null,
+        "estimated_percent": null,
+        "over_budget": null
+      },
+      "compaction": {
+        "auto_compaction_enabled": true,
+        "threshold_eligible": true,
+        "threshold_ineligible_reason": null,
+        "overflow_recovery_enabled": true
+      },
+      "cost": {
+        "currency": "USD",
+        "known_usd": "0.0123",
+        "complete": false,
+        "priced_record_count": 1,
+        "unpriced_record_count": 1
+      }
+    }
+  },
+  "context.estimated": {
+    "type": "context.estimated",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "turn": 1,
+    "provider": "fake",
+    "model": "model-1",
+    "budget": {
+      "estimate": {
+        "method": "chars_div_4_v1",
+        "system_tokens": 100,
+        "message_tokens": 2800,
+        "tool_schema_tokens": 100,
+        "total_tokens": 3000
+      },
+      "observed_tokens": null,
+      "observed_is_current": false,
+      "trailing_estimated_tokens": null,
+      "effective_tokens": 3000,
+      "accounting_method": "fully_estimated",
+      "context_window": 10000,
+      "reserve_tokens": 1000,
+      "remaining_tokens": null,
+      "estimated_percent": null,
+      "over_budget": null
+    }
+  },
+  "compaction.started": {
+    "type": "compaction.started",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "session_id": "session-1",
+    "reason": "overflow",
+    "source_entry_count": 4,
+    "trigger_budget": {
+      "estimate": {
+        "method": "chars_div_4_v1",
+        "system_tokens": 100,
+        "message_tokens": 2800,
+        "tool_schema_tokens": 100,
+        "total_tokens": 3000
+      },
+      "observed_tokens": null,
+      "observed_is_current": false,
+      "trailing_estimated_tokens": null,
+      "effective_tokens": 3000,
+      "accounting_method": "fully_estimated",
+      "context_window": 10000,
+      "reserve_tokens": 1000,
+      "remaining_tokens": null,
+      "estimated_percent": null,
+      "over_budget": null
+    }
+  },
+  "compaction.completed": {
+    "type": "compaction.completed",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "session_id": "session-1",
+    "reason": "overflow",
+    "outcome": "completed",
+    "compaction_id": "compaction-1",
+    "replaced_entry_count": 2,
+    "retained_entry_count": 2,
+    "provider": null,
+    "model": null,
+    "usage": null,
+    "cost": null,
+    "error": "Retry setup failed",
+    "will_retry": false
+  }
+}

@@ -18,7 +18,9 @@ pub(super) struct PendingModeChange {
 
 impl UiState {
     pub(crate) fn configuration_active(&self) -> bool {
-        self.mode_change.is_some() || self.model_configuration_active()
+        self.mode_change.is_some()
+            || self.model_configuration_active()
+            || self.context.configuring()
     }
 
     pub(crate) fn command_catalog_loading(&self) -> bool {
@@ -161,6 +163,7 @@ pub(super) fn observe(
     {
         let change = state.mode_change.take().expect("matched mode change");
         let mut effects = if *ok {
+            state.context.invalidate();
             state.mode = change.mode;
             state.mode_confirmed = true;
             vec![
