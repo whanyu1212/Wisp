@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
@@ -12,6 +12,7 @@ use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot}
 
 use crate::reducer::{API_KEY_MAX_BYTES, ApiKey};
 use crate::session_picker::terminal_row;
+use crate::theme::Palette;
 
 const PAGE_STEP: usize = 10;
 
@@ -105,7 +106,7 @@ impl ConnectionPanel {
         provider: &str,
         verification_uri: String,
         user_code: String,
-    ) {
+    ) -> bool {
         if let ConnectionPanelMode::DeviceCode {
             provider: active_provider,
             verification_uri: active_uri,
@@ -116,8 +117,10 @@ impl ConnectionPanel {
             if active_provider == provider {
                 *active_uri = Some(verification_uri);
                 *active_code = Some(user_code);
+                return true;
             }
         }
+        false
     }
 
     pub fn show_device_progress(&mut self, provider: &str, attempt: u32) {
@@ -322,13 +325,13 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel, palette: Palette) {
     match &mut panel.mode {
         ConnectionPanelMode::Picker { selected } => {
-            render_picker(frame, area, &panel.catalog, *selected)
+            render_picker(frame, area, &panel.catalog, *selected, palette)
         }
         ConnectionPanelMode::ApiKey { provider, value } => {
-            render_api_key(frame, area, provider, value)
+            render_api_key(frame, area, provider, value, palette)
         }
         ConnectionPanelMode::DeviceCode {
             provider,
@@ -344,6 +347,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel) {
             user_code.as_deref(),
             *attempt,
             scroll,
+            palette,
         ),
     }
 }
@@ -353,6 +357,7 @@ fn render_picker(
     area: Rect,
     catalog: &ConnectionCatalogSnapshot,
     selected: Option<usize>,
+    palette: Palette,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -367,7 +372,7 @@ fn render_picker(
     let lines = if methods.is_empty() {
         vec![Line::styled(
             "No connection methods reported.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         )]
     } else {
         methods
@@ -375,13 +380,14 @@ fn render_picker(
             .enumerate()
             .skip(start)
             .take(height)
-            .map(|(index, method)| method_line(method, selected == Some(index), width))
+            .map(|(index, method)| method_line(method, selected == Some(index), width, palette))
             .collect()
     };
     frame.render_widget(
         Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .title(" connect provider ")
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -393,12 +399,17 @@ fn render_picker(
             "↑/↓ move · PgUp/PgDn · Home/End · Enter connect · d remove stored credential · r refresh · Esc close"
         })
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray)),
+        .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
 }
 
-fn method_line(method: &ConnectionMethodSnapshot, selected: bool, width: usize) -> Line<'static> {
+fn method_line(
+    method: &ConnectionMethodSnapshot,
+    selected: bool,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
     let source = format!(
         "source: {} · environment: {} · stored fallback: {} · OAuth expiry: {}",
         method.source,
@@ -422,17 +433,20 @@ fn method_line(method: &ConnectionMethodSnapshot, selected: bool, width: usize) 
         width,
     );
     let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
+        palette.selection()
     } else {
         Style::default()
     };
     Line::from(Span::styled(content, style))
 }
 
-fn render_api_key(frame: &mut Frame<'_>, area: Rect, provider: &str, value: &ApiKeyInput) {
+fn render_api_key(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    provider: &str,
+    value: &ApiKeyInput,
+    palette: Palette,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -445,6 +459,7 @@ fn render_api_key(frame: &mut Frame<'_>, area: Rect, provider: &str, value: &Api
         .block(
             Block::default()
                 .title(format!(" API key: {provider} "))
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -452,11 +467,12 @@ fn render_api_key(frame: &mut Frame<'_>, area: Rect, provider: &str, value: &Api
     frame.render_widget(
         Paragraph::new("Enter save · Backspace edit · Esc cancel")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_device_code(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -465,6 +481,7 @@ fn render_device_code(
     user_code: Option<&str>,
     attempt: Option<u32>,
     scroll: &mut usize,
+    palette: Palette,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -494,6 +511,7 @@ fn render_device_code(
         .block(
             Block::default()
                 .title(format!(" device login: {provider} "))
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -501,7 +519,7 @@ fn render_device_code(
     frame.render_widget(
         Paragraph::new("↑↓ scroll · Esc/Ctrl-C cancel")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
 }
@@ -652,7 +670,7 @@ mod tests {
         let mut seen = String::new();
         for _ in 0..rows.len() {
             terminal
-                .draw(|frame| render(frame, frame.area(), &mut panel))
+                .draw(|frame| render(frame, frame.area(), &mut panel, Palette::default()))
                 .unwrap();
             seen.push_str(
                 &terminal
@@ -673,7 +691,7 @@ mod tests {
         }
         panel.handle_key(key(KeyCode::Home));
         terminal
-            .draw(|frame| render(frame, frame.area(), &mut panel))
+            .draw(|frame| render(frame, frame.area(), &mut panel, Palette::default()))
             .unwrap();
         assert!(terminal.backend().to_string().contains("Open"));
         assert_eq!(

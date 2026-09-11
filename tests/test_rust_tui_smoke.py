@@ -1601,8 +1601,14 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 108, 0, 0))
                 phase = "prompt restored"
                 output.clear()
-            elif phase == "prompt restored" and b"/skill:review" in output and b"keep" in output:
-                assert b"LIVEBG" in output
+            elif (
+                phase == "prompt restored"
+                and b"/skill:review" in output
+                and b"keep" in output
+                and b"LIVEBG" in output
+            ):
+                # A full styled frame can arrive in several PTY reads. Wait for
+                # the streamed row too, rather than asserting on an early chunk.
                 assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/quit\r")
                 phase = "quit"

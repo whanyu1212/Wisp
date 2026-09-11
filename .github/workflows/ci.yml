@@ -48,6 +48,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check generated TUI themes
+        run: uv run python scripts/generate_tui_themes.py --check
+
       - name: Check live RPC schemas
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -114,7 +117,7 @@ jobs:
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
         run: >-
-          uv run pytest tests/test_rust_tui_smoke.py --durations=20
+          uv run pytest tests/test_rust_tui_smoke.py tests/test_rust_tui_themes.py --durations=20
           --junitxml=test-results/rust-smoke/junit.xml
           --ci-node-manifest=test-results/rust-smoke/nodes.json
 

@@ -2,10 +2,11 @@
 
 use crate::model_picker::{self, ModelCommand};
 use crate::prompt_editor::PromptEditor;
+use crate::theme::{self, Palette};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -19,6 +20,7 @@ use wisp_protocol::{
 pub(crate) enum Command {
     Help,
     History,
+    Theme(Option<&'static theme::Theme>),
     Mode(AgentMode),
     Context,
     Skills,
@@ -36,6 +38,7 @@ fn usage(name: &str) -> Option<&'static str> {
     Some(match name {
         "help" => "/help",
         "history" => "/history",
+        "theme" => "/theme [name]",
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
@@ -71,7 +74,7 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         "quit"
     } else if lower.starts_with('/') && usage(name).is_some() {
         name
-    } else if let Some(descriptor) = catalog.unwrap_or_default().iter().find(|descriptor| {
+    } else if let Some(descriptor) = command_descriptors(catalog).into_iter().find(|descriptor| {
         descriptor.slash_command.eq_ignore_ascii_case(token)
             || descriptor
                 .slash_aliases
@@ -102,6 +105,14 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         }
         "help" => Command::Help,
         "history" => Command::History,
+        "theme" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] => Command::Theme(None),
+            [name] => match theme::resolve(name) {
+                Some(theme) => Command::Theme(Some(theme)),
+                None => Command::Invalid("Unknown theme. Use /theme to browse Wisp themes.".into()),
+            },
+            _ => Command::Invalid("Usage: /theme [name]".into()),
+        },
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
         "plan" => Command::Mode(AgentMode::Plan),
@@ -147,6 +158,22 @@ pub(crate) struct Completion {
 pub(crate) struct CompletionView<'a> {
     pub items: Vec<CompletionItem<'a>>,
     pub selected: usize,
+}
+
+/// Backend discovery keeps runtime commands authoritative; the generated local
+/// theme descriptor is available even if backend discovery fails.
+fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDescriptor> {
+    let mut commands: Vec<_> = catalog
+        .unwrap_or_default()
+        .iter()
+        .filter(|command| command.name != "theme")
+        .collect();
+    let position = commands
+        .iter()
+        .position(|command| command.order > theme::command().order)
+        .unwrap_or(commands.len());
+    commands.insert(position, theme::command());
+    commands
 }
 
 #[derive(Clone, Copy)]
@@ -212,9 +239,8 @@ impl Completion {
         }
         let (range, prefix) = self.context.as_ref()?;
         let prefix = prefix.to_ascii_lowercase();
-        let items: Vec<_> = catalog
-            .unwrap_or_default()
-            .iter()
+        let items: Vec<_> = command_descriptors(catalog)
+            .into_iter()
             .filter(|item| {
                 usage(&item.name).is_some()
                     && item.slash_command.to_ascii_lowercase().starts_with(&prefix)
@@ -279,7 +305,12 @@ impl Completion {
     }
 }
 
-pub(crate) fn render_completion(frame: &mut Frame<'_>, area: Rect, view: &CompletionView<'_>) {
+pub(crate) fn render_completion(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &CompletionView<'_>,
+    palette: Palette,
+) {
     let items = view.items.iter().map(|item| {
         ListItem::new(format!(
             "{}  {}",
@@ -290,11 +321,7 @@ pub(crate) fn render_completion(frame: &mut Frame<'_>, area: Rect, view: &Comple
     let mut state = ListState::default().with_selected(Some(view.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(palette.selection())
             .highlight_symbol("› "),
         area,
         &mut state,
@@ -322,14 +349,16 @@ impl Help {
     }
 }
 
-pub(crate) fn help_rows(catalog: Option<&[CommandDescriptor]>) -> Vec<Line<'static>> {
-    catalog
-        .unwrap_or_default()
-        .iter()
+pub(crate) fn help_rows(
+    catalog: Option<&[CommandDescriptor]>,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    command_descriptors(catalog)
+        .into_iter()
         .filter_map(|item| {
             let syntax = usage(&item.name)?;
             let mut rows = vec![
-                Line::styled(syntax, Style::default().fg(Color::Cyan)),
+                Line::styled(syntax, Style::default().fg(palette.primary)),
                 Line::raw(crate::ui::sanitize_for_terminal(&item.description)),
             ];
             if !item.slash_aliases.is_empty() {
@@ -342,10 +371,11 @@ pub(crate) fn help_rows(catalog: Option<&[CommandDescriptor]>) -> Vec<Line<'stat
         })
         .flatten()
         .chain([
-            Line::styled("@ project files", Style::default().fg(Color::Cyan)),
+            Line::styled("@ project files", Style::default().fg(palette.primary)),
             Line::raw("Type @ to find paths; ↑↓ select, Enter insert (not submit)."),
             Line::raw("Tab fuzzy/tree; ←/→ folders; Esc close; Tab at a dismissed reference refreshes."),
             Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
+            Line::raw("Ctrl+T toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores."),
         ])
         .collect()
 }
@@ -357,9 +387,11 @@ pub(crate) fn render_help(
     catalog: Option<&[CommandDescriptor]>,
     loading: bool,
     error: Option<&str>,
+    palette: Palette,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(palette.border())
         .title(" Commands ")
         .title_bottom(" ↑↓ PgUp/PgDn • r refresh • Esc close ");
     let inner = block.inner(area);
@@ -371,7 +403,7 @@ pub(crate) fn render_help(
     if let Some(error) = error {
         rows.push(Line::raw(crate::ui::sanitize_for_terminal(error)));
     }
-    rows.extend(help_rows(catalog));
+    rows.extend(help_rows(catalog, palette));
     if rows.is_empty() {
         rows.push(Line::raw("No commands available. Press r to retry."));
     }
@@ -622,7 +654,7 @@ pub(crate) mod tests {
     #[test]
     fn help_and_completion_exclude_unsupported_handlers_and_use_rust_syntax() {
         let catalog = catalog();
-        let rows = help_rows(Some(&catalog));
+        let rows = help_rows(Some(&catalog), Palette::default());
         let text = rows
             .iter()
             .map(ToString::to_string)
@@ -649,6 +681,8 @@ pub(crate) mod tests {
                 .iter()
                 .all(|item| item.spelling() != "/update")
         );
-        assert!(completion.view(None, None).is_none());
+        let local = completion.view(None, None).unwrap();
+        assert_eq!(local.items.len(), 1);
+        assert_eq!(local.items[0].spelling(), "/theme");
     }
 }

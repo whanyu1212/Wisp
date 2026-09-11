@@ -2,11 +2,11 @@
 
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::project_files::ProjectFiles;
+use crate::theme::Palette;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -382,11 +382,18 @@ impl FilePicker {
         PickerAction::Consumed
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, files: &ProjectFiles) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        files: &ProjectFiles,
+        palette: Palette,
+    ) {
         self.invalidate();
-        crate::ui::clear_overlay(frame, area);
+        crate::ui::clear_overlay(frame, area, palette);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(palette.border())
             .title(if self.tree {
                 " @ files: tree "
             } else {
@@ -481,11 +488,9 @@ impl FilePicker {
             .collect::<Vec<_>>();
         let mut selection = ListState::default().with_selected(Some(self.selected - offset));
         frame.render_stateful_widget(
-            List::new(rows).highlight_symbol("› ").highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            List::new(rows)
+                .highlight_symbol("› ")
+                .highlight_style(palette.selection()),
             list_area,
             &mut selection,
         );

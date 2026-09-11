@@ -3,6 +3,7 @@ use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
+use crate::theme::Palette;
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::TranscriptEntryId;
 use crate::transcript_view::{
@@ -10,7 +11,9 @@ use crate::transcript_view::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -98,7 +101,7 @@ pub fn overlay_area(area: Rect) -> Option<Rect> {
     ))
 }
 
-pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect) {
+pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
     if area.x > frame.area().x {
         for y in area.y..area.bottom() {
             let cell = &mut frame.buffer_mut()[(area.x - 1, y)];
@@ -106,10 +109,12 @@ pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect) {
             // Its leading cell cannot remain visible without its covered trailing cell.
             if cell.symbol().width() > 1 {
                 cell.reset();
+                cell.set_style(palette.base());
             }
         }
     }
     frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(palette.base()), area);
 }
 
 #[cfg(test)]
@@ -123,7 +128,17 @@ pub fn render(
     notice: Option<&str>,
 ) {
     render_interactive(
-        frame, state, viewport, row_cache, editor, connection, notice, None, true, None,
+        frame,
+        state,
+        viewport,
+        row_cache,
+        editor,
+        connection,
+        notice,
+        None,
+        true,
+        None,
+        Palette::default(),
     );
 }
 
@@ -139,8 +154,10 @@ pub fn render_interactive(
     browse_selected: Option<TranscriptEntryId>,
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
+    palette: Palette,
 ) -> bool {
     let area = frame.area();
+    frame.render_widget(Block::default().style(palette.base()), area);
     if !decision_context_visible(area) {
         frame.render_widget(
             Paragraph::new("Wisp: terminal too small (minimum 30x8)")
@@ -161,11 +178,11 @@ pub fn render_interactive(
             .constraints([Constraint::Length(3), Constraint::Min(5)])
             .split(area);
         if let Some(notice) = notice {
-            render_compact_notice(frame, chunks[0], notice);
+            render_compact_notice(frame, chunks[0], notice, palette);
         } else {
-            render_header(frame, chunks[0], state, connection);
+            render_header(frame, chunks[0], state, connection, palette);
         }
-        render_composer(frame, chunks[1], state, editor, composer_focused);
+        render_composer(frame, chunks[1], state, editor, composer_focused, palette);
         return false;
     }
 
@@ -184,7 +201,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    render_header(frame, chunks[0], state, connection);
+    render_header(frame, chunks[0], state, connection, palette);
     render_transcript(
         frame,
         chunks[1],
@@ -192,23 +209,30 @@ pub fn render_interactive(
         viewport,
         row_cache,
         browse_selected,
+        palette,
     );
     if let Some(view) = completion.filter(|_| completion_height > 0) {
-        crate::commands::render_completion(frame, chunks[2], view);
+        crate::commands::render_completion(frame, chunks[2], view, palette);
     }
-    render_composer(frame, chunks[3], state, editor, composer_focused);
-    render_footer(frame, chunks[4], state, notice);
+    render_composer(frame, chunks[3], state, editor, composer_focused, palette);
+    render_footer(frame, chunks[4], state, notice, palette);
     completion_height > 0
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection: &ConnectionInfo) {
+fn render_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    connection: &ConnectionInfo,
+    palette: Palette,
+) {
     let status_style = match state.view_status {
-        ViewStatus::Idle => Style::default().fg(Color::Green),
-        ViewStatus::Running => Style::default().fg(Color::Cyan),
+        ViewStatus::Idle => Style::default().fg(palette.success),
+        ViewStatus::Running => Style::default().fg(palette.primary),
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(palette.warning)
         }
-        ViewStatus::Error => Style::default().fg(Color::Red),
+        ViewStatus::Error => Style::default().fg(palette.error),
     };
     let mut details = format!(
         "backend {}  •  rpc v{} / events v{}",
@@ -248,7 +272,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
         Span::styled(
             " WISP ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
@@ -290,6 +314,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
             .block(
                 Block::default()
                     .title(title)
+                    .border_style(palette.border())
                     .title_bottom(Line::raw(format!(" {context} ")).right_aligned())
                     .borders(Borders::ALL),
             ),
@@ -304,6 +329,7 @@ fn render_transcript(
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
     browse_selected: Option<TranscriptEntryId>,
+    palette: Palette,
 ) {
     let content_width = usize::from(area.width.saturating_sub(2)).max(1);
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
@@ -333,7 +359,7 @@ fn render_transcript(
         } else {
             ""
         };
-        vec![Line::styled(message, Style::default().fg(Color::DarkGray))]
+        vec![Line::styled(message, Style::default().fg(palette.muted))]
     } else {
         rows.into_iter()
             .map(|row| {
@@ -341,34 +367,34 @@ fn render_transcript(
                 let mut style = match row.tone {
                     TranscriptRowTone::Default => Style::default(),
                     TranscriptRowTone::User => Style::default()
-                        .fg(Color::Green)
+                        .fg(palette.success)
                         .add_modifier(Modifier::BOLD),
                     TranscriptRowTone::Assistant if row.kind == TranscriptRowKind::Header => {
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(palette.primary)
                             .add_modifier(Modifier::BOLD)
                     }
-                    TranscriptRowTone::Assistant => Style::default().fg(Color::White),
-                    TranscriptRowTone::Muted => Style::default().fg(Color::DarkGray),
+                    TranscriptRowTone::Assistant => Style::default().fg(palette.foreground),
+                    TranscriptRowTone::Muted => Style::default().fg(palette.muted),
                     TranscriptRowTone::Pending => Style::default()
-                        .fg(Color::Cyan)
+                        .fg(palette.primary)
                         .add_modifier(Modifier::BOLD),
                     TranscriptRowTone::Success => Style::default()
-                        .fg(Color::Green)
+                        .fg(palette.success)
                         .add_modifier(Modifier::BOLD),
                     TranscriptRowTone::Warning => Style::default()
-                        .fg(Color::Yellow)
+                        .fg(palette.warning)
                         .add_modifier(Modifier::BOLD),
-                    TranscriptRowTone::Error => {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    }
+                    TranscriptRowTone::Error => Style::default()
+                        .fg(palette.error)
+                        .add_modifier(Modifier::BOLD),
                 };
                 if selected {
-                    style = style.bg(Color::Blue).fg(Color::White);
+                    style = style.patch(palette.selection());
                 }
                 if row.spans.len() == 1 {
                     let span = row.spans.into_iter().next().expect("one span exists");
-                    Line::styled(span.text, markdown_span_style(style, span.style))
+                    Line::styled(span.text, markdown_span_style(style, span.style, palette))
                 } else {
                     let spans = if row.spans.is_empty() {
                         vec![Span::styled(String::new(), style)]
@@ -376,7 +402,10 @@ fn render_transcript(
                         row.spans
                             .into_iter()
                             .map(|span| {
-                                Span::styled(span.text, markdown_span_style(style, span.style))
+                                Span::styled(
+                                    span.text,
+                                    markdown_span_style(style, span.style, palette),
+                                )
                             })
                             .collect()
                     };
@@ -394,8 +423,12 @@ fn render_transcript(
     } else {
         " conversation • scrolled "
     };
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(Block::default().title(title).borders(Borders::ALL));
+    let paragraph = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(palette.border()),
+    );
     frame.render_widget(paragraph, area);
 }
 
@@ -425,9 +458,10 @@ pub fn render_detail_overlay(
     area: Rect,
     state: &UiState,
     view: &mut DetailView,
+    palette: Palette,
 ) {
     if let Some(presentation) = selected_detail(state, view) {
-        render_detail(frame, area, view, presentation);
+        render_detail(frame, area, view, presentation, palette);
     }
 }
 
@@ -436,6 +470,7 @@ fn render_detail(
     area: Rect,
     view: &mut DetailView,
     presentation: &ToolDetailPresentation,
+    palette: Palette,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -454,6 +489,7 @@ fn render_detail(
         Paragraph::new(sanitize_for_terminal(&heading)).block(
             Block::default()
                 .title(" live retained detail ")
+                .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
         chunks[0],
@@ -466,10 +502,12 @@ fn render_detail(
     let lines = if rows.is_empty() {
         vec![Line::styled(
             "(no retained detail rows)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         )]
     } else {
-        rows.into_iter().map(detail_line).collect()
+        rows.into_iter()
+            .map(|row| detail_line(row, palette))
+            .collect()
     };
     let title = if presentation.truncated {
         " detail • retained content incomplete "
@@ -477,26 +515,34 @@ fn render_detail(
         " detail "
     };
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().title(title).borders(Borders::ALL)),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(palette.border()),
+        ),
         chunks[1],
     );
     frame.render_widget(
         Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc close")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(palette.muted)),
         chunks[2],
     );
 }
 
-fn detail_line(row: DetailViewRow) -> Line<'static> {
+fn detail_line(row: DetailViewRow, palette: Palette) -> Line<'static> {
     let style = match row.kind {
-        DetailRowKind::Addition => Style::default().fg(Color::Green),
-        DetailRowKind::Deletion => Style::default().fg(Color::Red),
+        DetailRowKind::Addition => Style::default()
+            .fg(palette.addition)
+            .bg(palette.addition_background),
+        DetailRowKind::Deletion => Style::default()
+            .fg(palette.deletion)
+            .bg(palette.deletion_background),
         DetailRowKind::Hunk | DetailRowKind::Header => Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.primary)
             .add_modifier(Modifier::BOLD),
-        DetailRowKind::GrepMatch => Style::default().fg(Color::LightMagenta),
-        DetailRowKind::Omission | DetailRowKind::Note => Style::default().fg(Color::Yellow),
+        DetailRowKind::GrepMatch => Style::default().fg(palette.accent),
+        DetailRowKind::Omission | DetailRowKind::Note => Style::default().fg(palette.warning),
         DetailRowKind::Context | DetailRowKind::ReadLine | DetailRowKind::FindPath => {
             Style::default()
         }
@@ -504,40 +550,38 @@ fn detail_line(row: DetailViewRow) -> Line<'static> {
     Line::styled(row.text, style)
 }
 
-fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
+fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Palette) -> Style {
     let mut style = match semantic.block {
         BlockStyle::Normal => base,
         BlockStyle::Heading(level) => {
             let color = if level <= 2 {
-                Color::Cyan
+                palette.primary
             } else {
-                Color::LightCyan
+                palette.secondary
             };
             base.fg(color).add_modifier(Modifier::BOLD)
         }
-        BlockStyle::Code => base.fg(Color::LightGreen).bg(Color::Rgb(30, 30, 30)),
-        BlockStyle::RawHtml => base.fg(Color::DarkGray),
+        BlockStyle::Code => base.fg(palette.foreground).bg(palette.surface),
+        BlockStyle::RawHtml => base.fg(palette.muted),
     };
     style = match semantic.inline {
         InlineStyle::Normal => style,
-        InlineStyle::Code => style.fg(Color::Yellow).bg(Color::Rgb(45, 45, 45)),
-        InlineStyle::Link => style
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::UNDERLINED),
-        InlineStyle::QuoteMarker => style.fg(Color::DarkGray),
-        InlineStyle::ListMarker => style.fg(Color::Cyan),
+        InlineStyle::Code => style.fg(palette.warning).bg(palette.panel),
+        InlineStyle::Link => style.fg(palette.primary).add_modifier(Modifier::UNDERLINED),
+        InlineStyle::QuoteMarker => style.fg(palette.muted),
+        InlineStyle::ListMarker => style.fg(palette.primary),
     };
     style = match semantic.syntax {
         SyntaxClass::Plain => style,
-        SyntaxClass::Comment => style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        SyntaxClass::Keyword => style.fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-        SyntaxClass::String => style.fg(Color::LightGreen),
-        SyntaxClass::Number | SyntaxClass::Constant => style.fg(Color::LightMagenta),
-        SyntaxClass::Type => style.fg(Color::LightCyan),
-        SyntaxClass::Function => style.fg(Color::LightBlue),
-        SyntaxClass::Variable => style.fg(Color::White),
-        SyntaxClass::Operator => style.fg(Color::Yellow),
-        SyntaxClass::Punctuation => style.fg(Color::Gray),
+        SyntaxClass::Comment => style.fg(palette.muted).add_modifier(Modifier::ITALIC),
+        SyntaxClass::Keyword => style.fg(palette.accent).add_modifier(Modifier::BOLD),
+        SyntaxClass::String => style.fg(palette.success),
+        SyntaxClass::Number | SyntaxClass::Constant => style.fg(palette.warning),
+        SyntaxClass::Type => style.fg(palette.secondary),
+        SyntaxClass::Function => style.fg(palette.primary),
+        SyntaxClass::Variable => style.fg(palette.foreground),
+        SyntaxClass::Operator => style.fg(palette.warning),
+        SyntaxClass::Punctuation => style.fg(palette.foreground),
     };
     if semantic.strong {
         style = style.add_modifier(Modifier::BOLD);
@@ -557,6 +601,7 @@ fn render_composer(
     state: &UiState,
     editor: &PromptEditor,
     focused: bool,
+    palette: Palette,
 ) {
     let queued_total = state
         .queued_steering()
@@ -585,10 +630,10 @@ fn render_composer(
     };
     let border_style = match state.view_status {
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(palette.warning)
         }
-        ViewStatus::Error => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::DarkGray),
+        ViewStatus::Error => Style::default().fg(palette.error),
+        _ => palette.border(),
     };
     let block = Block::default()
         .title(title)
@@ -849,29 +894,35 @@ fn push_source_grapheme_window(
     Some(column)
 }
 
-fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str) {
+fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str, palette: Palette) {
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(notice))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(palette.warning))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState, notice: Option<&str>) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    notice: Option<&str>,
+    palette: Palette,
+) {
     let (content, style) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.warning),
         ),
         None if state.active_prompt_editable() => (
             "Enter steer • Alt-Enter later • Alt-Up restore • Esc/Ctrl-C cancels".into(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         ),
         None => (
-            "Enter send • Ctrl-R history • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-C quit".into(),
-            Style::default().fg(Color::DarkGray),
+            "Enter send • Ctrl-R history • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-T theme • Ctrl-C quit".into(),
+            Style::default().fg(palette.muted),
         ),
     };
     frame.render_widget(
@@ -1627,7 +1678,7 @@ mod tests {
         );
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
-        assert_eq!(pending_fg, Color::Cyan);
+        assert_eq!(pending_fg, Palette::default().primary);
         assert!(pending_modifiers.contains(Modifier::BOLD));
 
         state
@@ -1641,7 +1692,7 @@ mod tests {
         assert!(complete.backend().to_string().contains("contents"));
         let (success_fg, _, success_modifiers) =
             style_at_text(complete.backend(), "Read  README.md").unwrap();
-        assert_eq!(success_fg, Color::Green);
+        assert_eq!(success_fg, Palette::default().success);
         assert!(success_modifiers.contains(Modifier::BOLD));
     }
 
@@ -1690,6 +1741,7 @@ mod tests {
                     Some(card_id),
                     true,
                     None,
+                    Palette::default(),
                 );
             })
             .unwrap();
@@ -1703,7 +1755,7 @@ mod tests {
         let visible_text = visible[0].plain_text();
         let (_, selected_background, _) =
             style_at_text(browse_terminal.backend(), &visible_text).unwrap();
-        assert_eq!(selected_background, Color::Blue);
+        assert_eq!(selected_background, Palette::default().primary);
 
         let card = state
             .transcript
@@ -1733,10 +1785,11 @@ mod tests {
                     Some(card_id),
                     false,
                     None,
+                    Palette::default(),
                 );
                 let area = overlay_area(frame.area()).unwrap();
-                clear_overlay(frame, area);
-                render_detail_overlay(frame, area, &state, &mut detail_view);
+                clear_overlay(frame, area, Palette::default());
+                render_detail_overlay(frame, area, &state, &mut detail_view, Palette::default());
             })
             .unwrap();
         let rendered = terminal.backend().to_string();
@@ -1745,8 +1798,8 @@ mod tests {
         assert!(rendered.contains("+ new value"));
         let (added_fg, _, _) = style_at_text(terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, _, _) = style_at_text(terminal.backend(), "- old�[2J").unwrap();
-        assert_eq!(added_fg, Color::Green);
-        assert_eq!(deleted_fg, Color::Red);
+        assert_eq!(added_fg, Palette::default().addition);
+        assert_eq!(deleted_fg, Palette::default().deletion);
     }
 
     #[test]
@@ -1798,29 +1851,60 @@ mod tests {
 
         let (keyword_fg, keyword_bg, keyword_modifiers) =
             style_at_text(terminal.backend(), "fn").unwrap();
-        assert_eq!(keyword_fg, Color::LightMagenta);
-        assert_eq!(keyword_bg, Color::Rgb(30, 30, 30));
+        assert_eq!(keyword_fg, Palette::default().accent);
+        assert_eq!(keyword_bg, Palette::default().surface);
         assert!(keyword_modifiers.contains(Modifier::BOLD));
         let (comment_fg, comment_bg, comment_modifiers) =
             style_at_text(terminal.backend(), "// note").unwrap();
-        assert_eq!(comment_fg, Color::DarkGray);
-        assert_eq!(comment_bg, Color::Rgb(30, 30, 30));
+        assert_eq!(comment_fg, Palette::default().muted);
+        assert_eq!(comment_bg, Palette::default().surface);
         assert!(comment_modifiers.contains(Modifier::ITALIC));
         let (string_fg, string_bg, _) = style_at_text(terminal.backend(), "\"text\"").unwrap();
-        assert_eq!(string_fg, Color::LightGreen);
-        assert_eq!(string_bg, Color::Rgb(30, 30, 30));
+        assert_eq!(string_fg, Palette::default().success);
+        assert_eq!(string_bg, Palette::default().surface);
+    }
+
+    #[test]
+    fn monochrome_diff_rows_keep_readable_pairs_and_noncolor_signs() {
+        for theme in crate::theme::themes() {
+            for (kind, text) in [
+                (DetailRowKind::Addition, "+ added"),
+                (DetailRowKind::Deletion, "- deleted"),
+            ] {
+                let line = detail_line(
+                    DetailViewRow {
+                        anchor: crate::detail_view::DetailAnchor {
+                            row_key: 0,
+                            byte_offset: 0,
+                        },
+                        kind,
+                        text: text.into(),
+                    },
+                    theme.palette(true),
+                );
+                assert_eq!(line.spans[0].content, text);
+                let style = line.style.patch(line.spans[0].style);
+                assert!(
+                    crate::theme::contrast_ratio(style.fg.unwrap(), style.bg.unwrap()) >= 4.5,
+                    "{}",
+                    theme.slug
+                );
+            }
+        }
     }
 
     #[test]
     fn semantic_markdown_styles_map_to_terminal_styles() {
+        let palette = Palette::default();
         let heading = markdown_span_style(
             Style::default(),
             TranscriptSpanStyle {
                 block: BlockStyle::Heading(1),
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
-        assert_eq!(heading.fg, Some(Color::Cyan));
+        assert_eq!(heading.fg, Some(palette.primary));
         assert!(heading.add_modifier.contains(Modifier::BOLD));
 
         let code = markdown_span_style(
@@ -1829,8 +1913,9 @@ mod tests {
                 inline: InlineStyle::Code,
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
-        assert_eq!(code.fg, Some(Color::Yellow));
+        assert_eq!(code.fg, Some(palette.warning));
         assert!(code.bg.is_some());
 
         let link = markdown_span_style(
@@ -1839,6 +1924,7 @@ mod tests {
                 inline: InlineStyle::Link,
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
         assert!(link.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -1848,20 +1934,22 @@ mod tests {
                 block: BlockStyle::Code,
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
-        assert_eq!(uniform_code.fg, Some(Color::LightGreen));
-        assert_eq!(uniform_code.bg, Some(Color::Rgb(30, 30, 30)));
+        assert_eq!(uniform_code.fg, Some(palette.foreground));
+        assert_eq!(uniform_code.bg, Some(palette.surface));
 
         let keyword = markdown_span_style(
-            Style::default().bg(Color::Rgb(30, 30, 30)),
+            Style::default().bg(palette.surface),
             TranscriptSpanStyle {
                 block: BlockStyle::Code,
                 syntax: SyntaxClass::Keyword,
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
-        assert_eq!(keyword.fg, Some(Color::LightMagenta));
-        assert_eq!(keyword.bg, Some(Color::Rgb(30, 30, 30)));
+        assert_eq!(keyword.fg, Some(palette.accent));
+        assert_eq!(keyword.bg, Some(palette.surface));
         assert!(keyword.add_modifier.contains(Modifier::BOLD));
 
         let comment = markdown_span_style(
@@ -1871,8 +1959,9 @@ mod tests {
                 syntax: SyntaxClass::Comment,
                 ..TranscriptSpanStyle::default()
             },
+            palette,
         );
-        assert_eq!(comment.fg, Some(Color::DarkGray));
+        assert_eq!(comment.fg, Some(palette.muted));
         assert!(comment.add_modifier.contains(Modifier::ITALIC));
     }
 

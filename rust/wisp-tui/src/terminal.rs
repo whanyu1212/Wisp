@@ -20,6 +20,9 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     pub fn enter() -> Result<Self, Error> {
+        // Wisp handles NO_COLOR in its palette (grayscale with readable contrast).
+        // Crossterm's own suppression would erase those grayscale colors too.
+        crossterm::style::force_color_output(true);
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
