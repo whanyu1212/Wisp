@@ -236,14 +236,13 @@ def test_rust_theme_preferences_interoperate_with_textual_and_survive_restart(
     project.mkdir()
     path = Path.home() / ".wisp/tui.json"  # conftest provides an isolated HOME.
     path.parent.mkdir(parents=True, exist_ok=True)
+    unrelated = {"preserve": True, "large_integer": 2**128 + 1, "nested": [-(2**127) - 1]}
     path.write_text(
-        json.dumps(
-            {"theme": "wisp-wave", "last_dark_theme": "wisp-wave", "unrelated": {"preserve": True}}
-        )
+        json.dumps({"theme": "wisp-wave", "last_dark_theme": "wisp-wave", "unrelated": unrelated})
     )
     for preview in (True, False):
         _run_theme_session(
             binary, project, tmp_path / "sessions", no_color=no_color, preview=preview
         )
-        assert json.loads(path.read_text())["unrelated"] == {"preserve": True}
+        assert json.loads(path.read_text())["unrelated"] == unrelated
     assert load_theme_state().active_theme == "wisp-wave"

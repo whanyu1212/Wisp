@@ -208,6 +208,36 @@ fn preferences_round_trip_dark_history_and_preserve_unrelated_fields() {
 }
 
 #[test]
+fn theme_changes_preserve_unrelated_numeric_tokens_losslessly() {
+    let home = TestHome::new();
+    for number in [
+        "18446744073709551617",
+        "-9223372036854775809",
+        "0.12345678901234567890123456789",
+        "1e+400",
+    ] {
+        home.write(
+            format!(
+                r#"{{"theme":"\u0077isp-wave","unrelated":{{"nested":[{number},{{"value":{number}}}]}}}}"#
+            )
+            .as_bytes(),
+        );
+        let store = home.store();
+        let mut selection = store.load();
+        assert_eq!(selection.active.slug, "wave");
+        selection.toggle();
+        store.save(selection).unwrap();
+        let saved = fs::read_to_string(home.path()).unwrap();
+        assert_eq!(
+            saved.matches(number).count(),
+            2,
+            "rewrote {number}: {saved}"
+        );
+        assert_eq!(store.load().active.slug, "paper");
+    }
+}
+
+#[test]
 fn unusable_preferences_fall_back_and_unreadable_bytes_are_not_overwritten() {
     let home = TestHome::new();
     for contents in [

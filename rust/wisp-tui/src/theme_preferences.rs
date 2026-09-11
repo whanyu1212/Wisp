@@ -1,8 +1,9 @@
 //! Bounded, presentation-only state compatible with Textual's ~/.wisp/tui.json.
 
 use crate::theme::{self, Theme};
-use serde_json::{Map, Value};
+use serde_json::value::{RawValue, to_raw_value};
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -67,13 +68,13 @@ impl ThemePreferences {
         };
         let active = document
             .get("theme")
-            .and_then(Value::as_str)
-            .and_then(theme::named)
+            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            .and_then(|name| theme::named(&name))
             .unwrap_or_else(theme::default_theme);
         let last_dark = document
             .get("last_dark_theme")
-            .and_then(Value::as_str)
-            .and_then(theme::named)
+            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            .and_then(|name| theme::named(&name))
             .filter(|theme| theme.dark)
             .unwrap_or_else(|| {
                 if active.dark {
@@ -87,14 +88,16 @@ impl ThemePreferences {
 
     /// Missing or malformed JSON is repairable, but unreadable/non-UTF-8/oversized
     /// documents are never replaced: their unrelated preferences are unknown.
-    fn read_document(&self) -> io::Result<Map<String, Value>> {
+    /// Unowned values stay raw so Python-sized integers and decimal precision
+    /// survive without passing through serde_json::Value's numeric representation.
+    fn read_document(&self) -> io::Result<BTreeMap<String, Box<RawValue>>> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_NONBLOCK)
             .open(&self.path)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(error) => return Err(error),
         };
         if !file.metadata()?.is_file() {
@@ -108,18 +111,15 @@ impl ThemePreferences {
         }
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| io::Error::other("theme preferences are not UTF-8"))?;
-        Ok(match serde_json::from_str(text) {
-            Ok(Value::Object(document)) => document,
-            _ => Map::new(),
-        })
+        Ok(serde_json::from_str(text).unwrap_or_default())
     }
 
     pub fn save(&self, selection: ThemeSelection) -> io::Result<()> {
         let mut document = self.read_document()?;
-        document.insert("theme".into(), selection.active.name.clone().into());
+        document.insert("theme".into(), to_raw_value(&selection.active.name)?);
         document.insert(
             "last_dark_theme".into(),
-            selection.last_dark.name.clone().into(),
+            to_raw_value(&selection.last_dark.name)?,
         );
         let mut bytes = serde_json::to_vec_pretty(&document)?;
         bytes.push(b'\n');
