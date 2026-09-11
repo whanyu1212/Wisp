@@ -15,12 +15,12 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v5 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v5/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v6 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v6/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 5;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 6;
 /// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 36;
+pub const EVENT_SCHEMA_VERSION: u32 = 37;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -154,22 +154,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v5/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v6/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v5/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v6/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v5/commands.schema.json"
+        "../../../schemas/live-rpc/v6/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v5/events.schema.json"
+        "../../../schemas/live-rpc/v6/events.schema.json"
     ))
 });
 
@@ -431,7 +431,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v5/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v6/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -466,7 +466,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v5/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v6/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -526,7 +526,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v6/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -614,6 +614,11 @@ pub mod commands {
         /// Discover the backend's frontend-neutral command metadata.
         pub fn get_commands(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_commands", "id": id}))
+        }
+
+        /// Request a bounded snapshot using backend-owned traversal and policy.
+        pub fn get_project_files(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_project_files", "id": id}))
         }
 
         /// Read current runtime state without becoming the active command.
@@ -1023,13 +1028,34 @@ pub mod events {
         SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v6/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(
         WispCurrentLiveEventOutput,
         generated::WispCurrentLiveEventOutput
     );
+
+    /// Relative project entry authorized for display, not for subsequent file access.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ProjectFileEntry {
+        pub path: String,
+        pub kind: ProjectFileKind,
+    }
+
+    #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum ProjectFileKind {
+        File,
+        Directory,
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct ProjectFileSnapshot {
+        pub generation: u64,
+        pub entries: Vec<ProjectFileEntry>,
+        pub truncated: bool,
+    }
 
     /// Command metadata needed for frontend discovery. Execution remains local to each frontend.
     #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
@@ -1136,6 +1162,23 @@ pub mod events {
     impl WispCurrentLiveEventOutput {
         fn wire_value(&self) -> serde_json::Value {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
+        }
+
+        /// Project safe metadata for one exact request; hierarchy and matching stay local.
+        pub fn project_files(&self, id: &str) -> Option<ProjectFileSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.project_files" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value).ok()
+        }
+
+        /// Clear earlier snapshots when the backend changes discovery policy.
+        pub fn project_files_invalidated(&self) -> Option<u64> {
+            let value = self.wire_value();
+            (value["type"] == "project_files.invalidated")
+                .then(|| value["generation"].as_u64())
+                .flatten()
         }
 
         /// Project a skill catalog for one exact inspection request.

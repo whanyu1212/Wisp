@@ -62,8 +62,8 @@ JSONL-RPC clients. Stable installation instructions remain pinned to 0.1.0 until
   generated Rust Serde types, and Python/Rust conformance fixtures for every current command and event.
 - Added an authoritative, bounded model-catalog RPC used by Textual and external clients for provider,
   model, availability, lifecycle, and effort discovery. Protocol v1 and v2 artifacts remain immutable.
-- External JSONL-RPC clients must handshake before sending commands and support live RPC v4 with
-  event schema v36. Persisted session compatibility is separate and is not reset by this release.
+- External JSONL-RPC clients must handshake before sending commands and support live RPC v6 with
+  event schema v37. Persisted session compatibility is separate and is not reset by this release.
 - Recorded the #470 renderer decision: Textual remains the default TUI; the Rust frontend stays
   experimental source-build opt-in on macOS and Linux. Explicit Rust selection does not fall back to
   Textual, and Python distributions still do not bundle the binary.
@@ -260,7 +260,17 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v36 — current
+## Schema v37 — current
+
+- Added `get_project_files`, returning non-persisted `rpc.project_files` snapshots with relative
+  file/directory metadata, request correlation, a policy generation, and explicit truncation.
+- Added `project_files.invalidated` to discard earlier snapshots during trust/configuration changes.
+  Python owns guarded traversal, protected paths, bounded work, cancellation, and publication;
+  clients can derive trees and rank the sanitized snapshot locally.
+- Live JSONL-RPC now negotiates protocol v6 with event schema v37. The v1–v5 schema bundles remain
+  immutable; persisted event compatibility is unchanged.
+
+## Schema v36
 
 Adds `rpc.connection_catalog`, `rpc.device_code`, and `rpc.device_code.progress` for correlated,
 backend-owned provider connection workflows. Connection catalogs expose only sanitized status;
@@ -463,7 +473,7 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v36 remain readable.
+Events at schema v5 through v37 remain readable.
 
 ---
 

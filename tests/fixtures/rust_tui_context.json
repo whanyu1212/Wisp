@@ -1,7 +1,7 @@
 {
   "session.stats": {
     "type": "session.stats",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "command_id": "stats-1",
     "stats": {
@@ -54,7 +54,7 @@
   },
   "context.estimated": {
     "type": "context.estimated",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "turn": 1,
     "provider": "fake",
@@ -81,7 +81,7 @@
   },
   "compaction.started": {
     "type": "compaction.started",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "session_id": "session-1",
     "reason": "overflow",
@@ -108,7 +108,7 @@
   },
   "compaction.completed": {
     "type": "compaction.completed",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "session_id": "session-1",
     "reason": "overflow",

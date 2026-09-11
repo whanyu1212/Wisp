@@ -1,0 +1,107 @@
+{
+  "$defs": {
+    "RpcCapability": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "First bounded frame sent by an external frontend.",
+  "properties": {
+    "frontend_name": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\\s\\S])",
+      "title": "Frontend Name",
+      "type": "string"
+    },
+    "frontend_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}(?![\\s\\S])",
+      "title": "Frontend Version",
+      "type": "string"
+    },
+    "max_event_schema_version": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "title": "Max Event Schema Version",
+      "type": "integer"
+    },
+    "max_protocol_version": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "title": "Max Protocol Version",
+      "type": "integer"
+    },
+    "min_event_schema_version": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "title": "Min Event Schema Version",
+      "type": "integer"
+    },
+    "min_protocol_version": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "title": "Min Protocol Version",
+      "type": "integer"
+    },
+    "required_capabilities": {
+      "items": {
+        "$ref": "#/$defs/RpcCapability"
+      },
+      "maxItems": 128,
+      "title": "Required Capabilities",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "supported_capabilities": {
+      "items": {
+        "$ref": "#/$defs/RpcCapability"
+      },
+      "maxItems": 128,
+      "title": "Supported Capabilities",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "type": {
+      "const": "rpc.handshake.request",
+      "default": "rpc.handshake.request",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "frontend_name",
+    "frontend_version",
+    "min_protocol_version",
+    "max_protocol_version",
+    "min_event_schema_version",
+    "max_event_schema_version",
+    "supported_capabilities",
+    "required_capabilities",
+    "type"
+  ],
+  "title": "RPC handshake request",
+  "type": "object",
+  "x-wisp-cross-field-invariants": [
+    {
+      "kind": "ordered-range",
+      "maximum_property": "max_protocol_version",
+      "minimum_property": "min_protocol_version"
+    },
+    {
+      "kind": "ordered-range",
+      "maximum_property": "max_event_schema_version",
+      "minimum_property": "min_event_schema_version"
+    },
+    {
+      "kind": "array-subset",
+      "subset_property": "required_capabilities",
+      "superset_property": "supported_capabilities"
+    }
+  ]
+}

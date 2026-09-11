@@ -201,6 +201,12 @@ class BeginDeviceCodeCommand(RpcCommandModel):
     provider: str = Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS)
 
 
+class GetProjectFilesCommand(RpcCommandModel):
+    """Discover bounded metadata using only backend-owned root and policy."""
+
+    type: Literal["get_project_files"] = "get_project_files"
+
+
 class GetSkillsCommand(RpcCommandModel):
     """Return the active immutable skill catalog snapshot."""
 
@@ -458,6 +464,7 @@ type RpcCommand = Annotated[
     | DisconnectProviderCommand
     | BeginDeviceCodeCommand
     | GetSkillsCommand
+    | GetProjectFilesCommand
     | GetMcpStatusCommand
     | GetMessagesCommand
     | GetSessionsCommand

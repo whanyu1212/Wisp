@@ -26,6 +26,7 @@ from wisp.rpc.commands import (
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
+    GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
     GetSessionStatsCommand,
@@ -47,6 +48,7 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
+from wisp.rpc.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.sessions.jsonl import JsonlSessionStore
 
@@ -136,7 +138,11 @@ class RpcCommandExecutor:
         running_command_factory: RunningCommandFactory = _RpcRunningCommand,
         command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
         defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
+        project_files: RpcProjectFiles | None = None,
+        publish_project_files: ProjectFilesPublisher | None = None,
     ) -> None:
+        self.project_files = project_files
+        self.publish_project_files = publish_project_files
         self.agent = agent
         self.runtime = runtime
         self.sessions = sessions
@@ -211,6 +217,21 @@ class RpcCommandExecutor:
         if isinstance(known, GetConnectionCatalogCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_connection_catalog(known, running_command)
+        if isinstance(known, GetProjectFilesCommand):
+            if self.project_files is None or self.publish_project_files is None:
+                RpcCommandLifecycle.for_command(known, write_event=self.write_event).fail(
+                    "Project file discovery unavailable"
+                )
+                return _RpcDispatchResult(running_command=None)
+            return _RpcDispatchResult(
+                running_command=self.project_files.start(
+                    known,
+                    task_group=self.task_group,
+                    send=self.send,
+                    write_event=self.write_event,
+                    publish=self.publish_project_files,
+                )
+            )
         if isinstance(known, GetSkillsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_skills(known, running_command)

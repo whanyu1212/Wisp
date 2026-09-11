@@ -22,7 +22,7 @@
       "type": "rpc.event",
       "event": {
         "type": "compaction.started",
-        "schema_version": 36,
+        "schema_version": 37,
         "timestamp": "2026-09-11T00:00:00Z",
         "session_id": "session-1",
         "reason": "threshold",
@@ -53,7 +53,7 @@
       "type": "rpc.event",
       "event": {
         "type": "compaction.completed",
-        "schema_version": 36,
+        "schema_version": 37,
         "timestamp": "2026-09-11T00:00:00Z",
         "session_id": "session-1",
         "reason": "threshold",

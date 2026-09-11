@@ -46,6 +46,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
+from wisp.project_files import ProjectScanCancelled, ProjectScanTimedOut
 from wisp.tools.context import ToolContext
 from wisp.tui.commands import (
     DEFAULT_TUI_COMMAND_CATALOG,
@@ -4834,7 +4835,7 @@ def _build_file_index_snapshot(request: FileIndexRequest) -> ProjectSnapshot | N
                 max_depth=request.max_depth,
             )
         )
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, ProjectScanCancelled, ProjectScanTimedOut):
         return None
 
 

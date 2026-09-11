@@ -28,6 +28,9 @@ Import supported names from these namespaces, not private implementation modules
 `__all__` lists are verified from the built wheel. `wisp.events` is a model namespace rather than a
 curated re-export package; the stable entry points used by SDK consumers are described below.
 
+See [Project file discovery](./project-files) for snapshot bounds, cancellation,
+and handling `ProjectFilesInvalidated` notifications.
+
 ## `wisp.sdk`
 
 ### `InProcessWisp`
@@ -134,6 +137,7 @@ request. Completion and results arrive through `events()`.
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
+| `get_project_files` | `(*, command_id: str \| None = None)` | `RpcProjectFilesReported` |
 | `get_skills` | `(*, command_id: str \| None = None)` | `RpcSkillsReported` |
 | `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
 | `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
@@ -255,7 +259,7 @@ idempotent and re-raises a retained close failure.
 - work/configuration: `PromptCommand`, `InitCommand`, `CompactCommand`, `ConfigureCommand`,
   `ShutdownCommand`
 - snapshots: `GetSessionStatsCommand`, `GetStateCommand`, `GetCommandsCommand`, `GetSkillsCommand`,
-  `GetMcpStatusCommand`
+  `GetMcpStatusCommand`, `GetProjectFilesCommand`
 - queue/control: `SteerCommand`, `FollowUpCommand`, `GetQueueStateCommand`, `SetQueueModeCommand`,
   `PopQueueCommand`, `ClearQueueCommand`, `CancelCommand`
 - safety: `ApprovalCommand`, `TrustCommand`
@@ -295,7 +299,7 @@ deprecation policy.
 | Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionEnded`, `ToolResultReady` |
 | Compaction/context | `ContextEstimated`, `ContextPressure`, `ContextOverflow`, `CompactionStarted`, `CompactionCompleted` |
 | Queues | `QueueUpdated`, `QueueItemsRemoved`, `QueueMessageInjected` |
-| Snapshots | `SessionStatsReported`, `RpcStateReported`, `RpcCommandsReported`, `RpcSkillsReported`, `RpcMcpStatusReported` |
+| Snapshots | `SessionStatsReported`, `RpcStateReported`, `RpcCommandsReported`, `RpcSkillsReported`, `RpcMcpStatusReported`, `RpcProjectFilesReported` |
 | Sessions | `SessionSaved`, `RpcMessagesReported`, `RpcSessionsReported`, `RpcSessionSelected`, `RpcSessionCloned`, `RpcSessionForked`, `RpcSessionNameChanged`, `RpcSessionTreeReported`, `RpcSessionTreeNavigated`, `RpcSessionTreeUnreverted` |
 
 `RpcCommandFinished` is the terminal command correlation event:

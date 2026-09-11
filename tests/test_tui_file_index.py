@@ -115,18 +115,24 @@ def test_queued_directory_replaced_by_symlink_cannot_disclose_outside_names(
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     _write(outside, "outside-secret-name.txt")
     original = tmp_path / "queued-original"
-    real_scandir = __import__("os").scandir
+    from contextlib import contextmanager
+
+    from wisp.tools import secure_fs
+
+    real_open = secure_fs.open_directory
     replaced = False
 
-    def racing_scandir(path: object):  # type: ignore[no-untyped-def]
+    @contextmanager
+    def racing_open(path):  # type: ignore[no-untyped-def]
         nonlocal replaced
-        if Path(path) == queued and not replaced:
+        if path.path == queued and not replaced:
             queued.rename(original)
             queued.symlink_to(outside, target_is_directory=True)
             replaced = True
-        return real_scandir(path)  # type: ignore[arg-type]
+        with real_open(path) as directory:
+            yield directory
 
-    monkeypatch.setattr("wisp.tui.file_index.os.scandir", racing_scandir)
+    monkeypatch.setattr(secure_fs, "open_directory", racing_open)
     try:
         snapshot = collect_project_snapshot(_config(tmp_path))
     finally:

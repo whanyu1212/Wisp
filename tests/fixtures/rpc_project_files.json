@@ -1,0 +1,20 @@
+{
+  "report": {
+    "type": "rpc.project_files",
+    "schema_version": 37,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "command_id": "files-1",
+    "generation": 1,
+    "entries": [
+      {"path": "src", "kind": "directory"},
+      {"path": "src/资料 \"example\".py", "kind": "file"}
+    ],
+    "truncated": true
+  },
+  "invalidated": {
+    "type": "project_files.invalidated",
+    "schema_version": 37,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "generation": 2
+  }
+}

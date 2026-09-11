@@ -147,6 +147,9 @@ contracts the built-in interfaces use. See
 [Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces) and the
 [Python SDK guide](https://whanyu1212.github.io/Wisp/guide/sdk).
 
+External frontends can use the [project file discovery RPC](site/reference/project-files.md)
+for bounded, protected-path-aware file and directory snapshots.
+
 ## Architecture
 
 One event-driven runtime, shared by every interface:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event, get_ident
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
@@ -45,6 +46,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.tools.context import ToolContext
 from wisp.tools.file_ops import ReadTool
 
 
@@ -1814,7 +1816,7 @@ def test_rpc_host_serializes_worker_event_after_bypass_lifecycle_batch() -> None
         host = rpc_host_module.RpcHost(
             runtime=cast(WispRuntime, object()),
             sessions=cast(Any, object()),
-            agent=cast(Any, object()),
+            agent=cast(Any, SimpleNamespace(tool_context=ToolContext(cwd=Path.cwd()))),
             approval_policy=cast(Any, object()),
             trust_gate=cast(Any, object()),
             configure_overrides=cast(Any, object()),
@@ -1848,7 +1850,7 @@ def test_rpc_host_drains_published_completion_events_before_return() -> None:
         host = rpc_host_module.RpcHost(
             runtime=cast(WispRuntime, object()),
             sessions=cast(Any, object()),
-            agent=cast(Any, object()),
+            agent=cast(Any, SimpleNamespace(tool_context=ToolContext(cwd=Path.cwd()))),
             approval_policy=cast(Any, object()),
             trust_gate=cast(Any, object()),
             configure_overrides=cast(Any, object()),

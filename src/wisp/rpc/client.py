@@ -39,6 +39,7 @@ from wisp.rpc.commands import (
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
+    GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
     GetSessionStatsCommand,
@@ -194,6 +195,20 @@ class RpcController:
         selected_id = command_id or self._command_id_factory("device-code")
         await self._transport.send(BeginDeviceCodeCommand(id=selected_id, provider=provider))
         return selected_id
+
+    async def get_project_files(self, *, command_id: str | None = None) -> str:
+        """Request a fresh bounded snapshot of backend-approved project paths.
+
+        Args:
+            command_id (str | None): Caller correlation ID, or a generated ID.
+
+        Returns:
+            str: ID correlating the report and terminal command event.
+        """
+
+        resolved_id = command_id or self._command_id_factory("get_project_files")
+        await self._transport.send(GetProjectFilesCommand(id=resolved_id))
+        return resolved_id
 
     async def get_skills(self, *, command_id: str | None = None) -> str:
         """Request the active immutable skill catalog snapshot."""

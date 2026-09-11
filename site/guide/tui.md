@@ -49,7 +49,7 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The Rust TUI negotiates and validates live RPC v5/event schema v36, supports prompts, approvals,
+The Rust TUI negotiates and validates live RPC v6/event schema v37, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
 `/resume` opens a keyboard-only picker for up to 50 persisted sessions (or accepts

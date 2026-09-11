@@ -1,7 +1,7 @@
 {
   "rpc.skills": {
     "type": "rpc.skills",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "command_id": "skills-1",
     "catalog": {
@@ -53,7 +53,7 @@
   },
   "skill.catalog.updated": {
     "type": "skill.catalog.updated",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "catalog": {
       "entries": [
@@ -104,7 +104,7 @@
   },
   "rpc.mcp": {
     "type": "rpc.mcp",
-    "schema_version": 36,
+    "schema_version": 37,
     "timestamp": "2026-09-11T00:00:00Z",
     "command_id": "mcp-1",
     "status": {
