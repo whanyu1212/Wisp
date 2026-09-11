@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::QueueKind;
@@ -35,6 +35,35 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
+/// Center a bounded popup within supported terminal sizes.
+pub fn overlay_area(area: Rect) -> Option<Rect> {
+    if !decision_context_visible(area) {
+        return None;
+    }
+    let width = (area.width.saturating_mul(4) / 5).clamp(MIN_TERMINAL_WIDTH, 100);
+    let height = (area.height.saturating_mul(4) / 5).clamp(MIN_TERMINAL_HEIGHT, 28);
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+}
+
+pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect) {
+    if area.x > frame.area().x {
+        for y in area.y..area.bottom() {
+            let cell = &mut frame.buffer_mut()[(area.x - 1, y)];
+            // A wide glyph crossing the left edge would make the terminal skip the border.
+            // Its leading cell cannot remain visible without its covered trailing cell.
+            if cell.symbol().width() > 1 {
+                cell.reset();
+            }
+        }
+    }
+    frame.render_widget(Clear, area);
+}
+
 #[cfg(test)]
 pub fn render(
     frame: &mut Frame<'_>,
@@ -46,7 +75,7 @@ pub fn render(
     notice: Option<&str>,
 ) {
     render_interactive(
-        frame, state, viewport, row_cache, editor, connection, notice, None, None, None,
+        frame, state, viewport, row_cache, editor, connection, notice, None, true, None,
     );
 }
 
@@ -60,7 +89,7 @@ pub fn render_interactive(
     connection: &ConnectionInfo,
     notice: Option<&str>,
     browse_selected: Option<TranscriptEntryId>,
-    detail_view: Option<&mut DetailView>,
+    composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
 ) -> bool {
     let area = frame.area();
@@ -78,14 +107,6 @@ pub fn render_interactive(
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
     );
-    if !decision_pending {
-        if let Some(view) = detail_view {
-            if let Some(presentation) = selected_detail(state, view) {
-                render_detail(frame, area, view, presentation);
-                return false;
-            }
-        }
-    }
     if decision_pending && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -96,7 +117,7 @@ pub fn render_interactive(
         } else {
             render_header(frame, chunks[0], state, connection);
         }
-        render_composer(frame, chunks[1], state, editor);
+        render_composer(frame, chunks[1], state, editor, composer_focused);
         return false;
     }
 
@@ -148,7 +169,7 @@ pub fn render_interactive(
     if let Some(view) = completion.filter(|_| completion_height > 0) {
         crate::commands::render_completion(frame, chunks[2], view);
     }
-    render_composer(frame, chunks[3], state, editor);
+    render_composer(frame, chunks[3], state, editor, composer_focused);
     render_footer(frame, chunks[4], state, notice);
     completion_height > 0
 }
@@ -372,6 +393,17 @@ fn selected_detail<'a>(
     Some(detail)
 }
 
+pub fn render_detail_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    view: &mut DetailView,
+) {
+    if let Some(presentation) = selected_detail(state, view) {
+        render_detail(frame, area, view, presentation);
+    }
+}
+
 fn render_detail(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -492,7 +524,13 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle) -> Style {
     style
 }
 
-fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &PromptEditor) {
+fn render_composer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    editor: &PromptEditor,
+    focused: bool,
+) {
     let queued_total = state
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
@@ -587,7 +625,7 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &UiState, editor: &
         let cursor_y = editor_area
             .y
             .saturating_add(u16::try_from(row.saturating_sub(vertical_scroll)).unwrap_or(u16::MAX));
-        if cursor_x < editor_area.right() && cursor_y < editor_area.bottom() {
+        if focused && cursor_x < editor_area.right() && cursor_y < editor_area.bottom() {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
         return;
@@ -1623,7 +1661,7 @@ mod tests {
                     &connection(),
                     None,
                     Some(card_id),
-                    None,
+                    true,
                     None,
                 );
             })
@@ -1666,9 +1704,12 @@ mod tests {
                     &connection(),
                     None,
                     Some(card_id),
-                    Some(&mut detail_view),
+                    false,
                     None,
                 );
+                let area = overlay_area(frame.area()).unwrap();
+                clear_overlay(frame, area);
+                render_detail_overlay(frame, area, &state, &mut detail_view);
             })
             .unwrap();
         let rendered = terminal.backend().to_string();

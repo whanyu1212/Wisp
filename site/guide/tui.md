@@ -101,6 +101,19 @@ successful configuration cannot report its selection, the header marks the last 
 until a fresh catalog succeeds. Other command-workflow parity remains tracked in
 [#467](https://github.com/whanyu1212/Wisp/issues/467).
 
+Rust pickers, help, context, skills/MCP, prompt history, and retained tool details open over the
+conversation. Output continues updating behind the popup; closing it preserves the draft and
+scroll intent. Keys and paste go to the focused popup, and its editor owns the cursor. Escape closes
+the popup (and cancels a device login when one is active). Existing Ctrl+C behavior remains: it
+closes help, history, context, discovery, model and connection views, while session/tree/detail views
+retain the normal run-cancellation or idle-exit behavior.
+
+Approvals and project-trust requests take precedence over popups. A refreshed selection must be
+drawn before it can be activated. Popups are centered and capped at 100×28; at the minimum 30×8
+terminal size they can fill the screen. Short decision layouts prioritize readable controls while
+retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
+read longer challenges. Popup dismissal by mouse is not supported yet.
+
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See

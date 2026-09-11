@@ -266,6 +266,7 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
 | Protected-path-aware file suggestions | Bounded snapshot RPC implemented; Rust picker UI remains | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, and graceful exit are present in Rust | Acceptable difference while experimental |
+| Transcript-preserving popups | Conversation drawn first, then one focused popup; decisions preempt popups | Implemented; minimum-size and compact decision layouts can cover the conversation |
 | Skills and MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |
 | Fuzz, backpressure, terminal sanitization, panic/PTY restore | Incomplete | Blocker for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
@@ -318,6 +319,18 @@ A default-renderer proposal remains out of scope until those conditions are re-m
 removal always requires a separate explicit issue; #470 did not file one.
 
 ### Rust command interaction
+
+The Rust frontend draws the virtual conversation and composer before clearing and painting the
+active popup rectangle. Modal geometry does not resize the background transcript. The same derived
+view priority controls painting and input, while individual views keep their existing asynchronous
+state. Only the focused editor places the cursor. Existing redraw coalescing and bounded row caches
+remain in effect; keeping the background current does not require continuous idle painting.
+
+Approval/trust states dismiss ordinary inspection views and suppress retained connection/session
+views until the decision settles. Backend updates continue while a view is suppressed. Rendering
+readiness is invalidated on actionable catalog changes, navigation, resize, and decision transitions,
+so a hidden or replaced choice cannot be activated before it is drawn. At 30×8 a popup can occupy
+the terminal; the compact decision layout below 11 rows retains its existing accessibility priority.
 
 `/help` lists commands implemented by the Rust frontend, using the backend's descriptions and
 ordering. Arrow keys and Page Up/Down scroll help; Escape or Ctrl+C closes it, and `r` refreshes

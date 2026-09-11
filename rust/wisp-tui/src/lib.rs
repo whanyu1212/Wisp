@@ -14,6 +14,8 @@ mod framing;
 pub mod history;
 mod markdown;
 mod model_picker;
+#[cfg(test)]
+mod overlay_tests;
 mod process;
 mod prompt_editor;
 mod prompt_history;
@@ -409,6 +411,20 @@ enum RenderedDecisionContext {
     Trust(String),
 }
 
+/// Presentation priority only; each view keeps its own asynchronous lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayKind {
+    PromptHistory,
+    Discovery,
+    Context,
+    Help,
+    Model,
+    Connection,
+    SessionTree,
+    Session,
+    Detail,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum UnsendableResponseContext {
     Interactive(RenderedDecisionContext),
@@ -442,6 +458,7 @@ struct LiveUi {
     connection_panel: Option<ConnectionPanel>,
     model_picker: Option<ModelPicker>,
     rendered_model_picker: bool,
+    rendered_overlay: Option<OverlayKind>,
     command_help: Option<Help>,
     context_view: Option<context_view::ContextView>,
     discovery_view: Option<DiscoveryView>,
@@ -471,6 +488,7 @@ impl Default for LiveUi {
             connection_panel: None,
             model_picker: None,
             rendered_model_picker: false,
+            rendered_overlay: None,
             command_help: None,
             context_view: None,
             discovery_view: None,
@@ -623,6 +641,7 @@ impl LiveUi {
                     send_payload(writer, Bytes::from(serde_json::to_vec(&value)?), limit).await?;
                 }
                 UiEffect::RecordPromptHistory(prompt) => {
+                    self.invalidate_overlay(OverlayKind::PromptHistory);
                     if self.prompt_history.record(prompt) {
                         if let Some(view) = &mut self.prompt_history_view {
                             view.sync(&self.prompt_history);
@@ -631,6 +650,7 @@ impl LiveUi {
                     }
                 }
                 UiEffect::ShowConnectionPanel(catalog) => {
+                    self.invalidate_overlay(OverlayKind::Connection);
                     self.prompt_history_view = None;
                     self.session_picker = None;
                     self.session_tree_picker = None;
@@ -638,18 +658,21 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ConnectionCatalogUpdated(catalog) => {
+                    self.invalidate_overlay(OverlayKind::Connection);
                     if let Some(panel) = self.connection_panel.as_mut() {
                         panel.update_catalog(catalog);
                         self.render_pending = true;
                     }
                 }
                 UiEffect::ShowModelPicker => {
+                    self.invalidate_overlay(OverlayKind::Model);
                     self.prompt_history_view = None;
                     self.rendered_model_picker = false;
                     self.model_picker = Some(ModelPicker::loading());
                     self.render_pending = true;
                 }
                 UiEffect::ModelCatalogUpdated(catalog) => {
+                    self.invalidate_overlay(OverlayKind::Model);
                     self.rendered_model_picker = false;
                     if let Some(picker) = &mut self.model_picker {
                         picker.update_catalog(catalog);
@@ -657,6 +680,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::InvalidateModelCatalog => {
+                    self.invalidate_overlay(OverlayKind::Model);
                     self.rendered_model_picker = false;
                     if let Some(picker) = &mut self.model_picker {
                         picker.invalidate();
@@ -664,6 +688,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ModelCatalogUnavailable => {
+                    self.invalidate_overlay(OverlayKind::Model);
                     self.rendered_model_picker = false;
                     if let Some(picker) = &mut self.model_picker {
                         picker.unavailable();
@@ -672,6 +697,7 @@ impl LiveUi {
                 }
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
                 UiEffect::SkillCatalogChanged => {
+                    self.invalidate_overlay(OverlayKind::Discovery);
                     self.completion.invalidate();
                     if let Some(view) = &mut self.discovery_view {
                         view.sync_skills(self.state.skills.snapshot.as_deref());
@@ -695,6 +721,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ShowDeviceCode(challenge) => {
+                    self.invalidate_overlay(OverlayKind::Connection);
                     if let Some(panel) = self.connection_panel.as_mut() {
                         panel.show_device_code(
                             &challenge.provider,
@@ -711,6 +738,7 @@ impl LiveUi {
                     }
                 }
                 UiEffect::FinishDeviceCode => {
+                    self.invalidate_overlay(OverlayKind::Connection);
                     if let Some(panel) = self.connection_panel.as_mut() {
                         panel.finish_device_code();
                         self.render_pending = true;
@@ -752,6 +780,7 @@ impl LiveUi {
                     sessions,
                     selected_session_id,
                 } => {
+                    self.invalidate_overlay(OverlayKind::Session);
                     self.prompt_history_view = None;
                     self.session_tree_picker = None;
                     self.session_picker =
@@ -759,6 +788,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ShowSessionTreePage { page, append } => {
+                    self.invalidate_overlay(OverlayKind::SessionTree);
                     self.prompt_history_view = None;
                     self.session_picker = None;
                     if append {
@@ -921,7 +951,12 @@ impl LiveUi {
         let blocked_context = self.unsendable_response_context.clone();
         let follow_after_update = matches!(&action, UiAction::Submit(_));
         let transcript_generation = self.state.transcript.generation();
+        let previous_decision = self.current_decision_context();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if previous_decision != self.current_decision_context() {
+            self.rendered_overlay = None;
+            self.rendered_decision_context = None;
+        }
         let transcript_replaced = effects
             .iter()
             .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
@@ -1079,13 +1114,52 @@ impl LiveUi {
         self.dispatch(action, writer, limit).await
     }
 
+    fn active_overlay(&self) -> Option<OverlayKind> {
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            return None;
+        }
+        if self.prompt_history_view.is_some() {
+            Some(OverlayKind::PromptHistory)
+        } else if self.discovery_view.is_some() {
+            Some(OverlayKind::Discovery)
+        } else if self.context_view.is_some() {
+            Some(OverlayKind::Context)
+        } else if self.command_help.is_some() {
+            Some(OverlayKind::Help)
+        } else if self.model_picker.is_some() {
+            Some(OverlayKind::Model)
+        } else if self.connection_panel.is_some() {
+            Some(OverlayKind::Connection)
+        } else if self.session_tree_picker.is_some() {
+            Some(OverlayKind::SessionTree)
+        } else if self.session_picker.is_some() {
+            Some(OverlayKind::Session)
+        } else if self.detail_view.is_open() {
+            Some(OverlayKind::Detail)
+        } else {
+            None
+        }
+    }
+
+    fn invalidate_overlay(&mut self, kind: OverlayKind) {
+        if self.rendered_overlay == Some(kind) {
+            self.rendered_overlay = None;
+            self.render_pending = true;
+        }
+    }
+
     fn draw<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
+        let overlay = self.active_overlay();
         let mut rendered_decision_context = None;
         let mut rendered_model_picker = false;
+        let mut rendered_overlay = None;
         let mut rendered_completion = None;
         self.completion.sync(&self.editor);
         if let Some(view) = &mut self.discovery_view {
@@ -1095,74 +1169,7 @@ impl LiveUi {
             view.invalidate_selection();
         }
         terminal.draw(|frame| {
-            if ui::decision_context_visible(frame.area()) {
-                rendered_decision_context = match self.state.view_status {
-                    ViewStatus::WaitingForApproval => {
-                        self.state.pending_approval.as_ref().map(|pending| {
-                            RenderedDecisionContext::Approval(pending.call_id.clone())
-                        })
-                    }
-                    ViewStatus::WaitingForTrust => self
-                        .state
-                        .pending_trust_request_id
-                        .clone()
-                        .map(RenderedDecisionContext::Trust),
-                    _ => None,
-                };
-            }
-            if let Some(view) = self
-                .prompt_history_view
-                .as_mut()
-                .filter(|_| ui::decision_context_visible(frame.area()))
-            {
-                view.render(frame, frame.area(), &self.prompt_history);
-            } else if let Some(view) = self
-                .discovery_view
-                .as_mut()
-                .filter(|_| ui::decision_context_visible(frame.area()))
-            {
-                view.render(frame, frame.area(), &self.state, self.notice.as_deref());
-            } else if let Some(view) = self
-                .context_view
-                .as_mut()
-                .filter(|_| ui::decision_context_visible(frame.area()))
-            {
-                view.render(frame, frame.area(), &self.state);
-            } else if let Some(help) = self
-                .command_help
-                .as_ref()
-                .filter(|_| ui::decision_context_visible(frame.area()))
-            {
-                commands::render_help(
-                    frame,
-                    frame.area(),
-                    help,
-                    self.state.command_catalog.as_deref(),
-                    self.state.command_catalog_loading(),
-                    self.state.command_catalog_error.as_deref(),
-                );
-            } else if let Some(picker) = self
-                .model_picker
-                .as_ref()
-                .filter(|_| ui::decision_context_visible(frame.area()))
-            {
-                rendered_model_picker = true;
-                model_picker::render(
-                    frame,
-                    frame.area(),
-                    picker,
-                    self.state.model_configuration_active(),
-                    self.notice.as_deref(),
-                );
-            } else if let Some(panel) = &self.connection_panel {
-                connection_panel::render(frame, frame.area(), panel);
-            } else if let Some(picker) = &self.session_tree_picker {
-                session_tree_picker::render(frame, frame.area(), picker);
-            } else if let Some(picker) = &self.session_picker {
-                session_picker::render(frame, frame.area(), picker);
-            } else {
-                let completion_view = (self.state.editor_editable()
-                    && self.browse_selected.is_none())
+            let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
                     self.completion.view(
                         self.state.command_catalog.as_deref(),
@@ -1170,28 +1177,91 @@ impl LiveUi {
                     )
                 })
                 .flatten();
-                let completion_visible = ui::render_interactive(
-                    frame,
-                    &self.state,
-                    &mut self.transcript_viewport,
-                    &mut self.transcript_row_cache,
-                    &self.editor,
-                    connection,
-                    self.notice.as_deref(),
-                    self.browse_selected,
-                    Some(&mut self.detail_view),
-                    completion_view.as_ref(),
-                );
-                if completion_visible {
-                    if let Some(view) = completion_view {
-                        rendered_completion =
-                            Some(view.items[view.selected].spelling().into_owned());
-                    }
+            // Popup focus does not change the background's geometry or scroll intent.
+            let completion_visible = ui::render_interactive(
+                frame,
+                &self.state,
+                &mut self.transcript_viewport,
+                &mut self.transcript_row_cache,
+                &self.editor,
+                connection,
+                self.notice.as_deref(),
+                self.browse_selected,
+                overlay.is_none() && self.browse_selected.is_none(),
+                completion_view.as_ref(),
+            );
+            if ui::decision_context_visible(frame.area()) {
+                rendered_decision_context = self.current_decision_context();
+            }
+            if overlay.is_none() && completion_visible {
+                if let Some(view) = completion_view {
+                    rendered_completion = Some(view.items[view.selected].spelling().into_owned());
                 }
             }
+            let Some((kind, area)) = overlay.zip(ui::overlay_area(frame.area())) else {
+                return;
+            };
+            ui::clear_overlay(frame, area);
+            match kind {
+                OverlayKind::PromptHistory => self
+                    .prompt_history_view
+                    .as_mut()
+                    .expect("active history")
+                    .render(frame, area, &self.prompt_history),
+                OverlayKind::Discovery => self
+                    .discovery_view
+                    .as_mut()
+                    .expect("active discovery")
+                    .render(frame, area, &self.state, self.notice.as_deref()),
+                OverlayKind::Context => self.context_view.as_mut().expect("active context").render(
+                    frame,
+                    area,
+                    &self.state,
+                ),
+                OverlayKind::Help => commands::render_help(
+                    frame,
+                    area,
+                    self.command_help.as_ref().expect("active help"),
+                    self.state.command_catalog.as_deref(),
+                    self.state.command_catalog_loading(),
+                    self.state.command_catalog_error.as_deref(),
+                ),
+                OverlayKind::Model => {
+                    rendered_model_picker = true;
+                    model_picker::render(
+                        frame,
+                        area,
+                        self.model_picker.as_ref().expect("active model"),
+                        self.state.model_configuration_active(),
+                        self.notice.as_deref(),
+                    );
+                }
+                OverlayKind::Connection => connection_panel::render(
+                    frame,
+                    area,
+                    self.connection_panel.as_mut().expect("active connection"),
+                ),
+                OverlayKind::SessionTree => session_tree_picker::render(
+                    frame,
+                    area,
+                    self.session_tree_picker
+                        .as_ref()
+                        .expect("active session tree"),
+                ),
+                OverlayKind::Session => session_picker::render(
+                    frame,
+                    area,
+                    self.session_picker.as_ref().expect("active session picker"),
+                ),
+                OverlayKind::Detail => {
+                    ui::render_detail_overlay(frame, area, &self.state, &mut self.detail_view)
+                }
+            }
+            rendered_overlay = Some(kind);
         })?;
         self.rendered_decision_context = rendered_decision_context;
         self.rendered_model_picker = rendered_model_picker;
+        self.rendered_overlay = rendered_overlay;
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
             self.completion.mark_rendered(name);
@@ -2289,12 +2359,45 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         self.completion.sync(&self.editor);
+        let overlay = self.active_overlay();
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
+        if let Some(kind) = overlay {
+            if let Input::Key(key) = &input {
+                let activates = match kind {
+                    OverlayKind::Connection => self
+                        .connection_panel
+                        .as_ref()
+                        .expect("active connection")
+                        .key_activates(*key),
+                    OverlayKind::SessionTree => {
+                        matches!(key.code, KeyCode::Enter | KeyCode::Char('f'))
+                    }
+                    OverlayKind::Model
+                    | OverlayKind::Session
+                    | OverlayKind::PromptHistory
+                    | OverlayKind::Discovery => key.code == KeyCode::Enter,
+                    _ => false,
+                };
+                if activates && self.rendered_overlay != Some(kind) {
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+            }
+            // Navigation and text entry remain usable between frames, but a new choice
+            // must be painted before an activation can act on it.
+            if matches!(&input, Input::Key(_) | Input::Paste(_)) {
+                self.invalidate_overlay(kind);
+            }
+        }
         match input {
-            Input::Key(key) if self.prompt_history_view.is_some() => {
+            Input::Key(key) if overlay == Some(OverlayKind::PromptHistory) => {
                 self.handle_prompt_history_key(key);
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(pasted) if self.prompt_history_view.is_some() => {
+            Input::Paste(pasted) if overlay == Some(OverlayKind::PromptHistory) => {
                 self.prompt_history_view
                     .as_mut()
                     .expect("open prompt history")
@@ -2302,7 +2405,7 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Input::Key(key) if self.discovery_view.is_some() => {
+            Input::Key(key) if overlay == Some(OverlayKind::Discovery) => {
                 let action = self
                     .discovery_view
                     .as_mut()
@@ -2327,8 +2430,8 @@ impl LiveUi {
                 }
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if self.discovery_view.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.context_view.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::Discovery) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Context) => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.context_view = None;
                 } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
@@ -2343,8 +2446,8 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if self.context_view.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.command_help.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::Context) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Help) => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.command_help = None;
                 } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
@@ -2362,15 +2465,15 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if self.command_help.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.model_picker.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::Help) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Model) => {
                 self.handle_model_picker_key(key, writer, limit).await
             }
-            Input::Paste(_) if self.model_picker.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.connection_panel.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::Model) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Connection) => {
                 self.handle_connection_panel_key(key, writer, limit).await
             }
-            Input::Paste(pasted) if self.connection_panel.is_some() => {
+            Input::Paste(pasted) if overlay == Some(OverlayKind::Connection) => {
                 if let Some(panel) = self.connection_panel.as_mut() {
                     panel.handle_paste(&pasted);
                 }
@@ -2378,21 +2481,27 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
-            Input::Key(key) if self.session_tree_picker.is_some() => {
+            Input::Key(key) if overlay == Some(OverlayKind::SessionTree) => {
                 self.handle_session_tree_picker_key(key, writer, limit)
                     .await
             }
-            Input::Paste(_) if self.session_tree_picker.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.session_picker.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::SessionTree) => {
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key) if overlay == Some(OverlayKind::Session) => {
                 self.handle_session_picker_key(key, writer, limit).await
             }
-            Input::Paste(_) if self.session_picker.is_some() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.detail_view.is_open() => Ok(self.handle_detail_key(key)),
-            Input::Paste(_) if self.detail_view.is_open() => Ok(LoopControl::Continue),
-            Input::Key(key) if self.browse_selected.is_some() => {
+            Input::Paste(_) if overlay == Some(OverlayKind::Session) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Detail) => {
+                Ok(self.handle_detail_key(key))
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::Detail) => Ok(LoopControl::Continue),
+            Input::Key(key) if !decision_pending && self.browse_selected.is_some() => {
                 self.handle_browse_key(key, writer, limit).await
             }
-            Input::Paste(_) if self.browse_selected.is_some() => Ok(LoopControl::Continue),
+            Input::Paste(_) if !decision_pending && self.browse_selected.is_some() => {
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key)
                 if self.editor_editable()
                     && key.code == KeyCode::Char('r')
@@ -2401,7 +2510,7 @@ impl LiveUi {
                 self.open_prompt_history();
                 Ok(LoopControl::Continue)
             }
-            Input::Key(key) if is_browse_key(key) => {
+            Input::Key(key) if !decision_pending && is_browse_key(key) => {
                 self.enter_or_cycle_browse();
                 Ok(LoopControl::Continue)
             }
@@ -2552,6 +2661,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Redraw => {
+                self.rendered_overlay = None;
                 self.completion.invalidate();
                 if let Some(view) = &mut self.prompt_history_view {
                     view.invalidate_selection();
@@ -4187,6 +4297,7 @@ mod tests {
             )
             .await
             .unwrap();
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4208,6 +4319,7 @@ mod tests {
                 .unwrap();
         let encoded_len = serde_json::to_vec(&command).unwrap().len();
 
+        draw_model_test(&mut live_ui, 80, 24);
         let control = live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4234,6 +4346,7 @@ mod tests {
         );
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
 
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4285,6 +4398,7 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["type"],
             "get_connection_catalog"
         );
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4302,6 +4416,7 @@ mod tests {
             .await
             .unwrap();
 
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4342,6 +4457,7 @@ mod tests {
             )
             .await
             .unwrap();
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4402,6 +4518,7 @@ mod tests {
             .await
             .unwrap();
 
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4442,6 +4559,7 @@ mod tests {
             )
             .await
             .unwrap();
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4480,6 +4598,7 @@ mod tests {
             )
             .await
             .unwrap();
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4497,6 +4616,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!format!("{:?}", live_ui.connection_panel).contains("live-secret"));
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4550,6 +4670,7 @@ mod tests {
             )
             .await
             .unwrap();
+        draw_model_test(&mut live_ui, 80, 24);
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),

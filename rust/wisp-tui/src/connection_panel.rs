@@ -6,6 +6,8 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot};
 
 use crate::reducer::{API_KEY_MAX_BYTES, ApiKey};
@@ -45,6 +47,7 @@ enum ConnectionPanelMode {
         verification_uri: Option<String>,
         user_code: Option<String>,
         attempt: Option<u32>,
+        scroll: usize,
     },
 }
 
@@ -87,6 +90,7 @@ impl ConnectionPanel {
             verification_uri: None,
             user_code: None,
             attempt: None,
+            scroll: 0,
         };
     }
 
@@ -170,13 +174,33 @@ impl ConnectionPanel {
                     _ => ConnectionPanelAction::None,
                 }
             }
-            ConnectionPanelMode::DeviceCode { .. } => {
+            ConnectionPanelMode::DeviceCode { scroll, .. } => {
                 if key.code == KeyCode::Esc || is_ctrl_c(key) {
-                    ConnectionPanelAction::CancelDeviceCode
-                } else {
-                    ConnectionPanelAction::None
+                    return ConnectionPanelAction::CancelDeviceCode;
                 }
+                match key.code {
+                    KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Down => *scroll = scroll.saturating_add(1),
+                    KeyCode::PageUp => *scroll = scroll.saturating_sub(PAGE_STEP),
+                    KeyCode::PageDown => *scroll = scroll.saturating_add(PAGE_STEP),
+                    KeyCode::Home => *scroll = 0,
+                    KeyCode::End => *scroll = usize::MAX,
+                    _ => {}
+                }
+                ConnectionPanelAction::None
             }
+        }
+    }
+
+    /// Distinguish picker actions from literal characters in the masked editor.
+    pub fn key_activates(&self, key: KeyEvent) -> bool {
+        match self.mode {
+            ConnectionPanelMode::Picker { .. } => {
+                key.modifiers == KeyModifiers::NONE
+                    && matches!(key.code, KeyCode::Enter | KeyCode::Char('d'))
+            }
+            ConnectionPanelMode::ApiKey { .. } => key.code == KeyCode::Enter,
+            ConnectionPanelMode::DeviceCode { .. } => false,
         }
     }
 
@@ -298,8 +322,8 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &ConnectionPanel) {
-    match &panel.mode {
+pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &mut ConnectionPanel) {
+    match &mut panel.mode {
         ConnectionPanelMode::Picker { selected } => {
             render_picker(frame, area, &panel.catalog, *selected)
         }
@@ -311,6 +335,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &ConnectionPanel) {
             verification_uri,
             user_code,
             attempt,
+            scroll,
         } => render_device_code(
             frame,
             area,
@@ -318,6 +343,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, panel: &ConnectionPanel) {
             verification_uri.as_deref(),
             user_code.as_deref(),
             *attempt,
+            scroll,
         ),
     }
 }
@@ -438,6 +464,7 @@ fn render_device_code(
     verification_uri: Option<&str>,
     user_code: Option<&str>,
     attempt: Option<u32>,
+    scroll: &mut usize,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -445,15 +472,26 @@ fn render_device_code(
         .split(area);
     let detail = match (verification_uri, user_code) {
         (Some(uri), Some(code)) => format!(
-            "Open {}\nEnter code {}\nLatest poll attempt: {}",
-            terminal_row(uri, usize::from(chunks[0].width.saturating_sub(2))),
-            terminal_row(code, usize::from(chunks[0].width.saturating_sub(2))),
+            "Open\n{uri}\nEnter code\n{code}\nLatest poll attempt: {}",
             attempt.map_or_else(|| "waiting".into(), |attempt| attempt.to_string()),
         ),
         _ => "Requesting device code…".into(),
     };
+    let rows = wrap_device_challenge(
+        &detail,
+        usize::from(chunks[0].width.saturating_sub(2)).max(1),
+    );
+    let height = usize::from(chunks[0].height.saturating_sub(2));
+    *scroll = (*scroll).min(rows.len().saturating_sub(height));
     frame.render_widget(
-        Paragraph::new(detail).block(
+        Paragraph::new(Text::from(
+            rows.into_iter()
+                .skip(*scroll)
+                .take(height)
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        ))
+        .block(
             Block::default()
                 .title(format!(" device login: {provider} "))
                 .borders(Borders::ALL),
@@ -461,11 +499,32 @@ fn render_device_code(
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new("Esc / Ctrl-C cancel")
+        Paragraph::new("↑↓ scroll · Esc/Ctrl-C cancel")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray)),
         chunks[1],
     );
+}
+
+/// Device URLs and codes must remain readable even in a minimum-size popup.
+fn wrap_device_challenge(content: &str, width: usize) -> Vec<String> {
+    let safe = crate::ui::sanitize_for_terminal(content);
+    let mut rows = Vec::new();
+    for line in safe.lines() {
+        let mut row = String::new();
+        let mut columns = 0;
+        for grapheme in line.graphemes(true) {
+            let cells = grapheme.width();
+            if columns + cells > width && !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                columns = 0;
+            }
+            row.push_str(grapheme);
+            columns += cells;
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -562,6 +621,7 @@ mod tests {
             verification_uri: None,
             user_code: None,
             attempt: None,
+            scroll: 0,
         };
         panel.show_device_code(
             "openai-codex",
@@ -575,5 +635,50 @@ mod tests {
         );
         panel.finish_device_code();
         assert!(matches!(panel.mode, ConnectionPanelMode::Picker { .. }));
+    }
+    #[test]
+    fn long_device_challenges_wrap_losslessly_and_scroll_at_minimum_size() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let uri = format!("https://example.test/{}END-URI", "u".repeat(470));
+        let code = format!("{}END-CODE", "C".repeat(120));
+        let detail = format!("Open\n{uri}\nEnter code\n{code}\nLatest poll attempt: waiting");
+        let rows = wrap_device_challenge(&detail, 28);
+        assert_eq!(rows.concat(), detail.replace('\n', ""));
+        assert!(rows.iter().all(|row| row.width() <= 28));
+        let mut panel = ConnectionPanel::new(catalog());
+        panel.begin_device_code("openai-codex".into());
+        panel.show_device_code("openai-codex", uri, code);
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut seen = String::new();
+        for _ in 0..rows.len() {
+            terminal
+                .draw(|frame| render(frame, frame.area(), &mut panel))
+                .unwrap();
+            seen.push_str(
+                &terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>(),
+            );
+            assert_eq!(
+                panel.handle_key(key(KeyCode::Down)),
+                ConnectionPanelAction::None
+            );
+        }
+        for row in &rows {
+            assert!(seen.contains(row), "missing challenge row: {row}");
+        }
+        panel.handle_key(key(KeyCode::Home));
+        terminal
+            .draw(|frame| render(frame, frame.area(), &mut panel))
+            .unwrap();
+        assert!(terminal.backend().to_string().contains("Open"));
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Esc)),
+            ConnectionPanelAction::CancelDeviceCode
+        );
     }
 }
