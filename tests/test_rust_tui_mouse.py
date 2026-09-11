@@ -97,11 +97,14 @@ def test_native_mouse_moves_only_the_opted_in_composer_cursor(
                 os.write(terminal_fd, b"X\r")
                 phase = "submitted"
                 output.clear()
-            elif (
-                phase == "submitted"
-                and b"response" in output
-                and output.rfind(b"idle") > output.rfind(b"running")
-            ):
+            elif phase == "submitted" and b"response" in output:
+                # A fast response can finish without ever painting "running", so
+                # the already-idle header need not appear in differential output.
+                # Request a full current frame before deciding it is safe to quit.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 82, 0, 0))
+                phase = "settled frame"
+                output.clear()
+            elif phase == "settled frame" and b"idle" in output:
                 os.write(terminal_fd, b"\x03")
                 phase = "quit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
