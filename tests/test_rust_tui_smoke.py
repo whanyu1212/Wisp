@@ -1562,7 +1562,8 @@ def test_rust_tui_skill_browser_expands_through_python(tmp_path: Path) -> None:
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
     binary = Path(binary_value).resolve(strict=True)
-    skill = Path.cwd() / ".wisp" / "skills" / "0-review" / "SKILL.md"
+    project = tmp_path / "project"
+    skill = project / ".wisp" / "skills" / "0-review" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text(
         """---
@@ -1576,6 +1577,7 @@ SKILL_EXPANSION_MARKER
     session_dir = tmp_path / "sessions"
     child_pid, terminal_fd = pty.fork()
     if child_pid == 0:
+        os.chdir(project)
         os.execve(
             sys.executable,
             [
@@ -1700,3 +1702,5 @@ SKILL_EXPANSION_MARKER
     assert message["content"].startswith("[WISP EXPLICIT SKILL]\nSkill: 0-review")
     assert "SKILL_EXPANSION_MARKER" in message["content"]
     assert message["content"].endswith("[USER REQUEST]\ninspect this change")
+    # The autouse fixture's empty parent project must remain untouched.
+    assert not (Path.cwd() / ".wisp").exists()
