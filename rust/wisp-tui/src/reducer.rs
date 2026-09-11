@@ -17,6 +17,7 @@ use wisp_protocol::commands::{
 pub use wisp_protocol::commands::AgentMode;
 mod command_controls;
 mod context;
+mod discovery;
 use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
 mod model_selection;
@@ -631,6 +632,8 @@ pub struct UiState {
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
     pub(crate) context: context::ContextState,
+    pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
+    pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -691,6 +694,8 @@ impl UiState {
             history_request: None,
             post_prompt_session_sync_pending: false,
             context: context::ContextState::default(),
+            skills: discovery::Inspection::default(),
+            mcp: discovery::Inspection::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -821,6 +826,8 @@ pub enum CommandKind {
     Cancel,
     Trust,
     GetSessionStats,
+    GetSkills,
+    GetMcpStatus,
     GetSessions,
     NewSession,
     SelectSession,
@@ -854,6 +861,8 @@ impl CommandKind {
             Self::Cancel => "cancel",
             Self::Trust => "trust",
             Self::GetSessionStats => "get_session_stats",
+            Self::GetSkills => "get_skills",
+            Self::GetMcpStatus => "get_mcp_status",
             Self::GetSessions => "get_sessions",
             Self::NewSession => "new_session",
             Self::SelectSession => "select_session",
@@ -889,6 +898,15 @@ pub enum MessageContentKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
+    SkillCatalogReported {
+        command_id: String,
+        catalog: discovery::SkillReport,
+    },
+    SkillCatalogUpdated(discovery::SkillReport),
+    McpStatusReported {
+        command_id: String,
+        status: discovery::McpReport,
+    },
     SessionStatsReported {
         command_id: String,
         stats: Box<wisp_protocol::events::SessionStats>,
@@ -1021,6 +1039,8 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
+    LoadSkills,
+    LoadMcpStatus,
     LoadContext,
     ConfigureAutoCompaction(bool),
     Compact(Option<String>),
@@ -1118,6 +1138,7 @@ pub enum UiEffect {
     ModelCatalogUnavailable,
     ModelConfigurationApplied,
     CommandCatalogChanged,
+    SkillCatalogChanged,
     ModeConfigurationApplied,
     AutoCompactionConfigured,
     ShowDeviceCode(DeviceCodeChallenge),
@@ -1171,6 +1192,8 @@ pub fn reduce(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     let mut effects = match action {
+        UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
+        UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
@@ -1244,6 +1267,8 @@ pub fn reduce(
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
             state.context.close();
+            state.skills.close();
+            state.mcp.close();
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
@@ -3658,6 +3683,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = discovery::observe(state, &event) {
+        return Ok(effects);
+    }
     if let Some(effects) = context::observe(state, &event, ids)? {
         return Ok(effects);
     }
@@ -3824,7 +3852,10 @@ fn handle_backend_event(
             state.queue.remove_first(kind, &content);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::SessionStatsReported { .. }
+        BackendEvent::SkillCatalogReported { .. }
+        | BackendEvent::SkillCatalogUpdated(_)
+        | BackendEvent::McpStatusReported { .. }
+        | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
         | BackendEvent::CompactionStarted(_)
         | BackendEvent::CompactionCompleted(_)
@@ -3941,6 +3972,7 @@ mod tests {
             | UiEffect::ModelCatalogUnavailable
             | UiEffect::ModelConfigurationApplied
             | UiEffect::CommandCatalogChanged
+            | UiEffect::SkillCatalogChanged
             | UiEffect::ModeConfigurationApplied
             | UiEffect::AutoCompactionConfigured
             | UiEffect::Diagnostic(_)

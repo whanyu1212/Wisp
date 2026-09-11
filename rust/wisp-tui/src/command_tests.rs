@@ -47,6 +47,160 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn skill_browser_inserts_without_submitting_and_catalog_changes_require_a_redraw() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/skills", true);
+    ui.state.skills.snapshot = Some(Arc::new(commands::tests::skills()));
+    let active = ui.state.current_command.clone();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let request = frame(&mut receiver);
+    assert_eq!(request["type"], "get_skills");
+    assert!(ui.discovery_view.is_some());
+    assert!(ui.editor.text().is_empty());
+    ui.editor.insert_paste("keep my draft");
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep my draft");
+    draw(&mut ui, 80, 24);
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::SkillCatalogUpdated(Ok(Arc::new(
+            commands::tests::skills(),
+        )))),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep my draft");
+    draw(&mut ui, 29, 7);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep my draft");
+    draw(&mut ui, 80, 24);
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep my draft");
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.discovery_view.is_none());
+    assert_eq!(ui.editor.text(), "/skill:review keep my draft");
+    assert_eq!(ui.state.current_command, active);
+    assert!(receiver.try_recv().is_err());
+    let sent = tokio::spawn(async move {
+        let WriterMessage::Frame { payload, ack, .. } = receiver.recv().await.unwrap() else {
+            panic!("expected queued skill invocation");
+        };
+        ack.unwrap().send(Ok(())).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&payload).unwrap()
+    });
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let steer = sent.await.unwrap();
+    assert_eq!(steer["type"], "steer");
+    assert_eq!(steer["content"], "/skill:review keep my draft");
+}
+
+#[tokio::test]
+async fn discovery_views_coalesce_refreshes_and_yield_to_decisions() {
+    for command in ["/skills", "/mcp"] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = ui(command, true);
+        let active = ui.state.current_command.clone();
+        ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(
+            frame(&mut receiver)["type"],
+            if command == "/skills" {
+                "get_skills"
+            } else {
+                "get_mcp_status"
+            }
+        );
+        ui.handle_input(key(KeyCode::Char('r')), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+        ui.editor.insert_paste("draft");
+        ui.handle_input(Input::Paste("ignored".into()), &writer, 8192)
+            .await
+            .unwrap();
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.discovery_view.is_none());
+        assert!(!ui.state.cancel_requested);
+        assert_eq!(ui.state.current_command, active);
+        assert_eq!(ui.editor.text(), "draft");
+        ui.discovery_view = Some(DiscoveryView::mcp());
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::TrustRequested {
+                request_id: "t".into(),
+                project_path: "/project".into(),
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.discovery_view.is_none());
+        assert_eq!(ui.editor.text(), "draft");
+        assert_eq!(ui.state.view_status, ViewStatus::WaitingForTrust);
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn undersized_discovery_requests_fail_locally_without_ending_the_prompt() {
+    for action in [UiAction::LoadSkills, UiAction::LoadMcpStatus] {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = ui("draft", true);
+        ui.dispatch(action, &writer, 1).await.unwrap();
+        assert!(!ui.state.skills.loading());
+        assert!(!ui.state.mcp.loading());
+        assert!(ui.state.skills.error.is_some() || ui.state.mcp.error.is_some());
+        assert_eq!(ui.state.current_command.as_ref().unwrap().id, "prompt-1");
+        assert_eq!(ui.editor.text(), "draft");
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn skill_insertion_overflow_preserves_browser_and_draft() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("", false);
+    ui.state.skills.snapshot = Some(Arc::new(commands::tests::skills()));
+    ui.discovery_view = Some(DiscoveryView::skills(ui.state.skills.snapshot.as_deref()));
+    ui.editor
+        .insert_paste(&"x".repeat(prompt_editor::MAX_PROMPT_BYTES));
+    let original = ui.editor.text().to_owned();
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), original);
+    assert!(ui.discovery_view.is_some());
+    assert!(ui.notice.is_some());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn context_during_prompt_is_cached_and_dismissal_preserves_ownership() {
     let (writer, mut receiver) = mpsc::channel(8);
     let mut ui = ui("/context", true);
@@ -326,7 +480,10 @@ async fn incoming_trust_dismisses_help_and_completion_without_answering() {
     assert!(ui.command_help.is_none());
     assert!(
         ui.completion
-            .view(ui.state.command_catalog.as_deref())
+            .view(
+                ui.state.command_catalog.as_deref(),
+                ui.state.skills.snapshot.as_deref()
+            )
             .is_none()
     );
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)

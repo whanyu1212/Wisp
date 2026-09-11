@@ -386,6 +386,17 @@ def test_conformance_fixtures_cover_and_round_trip_every_wire_discriminator() ->
         assert json.loads(event.model_dump_json()) == payload
 
 
+def test_rust_discovery_fixtures_round_trip_through_python_models() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "rust_tui_discovery.json"
+    fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert set(fixtures) == {"rpc.skills", "skill.catalog.updated", "rpc.mcp"}
+    validator = Draft202012Validator(_artifact("events.schema.json"))
+    for kind, payload in fixtures.items():
+        assert payload["type"] == kind
+        validator.validate(payload)
+        assert json.loads(wisp_event_from_dict(payload).model_dump_json()) == payload
+
+
 def test_typed_command_output_validates_but_none_is_never_a_wire_value() -> None:
     validator = Draft202012Validator(_artifact("commands.schema.json"))
     commands = (

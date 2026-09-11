@@ -121,6 +121,13 @@ and compaction details; during a run, session totals show the last refreshed sna
 When idle, `/context auto on|off` changes automatic compaction for the current process,
 and `/compact [instructions]` compacts the selected session. Ctrl-C cancels manual compaction.
 
+Use `/skills` to browse skill descriptions and sources; `d` shows discovery diagnostics.
+Enter inserts the selected `/skill:name ` before your draft, ready to edit and submit.
+Slash completion lists commands followed by skills; `/skill:` narrows the list to skills.
+Tab or Enter accepts a suggestion, then Enter submits it. `/mcp` shows server status,
+registered tools, and connection errors. Press `r` in either browser to refresh, and
+Esc or Ctrl-C to close. Both browsers remain available while a prompt is running.
+
 RPC mode and the in-process SDK expose the same command, event, session, trust, and approval
 contracts the built-in interfaces use. See
 [Interfaces](https://whanyu1212.github.io/Wisp/guide/interfaces) and the

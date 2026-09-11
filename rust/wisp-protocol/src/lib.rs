@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod context;
+mod discovery;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -729,6 +730,16 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_session_stats", "id": id}))
         }
 
+        /// Inspect the active skill catalog without performing discovery.
+        pub fn get_skills(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_skills", "id": id}))
+        }
+
+        /// Inspect current MCP status without reconnecting servers.
+        pub fn get_mcp_status(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_mcp_status", "id": id}))
+        }
+
         /// Compact the selected persisted session using optional summary guidance.
         pub fn compact(
             id: &str,
@@ -1007,6 +1018,10 @@ pub mod events {
         CompactionStarted, ContextAccountingMethod, ContextBudget, ContextEstimate,
         ContextEstimated, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
+    pub use crate::discovery::{
+        McpServerSnapshot, McpServerStatus, McpStatusSnapshot, SkillCatalogEntry,
+        SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
+    };
     mod generated {
         typify::import_types!(schema = "../../schemas/live-rpc/v5/rust-events.schema.json");
     }
@@ -1121,6 +1136,33 @@ pub mod events {
     impl WispCurrentLiveEventOutput {
         fn wire_value(&self) -> serde_json::Value {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
+        }
+
+        /// Project a skill catalog for one exact inspection request.
+        pub fn skill_catalog(&self, id: &str) -> Option<SkillCatalogSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.skills" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["catalog"].clone()).ok()
+        }
+
+        /// Project the authoritative catalog broadcast after a trust transition.
+        pub fn updated_skill_catalog(&self) -> Option<SkillCatalogSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "skill.catalog.updated" {
+                return None;
+            }
+            serde_json::from_value(value["catalog"].clone()).ok()
+        }
+
+        /// Project sanitized MCP status for one exact inspection request.
+        pub fn mcp_status(&self, id: &str) -> Option<McpStatusSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.mcp" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["status"].clone()).ok()
         }
 
         /// Project a statistics snapshot for one exact command.
