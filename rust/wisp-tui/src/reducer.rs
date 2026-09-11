@@ -14,6 +14,9 @@ use wisp_protocol::commands::{
     ApprovalScope, ModelConfiguration, QueueKind, WispTypedClientRpcCommands,
 };
 
+pub use wisp_protocol::commands::AgentMode;
+mod command_controls;
+use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
 mod model_selection;
 use model_selection::ModelOperation;
@@ -337,22 +340,6 @@ fn bounded_session_text(value: &str, max_bytes: usize) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum AgentMode {
-    #[default]
-    Build,
-    Plan,
-}
-
-impl AgentMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Build => "build",
-            Self::Plan => "plan",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ViewStatus {
     #[default]
     Idle,
@@ -616,6 +603,12 @@ pub struct UiState {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub mode: AgentMode,
+    pub mode_confirmed: bool,
+    pub(crate) command_catalog: Option<CommandCatalog>,
+    pub(crate) command_catalog_error: Option<String>,
+    command_catalog_read: Option<PendingRead<CommandCatalog>>,
+    mode_read: Option<PendingRead<AgentMode>>,
+    mode_change: Option<PendingModeChange>,
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
     pub session_operation: Option<SessionOperation>,
@@ -668,6 +661,12 @@ impl UiState {
             model,
             effort,
             mode: AgentMode::Build,
+            mode_confirmed: false,
+            command_catalog: None,
+            command_catalog_error: None,
+            command_catalog_read: None,
+            mode_read: None,
+            mode_change: None,
             last_session: None,
             selected_session: None,
             session_operation: None,
@@ -707,7 +706,7 @@ impl UiState {
 
     pub(crate) fn editor_editable(&self) -> bool {
         !self.exit_requested
-            && !self.model_configuration_active()
+            && !self.configuration_active()
             && self.input_ready
             && self.session_operation.is_none()
             && match self.current_command.as_ref() {
@@ -832,6 +831,8 @@ pub enum CommandKind {
     UnrevertSessionTree,
     GetConnectionCatalog,
     GetModelCatalog,
+    GetCommands,
+    GetState,
     Configure,
     StoreApiKey,
     DisconnectProvider,
@@ -862,6 +863,8 @@ impl CommandKind {
             Self::UnrevertSessionTree => "unrevert_session_tree",
             Self::GetConnectionCatalog => "get_connection_catalog",
             Self::GetModelCatalog => "get_model_catalog",
+            Self::GetCommands => "get_commands",
+            Self::GetState => "get_state",
             Self::Configure => "configure",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
@@ -920,6 +923,14 @@ pub enum BackendEvent {
     ModelCatalogReported {
         command_id: String,
         catalog: ModelCatalogSnapshot,
+    },
+    CommandCatalogReported {
+        command_id: String,
+        catalog: CommandCatalog,
+    },
+    ModeReported {
+        command_id: String,
+        mode: AgentMode,
     },
     Diagnostic(String),
     DeviceCodeReported {
@@ -1008,6 +1019,9 @@ pub enum UiAction {
     OpenConnectionPanel,
     LoadConnectionCatalog,
     LoadModelCatalog,
+    LoadCommandCatalog,
+    LoadInitialMode,
+    ConfigureMode(AgentMode),
     OpenModelPicker,
     ConfigureModel(ModelConfiguration),
     RejectModelRequest {
@@ -1090,6 +1104,8 @@ pub enum UiEffect {
     InvalidateModelCatalog,
     ModelCatalogUnavailable,
     ModelConfigurationApplied,
+    CommandCatalogChanged,
+    ModeConfigurationApplied,
     ShowDeviceCode(DeviceCodeChallenge),
     DeviceCodeProgress(DeviceCodeProgress),
     FinishDeviceCode,
@@ -1152,6 +1168,9 @@ pub fn reduce(
             UiEffect::RequestRender,
         ]),
         UiAction::LoadConnectionCatalog => load_connection_catalog(state, ids),
+        UiAction::LoadCommandCatalog => Ok(command_controls::load_catalog(state, ids)?),
+        UiAction::LoadInitialMode => Ok(command_controls::load_mode(state, ids)?),
+        UiAction::ConfigureMode(mode) => Ok(command_controls::configure_mode(state, mode, ids)?),
         UiAction::LoadModelCatalog => Ok(model_selection::load(state, ids)?),
         UiAction::OpenModelPicker => Ok(model_selection::open(state, ids)?),
         UiAction::ConfigureModel(configuration) => {
@@ -1208,6 +1227,9 @@ pub fn reduce(
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => {
             state.model_operation = None;
+            state.mode_change = None;
+            state.mode_read = None;
+            state.command_catalog_read = None;
             state.view_status = ViewStatus::Error;
             state.transcript.finish_active_response();
             state
@@ -1223,6 +1245,12 @@ fn submit(
     content: String,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.configuration_active() {
+        return Ok(vec![
+            UiEffect::Notice("Wait for configuration to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -1350,6 +1378,12 @@ fn clear_queue_cache(state: &mut UiState) {
 }
 
 fn begin_session_operation(state: &UiState) -> Result<Option<Vec<UiEffect>>, ReduceError> {
+    if state.configuration_active() {
+        return Ok(Some(vec![
+            UiEffect::Notice("Wait for configuration to finish.".into()),
+            UiEffect::RequestRender,
+        ]));
+    }
     if session_sync_pending(state) {
         return Ok(Some(vec![
             UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
@@ -3607,6 +3641,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = command_controls::observe(state, &event, ids)? {
+        return Ok(effects);
+    }
     if let Some(effects) = model_selection::observe(state, &event, ids)? {
         return Ok(effects);
     }
@@ -3731,6 +3768,8 @@ fn handle_backend_event(
             state.effort = effort;
             let mut effects = reload_connection_catalog_after_configuration(state, ids)?;
             effects.extend(model_selection::invalidate(state, ids)?);
+            state.command_catalog_read = None;
+            effects.extend(command_controls::load_catalog(state, ids)?);
             Ok(effects)
         }
         BackendEvent::QueueUpdated {
@@ -3756,6 +3795,8 @@ fn handle_backend_event(
         }
         BackendEvent::ConnectionCatalogReported { .. }
         | BackendEvent::ModelCatalogReported { .. }
+        | BackendEvent::CommandCatalogReported { .. }
+        | BackendEvent::ModeReported { .. }
         | BackendEvent::DeviceCodeReported { .. }
         | BackendEvent::DeviceCodeProgress { .. }
         | BackendEvent::SessionsReported { .. }
@@ -3866,6 +3907,8 @@ mod tests {
             | UiEffect::InvalidateModelCatalog
             | UiEffect::ModelCatalogUnavailable
             | UiEffect::ModelConfigurationApplied
+            | UiEffect::CommandCatalogChanged
+            | UiEffect::ModeConfigurationApplied
             | UiEffect::Diagnostic(_)
             | UiEffect::Notice(_)
             | UiEffect::RequestRender
@@ -5222,9 +5265,10 @@ mod tests {
         assert_eq!(state.effort.as_deref(), Some("high"));
         assert!(state.connection_catalog.providers.is_empty());
         let commands: Vec<_> = effects.iter().filter_map(command_value).collect();
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 3);
         assert_eq!(commands[0]["type"], "get_connection_catalog");
         assert_eq!(commands[1]["type"], "get_model_catalog");
+        assert_eq!(commands[2]["type"], "get_commands");
         assert!(
             effects
                 .iter()
@@ -7061,8 +7105,9 @@ mod tests {
         .unwrap();
         assert!(state.connection_catalog_reload_pending);
         let commands: Vec<_> = effects.iter().filter_map(command_value).collect();
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands.len(), 2);
         assert_eq!(commands[0]["type"], "get_model_catalog");
+        assert_eq!(commands[1]["type"], "get_commands");
 
         let challenge = DeviceCodeChallenge {
             provider: "openai-codex".into(),

@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+#[cfg(test)]
+mod command_tests;
+mod commands;
 mod connection_panel;
 mod detail_view;
 mod framing;
@@ -27,6 +30,9 @@ mod ui;
 use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
+#[cfg(test)]
+use commands::session_command;
+use commands::{Command, Completion, Help, SessionCommand};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use detail_view::DetailView;
@@ -425,6 +431,8 @@ struct LiveUi {
     connection_panel: Option<ConnectionPanel>,
     model_picker: Option<ModelPicker>,
     rendered_model_picker: bool,
+    command_help: Option<Help>,
+    completion: Completion,
 }
 
 impl Default for LiveUi {
@@ -448,6 +456,8 @@ impl Default for LiveUi {
             connection_panel: None,
             model_picker: None,
             rendered_model_picker: false,
+            command_help: None,
+            completion: Completion::default(),
         }
     }
 }
@@ -547,6 +557,17 @@ impl LiveUi {
                     let command_type = value.get("type").and_then(|value| value.as_str());
                     let payload = Bytes::from(serde_json::to_vec(&value)?);
                     if payload.len() > limit
+                        && (matches!(command_type, Some("get_commands" | "get_state"))
+                            || (command_type == Some("configure") && value.get("mode").is_some()))
+                    {
+                        pending.extend(reducer::reduce(&mut self.state, UiAction::BackendEvent(BackendEvent::CommandFinished {
+                            command_id: value["id"].as_str().expect("control request ID").into(),
+                            command_type: command_type.expect("control request type").into(), ok: false,
+                            error: Some(format!("Command exceeds the negotiated {limit}-byte frame limit; input was kept.")),
+                        }), &mut self.ids)?);
+                        continue;
+                    }
+                    if payload.len() > limit
                         && matches!(command_type, Some("configure" | "get_model_catalog"))
                     {
                         let command_id = value["id"].as_str().expect("model request ID").to_owned();
@@ -614,6 +635,12 @@ impl LiveUi {
                     if let Some(picker) = &mut self.model_picker {
                         picker.unavailable();
                     }
+                    self.render_pending = true;
+                }
+                UiEffect::CommandCatalogChanged => self.completion.invalidate(),
+                UiEffect::ModeConfigurationApplied => {
+                    self.editor.clear();
+                    self.completion.dismiss();
                     self.render_pending = true;
                 }
                 UiEffect::ModelConfigurationApplied => {
@@ -862,6 +889,8 @@ impl LiveUi {
         ) {
             self.model_picker = None;
             self.rendered_model_picker = false;
+            self.command_help = None;
+            self.completion.dismiss();
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
             self.browse_selected = None;
@@ -1009,6 +1038,8 @@ impl LiveUi {
     ) -> Result<(), Error> {
         let mut rendered_decision_context = None;
         let mut rendered_model_picker = false;
+        let mut rendered_completion = None;
+        self.completion.sync(&self.editor);
         terminal.draw(|frame| {
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = match self.state.view_status {
@@ -1025,7 +1056,20 @@ impl LiveUi {
                     _ => None,
                 };
             }
-            if let Some(picker) = self
+            if let Some(help) = self
+                .command_help
+                .as_ref()
+                .filter(|_| ui::decision_context_visible(frame.area()))
+            {
+                commands::render_help(
+                    frame,
+                    frame.area(),
+                    help,
+                    self.state.command_catalog.as_deref(),
+                    self.state.command_catalog_loading(),
+                    self.state.command_catalog_error.as_deref(),
+                );
+            } else if let Some(picker) = self
                 .model_picker
                 .as_ref()
                 .filter(|_| ui::decision_context_visible(frame.area()))
@@ -1045,7 +1089,11 @@ impl LiveUi {
             } else if let Some(picker) = &self.session_picker {
                 session_picker::render(frame, frame.area(), picker);
             } else {
-                ui::render_interactive(
+                let completion_view = (self.state.editor_editable()
+                    && self.browse_selected.is_none())
+                .then(|| self.completion.view(self.state.command_catalog.as_deref()))
+                .flatten();
+                let completion_visible = ui::render_interactive(
                     frame,
                     &self.state,
                     &mut self.transcript_viewport,
@@ -1055,11 +1103,21 @@ impl LiveUi {
                     self.notice.as_deref(),
                     self.browse_selected,
                     Some(&mut self.detail_view),
+                    completion_view.as_ref(),
                 );
+                if completion_visible {
+                    if let Some(view) = completion_view {
+                        rendered_completion = Some(view.items[view.selected].name.clone());
+                    }
+                }
             }
         })?;
         self.rendered_decision_context = rendered_decision_context;
         self.rendered_model_picker = rendered_model_picker;
+        self.completion.invalidate();
+        if let Some(name) = rendered_completion {
+            self.completion.mark_rendered(name);
+        }
         self.render_pending = false;
         let rendered_browse_selection = self.browse_selected;
         self.reconcile_browse_selection();
@@ -1185,7 +1243,7 @@ impl LiveUi {
         if self.unsendable_current_response() {
             return Ok(LoopControl::Exit);
         }
-        if self.state.session_operation.is_some() {
+        if self.state.session_operation.is_some() || self.state.configuration_active() {
             return Ok(if quit_if_idle {
                 LoopControl::Exit
             } else {
@@ -1541,6 +1599,143 @@ impl LiveUi {
         }
         self.notice = None;
         self.dispatch(action, writer, limit).await
+    }
+
+    async fn handle_command(
+        &mut self,
+        command: Command,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.completion.dismiss();
+        match command {
+            Command::Quit => Ok(LoopControl::Exit),
+            Command::Help => {
+                self.command_help = Some(Help::default());
+                self.editor.clear();
+                self.render_pending = true;
+                self.dispatch(UiAction::LoadCommandCatalog, writer, limit)
+                    .await
+            }
+            Command::Mode(mode) => {
+                self.notice = None;
+                self.dispatch(UiAction::ConfigureMode(mode), writer, limit)
+                    .await
+            }
+            Command::Model(command) => self.handle_model_command(command, writer, limit).await,
+            Command::Invalid(message) => {
+                self.notice = Some(message);
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Command::Session(command) => {
+                if self.state.current_command.is_some()
+                    || self.state.session_operation.is_some()
+                    || self.state.configuration_active()
+                    || !self.state.input_ready
+                    || self.state.view_status != ViewStatus::Idle
+                {
+                    self.notice = Some(
+                        "Wait for the current operation before using session commands.".into(),
+                    );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                match command {
+                    SessionCommand::ResumeCatalog => {
+                        self.dispatch_session_action(UiAction::LoadSessionCatalog, writer, limit)
+                            .await
+                    }
+                    SessionCommand::ResumeSession(session_id) => {
+                        if !reducer::valid_session_id(&session_id) {
+                            self.notice =
+                                Some("Session ID is empty or exceeds the 4096-byte limit.".into());
+                            self.render_pending = true;
+                            return Ok(LoopControl::Continue);
+                        }
+                        self.dispatch_session_action(
+                            UiAction::SelectSession { session_id },
+                            writer,
+                            limit,
+                        )
+                        .await
+                    }
+                    SessionCommand::New => {
+                        self.dispatch_session_action(UiAction::NewSession, writer, limit)
+                            .await
+                    }
+                    SessionCommand::Name(name) => {
+                        self.dispatch_session_action(UiAction::SetSessionName(name), writer, limit)
+                            .await
+                    }
+                    SessionCommand::Clone => {
+                        self.dispatch_session_action(UiAction::CloneSession, writer, limit)
+                            .await
+                    }
+                    SessionCommand::Tree => {
+                        self.dispatch_session_action(
+                            UiAction::LoadSessionTree {
+                                after_entry_id: None,
+                            },
+                            writer,
+                            limit,
+                        )
+                        .await
+                    }
+                    SessionCommand::Unrevert => {
+                        self.dispatch_session_action(UiAction::UnrevertSessionTree, writer, limit)
+                            .await
+                    }
+                    SessionCommand::Connect => {
+                        self.dispatch(UiAction::OpenConnectionPanel, writer, limit)
+                            .await
+                    }
+                    SessionCommand::Invalid(usage) => {
+                        self.notice = Some(usage.into());
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    SessionCommand::Prompt => {
+                        unreachable!("classifier only returns supported session commands")
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
+        if !self.editor_editable() {
+            return false;
+        }
+        let Some(view) = self.completion.view(self.state.command_catalog.as_deref()) else {
+            return false;
+        };
+        if is_escape(key) {
+            self.completion.dismiss();
+        } else if key.modifiers == KeyModifiers::NONE
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+        {
+            self.completion
+                .move_selection(key.code == KeyCode::Down, view.items.len());
+        } else if (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE)
+            || (key.code == KeyCode::Enter
+                && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
+                && !self.completion.is_exact(view.items[view.selected]))
+        {
+            if let Some((range, replacement)) = self
+                .completion
+                .replacement(view.items[view.selected], &self.editor)
+            {
+                let outcome = self.editor.replace_command_token(range, &replacement);
+                self.update_edit_notice(outcome);
+                self.completion.sync(&self.editor);
+                self.completion.dismiss();
+            }
+        } else {
+            return false;
+        }
+        self.render_pending = true;
+        true
     }
 
     async fn handle_model_command(
@@ -1924,7 +2119,27 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        self.completion.sync(&self.editor);
         match input {
+            Input::Key(key) if self.command_help.is_some() => {
+                if is_escape(key) || is_ctrl_c(key) {
+                    self.command_help = None;
+                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+                    self.render_pending = true;
+                    return self
+                        .dispatch(UiAction::LoadCommandCatalog, writer, limit)
+                        .await;
+                } else {
+                    let rows = commands::help_rows(self.state.command_catalog.as_deref()).len();
+                    self.command_help
+                        .as_mut()
+                        .expect("open help")
+                        .scroll(key.code, rows);
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if self.command_help.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.model_picker.is_some() => {
                 self.handle_model_picker_key(key, writer, limit).await
             }
@@ -1957,6 +2172,14 @@ impl LiveUi {
             Input::Paste(_) if self.browse_selected.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if is_browse_key(key) => {
                 self.enter_or_cycle_browse();
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key)
+                if !matches!(
+                    self.state.view_status,
+                    ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+                ) && self.handle_completion_key(key) =>
+            {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
@@ -2010,11 +2233,16 @@ impl LiveUi {
             Input::Key(key)
                 if key.code == KeyCode::Enter
                     && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
-                    && model_picker::command(self.editor.text()).is_some() =>
+                    && commands::classify(
+                        self.editor.text(),
+                        self.state.command_catalog.as_deref(),
+                    )
+                    .is_some() =>
             {
                 let command =
-                    model_picker::command(self.editor.text()).expect("recognized model command");
-                self.handle_model_command(command, writer, limit).await
+                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
+                        .expect("recognized command");
+                self.handle_command(command, writer, limit).await
             }
             Input::Key(key)
                 if self.editor_editable()
@@ -2041,95 +2269,25 @@ impl LiveUi {
             Input::Key(key) if self.editor_editable() => match self.editor.handle_key(key) {
                 EditorAction::Submit => {
                     let prompt = self.editor.text().to_owned();
-                    match session_command(&prompt) {
-                        SessionCommand::ResumeCatalog => {
-                            self.dispatch_session_action(
-                                UiAction::LoadSessionCatalog,
-                                writer,
-                                limit,
-                            )
-                            .await
-                        }
-                        SessionCommand::ResumeSession(session_id) => {
-                            if !reducer::valid_session_id(&session_id) {
-                                self.notice = Some(
-                                    "Session ID is empty or exceeds the 4096-byte limit.".into(),
-                                );
-                                self.render_pending = true;
-                                return Ok(LoopControl::Continue);
-                            }
-                            self.dispatch_session_action(
-                                UiAction::SelectSession { session_id },
-                                writer,
-                                limit,
-                            )
-                            .await
-                        }
-                        SessionCommand::New => {
-                            self.dispatch_session_action(UiAction::NewSession, writer, limit)
-                                .await
-                        }
-                        SessionCommand::Name(name) => {
-                            self.dispatch_session_action(
-                                UiAction::SetSessionName(name),
-                                writer,
-                                limit,
-                            )
-                            .await
-                        }
-                        SessionCommand::Clone => {
-                            self.dispatch_session_action(UiAction::CloneSession, writer, limit)
-                                .await
-                        }
-                        SessionCommand::Tree => {
-                            self.dispatch_session_action(
-                                UiAction::LoadSessionTree {
-                                    after_entry_id: None,
-                                },
-                                writer,
-                                limit,
-                            )
-                            .await
-                        }
-                        SessionCommand::Unrevert => {
-                            self.dispatch_session_action(
-                                UiAction::UnrevertSessionTree,
-                                writer,
-                                limit,
-                            )
-                            .await
-                        }
-                        SessionCommand::Connect => {
-                            self.dispatch(UiAction::OpenConnectionPanel, writer, limit)
-                                .await
-                        }
-                        SessionCommand::Invalid(usage) => {
-                            self.notice = Some(usage.into());
-                            self.render_pending = true;
-                            Ok(LoopControl::Continue)
-                        }
-                        SessionCommand::Prompt => {
-                            if prompt.trim().is_empty() {
-                                self.notice =
-                                    Some("Enter a non-empty prompt before sending.".into());
-                                self.render_pending = true;
-                                return Ok(LoopControl::Continue);
-                            }
-                            if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
-                                self.notice = Some(notice);
-                                self.render_pending = true;
-                                return Ok(LoopControl::Continue);
-                            }
-                            self.notice = None;
-                            let control = self
-                                .dispatch(UiAction::Submit(prompt), writer, limit)
-                                .await?;
-                            if self.notice.is_none() {
-                                self.editor.clear();
-                            }
-                            Ok(control)
-                        }
+
+                    if prompt.trim().is_empty() {
+                        self.notice = Some("Enter a non-empty prompt before sending.".into());
+                        self.render_pending = true;
+                        return Ok(LoopControl::Continue);
                     }
+                    if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
+                        self.notice = Some(notice);
+                        self.render_pending = true;
+                        return Ok(LoopControl::Continue);
+                    }
+                    self.notice = None;
+                    let control = self
+                        .dispatch(UiAction::Submit(prompt), writer, limit)
+                        .await?;
+                    if self.notice.is_none() {
+                        self.editor.clear();
+                    }
+                    Ok(control)
                 }
                 EditorAction::Edit(outcome) => {
                     let notice_changed = self.update_edit_notice(outcome);
@@ -2163,6 +2321,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Redraw => {
+                self.completion.invalidate();
                 self.rendered_decision_context = None;
                 self.rendered_model_picker = false;
                 self.render_pending = true;
@@ -2320,44 +2479,46 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let mut reader_outcome = Some(reader_outcome_rx);
     let mut events_open = true;
 
-    let result = async {
-        let request = RpcHandshakeRequest::current("wisp-rust-tui", &cli.expected_backend_version)?;
-        send_value(&writer_tx, &request, HANDSHAKE_FRAME_BYTES).await?;
-        let response = match timeout(HANDSHAKE_TIMEOUT, handshake_rx).await {
-            Ok(Ok(Ok(response))) => response,
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(_)) => return Err(Error::HandshakeEof),
-            Err(_) => return Err(Error::HandshakeTimeout),
-        };
-        if let Some((code, message)) = response.rejection() {
-            return Err(Error::HandshakeRejected { code, message });
-        }
-        let actual_version = response.backend_package_version();
-        if actual_version != cli.expected_backend_version {
-            return Err(Error::BackendVersionMismatch {
-                expected: cli.expected_backend_version.clone(),
-                actual: actual_version,
-            });
-        }
-        let (protocol, events, max_client_frame, _max_server_frame) = response
-            .accepted_contract()
-            .expect("non-rejected validated handshake must be accepted");
-        if protocol != LIVE_RPC_PROTOCOL_VERSION || events != EVENT_SCHEMA_VERSION {
-            return Err(Error::ContractMismatch { protocol, events });
-        }
+    let result =
+        async {
+            let request =
+                RpcHandshakeRequest::current("wisp-rust-tui", &cli.expected_backend_version)?;
+            send_value(&writer_tx, &request, HANDSHAKE_FRAME_BYTES).await?;
+            let response = match timeout(HANDSHAKE_TIMEOUT, handshake_rx).await {
+                Ok(Ok(Ok(response))) => response,
+                Ok(Ok(Err(error))) => return Err(error),
+                Ok(Err(_)) => return Err(Error::HandshakeEof),
+                Err(_) => return Err(Error::HandshakeTimeout),
+            };
+            if let Some((code, message)) = response.rejection() {
+                return Err(Error::HandshakeRejected { code, message });
+            }
+            let actual_version = response.backend_package_version();
+            if actual_version != cli.expected_backend_version {
+                return Err(Error::BackendVersionMismatch {
+                    expected: cli.expected_backend_version.clone(),
+                    actual: actual_version,
+                });
+            }
+            let (protocol, events, max_client_frame, _max_server_frame) = response
+                .accepted_contract()
+                .expect("non-rejected validated handshake must be accepted");
+            if protocol != LIVE_RPC_PROTOCOL_VERSION || events != EVENT_SCHEMA_VERSION {
+                return Err(Error::ContractMismatch { protocol, events });
+            }
 
-        let mut terminal = TerminalGuard::enter()?;
-        let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
-        let (input_stop_tx, input_stop_rx) = watch::channel(false);
-        let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx));
-        let connection = ConnectionInfo {
-            backend_version: actual_version,
-            protocol_version: protocol,
-            event_schema_version: events,
-        };
-        let mut live_ui = LiveUi::default();
-        let mut transport_closed_diagnostic = None;
-        let loop_result = async {
+            let mut terminal = TerminalGuard::enter()?;
+            let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
+            let (input_stop_tx, input_stop_rx) = watch::channel(false);
+            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx));
+            let connection = ConnectionInfo {
+                backend_version: actual_version,
+                protocol_version: protocol,
+                event_schema_version: events,
+            };
+            let mut live_ui = LiveUi::default();
+            let mut transport_closed_diagnostic = None;
+            let loop_result = async {
             live_ui
                 .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
                 .await?;
@@ -2371,6 +2532,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
             live_ui
                 .dispatch(UiAction::LoadModelCatalog, &writer_tx, max_client_frame)
                 .await?;
+            live_ui.dispatch(UiAction::LoadCommandCatalog, &writer_tx, max_client_frame).await?;
+            live_ui.dispatch(UiAction::LoadInitialMode, &writer_tx, max_client_frame).await?;
             let mut redraw = interval(FRAME_INTERVAL);
             redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
@@ -2466,59 +2629,59 @@ async fn run(cli: Cli) -> Result<(), Error> {
             }
         }
         .await;
-        let _ = input_stop_tx.send(true);
-        drop(input_rx);
-        let input_result = input.await.map_err(Error::Task).and_then(|result| result);
-        drop(terminal);
-        let unsent_queue_diagnostics =
-            render_unsent_queue_diagnostics(&live_ui.state, &live_ui.deferred_queue_recovery);
-        if let Some(diagnostic) = transport_closed_diagnostic {
-            eprintln!("{diagnostic}");
-        }
-        for diagnostic in unsent_queue_diagnostics {
-            eprintln!("{diagnostic}");
-        }
-        loop_result?;
-        input_result?;
+            let _ = input_stop_tx.send(true);
+            drop(input_rx);
+            let input_result = input.await.map_err(Error::Task).and_then(|result| result);
+            drop(terminal);
+            let unsent_queue_diagnostics =
+                render_unsent_queue_diagnostics(&live_ui.state, &live_ui.deferred_queue_recovery);
+            if let Some(diagnostic) = transport_closed_diagnostic {
+                eprintln!("{diagnostic}");
+            }
+            for diagnostic in unsent_queue_diagnostics {
+                eprintln!("{diagnostic}");
+            }
+            loop_result?;
+            input_result?;
 
-        queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
-        let shutdown_writer = writer.take().expect("RPC writer is still owned");
-        finish_task("RPC writer", shutdown_writer)
-            .await
-            .and_then(|result| result)?;
-        let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
-        let mut shutdown = ShutdownObservation::default();
-        while Instant::now() < deadline {
+            queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
+            let shutdown_writer = writer.take().expect("RPC writer is still owned");
+            finish_task("RPC writer", shutdown_writer)
+                .await
+                .and_then(|result| result)?;
+            let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+            let mut shutdown = ShutdownObservation::default();
+            while Instant::now() < deadline {
+                if let Some(status) = backend.try_wait()? {
+                    shutdown.observe_exit(status)?;
+                }
+                if shutdown.completed() {
+                    return Ok(());
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::select! {
+                    event = receive_event(&mut event_rx, events_open) => {
+                        match event {
+                            Some(event) => shutdown.observe_event(&event.event)?,
+                            None => events_open = false,
+                        }
+                    }
+                    outcome = receive_reader_outcome(&mut reader_outcome) => {
+                        reader_outcome = None;
+                        shutdown_reader_outcome(outcome)?;
+                    }
+                    _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
+                }
+            }
             if let Some(status) = backend.try_wait()? {
                 shutdown.observe_exit(status)?;
             }
             if shutdown.completed() {
                 return Ok(());
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            tokio::select! {
-                event = receive_event(&mut event_rx, events_open) => {
-                    match event {
-                        Some(event) => shutdown.observe_event(&event.event)?,
-                        None => events_open = false,
-                    }
-                }
-                outcome = receive_reader_outcome(&mut reader_outcome) => {
-                    reader_outcome = None;
-                    shutdown_reader_outcome(outcome)?;
-                }
-                _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
-            }
+            Err(shutdown.deadline_error())
         }
-        if let Some(status) = backend.try_wait()? {
-            shutdown.observe_exit(status)?;
-        }
-        if shutdown.completed() {
-            return Ok(());
-        }
-        Err(shutdown.deadline_error())
-    }
-    .await;
+        .await;
 
     let _ = writer_tx.try_send(WriterMessage::Close);
     drop(writer_tx);
@@ -2939,63 +3102,6 @@ fn is_bidi_control(character: char) -> bool {
             | '\u{2068}'
             | '\u{2069}'
     )
-}
-
-enum SessionCommand {
-    Prompt,
-    ResumeCatalog,
-    ResumeSession(String),
-    New,
-    Name(String),
-    Clone,
-    Tree,
-    Unrevert,
-    Connect,
-    Invalid(&'static str),
-}
-
-fn session_command(prompt: &str) -> SessionCommand {
-    let trimmed = prompt.trim();
-    if trimmed == "/resume" {
-        return SessionCommand::ResumeCatalog;
-    }
-    if trimmed == "/new" {
-        return SessionCommand::New;
-    }
-    if trimmed == "/clone" {
-        return SessionCommand::Clone;
-    }
-    if trimmed == "/tree" {
-        return SessionCommand::Tree;
-    }
-    if trimmed == "/unrevert" {
-        return SessionCommand::Unrevert;
-    }
-    if trimmed == "/connect" {
-        return SessionCommand::Connect;
-    }
-    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-    match parts.as_slice() {
-        ["/resume", session_id] => SessionCommand::ResumeSession((*session_id).into()),
-        ["/resume", ..] => SessionCommand::Invalid("Usage: /resume [session-id]"),
-        ["/new", ..] => SessionCommand::Invalid("Usage: /new"),
-        ["/clone", ..] => SessionCommand::Invalid("Usage: /clone"),
-        ["/tree", ..] => SessionCommand::Invalid("Usage: /tree"),
-        ["/unrevert", ..] => SessionCommand::Invalid("Usage: /unrevert"),
-        ["/connect", ..] => SessionCommand::Invalid("Usage: /connect"),
-        ["/name", "--clear"] => SessionCommand::Name(String::new()),
-        ["/name", "--clear", ..] | ["/name"] => {
-            SessionCommand::Invalid("Usage: /name <display name> | /name --clear")
-        }
-        ["/name", ..] => SessionCommand::Name(
-            trimmed
-                .strip_prefix("/name")
-                .expect("matched /name command")
-                .trim()
-                .into(),
-        ),
-        _ => SessionCommand::Prompt,
-    }
 }
 
 enum Input {

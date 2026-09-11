@@ -46,7 +46,7 @@ pub fn render(
     notice: Option<&str>,
 ) {
     render_interactive(
-        frame, state, viewport, row_cache, editor, connection, notice, None, None,
+        frame, state, viewport, row_cache, editor, connection, notice, None, None, None,
     );
 }
 
@@ -61,7 +61,8 @@ pub fn render_interactive(
     notice: Option<&str>,
     browse_selected: Option<TranscriptEntryId>,
     detail_view: Option<&mut DetailView>,
-) {
+    completion: Option<&crate::commands::CompletionView<'_>>,
+) -> bool {
     let area = frame.area();
     if !decision_context_visible(area) {
         frame.render_widget(
@@ -70,7 +71,7 @@ pub fn render_interactive(
                 .wrap(Wrap { trim: true }),
             area,
         );
-        return;
+        return false;
     }
 
     let decision_pending = matches!(
@@ -81,7 +82,7 @@ pub fn render_interactive(
         if let Some(view) = detail_view {
             if let Some(presentation) = selected_detail(state, view) {
                 render_detail(frame, area, view, presentation);
-                return;
+                return false;
             }
         }
     }
@@ -96,7 +97,7 @@ pub fn render_interactive(
             render_header(frame, chunks[0], state, connection);
         }
         render_composer(frame, chunks[1], state, editor);
-        return;
+        return false;
     }
 
     let composer_height = if editable(state) {
@@ -121,11 +122,15 @@ pub fn render_interactive(
     } else {
         3
     };
+    let completion_height = completion.map_or(0, |view| {
+        (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 4))
+    });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(2),
+            Constraint::Min(if completion_height > 0 { 0 } else { 2 }),
+            Constraint::Length(completion_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -140,8 +145,12 @@ pub fn render_interactive(
         row_cache,
         browse_selected,
     );
-    render_composer(frame, chunks[2], state, editor);
-    render_footer(frame, chunks[3], state, notice);
+    if let Some(view) = completion.filter(|_| completion_height > 0) {
+        crate::commands::render_completion(frame, chunks[2], view);
+    }
+    render_composer(frame, chunks[3], state, editor);
+    render_footer(frame, chunks[4], state, notice);
+    completion_height > 0
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection: &ConnectionInfo) {
@@ -194,9 +203,16 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &UiState, connection:
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" • "),
+        Span::raw(format!(
+            "{} • ",
+            if state.mode_confirmed {
+                state.mode.as_str()
+            } else {
+                "?"
+            }
+        )),
         Span::styled(
-            if state.model_configuration_active() {
+            if state.configuration_active() {
                 "configuring"
             } else {
                 state.view_status.as_str()
@@ -1593,6 +1609,7 @@ mod tests {
                     None,
                     Some(card_id),
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -1635,6 +1652,7 @@ mod tests {
                     None,
                     Some(card_id),
                     Some(&mut detail_view),
+                    None,
                 );
             })
             .unwrap();

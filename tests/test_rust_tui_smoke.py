@@ -658,11 +658,13 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and b"Type a prompt below to start." in output
-                and command_types[:4]
+                and command_types[:6]
                 == [
                     "get_messages",
                     "get_connection_catalog",
                     "get_model_catalog",
+                    "get_commands",
+                    "get_state",
                     "get_queue_state",
                 ]
             ):
@@ -757,10 +759,12 @@ for line in sys.stdin:
         if command["type"] in {"prompt", "steer", "follow_up", "pop_queue", "cancel", "shutdown"}
     ]
     assert phase == "shutdown sent", bytes(output)
-    assert command_types[:4] == [
+    assert command_types[:6] == [
         "get_messages",
         "get_connection_catalog",
         "get_model_catalog",
+        "get_commands",
+        "get_state",
         "get_queue_state",
     ]
     assert [command["type"] for command in lifecycle_commands] == [
@@ -1026,11 +1030,13 @@ for line in sys.stdin:
             now = time.monotonic()
             if (
                 phase == "startup"
-                and command_types[:4]
+                and command_types[:6]
                 == [
                     "get_messages",
                     "get_connection_catalog",
                     "get_model_catalog",
+                    "get_commands",
+                    "get_state",
                     "get_queue_state",
                 ]
                 and b"Type a prompt below to start." in output
@@ -1148,3 +1154,195 @@ for line in sys.stdin:
     assert b"fork-restored-z" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal
+
+
+@pytest.mark.process
+def test_rust_tui_command_discovery_and_modes_over_pty(tmp_path: Path) -> None:
+    binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
+    if binary_value is None:
+        pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
+    binary = Path(binary_value).resolve(strict=True)
+    command_log = tmp_path / "commands.jsonl"
+    backend = tmp_path / "commands_backend.py"
+    backend.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+from wisp.events import (
+    RpcCommandDescriptor, RpcCommandFinished, RpcCommandsReported,
+    RpcMessagesReported, RpcStateReported, RpcStateSnapshot,
+    RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
+)
+from wisp.runtime.builtin_commands import builtin_command_descriptors
+
+log_path = Path(sys.argv[1])
+mode = "plan"
+active = None
+
+def emit(event):
+    print(event.model_dump_json(), flush=True)
+
+def finish(command):
+    emit(RpcCommandFinished(command_id=command["id"], command_type=command["type"], ok=True))
+
+request = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": request["frontend_version"],
+    "protocol_version": 5, "event_schema_version": 36,
+    "min_protocol_version": 5, "max_protocol_version": 5,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
+for line in sys.stdin:
+    command = json.loads(line)
+    with log_path.open("a") as log:
+        log.write(json.dumps(command) + "\\n")
+    kind = command["type"]
+    if kind == "get_messages":
+        emit(RpcMessagesReported(command_id=command["id"]))
+    elif kind == "get_connection_catalog":
+        emit(RpcConnectionCatalogReported(command_id=command["id"],
+                                         catalog=RpcConnectionCatalogSnapshot()))
+    elif kind == "get_commands":
+        emit(RpcCommandsReported(command_id=command["id"], commands=tuple(
+            RpcCommandDescriptor(
+                name=d.name, title=d.title, description=d.description, category=d.category,
+                slash_command=d.slash_command, slash_aliases=d.slash_aliases, order=d.order,
+            ) for d in builtin_command_descriptors()
+        )))
+    elif kind == "get_state":
+        emit(RpcStateReported(command_id=command["id"], state=RpcStateSnapshot(
+            provider="fake", mode=mode, auto_compaction_enabled=True,
+            steering_mode="one_at_a_time", follow_up_mode="one_at_a_time",
+            pending_steering_count=0, pending_follow_up_count=0,
+        )))
+    elif kind == "configure":
+        mode = command["mode"]
+    elif kind == "prompt":
+        active = command
+        continue
+    elif kind == "shutdown":
+        if active:
+            emit(RpcCommandFinished(command_id=active["id"], command_type="prompt", ok=False,
+                                    error="RPC command cancelled: shutdown"))
+        finish(command)
+        break
+    finish(command)
+""",
+        encoding="utf-8",
+    )
+    child_pid, terminal_fd = pty.fork()
+    if child_pid == 0:
+        os.execve(
+            str(binary),
+            [
+                str(binary),
+                "--expected-backend-version",
+                __version__,
+                "--",
+                sys.executable,
+                str(backend),
+                str(command_log),
+            ],
+            os.environ,
+        )
+    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    initial_terminal = termios.tcgetattr(terminal_fd)
+    output = bytearray()
+    status: int | None = None
+    phase = "startup"
+    deadline = time.monotonic() + 20
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([terminal_fd], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(terminal_fd, 65536))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            commands = _complete_logged_commands(command_log)
+            if (
+                phase == "startup"
+                and b"Type a prompt below to start." in output
+                and b"plan" in output
+            ):
+                os.write(terminal_fd, b"/he")
+                phase = "prefix"
+                output.clear()
+            elif phase == "prefix" and b"/help" in output:
+                os.write(terminal_fd, b"\r")
+                phase = "completed"
+                output.clear()
+            # Differential terminal output may contain only the newly filled suffix.
+            elif phase == "completed" and b"lp" in output:
+                assert not any(command["type"] == "prompt" for command in commands)
+                os.write(terminal_fd, b"\r")
+                phase = "help"
+                output.clear()
+            elif phase == "help" and b"Commands" in output and b"/build" in output:
+                assert b"/compact" not in output
+                os.write(terminal_fd, b"\x1b")
+                phase = "closed"
+                output.clear()
+            elif phase == "closed" and b"Type a prompt below to start." in output:
+                os.write(terminal_fd, b"/build\r")
+                phase = "build"
+                output.clear()
+            elif phase == "build" and b"build mode enabled." in output:
+                os.write(terminal_fd, b"/plan\r")
+                phase = "plan"
+                output.clear()
+            elif phase == "plan" and any(
+                command["type"] == "configure" and command.get("mode") == "plan"
+                for command in commands
+            ):
+                # Resize after the request so the next frame contains the whole confirmed
+                # notice, even when only "build" -> "plan" otherwise changes on screen.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
+                phase = "plan confirmed"
+                output.clear()
+            elif phase == "plan confirmed" and b"plan mode enabled." in output:
+                os.write(terminal_fd, b"keep running\r")
+                phase = "running"
+                output.clear()
+            elif phase == "running" and b"queue steer:0 later:0" in output:
+                os.write(terminal_fd, b"/quit\r")
+                phase = "quit"
+            waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
+            if waited_pid == child_pid:
+                status = waited_status
+                break
+        assert status is not None, (phase, bytes(output))
+        assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
+        assert phase == "quit", (phase, bytes(output))
+        assert termios.tcgetattr(terminal_fd) == initial_terminal
+    finally:
+        if status is None:
+            try:
+                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child_pid, 0)
+        os.close(terminal_fd)
+    commands = _complete_logged_commands(command_log)
+    configure = [command for command in commands if command["type"] == "configure"]
+    assert [command["mode"] for command in configure] == ["build", "plan"]
+    assert all(command["persist_model_selection"] is False for command in configure)
+    assert [
+        command["type"]
+        for command in commands
+        if command["type"]
+        in {
+            "prompt",
+            "steer",
+            "follow_up",
+            "shutdown",
+        }
+    ] == ["prompt", "shutdown"]

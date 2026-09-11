@@ -57,6 +57,8 @@ impl BackendEvent {
         let command_id = match event_type.as_str() {
             "rpc.connection_catalog"
             | "rpc.model_catalog"
+            | "rpc.commands"
+            | "rpc.state"
             | "rpc.device_code"
             | "rpc.device_code.progress" => {
                 exact_string_field(&value, &event_type, "command_id", 256)?
@@ -64,6 +66,30 @@ impl BackendEvent {
             _ => return Self::from_projection_value(&value),
         };
         match event_type.as_str() {
+            "rpc.commands" => event
+                .command_catalog(&command_id)
+                .map(|mut catalog| {
+                    catalog.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
+                    for descriptor in &mut catalog {
+                        descriptor.description =
+                            super::bounded_session_text(&descriptor.description, 1024);
+                    }
+                    Self::CommandCatalogReported {
+                        command_id,
+                        catalog: catalog.into(),
+                    }
+                })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "commands",
+                }),
+            "rpc.state" => event
+                .agent_mode(&command_id)
+                .map(|mode| Self::ModeReported { command_id, mode })
+                .ok_or(EventProjectionError::InvalidField {
+                    event_type,
+                    field: "state.mode",
+                }),
             "rpc.model_catalog" => event
                 .model_catalog(&command_id)
                 .map(|catalog| Self::ModelCatalogReported {
@@ -116,7 +142,7 @@ impl BackendEvent {
                 &string_field(value, &event_type, "message")?,
                 super::SESSION_NOTICE_MAX_BYTES,
             )),
-            "rpc.model_catalog" => {
+            "rpc.model_catalog" | "rpc.commands" | "rpc.state" => {
                 let event = wisp_protocol::events::deserialize(value.clone()).map_err(|_| {
                     EventProjectionError::InvalidField {
                         event_type: event_type.clone(),

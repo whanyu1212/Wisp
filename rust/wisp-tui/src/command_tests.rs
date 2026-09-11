@@ -1,0 +1,292 @@
+//! Live input routing regressions: commands never become queued prompt text.
+use super::*;
+use ratatui::backend::TestBackend;
+use reducer::{ActiveCommand, ActiveCommandType, AgentMode, InteractionStatus};
+
+fn ui(draft: &str, active: bool) -> LiveUi {
+    let mut ui = LiveUi::default();
+    ui.state.command_catalog = Some(commands::tests::catalog().into());
+    ui.editor.insert_paste(draft);
+    if active {
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        ui.state.view_status = ViewStatus::Running;
+        ui.state.interaction_status = InteractionStatus::Running;
+    }
+    ui
+}
+fn draw(ui: &mut LiveUi, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    ui.draw(
+        &mut terminal,
+        &ConnectionInfo {
+            backend_version: "test".into(),
+            protocol_version: 5,
+            event_schema_version: 36,
+        },
+    )
+    .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+fn key(code: KeyCode) -> Input {
+    Input::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
+    let WriterMessage::Frame { payload, .. } = receiver.try_recv().unwrap() else {
+        panic!("expected frame")
+    };
+    serde_json::from_slice(&payload).unwrap()
+}
+
+#[tokio::test]
+async fn partial_enter_completes_then_exact_enter_opens_help() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/he", false);
+    assert!(draw(&mut ui, 30, 8).contains("/help"));
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/help");
+    assert!(ui.command_help.is_none());
+    assert!(receiver.try_recv().is_err());
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.command_help.is_some());
+    assert_eq!(frame(&mut receiver)["type"], "get_commands");
+    assert!(draw(&mut ui, 30, 8).contains("Commands"));
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandCatalogReported {
+            command_id: "get_commands-1".into(),
+            catalog: commands::tests::catalog().into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: "get_commands-1".into(),
+            command_type: "get_commands".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.command_help.is_none());
+}
+
+#[tokio::test]
+async fn hidden_or_changed_completion_cannot_fill_and_escape_dismisses_only_menu() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/mo", true);
+    draw(&mut ui, 30, 8);
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/mo");
+    draw(&mut ui, 29, 7);
+    ui.handle_input(key(KeyCode::Tab), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/mo");
+    draw(&mut ui, 30, 8);
+    ui.apply_effects(vec![UiEffect::CommandCatalogChanged], &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Tab), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/mo");
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(!ui.state.cancel_requested);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn supported_invalid_and_unsupported_commands_never_enter_active_queues() {
+    for text in [
+        "/new",
+        "/resume",
+        "/name hi",
+        "/clone",
+        "/tree",
+        "/unrevert",
+        "/connect",
+        "/model",
+        "/provider",
+        "/plan",
+        "/build",
+        "/compact guidance",
+        "/missing",
+        "/quit extra",
+    ] {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::ALT] {
+            let (writer, mut receiver) = mpsc::channel(8);
+            let mut ui = ui(text, true);
+            assert_eq!(
+                ui.handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
+                    &writer,
+                    8192
+                )
+                .await
+                .unwrap(),
+                LoopControl::Continue
+            );
+            assert_eq!(ui.editor.text(), text);
+            assert!(ui.notice.is_some(), "{text}");
+            assert!(receiver.try_recv().is_err(), "{text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn quit_exits_active_run_and_help_ctrl_c_only_dismisses() {
+    for text in ["/quit", "/exit", ":q"] {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = ui(text, true);
+        assert_eq!(
+            ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+                .await
+                .unwrap(),
+            LoopControl::Exit
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+    let (writer, _) = mpsc::channel(8);
+    let mut ui = ui("/help", true);
+    ui.command_help = Some(Help::default());
+    assert_eq!(
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &writer,
+            8192
+        )
+        .await
+        .unwrap(),
+        LoopControl::Continue
+    );
+    assert!(ui.command_help.is_none());
+    assert!(!ui.state.cancel_requested);
+}
+
+#[tokio::test]
+async fn mode_acknowledgement_controls_header_and_draft_and_ctrl_c_remains_available() {
+    for ok in [true, false] {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = ui("/plan", false);
+        ui.state.mode_confirmed = true;
+        ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+            .await
+            .unwrap();
+        let command = frame(&mut receiver);
+        assert_eq!(command["mode"], "plan");
+        assert_eq!(ui.editor.text(), "/plan");
+        assert_eq!(ui.state.mode, AgentMode::Build);
+        assert_eq!(
+            ui.handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &writer,
+                8192
+            )
+            .await
+            .unwrap(),
+            LoopControl::Exit
+        );
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: command["id"].as_str().unwrap().into(),
+                command_type: "configure".into(),
+                ok,
+                error: None,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.text(), if ok { "" } else { "/plan" });
+        let rendered = draw(&mut ui, 30, 8);
+        assert!(
+            rendered.contains(if ok { "WISP plan" } else { "WISP build" }),
+            "{rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn incoming_trust_dismisses_help_and_completion_without_answering() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/he", false);
+    draw(&mut ui, 80, 24);
+    ui.command_help = Some(Help::default());
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::TrustRequested {
+            request_id: "trust-1".into(),
+            project_path: "/workspace".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.command_help.is_none());
+    assert!(
+        ui.completion
+            .view(ui.state.command_catalog.as_deref())
+            .is_none()
+    );
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(ui.editor.text(), "/he");
+}
+
+#[tokio::test]
+async fn tool_browsing_hides_completion_until_composer_regains_focus() {
+    let (writer, _) = mpsc::channel(8);
+    let mut ui = ui("/mo", false);
+    let event = BackendEvent::from_projection_value(&serde_json::json!({
+        "type": "tool.call", "call_id": "tool-1", "name": "edit", "arguments": {"path": "README.md", "edits": [{"oldText": "old", "newText": "new"}]}
+    }))
+    .unwrap();
+    ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+        .await
+        .unwrap();
+    let event = BackendEvent::from_projection_value(&serde_json::json!({
+        "type": "tool.result", "call_id": "tool-1", "name": "edit", "output": "Applied 1 edit", "is_error": false
+    })).unwrap();
+    ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(draw(&mut ui, 80, 24).contains("Describe model"));
+    ui.handle_input(key(KeyCode::F(6)), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.browse_selected.is_some());
+    assert!(!draw(&mut ui, 80, 24).contains("Describe model"));
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(draw(&mut ui, 80, 24).contains("Describe model"));
+}

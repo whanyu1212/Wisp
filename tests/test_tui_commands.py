@@ -141,7 +141,11 @@ def test_mcp_command_parses_and_is_available_in_slash_menu() -> None:
 
 
 def test_slash_command_specs_project_shared_builtin_descriptors() -> None:
-    descriptors = builtin_command_descriptors()
+    descriptors = tuple(
+        descriptor
+        for descriptor in builtin_command_descriptors()
+        if descriptor.name in {command.value for command in TuiSlashCommandName}
+    )
 
     assert tuple(spec.command for spec in SLASH_COMMAND_SPECS) == tuple(
         descriptor.slash_command for descriptor in descriptors
@@ -237,3 +241,10 @@ def test_required_argument_command_prefills_only_partial_enter(typed: str, expec
         prefill_on_partial_enter=True,
     )
     assert _slash_enter_prefills(typed, spec) is expected
+
+
+@pytest.mark.parametrize("name", ["name", "clone", "tree", "unrevert"])
+def test_default_catalog_excludes_commands_without_textual_handlers(name: str) -> None:
+    assert f"/{name}" not in {spec.command for spec in SLASH_COMMAND_SPECS}
+    with pytest.raises(TuiSlashCommandError, match="Unknown command"):
+        parse_tui_slash_command(f"/{name}")

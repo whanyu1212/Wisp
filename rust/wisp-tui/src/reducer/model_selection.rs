@@ -38,7 +38,7 @@ impl UiState {
             && self.session_operation.is_none()
             && self.connection_operation.is_none()
             && self.history_request.is_none()
-            && !self.model_configuration_active()
+            && !self.configuration_active()
     }
 }
 

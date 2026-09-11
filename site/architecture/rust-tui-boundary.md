@@ -264,7 +264,8 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
 | Windows | Rejected before binary resolution | Acceptable difference; not a claimed target |
 | Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
 | Protected-path-aware file suggestions | Backend-owned; Rust must not walk the workspace | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#462](https://github.com/whanyu1212/Wisp/issues/462)) |
-| Skills, command catalog, MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
+| `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, and graceful exit are present in Rust | Acceptable difference while experimental |
+| Skills and MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
 | Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |
 | Fuzz, backpressure, terminal sanitization, panic/PTY restore | Incomplete | Blocker for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
 | Narrow-layout and mouse polish | Not required for stage 2 | Deferred noncritical |
@@ -314,3 +315,21 @@ moving unrelated Python systems.
 
 A default-renderer proposal remains out of scope until those conditions are re-measured. Textual
 removal always requires a separate explicit issue; #470 did not file one.
+
+### Rust command interaction
+
+`/help` lists commands implemented by the Rust frontend, using the backend's descriptions and
+ordering. Arrow keys and Page Up/Down scroll help; Escape or Ctrl+C closes it, and `r` refreshes
+discovery. Unsupported catalog commands produce a notice when typed. Discovery runs in the
+background; its failure does not block prompts or explicitly typed supported commands.
+
+Typing a slash prefix opens completion above the composer. Up/Down selects a command; Tab or
+Enter fills a partial command without executing it. Enter on an exact command executes it.
+Completion preserves existing arguments. Escape dismisses completion; Shift+Enter and Ctrl+J
+insert newlines. Multiline pastes and slash-prefixed prose remain prompt text. A lone unknown
+slash word is treated as a command attempt, so `/tmp` reports an unknown command while
+`/tmp/file` remains literal text. Commands are handled before steering and follow-up queues.
+
+`/plan` and `/build` change the current process's mode only while idle. The header shows mode
+after startup state discovery or successful configuration acknowledgement. `/quit`, `/exit`,
+and `:q` exit through normal backend shutdown, including cancellation of active work.

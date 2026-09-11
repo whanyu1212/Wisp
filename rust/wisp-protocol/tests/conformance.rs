@@ -902,3 +902,44 @@ fn response_and_event_accessors_use_validated_wire_values() {
         None
     );
 }
+
+#[test]
+fn command_discovery_and_mode_projections_use_existing_live_contract() {
+    use commands::{AgentMode, WispTypedClientRpcCommands};
+    for command in [
+        WispTypedClientRpcCommands::get_commands("controls").unwrap(),
+        WispTypedClientRpcCommands::get_state("controls").unwrap(),
+        WispTypedClientRpcCommands::configure_mode("controls", AgentMode::Plan).unwrap(),
+    ] {
+        let value = serde_json::to_value(command).unwrap();
+        assert_eq!(value["id"], "controls");
+        assert!(
+            value
+                .get("persist_model_selection")
+                .is_none_or(|value| value == false)
+        );
+    }
+    let mut fixtures = fixtures(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/live-rpc/v5/events.schema.json"
+    )));
+    let mut command_report = fixtures.remove("rpc.commands").unwrap();
+    command_report["commands"] = serde_json::json!([{
+        "name": "help", "title": "Help", "description": "Show commands", "category": "general",
+        "slash_command": "/help", "aliases": [], "slash_aliases": [], "arguments": [],
+        "accepts_arguments": false, "prefill_on_partial_enter": false, "order": 10
+    }]);
+    let command_event = events::deserialize(command_report).unwrap();
+    assert!(
+        !command_event
+            .command_catalog("command-1")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(command_event.command_catalog("stale").is_none());
+    let mut state = fixtures.remove("rpc.state").unwrap();
+    state["state"]["mode"] = serde_json::json!("plan");
+    let event = events::deserialize(state).unwrap();
+    assert_eq!(event.agent_mode("command-1"), Some(AgentMode::Plan));
+    assert!(event.agent_mode("stale").is_none());
+}
