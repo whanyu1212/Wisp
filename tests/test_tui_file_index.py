@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,18 @@ from wisp.tui.file_index import (
 from wisp.tui.textual_app import _build_file_index_snapshot, _file_index_context
 
 pytestmark = pytest.mark.tui
+
+
+def test_reference_format_matches_shared_rust_cases() -> None:
+    cases = json.loads(
+        (Path(__file__).parent / "fixtures" / "tui_file_references.json").read_text()
+    )
+    for case in cases:
+        assert format_file_reference(case["path"]) == case["reference"]
+        assert parse_file_reference(case["reference"], start=0) == (
+            len(case["reference"]),
+            case["path"],
+        )
 
 
 def _config(root: Path, **overrides: object) -> FileIndexConfig:

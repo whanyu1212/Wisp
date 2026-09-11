@@ -35,6 +35,54 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
+fn composer_height(state: &UiState, editor: &PromptEditor) -> u16 {
+    if editable(state) {
+        let queue_rows = if state.active_prompt_editable() {
+            state
+                .queued_steering()
+                .saturating_add(state.queued_follow_ups())
+                .min(3)
+        } else {
+            0
+        };
+        u16::try_from(
+            editor
+                .line_count()
+                .saturating_add(queue_rows)
+                .saturating_add(2),
+        )
+        .unwrap_or(MAX_COMPOSER_HEIGHT)
+        .clamp(3, MAX_COMPOSER_HEIGHT)
+    } else if matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    ) {
+        5
+    } else {
+        3
+    }
+}
+
+/// Anchor suggestions above the composer without changing transcript geometry.
+pub(crate) fn file_picker_area(area: Rect, state: &UiState, editor: &PromptEditor) -> Option<Rect> {
+    if !decision_context_visible(area) {
+        return None;
+    }
+    // At short sizes a tall draft leaves no free strip. Cover the upper rows rather
+    // than hide all choices or change the transcript's layout to make room.
+    let bottom = area
+        .bottom()
+        .saturating_sub(composer_height(state, editor) + 1)
+        .max(area.y + 4);
+    let height = (bottom - area.y).min(12);
+    Some(Rect::new(
+        area.x,
+        bottom - height,
+        area.width.min(100),
+        height,
+    ))
+}
+
 /// Center a bounded popup within supported terminal sizes.
 pub fn overlay_area(area: Rect) -> Option<Rect> {
     if !decision_context_visible(area) {
@@ -121,28 +169,7 @@ pub fn render_interactive(
         return false;
     }
 
-    let composer_height = if editable(state) {
-        let queue_rows = if state.active_prompt_editable() {
-            state
-                .queued_steering()
-                .saturating_add(state.queued_follow_ups())
-                .min(3)
-        } else {
-            0
-        };
-        u16::try_from(
-            editor
-                .line_count()
-                .saturating_add(queue_rows)
-                .saturating_add(2),
-        )
-        .unwrap_or(MAX_COMPOSER_HEIGHT)
-        .clamp(3, MAX_COMPOSER_HEIGHT)
-    } else if decision_pending {
-        5
-    } else {
-        3
-    };
+    let composer_height = composer_height(state, editor);
     let completion_height = completion.map_or(0, |view| {
         (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 4))
     });

@@ -114,6 +114,26 @@ terminal size they can fill the screen. Short decision layouts prioritize readab
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
 read longer challenges. Popup dismissal by mouse is not supported yet.
 
+The Rust composer supports `@` project-file references while idle or streaming. Type `@` at a token
+boundary to open a composer-anchored popup, then type to fuzzy-filter the paths. `Up`/`Down` select;
+`Enter` inserts a reference without submitting. `Tab` switches to a project tree without changing the
+draft or query; `Left`/`Right` collapse/expand folders, and `Enter` toggles folders or inserts files.
+Fuzzy mode also permits directory references. `Escape` closes the picker first, without cancelling
+the run; `Tab` at a dismissed reference reopens it and refreshes discovery.
+
+Only reference text is inserted: `@"src/example file.py"` for paths requiring JSON quoting, otherwise
+`@src/main.rs`. No file content is read or inlined by Rust. Python supplies one bounded, protected-path-aware
+snapshot per opening; typing and tree navigation use that snapshot locally. A policy change clears
+the old choices before refresh, and late responses cannot reopen a dismissed picker. A limited-snapshot
+cue means paths were omitted, not that a folder is empty. Fuzzy results are capped at 30; matching is
+smart-case and deterministic, but ranking need not be identical to Textual. Queries over 4096 bytes
+must be shortened. Discovery failures preserve the draft; close and reopen to retry.
+
+The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
+it can cover the header or upper composer rows rather than rearranging the conversation. Approval and
+trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse interaction
+remains unsupported, and modified submission shortcuts retain their existing meanings.
+
 Selecting Rust never falls back to Textual. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See

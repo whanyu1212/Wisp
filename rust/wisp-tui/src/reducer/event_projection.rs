@@ -86,6 +86,22 @@ impl BackendEvent {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
+            "rpc.project_files" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let snapshot = discovery_report(&value, || event.project_files(&command_id))
+                    .map_err(|_| "Project discovery report exceeds the 1 MiB display limit or could not be decoded.".into());
+                return Ok(Self::ProjectFilesReported {
+                    command_id,
+                    snapshot,
+                });
+            }
+            "project_files.invalidated" => {
+                return Ok(Self::ProjectFilesInvalidated(u64_field(
+                    &value,
+                    &event_type,
+                    "generation",
+                )?));
+            }
             "rpc.skills" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let catalog =
@@ -282,6 +298,8 @@ impl BackendEvent {
                 super::SESSION_NOTICE_MAX_BYTES,
             )),
             "rpc.model_catalog"
+            | "rpc.project_files"
+            | "project_files.invalidated"
             | "rpc.skills"
             | "skill.catalog.updated"
             | "rpc.mcp"
