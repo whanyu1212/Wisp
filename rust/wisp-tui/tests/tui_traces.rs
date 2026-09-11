@@ -425,6 +425,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::ModelCatalogUnavailable
                 | UiEffect::ModelConfigurationApplied
                 | UiEffect::CommandCatalogChanged
+                | UiEffect::SkillCatalogChanged
                 | UiEffect::ModeConfigurationApplied
                 | UiEffect::AutoCompactionConfigured
                 | UiEffect::Diagnostic(_)

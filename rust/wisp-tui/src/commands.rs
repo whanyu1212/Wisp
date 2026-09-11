@@ -9,13 +9,19 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use std::borrow::Cow;
 use std::ops::Range;
-use wisp_protocol::{commands::AgentMode, events::CommandDescriptor};
+use wisp_protocol::{
+    commands::AgentMode,
+    events::{CommandDescriptor, SkillCatalogEntry, SkillCatalogSnapshot},
+};
 
 pub(crate) enum Command {
     Help,
     Mode(AgentMode),
     Context,
+    Skills,
+    Mcp,
     AutoCompaction(bool),
     Compact(Option<String>),
     Quit,
@@ -31,6 +37,8 @@ fn usage(name: &str) -> Option<&'static str> {
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
+        "skills" => "/skills",
+        "mcp" => "/mcp",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
@@ -85,10 +93,12 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let tail = &trimmed[token.len()..];
     let normalized = format!("/{canonical}{tail}");
     Some(match canonical {
-        "help" | "plan" | "build" | "quit" if !tail.trim().is_empty() => {
+        "help" | "plan" | "build" | "quit" | "skills" | "mcp" if !tail.trim().is_empty() => {
             Command::Invalid(format!("Usage: {syntax}"))
         }
         "help" => Command::Help,
+        "skills" => Command::Skills,
+        "mcp" => Command::Mcp,
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
         "context" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -130,8 +140,41 @@ pub(crate) struct Completion {
 }
 
 pub(crate) struct CompletionView<'a> {
-    pub items: Vec<&'a CommandDescriptor>,
+    pub items: Vec<CompletionItem<'a>>,
     pub selected: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CompletionItem<'a> {
+    Command(&'a CommandDescriptor),
+    Skill(&'a SkillCatalogEntry),
+}
+
+impl<'a> CompletionItem<'a> {
+    pub fn spelling(self) -> Cow<'a, str> {
+        match self {
+            Self::Command(command) => Cow::Borrowed(&command.slash_command),
+            Self::Skill(skill) => Cow::Owned(format!("/skill:{}", skill.name)),
+        }
+    }
+
+    fn description(self) -> String {
+        match self {
+            Self::Command(command) => crate::ui::sanitize_for_terminal(&command.description),
+            Self::Skill(skill) => format!(
+                "[{}] {}",
+                skill.source.as_str(),
+                crate::ui::sanitize_for_terminal(&skill.description)
+            ),
+        }
+    }
+
+    fn takes_arguments(self) -> bool {
+        match self {
+            Self::Command(command) => usage(&command.name).is_some_and(|usage| usage.contains(' ')),
+            Self::Skill(_) => true,
+        }
+    }
 }
 
 impl Completion {
@@ -154,20 +197,36 @@ impl Completion {
         self.invalidate();
     }
 
-    pub fn view<'a>(&self, catalog: Option<&'a [CommandDescriptor]>) -> Option<CompletionView<'a>> {
+    pub fn view<'a>(
+        &self,
+        catalog: Option<&'a [CommandDescriptor]>,
+        skills: Option<&'a SkillCatalogSnapshot>,
+    ) -> Option<CompletionView<'a>> {
         if self.dismissed {
             return None;
         }
-        let (_, prefix) = self.context.as_ref()?;
-        let items: Vec<_> = catalog?
+        let (range, prefix) = self.context.as_ref()?;
+        let prefix = prefix.to_ascii_lowercase();
+        let items: Vec<_> = catalog
+            .unwrap_or_default()
             .iter()
             .filter(|item| {
                 usage(&item.name).is_some()
-                    && item
-                        .slash_command
-                        .to_ascii_lowercase()
-                        .starts_with(&prefix.to_ascii_lowercase())
+                    && item.slash_command.to_ascii_lowercase().starts_with(&prefix)
             })
+            .map(CompletionItem::Command)
+            .chain(
+                // Python recognizes skill directives only at byte zero.
+                skills
+                    .filter(|_| range.start == 0)
+                    .into_iter()
+                    .flat_map(|catalog| &catalog.entries)
+                    .filter(|skill| {
+                        skill.is_invocable()
+                            && format!("/skill:{}", skill.name).starts_with(&prefix)
+                    })
+                    .map(CompletionItem::Skill),
+            )
             .collect();
         if items.is_empty() {
             return None;
@@ -192,24 +251,26 @@ impl Completion {
     /// A selection may fill text only after that exact choice has been displayed.
     pub fn replacement(
         &self,
-        item: &CommandDescriptor,
+        item: CompletionItem<'_>,
         editor: &PromptEditor,
     ) -> Option<(Range<usize>, String)> {
-        if self.rendered.as_deref() != Some(&item.name) {
+        let spelling = item.spelling();
+        if self.rendered.as_deref() != Some(spelling.as_ref()) {
             return None;
         }
         let (range, _) = self.context.as_ref()?;
-        let mut replacement = item.slash_command.clone();
-        if editor.text()[range.end..].is_empty() && usage(&item.name)?.contains(' ') {
+        let mut replacement = spelling.into_owned();
+        if editor.text()[range.end..].is_empty() && item.takes_arguments() {
             replacement.push(' ');
         }
         Some((range.clone(), replacement))
     }
 
-    pub fn is_exact(&self, item: &CommandDescriptor) -> bool {
-        self.context
-            .as_ref()
-            .is_some_and(|(_, token)| token.eq_ignore_ascii_case(&item.slash_command))
+    pub fn is_exact(&self, item: CompletionItem<'_>) -> bool {
+        self.context.as_ref().is_some_and(|(_, token)| match item {
+            CompletionItem::Command(_) => token.eq_ignore_ascii_case(&item.spelling()),
+            CompletionItem::Skill(_) => token == item.spelling().as_ref(),
+        })
     }
 }
 
@@ -217,8 +278,8 @@ pub(crate) fn render_completion(frame: &mut Frame<'_>, area: Rect, view: &Comple
     let items = view.items.iter().map(|item| {
         ListItem::new(format!(
             "{}  {}",
-            item.slash_command,
-            crate::ui::sanitize_for_terminal(&item.description)
+            crate::ui::sanitize_for_terminal(&item.spelling()),
+            item.description()
         ))
     });
     let mut state = ListState::default().with_selected(Some(view.selected));
@@ -375,7 +436,7 @@ pub(crate) mod tests {
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [
             "help", "plan", "build", "model", "provider", "connect", "resume", "new", "name",
-            "clone", "tree", "unrevert", "context", "compact", "skills", "quit",
+            "clone", "tree", "unrevert", "context", "compact", "skills", "mcp", "history", "quit",
         ]
         .into_iter()
         .enumerate()
@@ -391,6 +452,92 @@ pub(crate) mod tests {
             order: order as i64,
         })
         .collect()
+    }
+
+    pub(crate) fn skills() -> SkillCatalogSnapshot {
+        serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../tests/fixtures/rust_tui_discovery.json"
+            ))
+            .unwrap()["rpc.skills"]["catalog"]
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn combined_menu_keeps_commands_before_skills_and_preserves_canonical_identity() {
+        let catalog = catalog();
+        let mut skills = skills();
+        skills.entries[0].name = "unsafe\n/quit".into();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("/");
+        let mut completion = Completion::default();
+        completion.sync(&editor);
+        let view = completion.view(Some(&catalog), Some(&skills)).unwrap();
+        let first_skill = view
+            .items
+            .iter()
+            .position(|item| matches!(item, CompletionItem::Skill(_)))
+            .unwrap();
+        assert!(
+            view.items[..first_skill]
+                .iter()
+                .all(|item| matches!(item, CompletionItem::Command(_)))
+        );
+        assert!(
+            !view
+                .items
+                .iter()
+                .any(|item| item.spelling().contains("unsafe"))
+        );
+        assert!(view.items.iter().any(|item| item.spelling() == "/build"));
+        assert!(
+            view.items
+                .iter()
+                .any(|item| item.spelling() == "/skill:build")
+        );
+        editor.clear();
+        editor.insert_paste("/SKILL:BU 候選  arguments");
+        editor.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        for _ in 0..9 {
+            editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        completion.sync(&editor);
+        let view = completion.view(Some(&catalog), Some(&skills)).unwrap();
+        assert_eq!(view.items.len(), 1);
+        let item = view.items[0];
+        assert_eq!(item.spelling(), "/skill:build");
+        assert!(completion.replacement(item, &editor).is_none());
+        completion.mark_rendered(item.spelling().into_owned());
+        let (range, replacement) = completion.replacement(item, &editor).unwrap();
+        editor.replace_command_token(range, &replacement);
+        assert_eq!(editor.text(), "/skill:build 候選  arguments");
+        assert!(classify(editor.text(), Some(&catalog)).is_none());
+        completion.invalidate();
+        assert!(completion.replacement(item, &editor).is_none());
+    }
+
+    #[test]
+    fn skill_completion_requires_a_directive_at_byte_zero_and_adds_a_space() {
+        let skills = skills();
+        let mut completion = Completion::default();
+        let mut editor = PromptEditor::default();
+        for literal in ["  /skill:re", "\t/skill:re", "/skill:re\nrequest"] {
+            editor.clear();
+            editor.insert_paste(literal);
+            completion.sync(&editor);
+            assert!(completion.view(None, Some(&skills)).is_none(), "{literal}");
+        }
+        editor.clear();
+        editor.insert_paste("/skill:re");
+        completion.sync(&editor);
+        let item = completion.view(None, Some(&skills)).unwrap().items[0];
+        completion.mark_rendered(item.spelling().into_owned());
+        let (range, replacement) = completion.replacement(item, &editor).unwrap();
+        editor.replace_command_token(range, &replacement);
+        assert_eq!(editor.text(), "/skill:review ");
+        assert!(classify("/skill:unknown request", None).is_none());
     }
 
     #[test]
@@ -444,20 +591,20 @@ pub(crate) mod tests {
         }
         let mut completion = Completion::default();
         completion.sync(&editor);
-        let view = completion.view(Some(&catalog)).unwrap();
+        let view = completion.view(Some(&catalog), None).unwrap();
         assert_eq!(view.items.len(), 1);
         let model = view.items[0];
         assert!(completion.replacement(model, &editor).is_none());
-        completion.mark_rendered(model.name.clone());
+        completion.mark_rendered(model.spelling().into_owned());
         let (range, text) = completion.replacement(model, &editor).unwrap();
         assert!(editor.replace_command_token(range, &text).changed);
         assert_eq!(editor.text(), "  /model 候選 arguments");
         completion.sync(&editor);
         completion.dismiss();
-        assert!(completion.view(Some(&catalog)).is_none());
+        assert!(completion.view(Some(&catalog), None).is_none());
         editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         completion.sync(&editor);
-        assert!(completion.view(Some(&catalog)).is_some());
+        assert!(completion.view(Some(&catalog), None).is_some());
     }
 
     #[test]
@@ -473,7 +620,9 @@ pub(crate) mod tests {
         assert!(!text.contains("/connect ["));
         assert!(text.contains("/compact [instructions]"));
         assert!(text.contains("/context [auto on|off]"));
-        assert!(!text.contains("/skills"));
+        assert!(text.contains("/skills"));
+        assert!(text.contains("/mcp"));
+        assert!(!text.contains("/history"));
         assert!(text.contains("Aliases: /exit, :q"));
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
@@ -481,12 +630,12 @@ pub(crate) mod tests {
         completion.sync(&editor);
         assert!(
             completion
-                .view(Some(&catalog))
+                .view(Some(&catalog), None)
                 .unwrap()
                 .items
                 .iter()
-                .all(|item| item.name != "skills")
+                .all(|item| item.spelling() != "/history")
         );
-        assert!(completion.view(None).is_none());
+        assert!(completion.view(None, None).is_none());
     }
 }

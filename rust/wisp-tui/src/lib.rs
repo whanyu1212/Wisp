@@ -9,6 +9,7 @@ mod commands;
 mod connection_panel;
 mod context_view;
 mod detail_view;
+mod discovery_view;
 mod framing;
 pub mod history;
 mod markdown;
@@ -37,6 +38,7 @@ use commands::{Command, Completion, Help, SessionCommand};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use detail_view::DetailView;
+use discovery_view::{DiscoveryAction, DiscoveryView};
 use framing::FrameReader;
 use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
@@ -434,6 +436,7 @@ struct LiveUi {
     rendered_model_picker: bool,
     command_help: Option<Help>,
     context_view: Option<context_view::ContextView>,
+    discovery_view: Option<DiscoveryView>,
     completion: Completion,
 }
 
@@ -460,6 +463,7 @@ impl Default for LiveUi {
             rendered_model_picker: false,
             command_help: None,
             context_view: None,
+            discovery_view: None,
             completion: Completion::default(),
         }
     }
@@ -560,10 +564,12 @@ impl LiveUi {
                     let command_type = value.get("type").and_then(|value| value.as_str());
                     let payload = Bytes::from(serde_json::to_vec(&value)?);
                     if payload.len() > limit
-                        && (matches!(command_type, Some("get_commands" | "get_state"))
-                            || (command_type == Some("configure")
-                                && (value.get("mode").is_some()
-                                    || value.get("auto_compaction_enabled").is_some())))
+                        && (matches!(
+                            command_type,
+                            Some("get_commands" | "get_state" | "get_skills" | "get_mcp_status")
+                        ) || (command_type == Some("configure")
+                            && (value.get("mode").is_some()
+                                || value.get("auto_compaction_enabled").is_some())))
                     {
                         pending.extend(reducer::reduce(&mut self.state, UiAction::BackendEvent(BackendEvent::CommandFinished {
                             command_id: value["id"].as_str().expect("control request ID").into(),
@@ -643,6 +649,12 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
+                UiEffect::SkillCatalogChanged => {
+                    self.completion.invalidate();
+                    if let Some(view) = &mut self.discovery_view {
+                        view.sync_skills(self.state.skills.snapshot.as_deref());
+                    }
+                }
                 UiEffect::ModeConfigurationApplied | UiEffect::AutoCompactionConfigured => {
                     self.editor.clear();
                     self.completion.dismiss();
@@ -896,6 +908,7 @@ impl LiveUi {
             self.rendered_model_picker = false;
             self.command_help = None;
             self.context_view = None;
+            self.discovery_view = None;
             self.completion.dismiss();
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1046,6 +1059,9 @@ impl LiveUi {
         let mut rendered_model_picker = false;
         let mut rendered_completion = None;
         self.completion.sync(&self.editor);
+        if let Some(view) = &mut self.discovery_view {
+            view.invalidate_selection();
+        }
         terminal.draw(|frame| {
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = match self.state.view_status {
@@ -1063,6 +1079,12 @@ impl LiveUi {
                 };
             }
             if let Some(view) = self
+                .discovery_view
+                .as_mut()
+                .filter(|_| ui::decision_context_visible(frame.area()))
+            {
+                view.render(frame, frame.area(), &self.state, self.notice.as_deref());
+            } else if let Some(view) = self
                 .context_view
                 .as_mut()
                 .filter(|_| ui::decision_context_visible(frame.area()))
@@ -1103,7 +1125,12 @@ impl LiveUi {
             } else {
                 let completion_view = (self.state.editor_editable()
                     && self.browse_selected.is_none())
-                .then(|| self.completion.view(self.state.command_catalog.as_deref()))
+                .then(|| {
+                    self.completion.view(
+                        self.state.command_catalog.as_deref(),
+                        self.state.skills.snapshot.as_deref(),
+                    )
+                })
                 .flatten();
                 let completion_visible = ui::render_interactive(
                     frame,
@@ -1119,7 +1146,8 @@ impl LiveUi {
                 );
                 if completion_visible {
                     if let Some(view) = completion_view {
-                        rendered_completion = Some(view.items[view.selected].name.clone());
+                        rendered_completion =
+                            Some(view.items[view.selected].spelling().into_owned());
                     }
                 }
             }
@@ -1635,6 +1663,21 @@ impl LiveUi {
                 self.render_pending = true;
                 self.dispatch(UiAction::LoadContext, writer, limit).await
             }
+            Command::Skills | Command::Mcp => {
+                let (view, action) = if matches!(command, Command::Skills) {
+                    (
+                        DiscoveryView::skills(self.state.skills.snapshot.as_deref()),
+                        UiAction::LoadSkills,
+                    )
+                } else {
+                    (DiscoveryView::mcp(), UiAction::LoadMcpStatus)
+                };
+                self.discovery_view = Some(view);
+                self.editor.clear();
+                self.notice = None;
+                self.render_pending = true;
+                self.dispatch(action, writer, limit).await
+            }
             Command::AutoCompaction(enabled) => {
                 self.notice = None;
                 self.dispatch(UiAction::ConfigureAutoCompaction(enabled), writer, limit)
@@ -1751,7 +1794,10 @@ impl LiveUi {
         if !self.editor_editable() {
             return false;
         }
-        let Some(view) = self.completion.view(self.state.command_catalog.as_deref()) else {
+        let Some(view) = self.completion.view(
+            self.state.command_catalog.as_deref(),
+            self.state.skills.snapshot.as_deref(),
+        ) else {
             return false;
         };
         if is_escape(key) {
@@ -2165,6 +2211,32 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         self.completion.sync(&self.editor);
         match input {
+            Input::Key(key) if self.discovery_view.is_some() => {
+                let action = self
+                    .discovery_view
+                    .as_mut()
+                    .expect("open discovery view")
+                    .handle_key(key, &self.state);
+                self.render_pending = true;
+                match action {
+                    DiscoveryAction::Close => self.discovery_view = None,
+                    DiscoveryAction::Refresh(action) => {
+                        return self.dispatch(action, writer, limit).await;
+                    }
+                    DiscoveryAction::InsertSkill(prefix) => {
+                        let outcome = self.editor.replace_command_token(0..0, &prefix);
+                        self.update_edit_notice(outcome);
+                        if !outcome.rejected_limit {
+                            self.discovery_view = None;
+                            self.completion.sync(&self.editor);
+                            self.completion.dismiss();
+                        }
+                    }
+                    DiscoveryAction::None => {}
+                }
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if self.discovery_view.is_some() => Ok(LoopControl::Continue),
             Input::Key(key) if self.context_view.is_some() => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.context_view = None;
@@ -2382,6 +2454,9 @@ impl LiveUi {
             }
             Input::Redraw => {
                 self.completion.invalidate();
+                if let Some(view) = &mut self.discovery_view {
+                    view.invalidate_selection();
+                }
                 self.rendered_decision_context = None;
                 self.rendered_model_picker = false;
                 self.render_pending = true;
@@ -2594,6 +2669,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 .await?;
             live_ui.dispatch(UiAction::LoadCommandCatalog, &writer_tx, max_client_frame).await?;
             live_ui.dispatch(UiAction::LoadInitialMode, &writer_tx, max_client_frame).await?;
+            live_ui.dispatch(UiAction::LoadSkills, &writer_tx, max_client_frame).await?;
             let mut redraw = interval(FRAME_INTERVAL);
             redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {

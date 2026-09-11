@@ -23,7 +23,14 @@ _CONTEXT_STATS_BACKEND = """
 from wisp.events import (
     ContextBudget, ContextEstimate, SessionStats, SessionStatsReported, TokenUsage,
     CompactionPolicyStatus, SessionCostSummary, RpcCommandFinished,
+    RpcSkillsReported, RpcSkillCatalogSnapshot,
 )
+
+def report_skills(command):
+    print(RpcSkillsReported(command_id=command["id"],
+        catalog=RpcSkillCatalogSnapshot()).model_dump_json(), flush=True)
+    print(RpcCommandFinished(command_id=command["id"],
+        command_type="get_skills", ok=True).model_dump_json(), flush=True)
 
 def report_stats(command, session_id=None, enabled=True):
     budget = ContextBudget(estimate=ContextEstimate(system_tokens=100,
@@ -344,6 +351,8 @@ for line in sys.stdin:
     command_id = command["id"]
     if command_type == "get_session_stats":
         report_stats(command)
+    elif command_type == "get_skills":
+        report_skills(command)
     elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command_id,
@@ -616,6 +625,8 @@ for line in sys.stdin:
     command_type = command["type"]
     if command_type == "get_session_stats":
         report_stats(command)
+    elif command_type == "get_skills":
+        report_skills(command)
     elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command["id"],
@@ -703,13 +714,14 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and b"Type a prompt below to start." in output
-                and command_types[:6]
+                and command_types[:7]
                 == [
                     "get_messages",
                     "get_connection_catalog",
                     "get_model_catalog",
                     "get_commands",
                     "get_state",
+                    "get_skills",
                     "get_queue_state",
                 ]
             ):
@@ -804,12 +816,13 @@ for line in sys.stdin:
         if command["type"] in {"prompt", "steer", "follow_up", "pop_queue", "cancel", "shutdown"}
     ]
     assert phase == "shutdown sent", bytes(output)
-    assert command_types[:6] == [
+    assert command_types[:7] == [
         "get_messages",
         "get_connection_catalog",
         "get_model_catalog",
         "get_commands",
         "get_state",
+        "get_skills",
         "get_queue_state",
     ]
     assert [command["type"] for command in lifecycle_commands] == [
@@ -918,6 +931,8 @@ for line in sys.stdin:
             command_id=command["id"], catalog=RpcConnectionCatalogSnapshot(),
         ))
         finish(command)
+    elif command_type == "get_skills":
+        report_skills(command)
     elif command_type == "get_messages":
         emit(RpcMessagesReported(
             command_id=command["id"],
@@ -1092,13 +1107,14 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and context_redrawn
-                and command_types[:6]
+                and command_types[:7]
                 == [
                     "get_messages",
                     "get_connection_catalog",
                     "get_model_catalog",
                     "get_commands",
                     "get_state",
+                    "get_skills",
                     "get_queue_state",
                 ]
                 and b"Type a prompt below to start." in output
@@ -1236,9 +1252,11 @@ from wisp.events import (
     RpcCommandDescriptor, RpcCommandFinished, RpcCommandsReported,
     RpcMessagesReported, RpcStateReported, RpcStateSnapshot,
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
-    CompactionStarted, CompactionCompleted, ContextEstimated,
+    CompactionStarted, CompactionCompleted, ContextEstimated, SkillInvoked,
+    RpcMcpStatusReported, RpcMcpStatusSnapshot, RpcMcpServerSnapshot,
 )
 from wisp.runtime.builtin_commands import builtin_command_descriptors
+from wisp.skills.models import SkillInvocationEvidence
 
 log_path = Path(sys.argv[1])
 mode = "plan"
@@ -1268,6 +1286,13 @@ for line in sys.stdin:
     if kind == "get_session_stats":
         report_stats(command, "context-session", auto_compaction)
         continue
+    elif kind == "get_skills":
+        report_skills(command)
+        continue
+    elif kind == "get_mcp_status":
+        emit(RpcMcpStatusReported(command_id=command["id"], status=RpcMcpStatusSnapshot(
+            servers=(RpcMcpServerSnapshot(name="search", status="connected",
+                tool_names=("mcp__search__query",)),))))
     elif kind == "get_messages":
         emit(RpcMessagesReported(command_id=command["id"], session_id="context-session",
                                  session_path=Path("/context-session.jsonl"),
@@ -1306,6 +1331,10 @@ for line in sys.stdin:
         continue
     elif kind == "prompt":
         active = command
+        emit(SkillInvoked(session_id="context-session", message_entry_id="skill-message",
+            invocation=SkillInvocationEvidence(name="review", original_content=command["prompt"],
+                request="keep running", content_sha256="0" * 64),
+            provider_content="EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT"))
         emit(ContextEstimated(turn=1, provider="fake", budget=ContextBudget(
             estimate=ContextEstimate(system_tokens=100, message_tokens=3800,
                 tool_schema_tokens=100, total_tokens=4000),
@@ -1429,7 +1458,7 @@ for line in sys.stdin:
                 phase = "cancel confirmed"
                 output.clear()
             elif phase == "cancel confirmed" and b"cancelled" in output:
-                os.write(terminal_fd, b"keep running\r")
+                os.write(terminal_fd, b"/skill:review keep running\r")
                 phase = "running"
                 output.clear()
             elif phase == "running" and b"queue steer:0 later:0" in output:
@@ -1448,13 +1477,42 @@ for line in sys.stdin:
                 phase = "cached closed"
                 output.clear()
             elif phase == "cached closed" and b"WISP" in output:
+                assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
+                os.write(terminal_fd, b"/mcp\r")
+                phase = "mcp"
+                output.clear()
+            elif phase == "mcp" and b"MCP servers" in output:
+                # The new overlay can reuse individual terminal cells from the
+                # transcript. Inspect a full frame, not differential writes.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
+                phase = "mcp ready"
+                output.clear()
+            elif phase == "mcp ready" and b"mcp__search__query" in output:
+                assert b"connected" in output
+                os.write(terminal_fd, b"r")
+                phase = "mcp refresh"
+                output.clear()
+            elif (
+                phase == "mcp refresh"
+                and sum(command["type"] == "get_mcp_status" for command in commands) == 2
+            ):
+                os.write(terminal_fd, b"\x03")
+                phase = "mcp closed"
+                output.clear()
+            elif phase == "mcp closed" and b"WISP" in output:
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 105, 0, 0))
+                phase = "prompt restored"
+                output.clear()
+            elif phase == "prompt restored" and b"/skill:review" in output and b"keep" in output:
+                assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/quit\r")
                 phase = "quit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
                 status = waited_status
                 break
-        assert status is not None, (phase, bytes(output))
+        if status is None:
+            pytest.fail(f"Rust TUI timed out in {phase!r}; output={bytes(output)!r}")
         assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
         assert phase == "quit", (phase, bytes(output))
         assert termios.tcgetattr(terminal_fd) == initial_terminal
@@ -1480,6 +1538,8 @@ for line in sys.stdin:
     ] == [False]
     compact = next(command for command in commands if command["type"] == "compact")
     assert compact["instructions"] == "Keep the constraints"
+    prompt = next(command for command in commands if command["type"] == "prompt")
+    assert prompt["prompt"] == "/skill:review keep running"
     cancel = next(command for command in commands if command["type"] == "cancel")
     assert cancel["target_id"] == compact["id"]
     assert all(command["persist_model_selection"] is False for command in configure)
@@ -1494,3 +1554,153 @@ for line in sys.stdin:
             "shutdown",
         }
     ] == ["prompt", "shutdown"]
+
+
+@pytest.mark.process
+def test_rust_tui_skill_browser_expands_through_python(tmp_path: Path) -> None:
+    binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
+    if binary_value is None:
+        pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
+    binary = Path(binary_value).resolve(strict=True)
+    project = tmp_path / "project"
+    skill = project / ".wisp" / "skills" / "0-review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        """---
+name: 0-review
+description: Inspect changes carefully
+---
+SKILL_EXPANSION_MARKER
+""",
+        encoding="utf-8",
+    )
+    session_dir = tmp_path / "sessions"
+    child_pid, terminal_fd = pty.fork()
+    if child_pid == 0:
+        os.chdir(project)
+        os.execve(
+            sys.executable,
+            [
+                sys.executable,
+                "-m",
+                "wisp",
+                "tui",
+                "--renderer",
+                "rust",
+                "--session-dir",
+                str(session_dir),
+            ],
+            {
+                **os.environ,
+                "WISP_PROVIDER": "fake",
+                "WISP_MODEL": "",
+                "WISP_RUST_TUI_BINARY": str(binary),
+                "WISP_TRUST": "1",
+            },
+        )
+    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 120, 0, 0))
+    initial_terminal = termios.tcgetattr(terminal_fd)
+    output = bytearray()
+    status: int | None = None
+    phase = "startup"
+    context_redrawn = False
+    deadline = time.monotonic() + 25
+    next_browser_frame = 0.0
+    browser_width = 121
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([terminal_fd], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(terminal_fd, 65536))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            if not context_redrawn and b"ctx" in output and b"~" in output:
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 121, 0, 0))
+                context_redrawn = True
+                output.clear()
+                continue
+            if (
+                phase == "startup"
+                and context_redrawn
+                and b"Type a prompt below to start." in output
+            ):
+                os.write(terminal_fd, b"/skills\r")
+                phase = "browser"
+                output.clear()
+            elif phase == "browser" and b"Skills" in output:
+                phase = "browser ready"
+                output.clear()
+            elif (
+                phase == "browser ready"
+                and b"Inspect changes carefully" in output
+                and b"Refreshing skills" not in output
+            ):
+                assert b"0-review" in output and b"project:wisp" in output
+                os.write(terminal_fd, b"\r")
+                phase = "inserted"
+                output.clear()
+            elif phase == "inserted" and b"/skill:0-review" in output:
+                # Selecting only inserts the directive. The user supplies and submits
+                # the request; the Python backend owns expansion and persistence.
+                assert not list(session_dir.glob("*.jsonl"))
+                os.write(terminal_fd, b"inspect this change\r")
+                phase = "submitted"
+                output.clear()
+            elif (
+                phase == "submitted"
+                and b"SKILL_EXPANSION_MARKER" in output
+                and output.rfind(b"idle") > output.rfind(b"running")
+            ):
+                # FakeProvider echoes its expanded input as assistant output.
+                os.write(terminal_fd, b"\x03")
+                phase = "quit"
+            if phase == "browser ready" and time.monotonic() >= next_browser_frame:
+                # Cached entries are visible before refresh settles. Require a full
+                # frame without the loading line before acting on its selection.
+                browser_width += 1
+                fcntl.ioctl(
+                    terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, browser_width, 0, 0)
+                )
+                next_browser_frame = time.monotonic() + 0.1
+                output.clear()
+            waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
+            if waited_pid == child_pid:
+                status = waited_status
+                break
+        if status is None:
+            pytest.fail(f"Rust TUI timed out in {phase!r}; output={bytes(output)!r}")
+        assert phase == "quit", (phase, bytes(output))
+        assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
+        assert termios.tcgetattr(terminal_fd) == initial_terminal
+    finally:
+        if status is None:
+            try:
+                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child_pid, 0)
+        os.close(terminal_fd)
+    entries = [
+        json.loads(line)
+        for path in session_dir.glob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    message = next(
+        entry["message"]
+        for entry in entries
+        if entry.get("kind") == "message" and entry["message"]["role"] == "user"
+    )
+    assert message["skill_invocation"]["original_content"] == (
+        "/skill:0-review inspect this change"
+    )
+    assert message["content"].startswith("[WISP EXPLICIT SKILL]\nSkill: 0-review")
+    assert "SKILL_EXPANSION_MARKER" in message["content"]
+    assert message["content"].endswith("[USER REQUEST]\ninspect this change")
+    # The autouse fixture's empty parent project must remain untouched.
+    assert not (Path.cwd() / ".wisp").exists()

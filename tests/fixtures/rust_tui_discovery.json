@@ -1,0 +1,137 @@
+{
+  "rpc.skills": {
+    "type": "rpc.skills",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "command_id": "skills-1",
+    "catalog": {
+      "entries": [
+        {
+          "name": "review",
+          "description": "Description for review",
+          "source": "project:wisp"
+        },
+        {
+          "name": "build",
+          "description": "Description for build",
+          "source": "project:agents"
+        },
+        {
+          "name": "docs",
+          "description": "Description for docs",
+          "source": "user:wisp"
+        },
+        {
+          "name": "explain",
+          "description": "Description for explain",
+          "source": "user:agents"
+        },
+        {
+          "name": "teach",
+          "description": "Description for teach",
+          "source": "package:wisp"
+        }
+      ],
+      "diagnostics": [
+        {
+          "code": "shadowed",
+          "severity": "warning",
+          "message": "A higher-priority skill was selected.",
+          "source": "user:wisp",
+          "path": "/skills/review/SKILL.md"
+        },
+        {
+          "code": "invalid-metadata",
+          "severity": "error",
+          "message": "Invalid metadata for this skill.",
+          "source": "project:agents",
+          "path": null
+        }
+      ],
+      "project_trusted": true
+    }
+  },
+  "skill.catalog.updated": {
+    "type": "skill.catalog.updated",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "catalog": {
+      "entries": [
+        {
+          "name": "review",
+          "description": "Description for review",
+          "source": "project:wisp"
+        },
+        {
+          "name": "build",
+          "description": "Description for build",
+          "source": "project:agents"
+        },
+        {
+          "name": "docs",
+          "description": "Description for docs",
+          "source": "user:wisp"
+        },
+        {
+          "name": "explain",
+          "description": "Description for explain",
+          "source": "user:agents"
+        },
+        {
+          "name": "teach",
+          "description": "Description for teach",
+          "source": "package:wisp"
+        }
+      ],
+      "diagnostics": [
+        {
+          "code": "shadowed",
+          "severity": "warning",
+          "message": "A higher-priority skill was selected.",
+          "source": "user:wisp",
+          "path": "/skills/review/SKILL.md"
+        },
+        {
+          "code": "invalid-metadata",
+          "severity": "error",
+          "message": "Invalid metadata for this skill.",
+          "source": "project:agents",
+          "path": null
+        }
+      ],
+      "project_trusted": true
+    }
+  },
+  "rpc.mcp": {
+    "type": "rpc.mcp",
+    "schema_version": 36,
+    "timestamp": "2026-09-11T00:00:00Z",
+    "command_id": "mcp-1",
+    "status": {
+      "servers": [
+        {
+          "name": "search",
+          "status": "connected",
+          "tool_names": [
+            "mcp__search__query"
+          ],
+          "error": null
+        },
+        {
+          "name": "files",
+          "status": "disconnected",
+          "tool_names": [
+            "mcp__files__read"
+          ],
+          "error": null
+        },
+        {
+          "name": "offline",
+          "status": "unavailable",
+          "tool_names": [],
+          "error": "Server startup failed"
+        }
+      ]
+    }
+  }
+}

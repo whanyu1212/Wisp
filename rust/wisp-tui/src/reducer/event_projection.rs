@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use super::{
     BackendEvent, MessageContentKind, PendingApproval, QUEUE_CONTENT_BYTES_LIMIT,
@@ -49,12 +50,62 @@ pub enum EventProjectionError {
     OversizedQueueContent { event_type: String },
 }
 
+pub(super) const DISCOVERY_REPORT_MAX_BYTES: usize = 1024 * 1024;
+
+/// Count the serialized payload without allocating another unbounded copy.
+struct DiscoveryBudget(usize);
+
+impl std::io::Write for DiscoveryBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("discovery report exceeds retention limit"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn discovery_report<T>(
+    value: &Value,
+    project: impl FnOnce() -> Option<T>,
+) -> Result<Arc<T>, String> {
+    if serde_json::to_writer(DiscoveryBudget(DISCOVERY_REPORT_MAX_BYTES), value).is_err() {
+        return Err("Discovery report exceeds the 1 MiB display limit. Press r to retry.".into());
+    }
+    project()
+        .map(Arc::new)
+        .ok_or_else(|| "Discovery report could not be displayed. Press r to retry.".into())
+}
+
 impl BackendEvent {
     /// Project an already validated live event into reducer-owned semantics.
     pub fn from_live(event: &WispCurrentLiveEventOutput) -> Result<Self, EventProjectionError> {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
+            "rpc.skills" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let catalog =
+                    discovery_report(&value["catalog"], || event.skill_catalog(&command_id));
+                return Ok(Self::SkillCatalogReported {
+                    command_id,
+                    catalog,
+                });
+            }
+            "skill.catalog.updated" => {
+                return Ok(Self::SkillCatalogUpdated(discovery_report(
+                    &value["catalog"],
+                    || event.updated_skill_catalog(),
+                )));
+            }
+            "rpc.mcp" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let status = discovery_report(&value["status"], || event.mcp_status(&command_id));
+                return Ok(Self::McpStatusReported { command_id, status });
+            }
             "session.stats" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let mut stats = event.session_stats(&command_id).ok_or_else(|| {
@@ -231,6 +282,9 @@ impl BackendEvent {
                 super::SESSION_NOTICE_MAX_BYTES,
             )),
             "rpc.model_catalog"
+            | "rpc.skills"
+            | "skill.catalog.updated"
+            | "rpc.mcp"
             | "rpc.commands"
             | "rpc.state"
             | "session.stats"
