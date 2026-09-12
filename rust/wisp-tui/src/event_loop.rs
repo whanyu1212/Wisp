@@ -28,6 +28,13 @@ pub(super) struct Sources<'a> {
     pub writer: &'a mut WriterOutcome,
 }
 
+fn captured_event_prefix(sources: &Sources<'_>) -> usize {
+    // Queue capacity is consumed at reserve(), before the reader decodes the
+    // frame. len() alone would let input overtake that admitted event.
+    sources.events.max_capacity() - sources.events.capacity()
+        + usize::from(sources.ready_event.is_some())
+}
+
 // No input is processed between capture and apply. A workflow revision therefore
 // identifies its selection as well as its owner, including remove/recreate cycles.
 // Never snapshot the connection panel or its secret input buffer.
@@ -274,7 +281,7 @@ pub(super) async fn run<B: Backend>(
                     pending_input = Some(PendingInput::capture(
                         input,
                         ui,
-                        sources.events.len() + usize::from(sources.ready_event.is_some()),
+                        captured_event_prefix(&sources),
                     ))
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(Exit::User),
@@ -354,7 +361,7 @@ pub(super) async fn run<B: Backend>(
             }
             input = sources.inputs.recv(), if pending_input.is_none() && !eof => {
                 match input {
-                    Some(input) => pending_input = Some(PendingInput::capture(input, ui, sources.events.len())),
+                    Some(input) => pending_input = Some(PendingInput::capture(input, ui, captured_event_prefix(&sources))),
                     None => return Ok(Exit::User),
                 }
             }

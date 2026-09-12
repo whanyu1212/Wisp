@@ -580,3 +580,60 @@ async fn a_stale_denial_cannot_become_text_after_approval_or_trust_finishes() {
         assert!(commands.try_recv().is_err());
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn input_waits_for_a_reserved_event_that_has_not_been_published() {
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.dispatch(approval("old"), &writer, 8192).await.unwrap();
+    draw(&mut ui);
+    let budget = Arc::new(Semaphore::new(64));
+    let (events_tx, mut events) = mpsc::channel(64);
+    let reserved = events_tx.reserve_owned().await.unwrap();
+    assert_eq!(events.len(), 0);
+    assert_eq!(events.capacity(), 63);
+    let publisher = tokio::spawn(async move {
+        // The main task captures input before this simulated decode finishes.
+        tokio::task::yield_now().await;
+        let UiAction::BackendEvent(event) = approval("replacement") else {
+            unreachable!()
+        };
+        reserved.send(queued(event, &budget).await);
+    });
+    let (inputs_tx, mut inputs) = mpsc::channel(16);
+    inputs_tx.send(key(KeyCode::Char('y'))).await.unwrap();
+    inputs_tx
+        .send(Input::Error(std::io::Error::other("test stop")))
+        .await
+        .unwrap();
+    let (_reader_tx, reader_rx) = oneshot::channel();
+    let (_writer_tx, writer_rx) = oneshot::channel();
+    let mut reader = Some(reader_rx);
+    let mut writer_outcome = Some(writer_rx);
+    let mut ready_event = None;
+    let result = run(
+        &mut ui,
+        &mut Terminal::new(TestBackend::new(100, 24)).unwrap(),
+        &connection(),
+        Sources {
+            events: &mut events,
+            ready_event: &mut ready_event,
+            inputs: &mut inputs,
+            reader: &mut reader,
+            writer: &mut writer_outcome,
+        },
+        &writer,
+        8192,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Io(_))));
+    assert!(
+        commands.try_recv().is_err(),
+        "input must not approve the old decision before the reserved event arrives"
+    );
+    assert_eq!(
+        ui.state.pending_approval.as_ref().unwrap().call_id,
+        "replacement"
+    );
+    publisher.await.unwrap();
+}

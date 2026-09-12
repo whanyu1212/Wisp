@@ -35,7 +35,8 @@ that an arbitrarily long session has bounded RSS.
 Each turn checks transport outcomes and external SIGINT, dispatches at most eight FIFO events,
 handles at most one input, and offers at most one due redraw. The input channel holds at most
 16 items, with at most one additional pending input. On dequeue, that input captures the finite
-admitted event-prefix length; subsequently admitted events cannot extend its barrier.
+admitted event-prefix length, including the reader's reserved slot while decoding; subsequently
+admitted events cannot extend its barrier.
 
 The pending input retains its original workflow revision, decision/entry identity and painted
 selection, or mouse geometry. A redraw during the barrier cannot authorize an unseen or replacement
@@ -67,7 +68,7 @@ secret cleanup, remaining lifecycle races and platform recovery remain under #46
 
 ## Local verification
 
-The full Rust workspace passed 602 tests with all features. Cargo formatting and Clippy passed.
+The full Rust workspace passed 603 tests with all features. Cargo formatting and Clippy passed.
 The handoff suite passed all 34 cases; the four pressure cases were rerun against the rebuilt binary
 after the final signal and fatal-drain fixes. Shared traces/RPC contract checks passed (including the
 new four-way parametrized trace), and process-retention/shared-trace checks passed 229 cases with
