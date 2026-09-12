@@ -1557,7 +1557,9 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
-            elif phase == "compacting" and b"Compacting (manual)" in output:
+            elif phase == "compacting" and b"compacting" in output:
+                # Header status is contiguous; the reason line can arrive as
+                # cell-level diffs against the previous identity details.
                 os.write(terminal_fd, b"\x03")
                 phase = "cancelled"
                 output.clear()

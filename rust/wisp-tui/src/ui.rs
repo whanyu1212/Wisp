@@ -1035,6 +1035,10 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
             ),
             "Ctrl+G help".into(),
         ]
+    } else if matches!(state.view_status, ViewStatus::Running)
+        || state.interaction_status == crate::reducer::InteractionStatus::Compacting
+    {
+        vec!["Esc/Ctrl-C cancels".into(), "Ctrl+G help".into()]
     } else {
         vec![
             format!("{} send", primary_label(bindings, KeyAction::Submit)),
@@ -1499,6 +1503,13 @@ mod tests {
         assert!(running.contains("Alt+Enter later"));
         assert!(running.contains("working"));
         assert!(!running.contains("running"));
+
+        state.current_command = None;
+        state.interaction_status = InteractionStatus::Compacting;
+        let compacting = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(compacting.contains("Esc/Ctrl-C cancels"));
+        assert!(compacting.contains("compacting"));
+        assert!(!compacting.contains("Enter send"));
     }
 
     #[test]
