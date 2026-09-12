@@ -51,7 +51,6 @@ The [Rust terminal frontend boundary](./rust-tui-boundary) records the process t
 ownership, migration map, compatibility rules, failure ownership, and the closed [#470](https://github.com/whanyu1212/Wisp/issues/470)
 renderer decision. Textual remains the default and supported frontend. Rust is an experimental
 opt-in, not a shipped or default interface. Supported opt-in (stage 3) requires
-[#467](https://github.com/whanyu1212/Wisp/issues/467),
 [#468](https://github.com/whanyu1212/Wisp/issues/468), and
 [#469](https://github.com/whanyu1212/Wisp/issues/469). A later default switch requires a new
 explicit issue.

@@ -168,7 +168,7 @@ module graph or translate Textual widgets line by line.
 | Model lookup, ambiguity handling, effort filtering, selection persistence | `rpc/configure.py`, provider catalog, settings | Rust renders the backend catalog and requests persistence through `configure`; Python applies and saves resolved selections. Textual retains its existing persistence path. |
 | Credential status, API-key persistence, disconnect, device-code login | `tui/auth_commands.py`, `tui/connections.py` | Move behind the secure Python contract in #461. Rust owns masked entry and progress presentation only. |
 | Protected-path-aware snapshots and local path ranking | `project_files.py`, `rpc/project_files.py`, `tui/file_index.py` | Shared Python traversal now serves `get_project_files`; Rust ranks safe relative paths locally and does not walk the workspace. |
-| Update checking, install capability, and update execution | `tui/update_commands.py`, `wisp.update_check` | Keep Python-owned. Rust presents notices and requests supported actions according to the launcher/distribution contract. |
+| Update checking, install capability, and update execution | `tui/update_commands.py`, `wisp.update_check` | Keep Python-owned. Rust `/update [check|install]` shows external instructions without network/install/restart. Automated notices and coordinated binary install/update/rollback remain #469. |
 | Terminal lifecycle, composer, overlays, pickers, mouse, focus, resize | Textual app, controllers, and widgets | Reimplement behavior in Rust. Do not port Textual private APIs, CSS, widget identity, or compositor workarounds. |
 | Streaming cadence, transcript window, history viewport, card identity | Textual stream/history/transcript controllers | Reimplement bounded client-side state in Rust and validate semantic behavior with #459 traces. |
 | Markdown, tool output, file results, process cards, and diffs | TUI presentation helpers and widgets | Reimplement bounded presentation from structured events. Execution and process lifecycle remain Python-owned. |
@@ -245,33 +245,51 @@ cleanup, transfer semantic authority, or permit unbounded cleanup.
 
 ## Feature-parity matrix
 
-Rows are classified for promotion past experimental opt-in, not as a claim that Rust is unfinished
-as a stage-2 experiment. **Blocker for stage 3** means supported opt-in is not authorized until the
-owning issue lands. **Acceptable difference** is an intentional or documented gap that does not by
-itself block remaining at stage 2. **Deferred noncritical** is polish that can wait after stage 3.
+Reconciled on **2026-09-12** from main
+[`a7cc3a3`](https://github.com/whanyu1212/Wisp/commit/a7cc3a376b26dbfb5b80a6f071274d77418d5f6b),
+through [#548](https://github.com/whanyu1212/Wisp/pull/548), plus the #467 daily-use readiness changes
+in this tree. The [acceptance inventory](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_daily_use_readiness.md) records
+focused evidence and remaining gates; it is not a comparative benchmark or broad hardening pass. The September 3 measurements in
+`benchmarks/rust_tui_acceptance_evidence.md` remain historical evidence.
 
-| Surface | Status | Classification |
+**Implemented** means the feature and its focused regression coverage are present in this tree; it does not
+certify every acceptance criterion in #467 or #468. **Blocker for stage 3** means the owning
+readiness work must be completed before supported opt-in. **Acceptable while experimental** records
+a current limitation without approving it for a default switch or Textual removal. **Deferred
+noncritical** work can wait after stage 3.
+
+| Surface | Current Rust behavior | Evidence / remaining gate |
 |---|---|---|
-| Prompts, approvals, trust, cancel, steering and follow-up queues | Present in Rust | Acceptable difference while experimental |
-| Virtual Markdown, tool-card, and structured-diff transcript | Present in Rust | Acceptable difference while experimental |
-| Bounded history paging, `/resume`, `/new` | Present in Rust | Acceptable difference while experimental |
-| `/clone`, `/tree`, `/unrevert`, `/name` | Present in Rust; not in Textual | Acceptable difference |
-| `/connect` API-key and device-code flows | Present in Rust | Acceptable difference while experimental |
-| Live RPC v6 / event schema v37 lockstep | Enforced at handshake | Acceptable difference while experimental |
-| Keyboard-only operation; no mouse | Intentional | Acceptable difference |
-| No transcript search | Intentional while experimental | Acceptable difference |
-| No automatic fallback to Textual | Intentional; #470 closed this way | Acceptable difference |
-| Source-build only; no wheel binary | Current packaging | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)) |
-| Windows | Rejected before binary resolution | Acceptable difference; not a claimed target |
-| Model/effort picker interaction | Backend-driven keyboard picker, typed model/provider commands, saved defaults | Implemented; remaining command-workflow parity is tracked in [#467](https://github.com/whanyu1212/Wisp/issues/467) |
-| Protected-path-aware file suggestions | Bounded snapshot RPC implemented; Rust picker UI remains | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
-| `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, and graceful exit are present in Rust | Acceptable difference while experimental |
-| Transcript-preserving popups | Conversation drawn first, then one focused popup; decisions preempt popups | Implemented; minimum-size and compact decision layouts can cover the conversation |
-| Skills and MCP status UX | Typed catalogs must come from Python | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467)) |
-| Configurable keybindings, themes, prompt-history search | Frontend-local | Blocker for stage 3 ([#467](https://github.com/whanyu1212/Wisp/issues/467), [#445](https://github.com/whanyu1212/Wisp/issues/445)) |
-| Fuzz, backpressure, terminal sanitization, panic/PTY restore | Incomplete | Blocker for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
-| Narrow-layout and mouse polish | Not required for stage 2 | Deferred noncritical |
-| Comparative PTY input-to-frame vs Textual | No dual-renderer harness | Stop condition against a default switch; not claimed |
+| Prompts, approvals, trust, cancel, steering and follow-up queues | Implemented | Foundations in [#464](https://github.com/whanyu1212/Wisp/issues/464) and [#466](https://github.com/whanyu1212/Wisp/issues/466); pressure and lifecycle acceptance remains #468 |
+| Virtual Markdown, tool-card, and structured-diff transcript | Implemented | [#465](https://github.com/whanyu1212/Wisp/issues/465); terminal-safety and pressure acceptance remains #468 |
+| Bounded history paging, `/resume`, `/new` | Implemented | [#466](https://github.com/whanyu1212/Wisp/issues/466) |
+| `/clone`, `/tree`, `/unrevert`, `/name` | Implemented in Rust; not exposed in Textual | [#466](https://github.com/whanyu1212/Wisp/issues/466); intentional frontend difference |
+| `/connect` API-key and device-code flows | Implemented | [#497](https://github.com/whanyu1212/Wisp/pull/497); secret-lifecycle hardening remains #468 |
+| Live RPC v6 / event schema v37 lockstep | Enforced at handshake | [#544](https://github.com/whanyu1212/Wisp/pull/544); no older live-contract negotiation |
+| Model/provider/effort selection | Backend-driven picker, typed commands, saved defaults | Implemented in [#538](https://github.com/whanyu1212/Wisp/pull/538) |
+| `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, graceful exit | Implemented in [#539](https://github.com/whanyu1212/Wisp/pull/539) |
+| Context/cost visibility and compaction | `/context`, automatic-compaction controls, `/compact` | Implemented in [#540](https://github.com/whanyu1212/Wisp/pull/540) |
+| Skills and MCP status | Typed backend catalogs, skill insertion/completion, MCP status and refresh | Implemented in [#541](https://github.com/whanyu1212/Wisp/pull/541); MCP reconnect controls are outside this slice |
+| Prompt-history search | `/history` and Ctrl+R restore exact prompts; bounded and process-local | Implemented in [#542](https://github.com/whanyu1212/Wisp/pull/542); not persisted history or transcript search |
+| Transcript-preserving popups | Conversation drawn first, focused popup last; decisions preempt popups | Implemented in [#545](https://github.com/whanyu1212/Wisp/pull/545); minimum-size popups can cover the conversation |
+| Protected-path-aware file suggestions | Python snapshot RPC; Rust fuzzy/tree picker inserts references without reading files | Implemented in [#544](https://github.com/whanyu1212/Wisp/pull/544) and [#546](https://github.com/whanyu1212/Wisp/pull/546); [#462](https://github.com/whanyu1212/Wisp/issues/462) is closed |
+| Themes and presentation preferences | Shared palettes and `tui.json`, preview/apply/cancel, Ctrl+T, `NO_COLOR` | Implemented in [#547](https://github.com/whanyu1212/Wisp/pull/547); does not implement configurable bindings |
+| Mouse navigation | Opt-in wheel scrolling, row selection, outside-click dismissal, composer cursor positioning | Implemented in [#548](https://github.com/whanyu1212/Wisp/pull/548); off by default; approval/trust decisions remain keyboard-only |
+| Configurable actions and keybindings | Implemented in Rust; stable IDs, user-only overrides, resolved hints and Ctrl+G help | #445 / #467; Textual retains its existing binding engine |
+| Update notice/install/restart UX | Rust `/update [check\|install]` provides external instructions; Textual retains its integrated flow | Explicit alternative for #467; automatic notices and coordinated binary install/update/rollback remain [#469](https://github.com/whanyu1212/Wisp/issues/469) |
+| Essential layout, editing, and focus acceptance | Consolidated feature regressions plus configured-input/help/paste launcher PTYs | #467 acceptance inventory; broad adversarial and terminal coverage remains #468; decorative polish is deferred noncritical |
+| Large-paste presentation | Compact markers with bounded display metadata; exact raw submission/history/queues | #467 editor, reducer, rendering and PTY regressions; historical replay stays raw |
+| Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Acceptable while experimental; assess accessibility and copying workflows before a default switch |
+| Fuzz, backpressure, terminal/secret hygiene, fault recovery | Bounded transport, sanitization, shared traces, and baseline PTY/supervision tests exist | Complete adversarial acceptance remains a blocker for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
+| Prebuilt binary distribution and install lifecycle | Source-build only; no shipped binary | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)); artifact integrity, install/update/rollback and target coverage remain |
+| Windows | Rejected before binary resolution | Acceptable while experimental; not a claimed Rust target |
+| No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
+| Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Gates against a default switch under [#456](https://github.com/whanyu1212/Wisp/issues/456); in-process frame timings do not satisfy them |
+
+The remaining stage-3 work is hardening (#468) and distribution (#469), including coordinated updates.
+Closing those issues does not itself authorize a default switch or Textual deprecation. Optional
+experience improvements under [#237](https://github.com/whanyu1212/Wisp/issues/237), including draft
+stash, activity views, and the separate image-attachment roadmap, are not automatic parity blockers.
 
 ## Relationship to existing work
 
@@ -283,16 +301,15 @@ itself block remaining at stage 2. **Deferred noncritical** is polish that can w
   model, authentication, and settings semantics instead of creating frontend-only policy.
 - [#409](https://github.com/whanyu1212/Wisp/issues/409) coordinates package boundaries and any
   evidence-based lightweight distribution decision.
-- [#418](https://github.com/whanyu1212/Wisp/issues/418) continues to own Textual architecture and
-  performance work while Textual is supported.
+- [#418](https://github.com/whanyu1212/Wisp/issues/418) keeps Textual reliable as the supported
+  default and explicit fallback; broad Textual-only restructuring is deferred.
 - [#442](https://github.com/whanyu1212/Wisp/issues/442) supplies the near-term Textual input-latency
   baseline used for a later comparison.
 - [#443](https://github.com/whanyu1212/Wisp/issues/443) remains a Textual synchronized-frame
   experiment rather than a prerequisite for Rust.
-- [#445](https://github.com/whanyu1212/Wisp/issues/445) should define stable action identifiers that
-  can inform frontend-local keymaps without sharing renderer implementation.
-- [#467](https://github.com/whanyu1212/Wisp/issues/467),
-  [#468](https://github.com/whanyu1212/Wisp/issues/468), and
+- [#445](https://github.com/whanyu1212/Wisp/issues/445) supplies stable action identifiers and
+  Rust-local keymaps without sharing renderer implementation.
+- [#468](https://github.com/whanyu1212/Wisp/issues/468), and
   [#469](https://github.com/whanyu1212/Wisp/issues/469) are the remaining blockers for supported
   opt-in (stage 3). They do not reopen the #470 default-renderer decision.
 - [#470](https://github.com/whanyu1212/Wisp/issues/470) is the closed decision to remain at
@@ -305,15 +322,16 @@ obligation. Shipping platform binaries would add a separate distribution cost; #
 and is not done. Those costs are accepted only while Rust stays experimental. They do not justify
 moving unrelated Python systems.
 
-#470 closed as a stage-2 hold because several reconsideration conditions still hold:
+#470 closed as a stage-2 hold. After the daily-use readiness work, the remaining reconsideration conditions are:
 
 - there is no comparative PTY input-to-frame measurement against Textual;
-- UX parity for file suggestions, skills, MCP, and keybindings is incomplete
-  ([#467](https://github.com/whanyu1212/Wisp/issues/467));
 - hardening, backpressure, and terminal-safety evidence is incomplete
   ([#468](https://github.com/whanyu1212/Wisp/issues/468));
 - supported platforms cannot install the frontend without a local Rust toolchain
   ([#469](https://github.com/whanyu1212/Wisp/issues/469)).
+
+Supported opt-in feedback and an explicit support/accessibility/rollback decision remain required
+before default promotion. The latest merged feature checks do not replace those rollout gates.
 
 A default-renderer proposal remains out of scope until those conditions are re-measured. Textual
 removal always requires a separate explicit issue; #470 did not file one.

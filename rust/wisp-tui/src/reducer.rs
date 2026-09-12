@@ -43,6 +43,8 @@ const SESSION_NOTICE_MAX_BYTES: usize = 1024;
 pub const API_KEY_MAX_BYTES: usize = 8_192;
 pub const QUEUE_MESSAGE_LIMIT: usize = 100;
 pub const QUEUE_CONTENT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
+const QUEUE_ECHO_PRESENTATION_LIMIT: usize = 32;
+const QUEUE_ECHO_PRESENTATION_BYTES_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionIdentity {
@@ -435,6 +437,7 @@ pub struct PendingApproval {
 pub struct QueuedMessage {
     pub content: String,
     pub local_order: Option<u64>,
+    local_display: Option<String>,
     identity: u64,
 }
 
@@ -483,6 +486,7 @@ impl QueueState {
                 replacement.push(QueuedMessage {
                     content,
                     local_order: None,
+                    local_display: None,
                     identity,
                 });
                 new_identities.push(identity);
@@ -492,13 +496,21 @@ impl QueueState {
         new_identities
     }
 
-    fn assign_local_order(&mut self, kind: QueueKind, identity: u64, local_order: u64) {
+    fn assign_local_metadata(
+        &mut self,
+        kind: QueueKind,
+        identity: u64,
+        local_order: u64,
+        local_display: Option<String>,
+    ) {
         if let Some(message) = self
             .messages_mut(kind)
             .iter_mut()
             .find(|message| message.identity == identity)
         {
             message.local_order = Some(local_order);
+            message.local_display =
+                local_display.filter(|display| !display.is_empty() && display != &message.content);
         }
     }
 
@@ -508,16 +520,12 @@ impl QueueState {
             .any(|message| message.identity == identity && message.content == content)
     }
 
-    fn remove_first(&mut self, kind: QueueKind, content: &str) -> bool {
+    fn remove_first(&mut self, kind: QueueKind, content: &str) -> Option<QueuedMessage> {
         let messages = self.messages_mut(kind);
-        let Some(index) = messages
+        let index = messages
             .iter()
-            .position(|message| message.content == content)
-        else {
-            return false;
-        };
-        messages.remove(index);
-        true
+            .position(|message| message.content == content)?;
+        Some(messages.remove(index))
     }
 
     fn remove_last(&mut self, kind: QueueKind, content: &str) -> bool {
@@ -557,6 +565,12 @@ impl QueueState {
         let kind = self.newest_kind()?;
         self.messages(kind).last().map(|message| (kind, message))
     }
+
+    fn clear_local_presentations(&mut self) {
+        for message in self.steering.iter_mut().chain(self.follow_up.iter_mut()) {
+            message.local_display = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -569,8 +583,10 @@ pub enum QueueRemovalOperation {
 struct PendingQueueSubmission {
     kind: QueueKind,
     content: String,
+    local_display: Option<String>,
     local_order: u64,
     observed_queue_update: bool,
+    completion: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1049,6 +1065,10 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
+    SubmitPresented {
+        content: String,
+        presentation: String,
+    },
     LoadSkills,
     LoadMcpStatus,
     SetProjectFilesOpen(bool),
@@ -1056,7 +1076,15 @@ pub enum UiAction {
     ConfigureAutoCompaction(bool),
     Compact(Option<String>),
     Steer(String),
+    SteerPresented {
+        content: String,
+        presentation: String,
+    },
     FollowUp(String),
+    FollowUpPresented {
+        content: String,
+        presentation: String,
+    },
     RestoreNewestQueueDraft,
     RefreshQueueState,
     StartupHydration,
@@ -1216,9 +1244,25 @@ pub fn reduce(
             Ok(context::configure_auto(state, enabled, ids)?)
         }
         UiAction::Compact(instructions) => Ok(context::compact(state, instructions, ids)?),
-        UiAction::Submit(content) => submit(state, content, ids),
-        UiAction::Steer(content) => queue_submission(state, QueueKind::Steering, content, ids),
-        UiAction::FollowUp(content) => queue_submission(state, QueueKind::FollowUp, content, ids),
+        UiAction::Submit(content) => submit(state, content, None, ids),
+        UiAction::SubmitPresented {
+            content,
+            presentation,
+        } => submit(state, content, Some(presentation), ids),
+        UiAction::Steer(content) => {
+            queue_submission(state, QueueKind::Steering, content, None, ids)
+        }
+        UiAction::SteerPresented {
+            content,
+            presentation,
+        } => queue_submission(state, QueueKind::Steering, content, Some(presentation), ids),
+        UiAction::FollowUp(content) => {
+            queue_submission(state, QueueKind::FollowUp, content, None, ids)
+        }
+        UiAction::FollowUpPresented {
+            content,
+            presentation,
+        } => queue_submission(state, QueueKind::FollowUp, content, Some(presentation), ids),
         UiAction::RestoreNewestQueueDraft => restore_newest_queue_draft(state, ids),
         UiAction::RefreshQueueState => refresh_queue_state(ids),
         UiAction::StartupHydration => start_startup_hydration(state, ids),
@@ -1291,6 +1335,10 @@ pub fn reduce(
             state.mode_change = None;
             state.mode_read = None;
             state.command_catalog_read = None;
+            state.queue.clear_local_presentations();
+            for pending in state.pending_queue_submissions.values_mut() {
+                pending.local_display = None;
+            }
             state.view_status = ViewStatus::Error;
             state.transcript.finish_active_response();
             state
@@ -1307,6 +1355,7 @@ pub fn reduce(
 fn submit(
     state: &mut UiState,
     content: String,
+    local_display: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     if state.configuration_active() {
@@ -1347,7 +1396,9 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state.transcript.append_prompt(content.clone());
+    state
+        .transcript
+        .append_prompt_with_display(content.clone(), local_display);
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
@@ -1359,6 +1410,7 @@ fn queue_submission(
     state: &mut UiState,
     kind: QueueKind,
     content: String,
+    local_display: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     if let Err(error) = state.queue_submission_preflight(&content) {
@@ -1385,10 +1437,13 @@ fn queue_submission(
         PendingQueueSubmission {
             kind,
             content,
+            local_display,
             local_order,
             observed_queue_update: false,
+            completion: None,
         },
     );
+    enforce_queue_echo_presentation_budget(state);
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -1441,6 +1496,95 @@ fn clear_queue_cache(state: &mut UiState) {
     state.queue = QueueState::default();
     state.pending_queue_submissions.clear();
     state.pending_queue_restore = None;
+}
+
+enum QueueEchoPresentationLocation {
+    Queued { kind: QueueKind, identity: u64 },
+    Pending { command_id: String },
+}
+
+fn enforce_queue_echo_presentation_budget(state: &mut UiState) {
+    loop {
+        let mut retained_count = 0usize;
+        let mut retained_bytes = 0usize;
+        let mut oldest: Option<(u64, QueueEchoPresentationLocation)> = None;
+        for (kind, message) in state
+            .queue
+            .steering
+            .iter()
+            .map(|message| (QueueKind::Steering, message))
+            .chain(
+                state
+                    .queue
+                    .follow_up
+                    .iter()
+                    .map(|message| (QueueKind::FollowUp, message)),
+            )
+        {
+            let Some(display) = message.local_display.as_ref() else {
+                continue;
+            };
+            retained_count = retained_count.saturating_add(1);
+            retained_bytes = retained_bytes
+                .saturating_add(message.content.len())
+                .saturating_add(display.len());
+            let order = message.local_order.unwrap_or(u64::MAX);
+            if oldest.as_ref().is_none_or(|(oldest, _)| order < *oldest) {
+                oldest = Some((
+                    order,
+                    QueueEchoPresentationLocation::Queued {
+                        kind,
+                        identity: message.identity,
+                    },
+                ));
+            }
+        }
+        for (command_id, pending) in &state.pending_queue_submissions {
+            let Some(display) = pending.local_display.as_ref() else {
+                continue;
+            };
+            retained_count = retained_count.saturating_add(1);
+            retained_bytes = retained_bytes
+                .saturating_add(pending.content.len())
+                .saturating_add(display.len());
+            if oldest
+                .as_ref()
+                .is_none_or(|(oldest, _)| pending.local_order < *oldest)
+            {
+                oldest = Some((
+                    pending.local_order,
+                    QueueEchoPresentationLocation::Pending {
+                        command_id: command_id.clone(),
+                    },
+                ));
+            }
+        }
+        if retained_count <= QUEUE_ECHO_PRESENTATION_LIMIT
+            && retained_bytes <= QUEUE_ECHO_PRESENTATION_BYTES_LIMIT
+        {
+            break;
+        }
+        let Some((_, oldest)) = oldest else {
+            break;
+        };
+        match oldest {
+            QueueEchoPresentationLocation::Queued { kind, identity } => {
+                if let Some(message) = state
+                    .queue
+                    .messages_mut(kind)
+                    .iter_mut()
+                    .find(|message| message.identity == identity)
+                {
+                    message.local_display = None;
+                }
+            }
+            QueueEchoPresentationLocation::Pending { command_id } => {
+                if let Some(pending) = state.pending_queue_submissions.get_mut(&command_id) {
+                    pending.local_display = None;
+                }
+            }
+        }
+    }
 }
 
 fn begin_session_operation(state: &UiState) -> Result<Option<Vec<UiEffect>>, ReduceError> {
@@ -3360,11 +3504,21 @@ fn apply_queue_update(state: &mut UiState, steering: Vec<String>, follow_up: Vec
             continue;
         };
         let identity = candidates.remove(index);
-        state.queue.assign_local_order(kind, identity, local_order);
-        if let Some(pending) = state.pending_queue_submissions.get_mut(&command_id) {
-            pending.observed_queue_update = true;
-        }
+        let local_display = state
+            .pending_queue_submissions
+            .get_mut(&command_id)
+            .and_then(|pending| {
+                pending.observed_queue_update = true;
+                pending.local_display.take()
+            });
+        state
+            .queue
+            .assign_local_metadata(kind, identity, local_order, local_display);
     }
+    state
+        .pending_queue_submissions
+        .retain(|_, pending| pending.completion != Some(true) || !pending.observed_queue_update);
+    enforce_queue_echo_presentation_budget(state);
 }
 
 fn finish_pending_queue_restore(state: &mut UiState) -> Vec<UiEffect> {
@@ -3400,6 +3554,12 @@ fn handle_queue_items_removed(
     steering: Vec<String>,
     follow_up: Vec<String>,
 ) -> Vec<UiEffect> {
+    if operation == QueueRemovalOperation::Clear {
+        state.queue.clear_local_presentations();
+        for pending in state.pending_queue_submissions.values_mut() {
+            pending.local_display = None;
+        }
+    }
     let pending_kind = {
         let Some(pending) = state.pending_queue_restore.as_ref() else {
             return Vec::new();
@@ -3434,21 +3594,30 @@ fn handle_queue_command_finished(
     command_type: String,
     ok: bool,
 ) -> Option<Vec<UiEffect>> {
-    if let Some(pending) = state.pending_queue_submissions.remove(&command_id) {
+    if let Some(pending) = state.pending_queue_submissions.get_mut(&command_id) {
         let expected_command_type = match pending.kind {
             QueueKind::Steering => "steer",
             QueueKind::FollowUp => "follow_up",
         };
         if expected_command_type != command_type {
-            state.pending_queue_submissions.insert(command_id, pending);
             return None;
         }
+        if pending.completion.is_some() {
+            return Some(Vec::new());
+        }
+        pending.completion = Some(ok);
+        let content = pending.content.clone();
+        let local_order = pending.local_order;
+        let observed = pending.observed_queue_update;
+        if !ok || observed {
+            state.pending_queue_submissions.remove(&command_id);
+        }
         return Some(if ok {
-            vec![UiEffect::RecordPromptHistory(pending.content)]
+            vec![UiEffect::RecordPromptHistory(content)]
         } else {
             vec![UiEffect::RestoreDraft {
-                content: pending.content,
-                local_order: Some(pending.local_order),
+                content,
+                local_order: Some(local_order),
             }]
         });
     }
@@ -3871,8 +4040,13 @@ fn handle_backend_event(
             state, command_id, operation, kind, steering, follow_up,
         )),
         BackendEvent::QueueMessageInjected { kind, content } => {
-            state.transcript.append_prompt(content.clone());
-            state.queue.remove_first(kind, &content);
+            let local_display = state
+                .queue
+                .remove_first(kind, &content)
+                .and_then(|message| message.local_display);
+            state
+                .transcript
+                .append_prompt_with_display(content, local_display);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ProjectFilesReported { .. }
@@ -6264,6 +6438,310 @@ mod tests {
         assert_eq!(state.transcript.latest_user_text(), Some("duplicate"));
         assert_eq!(state.queue.steering.len(), 1);
         assert_eq!(state.queue.steering[0].identity, second_identity);
+    }
+
+    #[test]
+    fn presented_submit_keeps_protocol_history_and_transcript_content_raw() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let raw = "first\nsecond".to_string();
+        let effects = reduce(
+            &mut state,
+            UiAction::SubmitPresented {
+                content: raw.clone(),
+                presentation: "[pasted text: 12 characters, 2 lines]".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(command_value(&effects[0]).unwrap()["prompt"], raw);
+        assert!(effects.iter().any(
+            |effect| matches!(effect, UiEffect::RecordPromptHistory(content) if content == &raw)
+        ));
+        let entry = state.transcript.entries().last().unwrap();
+        assert_eq!(entry.content, raw);
+        assert_eq!(
+            entry.display_content(),
+            "[pasted text: 12 characters, 2 lines]"
+        );
+    }
+
+    #[test]
+    fn duplicate_queue_injections_consume_local_presentations_fifo() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        for (presentation, queued_count) in [("first fold", 1), ("second fold", 2)] {
+            reduce(
+                &mut state,
+                UiAction::SteerPresented {
+                    content: "duplicate".into(),
+                    presentation: presentation.into(),
+                },
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                    steering: vec!["duplicate".into(); queued_count],
+                    follow_up: Vec::new(),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished(&format!("steer-{queued_count}"), "steer", true)),
+                &mut ids,
+            )
+            .unwrap();
+        }
+
+        for expected in ["first fold", "second fold"] {
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::QueueMessageInjected {
+                    kind: QueueKind::Steering,
+                    content: "duplicate".into(),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            let entry = state.transcript.entries().last().unwrap();
+            assert_eq!(entry.content, "duplicate");
+            assert_eq!(entry.display_content(), expected);
+        }
+        assert!(state.queue.steering.is_empty());
+    }
+
+    #[test]
+    fn successful_queue_completion_waits_for_authoritative_echo_match() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::FollowUpPresented {
+                content: "raw queued".into(),
+                presentation: "folded queued".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("follow_up-1", "follow_up", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::RecordPromptHistory(content)] if content == "raw queued"
+        ));
+        assert_eq!(state.pending_queue_submissions.len(), 1);
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: Vec::new(),
+                follow_up: vec!["raw queued".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.pending_queue_submissions.is_empty());
+        assert_eq!(
+            state.queue.follow_up[0].local_display.as_deref(),
+            Some("folded queued")
+        );
+    }
+
+    #[test]
+    fn queue_echo_presentations_are_bounded_without_dropping_raw_items() {
+        let mut pending = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        for index in 0..=QUEUE_ECHO_PRESENTATION_LIMIT {
+            reduce(
+                &mut pending,
+                UiAction::SteerPresented {
+                    content: format!("raw-{index}"),
+                    presentation: format!("fold-{index}"),
+                },
+                &mut ids,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            pending.pending_queue_submissions.len(),
+            QUEUE_ECHO_PRESENTATION_LIMIT + 1
+        );
+        assert!(
+            pending.pending_queue_submissions["steer-1"]
+                .local_display
+                .is_none()
+        );
+        assert_eq!(
+            pending
+                .pending_queue_submissions
+                .values()
+                .filter(|pending| pending.local_display.is_some())
+                .count(),
+            QUEUE_ECHO_PRESENTATION_LIMIT
+        );
+        assert_eq!(
+            pending.pending_queue_submissions["steer-1"].content,
+            "raw-0"
+        );
+
+        let mut combined = UiState::new("fake".into(), None, None);
+        let mut combined_ids = DeterministicIds::default();
+        reduce(
+            &mut combined,
+            UiAction::FollowUpPresented {
+                content: "accepted raw".into(),
+                presentation: "accepted fold".into(),
+            },
+            &mut combined_ids,
+        )
+        .unwrap();
+        reduce(
+            &mut combined,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: Vec::new(),
+                follow_up: vec!["accepted raw".into()],
+            }),
+            &mut combined_ids,
+        )
+        .unwrap();
+        for index in 0..QUEUE_ECHO_PRESENTATION_LIMIT {
+            reduce(
+                &mut combined,
+                UiAction::SteerPresented {
+                    content: format!("pending raw-{index}"),
+                    presentation: format!("pending fold-{index}"),
+                },
+                &mut combined_ids,
+            )
+            .unwrap();
+        }
+        assert_eq!(combined.queue.follow_up[0].content, "accepted raw");
+        assert!(combined.queue.follow_up[0].local_display.is_none());
+        assert_eq!(
+            combined
+                .pending_queue_submissions
+                .values()
+                .filter(|pending| pending.local_display.is_some())
+                .count(),
+            QUEUE_ECHO_PRESENTATION_LIMIT
+        );
+    }
+
+    #[test]
+    fn pending_queue_echo_presentations_enforce_combined_byte_budget() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let raw = "x".repeat(QUEUE_ECHO_PRESENTATION_BYTES_LIMIT / 4);
+        for index in 0..5 {
+            reduce(
+                &mut state,
+                UiAction::FollowUpPresented {
+                    content: format!("{raw}{index}"),
+                    presentation: format!("fold-{index}"),
+                },
+                &mut ids,
+            )
+            .unwrap();
+        }
+
+        let retained = state
+            .pending_queue_submissions
+            .values()
+            .filter_map(|pending| {
+                pending
+                    .local_display
+                    .as_ref()
+                    .map(|display| pending.content.len().saturating_add(display.len()))
+            })
+            .sum::<usize>();
+        assert!(retained <= QUEUE_ECHO_PRESENTATION_BYTES_LIMIT);
+        assert_eq!(
+            state
+                .pending_queue_submissions
+                .values()
+                .filter(|pending| pending.local_display.is_some())
+                .count(),
+            3
+        );
+        assert_eq!(state.pending_queue_submissions.len(), 5);
+        assert!(
+            state
+                .pending_queue_submissions
+                .values()
+                .all(|pending| !pending.content.is_empty())
+        );
+    }
+
+    #[test]
+    fn clear_and_transport_abandon_queue_echo_presentations_only() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::FollowUpPresented {
+                content: "queued raw".into(),
+                presentation: "queued fold".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: Vec::new(),
+                follow_up: vec!["queued raw".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state.queue.follow_up[0].local_display.as_deref(),
+            Some("queued fold")
+        );
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::QueueItemsRemoved {
+                command_id: "clear-1".into(),
+                operation: QueueRemovalOperation::Clear,
+                kind: None,
+                steering: Vec::new(),
+                follow_up: Vec::new(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.queue.follow_up[0].content, "queued raw");
+        assert!(state.queue.follow_up[0].local_display.is_none());
+
+        let pending = state
+            .pending_queue_submissions
+            .get_mut("follow_up-1")
+            .unwrap();
+        pending.local_display = Some("pending fold".into());
+        reduce(
+            &mut state,
+            UiAction::TransportClosed { error: None },
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            state
+                .pending_queue_submissions
+                .values()
+                .all(|pending| pending.local_display.is_none())
+        );
     }
 
     #[test]

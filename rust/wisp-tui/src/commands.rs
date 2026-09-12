@@ -21,6 +21,7 @@ use wisp_protocol::{
 pub(crate) enum Command {
     Help,
     History,
+    UpdateGuidance,
     Theme(Option<&'static theme::Theme>),
     Mode(AgentMode),
     Context,
@@ -39,6 +40,7 @@ fn usage(name: &str) -> Option<&'static str> {
     Some(match name {
         "help" => "/help",
         "history" => "/history",
+        "update" => "/update [check|install]",
         "theme" => "/theme [name]",
         "plan" => "/plan",
         "build" => "/build",
@@ -106,6 +108,10 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         }
         "help" => Command::Help,
         "history" => Command::History,
+        "update" => match tail.trim() {
+            "" | "check" | "install" => Command::UpdateGuidance,
+            _ => Command::Invalid("Usage: /update [check|install]".into()),
+        },
         "theme" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => Command::Theme(None),
             [name] => match theme::resolve(name) {
@@ -193,6 +199,9 @@ impl<'a> CompletionItem<'a> {
 
     fn description(self) -> String {
         match self {
+            Self::Command(command) if command.name == "update" => {
+                "Show external update instructions (no install or restart)".into()
+            }
             Self::Command(command) => crate::ui::sanitize_for_terminal(&command.description),
             Self::Skill(skill) => format!(
                 "[{}] {}",
@@ -363,6 +372,7 @@ impl Help {
 pub(crate) fn help_rows(
     catalog: Option<&[CommandDescriptor]>,
     palette: Palette,
+    bindings: &crate::keybindings::Bindings,
 ) -> Vec<Line<'static>> {
     command_descriptors(catalog)
         .into_iter()
@@ -370,7 +380,7 @@ pub(crate) fn help_rows(
             let syntax = usage(&item.name)?;
             let mut rows = vec![
                 Line::styled(syntax, Style::default().fg(palette.primary)),
-                Line::raw(crate::ui::sanitize_for_terminal(&item.description)),
+                Line::raw(if item.name == "update" { "Show external update and matching Rust rebuild instructions (no installation).".into() } else { crate::ui::sanitize_for_terminal(&item.description) }),
             ];
             if !item.slash_aliases.is_empty() {
                 rows.push(Line::raw(format!(
@@ -386,14 +396,17 @@ pub(crate) fn help_rows(
             Line::raw("Type @ to find paths; ↑↓ select, Enter insert (not submit)."),
             Line::raw("Tab fuzzy/tree; ←/→ folders; Esc close; Tab at a dismissed reference refreshes."),
             Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
-            Line::raw("Ctrl+T toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores."),
+            Line::raw(format!("{} toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores.", bindings.label(crate::keybindings::Action::ToggleTheme))),
+            Line::raw("Ctrl+G shows the resolved shortcuts for the focused workflow."),
             Line::raw("WISP_TUI_MOUSE=1 enables mouse navigation (off by default)."),
             Line::raw("Wheel scrolls; click selects; Enter activates. Outside click closes a popup."),
             Line::raw("Approvals/trust remain keyboard-only. Drag selection and copy are not implemented."),
         ])
+        .chain(bindings.help_entries().into_iter().map(|entry| Line::raw(format!("{}: {}", entry.label, entry.description))))
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_help(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -402,6 +415,7 @@ pub(crate) fn render_help(
     loading: bool,
     error: Option<&str>,
     palette: Palette,
+    bindings: &crate::keybindings::Bindings,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -417,7 +431,7 @@ pub(crate) fn render_help(
     if let Some(error) = error {
         rows.push(Line::raw(crate::ui::sanitize_for_terminal(error)));
     }
-    rows.extend(help_rows(catalog, palette));
+    rows.extend(help_rows(catalog, palette, bindings));
     if rows.is_empty() {
         rows.push(Line::raw("No commands available. Press r to retry."));
     }
@@ -668,7 +682,11 @@ pub(crate) mod tests {
     #[test]
     fn help_and_completion_exclude_unsupported_handlers_and_use_rust_syntax() {
         let catalog = catalog();
-        let rows = help_rows(Some(&catalog), Palette::default());
+        let rows = help_rows(
+            Some(&catalog),
+            Palette::default(),
+            &crate::keybindings::Bindings::default(),
+        );
         let text = rows
             .iter()
             .map(ToString::to_string)
@@ -681,7 +699,7 @@ pub(crate) mod tests {
         assert!(text.contains("/skills"));
         assert!(text.contains("/mcp"));
         assert!(text.contains("/history"));
-        assert!(!text.contains("/update"));
+        assert!(text.contains("/update"));
         assert!(text.contains("Aliases: /exit, :q"));
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
@@ -693,7 +711,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .items
                 .iter()
-                .all(|item| item.spelling() != "/update")
+                .any(|item| item.spelling() == "/update")
         );
         let local = completion.view(None, None).unwrap();
         assert_eq!(local.items.len(), 1);

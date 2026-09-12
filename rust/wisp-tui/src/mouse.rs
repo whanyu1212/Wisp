@@ -89,6 +89,15 @@ impl Editor {
             start + usize::from(event.column - self.area.x),
         ))
     }
+
+    pub fn place_cursor(&self, event: MouseEvent, editor: &mut PromptEditor) -> bool {
+        let Some((row, column)) = self.hit(event, editor) else {
+            return false;
+        };
+        editor.place_projected_cursor(row, column);
+        // A valid click transfers focus even when the cursor is already there.
+        true
+    }
 }
 
 #[derive(Default)]
@@ -237,14 +246,13 @@ impl LiveUi {
                         if self.completion.select_mouse(index, count) {
                             self.render_pending = true;
                         }
-                    } else if let Some((row, column)) = frame
+                    } else if frame
                         .conversation
                         .editor
                         .as_ref()
-                        .and_then(|hit| hit.hit(event, &self.editor))
+                        .is_some_and(|hit| hit.place_cursor(event, &mut self.editor))
                     {
                         self.browse_selected = None;
-                        self.editor.place_cursor(row, column);
                         self.render_pending = true;
                     }
                 }
@@ -284,5 +292,54 @@ impl LiveUi {
                 .is_some_and(|view| view.select_mouse(index)),
             OverlayKind::Context | OverlayKind::Help | OverlayKind::Detail => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn painted_editor_mapping_expands_a_fold_without_changing_raw_text() {
+        let mut editor = PromptEditor::default();
+        let raw = format!("{}\nsecond line", "界".repeat(2_001));
+        editor.insert_paste(&raw);
+        let mapping = Editor {
+            area: Rect::new(2, 3, 60, 1),
+            revision: editor.revision(),
+            first_line: 0,
+            column_starts: vec![0],
+        };
+
+        assert!(mapping.place_cursor(click(8, 3), &mut editor));
+        assert_eq!(editor.text(), raw);
+        assert_eq!(editor.compact_text(), raw);
+        assert_eq!(editor.cursor_offset(), 0);
+    }
+
+    #[test]
+    fn stale_painted_editor_mapping_cannot_expand_a_new_draft() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"x".repeat(2_001));
+        let mapping = Editor {
+            area: Rect::new(0, 0, 60, 1),
+            revision: editor.revision(),
+            first_line: 0,
+            column_starts: vec![0],
+        };
+        editor.restore_prompt(&"y".repeat(2_001));
+        let before = editor.clone();
+
+        assert!(!mapping.place_cursor(click(2, 0), &mut editor));
+        assert_eq!(editor, before);
     }
 }

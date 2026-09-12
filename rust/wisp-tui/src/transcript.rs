@@ -11,6 +11,8 @@ const MAX_PROCESS_INDEX_BYTES: usize = 256 * 1024;
 const MAX_TRACKED_PROCESS_ID_BYTES: usize = 4 * 1024;
 const MAX_PENDING_DETAIL_SOURCES: usize = 128;
 const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
+const MAX_LOCAL_DISPLAY_ENTRIES: usize = 32;
+const MAX_LOCAL_DISPLAY_BYTES: usize = 4 * 1024 * 1024;
 const HISTORY_OMISSION_MARKER: &str = "[earlier session history omitted]";
 
 use crate::tool_cards::{
@@ -87,6 +89,8 @@ pub struct TranscriptEntry {
     pub role: TranscriptRole,
     /// Message source. Tool/process entries keep structured content in `kind`.
     pub content: String,
+    /// Ephemeral text used only to render a locally submitted user message.
+    local_display: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
     revision: u64,
@@ -107,6 +111,15 @@ impl TranscriptEntry {
 
     pub fn layout_epoch(&self) -> u64 {
         self.layout_epoch
+    }
+
+    /// Return the text projected by the transcript view for this entry.
+    ///
+    /// The authoritative message remains in [`Self::content`]. Historical
+    /// entries and messages without local presentation metadata display that
+    /// source verbatim.
+    pub(crate) fn display_content(&self) -> &str {
+        self.local_display.as_deref().unwrap_or(&self.content)
     }
 
     pub fn tool_card(&self) -> Option<&ToolCardSnapshot> {
@@ -178,8 +191,23 @@ impl Transcript {
 
     /// Append a user prompt without creating an out-of-order assistant placeholder.
     pub fn append_prompt(&mut self, prompt: String) -> TranscriptEntryId {
+        self.append_prompt_with_display(prompt, None)
+    }
+
+    /// Append a user prompt with optional display-only local presentation text.
+    pub fn append_prompt_with_display(
+        &mut self,
+        prompt: String,
+        display: Option<String>,
+    ) -> TranscriptEntryId {
         self.finish_active_response();
-        self.push_message(TranscriptRole::User, prompt, TranscriptEntryState::Complete)
+        let display = display.filter(|candidate| !candidate.is_empty() && candidate != &prompt);
+        self.push_message_with_display(
+            TranscriptRole::User,
+            prompt,
+            display,
+            TranscriptEntryState::Complete,
+        )
     }
 
     /// Convenience used by presentation tests that explicitly exercise pending rows.
@@ -1092,6 +1120,7 @@ impl Transcript {
                         id,
                         role: TranscriptRole::Assistant,
                         content: HISTORY_OMISSION_MARKER.into(),
+                        local_display: None,
                         state: TranscriptEntryState::Complete,
                         kind: TranscriptEntryKind::Message,
                         revision: 0,
@@ -1145,6 +1174,7 @@ impl Transcript {
         let mut inserted = Vec::with_capacity(page.entries.len());
         for source in page.entries.iter().filter(|entry| !entry.history_omission) {
             let mut entry = source.clone();
+            entry.local_display = None;
             entry.id = TranscriptEntryId(self.next_entry_id);
             self.next_entry_id = self
                 .next_entry_id
@@ -1746,10 +1776,22 @@ impl Transcript {
         content: String,
         state: TranscriptEntryState,
     ) -> TranscriptEntryId {
-        self.push_entry(TranscriptEntry {
+        self.push_message_with_display(role, content, None, state)
+    }
+
+    fn push_message_with_display(
+        &mut self,
+        role: TranscriptRole,
+        content: String,
+        local_display: Option<String>,
+        state: TranscriptEntryState,
+    ) -> TranscriptEntryId {
+        let has_local_display = local_display.is_some();
+        let entry_id = self.push_entry(TranscriptEntry {
             id: TranscriptEntryId(0),
             role,
             content,
+            local_display,
             state,
             kind: TranscriptEntryKind::Message,
             revision: 0,
@@ -1761,7 +1803,57 @@ impl Transcript {
             history_result_projection_truncated: false,
             history_calls: Vec::new(),
             history_pending_result: None,
-        })
+        });
+        if has_local_display {
+            self.enforce_local_display_budget();
+        }
+        entry_id
+    }
+
+    fn enforce_local_display_budget(&mut self) {
+        let mut retained_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.local_display.is_some())
+            .count();
+        let mut retained_bytes = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .local_display
+                    .as_ref()
+                    .map(|display| entry.content.len().saturating_add(display.len()))
+            })
+            .sum::<usize>();
+        if retained_count <= MAX_LOCAL_DISPLAY_ENTRIES && retained_bytes <= MAX_LOCAL_DISPLAY_BYTES
+        {
+            return;
+        }
+
+        let mut changed = false;
+        for entry in &mut self.entries {
+            if retained_count <= MAX_LOCAL_DISPLAY_ENTRIES
+                && retained_bytes <= MAX_LOCAL_DISPLAY_BYTES
+            {
+                break;
+            }
+            let Some(display) = entry.local_display.take() else {
+                continue;
+            };
+            retained_count = retained_count.saturating_sub(1);
+            retained_bytes =
+                retained_bytes.saturating_sub(entry.content.len().saturating_add(display.len()));
+            entry.layout_epoch = entry
+                .layout_epoch
+                .checked_add(1)
+                .expect("transcript layout epoch exhausted");
+            Self::bump_revision(entry);
+            changed = true;
+        }
+        if changed {
+            self.bump_generation();
+        }
     }
 
     fn push_card(&mut self, kind: TranscriptEntryKind) -> TranscriptEntryId {
@@ -1781,6 +1873,7 @@ impl Transcript {
             id: TranscriptEntryId(0),
             role: TranscriptRole::Tool,
             content: String::new(),
+            local_display: None,
             state,
             kind,
             revision: 0,
@@ -1969,6 +2062,120 @@ mod tests {
         assert_eq!(transcript.entries().len(), 4);
         assert_eq!(transcript.entries()[0].content, "one");
         assert_eq!(transcript.entries()[2].content, "two");
+    }
+
+    #[test]
+    fn local_prompt_presentation_never_replaces_authoritative_content() {
+        let mut transcript = Transcript::default();
+        let raw = "large\nraw\nprompt".to_string();
+        let entry_id = transcript.append_prompt_with_display(
+            raw.clone(),
+            Some("[pasted text: 16 characters, 3 lines]".into()),
+        );
+
+        let entry = transcript.entry(entry_id).unwrap();
+        assert_eq!(entry.content, raw);
+        assert_eq!(
+            entry.display_content(),
+            "[pasted text: 16 characters, 3 lines]"
+        );
+        assert_eq!(transcript.latest_user_text(), Some(raw.as_str()));
+
+        let raw_entry = transcript.append_prompt_with_display("same".into(), Some("same".into()));
+        assert_eq!(
+            transcript.entry(raw_entry).unwrap().display_content(),
+            "same"
+        );
+    }
+
+    #[test]
+    fn history_page_discards_local_prompt_presentation() {
+        let mut page = Transcript::default();
+        let entry_id =
+            page.append_prompt_with_display("historical raw".into(), Some("local fold".into()));
+        page.entry_mut(entry_id).history_group = Some(0);
+
+        let mut transcript = Transcript::default();
+        assert!(transcript.append_history_page(&page));
+        let entry = transcript.entries().first().unwrap();
+        assert_eq!(entry.content, "historical raw");
+        assert_eq!(entry.display_content(), "historical raw");
+    }
+
+    #[test]
+    fn mixed_local_presentations_evict_oldest_metadata_and_keep_raw_content() {
+        let mut transcript = Transcript::default();
+        let first =
+            transcript.append_prompt_with_display("first raw".into(), Some("first fold".into()));
+        transcript.append_prompt("ordinary prompt".into());
+        let first_revision = transcript.entry(first).unwrap().revision();
+        let first_layout_epoch = transcript.entry(first).unwrap().layout_epoch();
+        let generation_before_eviction = transcript.generation();
+        for index in 1..=MAX_LOCAL_DISPLAY_ENTRIES {
+            transcript.append_prompt_with_display(
+                format!("presented raw-{index}"),
+                Some(format!("presented fold-{index}")),
+            );
+            transcript.append_prompt(format!("ordinary raw-{index}"));
+        }
+
+        let first_entry = transcript.entry(first).unwrap();
+        assert_eq!(first_entry.content, "first raw");
+        assert_eq!(first_entry.display_content(), "first raw");
+        assert!(first_entry.revision() > first_revision);
+        assert!(first_entry.layout_epoch() > first_layout_epoch);
+        assert!(transcript.generation() > generation_before_eviction);
+        assert_eq!(
+            transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.local_display.is_some())
+                .count(),
+            MAX_LOCAL_DISPLAY_ENTRIES
+        );
+    }
+
+    #[test]
+    fn repeated_large_draft_presentations_obey_retained_byte_budget() {
+        let mut transcript = Transcript::default();
+        let raw = "x".repeat(MAX_LOCAL_DISPLAY_BYTES / 4);
+        let first =
+            transcript.append_prompt_with_display(format!("{raw}-0"), Some("large fold-0".into()));
+        let first_layout_epoch = transcript.entry(first).unwrap().layout_epoch();
+        for index in 1..5 {
+            transcript.append_prompt("small ordinary prompt".into());
+            transcript.append_prompt_with_display(
+                format!("{raw}-{index}"),
+                Some(format!("large fold-{index}")),
+            );
+        }
+
+        let retained_bytes = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .local_display
+                    .as_ref()
+                    .map(|display| entry.content.len().saturating_add(display.len()))
+            })
+            .sum::<usize>();
+        assert!(retained_bytes <= MAX_LOCAL_DISPLAY_BYTES);
+        assert_eq!(
+            transcript.entry(first).unwrap().display_content(),
+            format!("{raw}-0")
+        );
+        assert!(transcript.entry(first).unwrap().layout_epoch() > first_layout_epoch);
+        assert!(
+            transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.local_display.is_some())
+                .count()
+                < 5
+        );
+        let latest = format!("{raw}-4");
+        assert_eq!(transcript.latest_user_text(), Some(latest.as_str()));
     }
 
     #[test]

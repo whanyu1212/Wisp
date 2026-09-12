@@ -57,8 +57,7 @@ example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
 frontend. An explicit `--tui-renderer` takes precedence. The dedicated `wisp tui` command instead
 uses `--renderer rust`. Rust selection never falls back to Textual on failure.
 [#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the default; Rust stays
-experimental opt-in. [#467](https://github.com/whanyu1212/Wisp/issues/467),
-[#468](https://github.com/whanyu1212/Wisp/issues/468), and
+experimental opt-in. [#468](https://github.com/whanyu1212/Wisp/issues/468), and
 [#469](https://github.com/whanyu1212/Wisp/issues/469) remain stage-3 blockers.
 
 `WISP_RUST_TUI_BINARY` is a source-development override, not a general executable search path. It

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -17,9 +18,11 @@ from types import FrameType
 import anyio
 
 from wisp import __version__
+from wisp.settings import resolve_settings
 from wisp.tui.launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
 
 _BINARY_ENV = "WISP_RUST_TUI_BINARY"
+_BINDINGS_ENV = "WISP_RUST_TUI_BINDINGS_JSON"
 _PACKAGED_BINARY = Path(__file__).resolve().parent / "bin" / "wisp-tui"
 _GRACE_SECONDS = 1.0
 _TERM_SECONDS = 1.0
@@ -94,6 +97,7 @@ def run_rust_tui(options: TuiOptions) -> int:
 
     binary = resolve_rust_tui_binary()
     anyio.run(_preflight_tui_options, options)
+    tui_keybindings = resolve_settings(trust_project=False).tui_keybindings
     terminal = _snapshot_terminal()
     process: subprocess.Popen[bytes] | None = None
     cleanup_error: RustTuiLaunchError | None = None
@@ -108,6 +112,12 @@ def run_rust_tui(options: TuiOptions) -> int:
                 else:
                     environment = _rpc_env(options)
                     environment.pop(_BINARY_ENV, None)
+                    environment[_BINDINGS_ENV] = json.dumps(
+                        tui_keybindings,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
                     process = subprocess.Popen(
                         rust_tui_command(binary, options),
                         env=environment,

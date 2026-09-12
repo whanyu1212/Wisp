@@ -273,6 +273,7 @@ fn popup_clear_is_opaque_and_geometry_stays_bounded() {
                         false,
                         None,
                         ui.palette(),
+                        &ui.bindings,
                     )
                 })
                 .unwrap();
@@ -722,6 +723,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
                     false,
                     None,
                     ui.palette(),
+                    &ui.bindings,
                 )
             })
             .unwrap();

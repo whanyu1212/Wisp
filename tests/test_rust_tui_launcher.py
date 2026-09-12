@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from wisp import cli as cli_module
 from wisp.cli import app
 from wisp.cli.types import TuiFrontendKind
 from wisp.config import WispConfig
+from wisp.settings import ResolvedSettings
 from wisp.tui import rust_launcher
 from wisp.tui.launch import TuiOptions
 from wisp.tui.rust_launcher import RustTuiLaunchError
@@ -341,6 +343,7 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
     monkeypatch.setenv("WISP_LAUNCHER_TEST_SENTINEL", "inherited")
     monkeypatch.setenv("WISP_TUI_MOUSE", "1")
     monkeypatch.setenv("WISP_RUST_TUI_BINARY", str(binary))
+    monkeypatch.setenv("WISP_RUST_TUI_BINDINGS_JSON", '{"inherited":["f12"]}')
     monkeypatch.setattr(rust_launcher, "resolve_rust_tui_binary", lambda: binary)
     monkeypatch.setattr(rust_launcher, "_preflight_tui_options", fake_preflight)
     monkeypatch.setattr(rust_launcher.subprocess, "Popen", fake_popen)
@@ -354,5 +357,60 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
     assert environment["WISP_LAUNCHER_TEST_SENTINEL"] == "inherited"
     assert environment["WISP_TUI_MOUSE"] == "1"
     assert "WISP_RUST_TUI_BINARY" not in environment
+    assert environment["WISP_RUST_TUI_BINDINGS_JSON"] == "{}"
     assert process_group == 0
     assert os.environ["WISP_LAUNCHER_TEST_SENTINEL"] == "inherited"
+
+
+def test_launcher_forwards_resolved_user_keybindings_as_bounded_json(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    binary = tmp_path / "wisp-tui"
+    environments: list[dict[str, str]] = []
+
+    class FakeProcess:
+        pid = 4321
+
+        def poll(self) -> int:
+            return 0
+
+    async def fake_preflight(_options: TuiOptions) -> None:
+        return None
+
+    def fake_popen(
+        _argv: tuple[str, ...],
+        *,
+        env: dict[str, str],
+        process_group: int,
+    ) -> FakeProcess:
+        assert process_group == 0
+        environments.append(env)
+        return FakeProcess()
+
+    monkeypatch.setattr(rust_launcher, "resolve_rust_tui_binary", lambda: binary)
+    monkeypatch.setattr(rust_launcher, "_preflight_tui_options", fake_preflight)
+    monkeypatch.setattr(
+        rust_launcher,
+        "resolve_settings",
+        lambda **kwargs: (
+            ResolvedSettings(
+                tui_keybindings={
+                    "prompt.submit": ["ctrl+enter"],
+                    "theme.toggle": [],
+                }
+            )
+            if kwargs == {"trust_project": False}
+            else pytest.fail(f"unexpected settings resolution: {kwargs}")
+        ),
+    )
+    monkeypatch.setattr(rust_launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(rust_launcher, "_snapshot_terminal", lambda: None)
+    monkeypatch.setattr(rust_launcher, "_cleanup_process_group", lambda *_args, **_kwargs: None)
+
+    assert rust_launcher.run_rust_tui(_options(tmp_path)) == 0
+    assert len(environments) == 1
+    assert json.loads(environments[0]["WISP_RUST_TUI_BINDINGS_JSON"]) == {
+        "prompt.submit": ["ctrl+enter"],
+        "theme.toggle": [],
+    }

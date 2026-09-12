@@ -117,7 +117,7 @@ jobs:
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
         run: >-
-          uv run pytest tests/test_rust_tui_smoke.py tests/test_rust_tui_themes.py tests/test_rust_tui_mouse.py --durations=20
+          uv run pytest tests/test_rust_tui_smoke.py tests/test_rust_tui_themes.py tests/test_rust_tui_mouse.py tests/test_rust_tui_readiness.py --durations=20
           --junitxml=test-results/rust-smoke/junit.xml
           --ci-node-manifest=test-results/rust-smoke/nodes.json
 

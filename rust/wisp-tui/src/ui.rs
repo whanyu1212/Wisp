@@ -1,7 +1,8 @@
 use crate::detail_view::{DetailView, DetailViewRow};
+use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::mouse;
-use crate::prompt_editor::PromptEditor;
+use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
@@ -56,6 +57,7 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
         };
         u16::try_from(
             editor
+                .projection()
                 .line_count()
                 .saturating_add(queue_rows)
                 .saturating_add(2),
@@ -150,6 +152,7 @@ pub fn render(
         true,
         None,
         Palette::default(),
+        &Bindings::default(),
     );
 }
 
@@ -166,6 +169,7 @@ pub fn render_interactive(
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
     palette: Palette,
+    bindings: &Bindings,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -227,7 +231,7 @@ pub fn render_interactive(
         .map(|view| crate::commands::render_completion(frame, chunks[2], view, palette))
         .unwrap_or_default();
     let editor = render_composer(frame, chunks[3], state, editor, composer_focused, palette);
-    render_footer(frame, chunks[4], state, notice, palette);
+    render_footer(frame, chunks[4], state, notice, palette, bindings);
     mouse::Conversation {
         transcript: chunks[1],
         editor,
@@ -692,14 +696,15 @@ fn render_composer(
                 .height
                 .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
         };
-        let row = editor.cursor_row();
-        let column = editor.cursor_column();
+        let projection = editor.projection();
+        let row = projection.cursor_row();
+        let column = projection.cursor_column();
         let vertical_scroll = row.saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
         let horizontal_scroll =
             column.saturating_sub(usize::from(editor_area.width.saturating_sub(1)));
         let cursor_visible_row = row.saturating_sub(vertical_scroll);
         let display_text = composer_visible_text(
-            editor,
+            &projection,
             vertical_scroll,
             horizontal_scroll,
             usize::from(editor_area.width),
@@ -809,14 +814,14 @@ struct ComposerVisibleText {
 }
 
 fn composer_visible_text(
-    editor: &PromptEditor,
+    projection: &PromptProjection<'_>,
     vertical_scroll: usize,
     horizontal_scroll: usize,
     width: usize,
     height: usize,
     cursor_visible_row: usize,
 ) -> ComposerVisibleText {
-    let source_text = editor.text();
+    let source_text = projection.text();
     let mut visible = String::new();
     let visible_width = width.max(1);
     let visible_height = height.max(1);
@@ -937,6 +942,7 @@ fn render_footer(
     state: &UiState,
     notice: Option<&str>,
     palette: Palette,
+    bindings: &Bindings,
 ) {
     let (content, style) = match notice {
         Some(notice) => (
@@ -944,11 +950,26 @@ fn render_footer(
             Style::default().fg(palette.warning),
         ),
         None if state.active_prompt_editable() => (
-            "Enter steer • Alt-Enter later • Alt-Up restore • Esc/Ctrl-C cancels".into(),
+            format!(
+                "{} steer • {} later • {} restore • Ctrl+G help • Esc/Ctrl-C cancels",
+                bindings.label(KeyAction::Submit),
+                bindings.label(KeyAction::AlternateSubmit),
+                bindings.label(KeyAction::RestoreQueue),
+            ),
             Style::default().fg(palette.muted),
         ),
         None => (
-            "Enter send • Ctrl-R history • Ctrl+J newline • PgUp/PgDn scroll • Ctrl-End tail • F6 details • Ctrl-T theme • Ctrl-C quit".into(),
+            format!(
+                "{} send • Ctrl+G help • {} history • {} newline • {}/{} scroll • {} tail • {} details • {} theme • Ctrl-C quit",
+                bindings.label(KeyAction::Submit),
+                bindings.label(KeyAction::History),
+                bindings.label(KeyAction::Newline),
+                bindings.label(KeyAction::PageUp),
+                bindings.label(KeyAction::PageDown),
+                bindings.label(KeyAction::Tail),
+                bindings.label(KeyAction::Browse),
+                bindings.label(KeyAction::ToggleTheme),
+            ),
             Style::default().fg(palette.muted),
         ),
     };
@@ -1245,13 +1266,24 @@ mod tests {
         editor: &PromptEditor,
         notice: Option<&str>,
     ) -> String {
+        render_to_string_with_bindings(width, height, state, editor, notice, &Bindings::default())
+    }
+
+    fn render_to_string_with_bindings(
+        width: u16,
+        height: u16,
+        state: &UiState,
+        editor: &PromptEditor,
+        notice: Option<&str>,
+        bindings: &Bindings,
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
         terminal
             .draw(|frame| {
-                render(
+                render_interactive(
                     frame,
                     state,
                     &mut viewport,
@@ -1259,6 +1291,11 @@ mod tests {
                     editor,
                     &connection(),
                     notice,
+                    None,
+                    true,
+                    None,
+                    Palette::default(),
+                    bindings,
                 );
             })
             .unwrap();
@@ -1304,6 +1341,28 @@ mod tests {
         assert!(rendered.contains("rpc v3 / events v35"));
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
+        assert!(rendered.contains("Ctrl+G help"));
+    }
+
+    #[test]
+    fn footer_uses_resolved_binding_labels() {
+        let state = UiState::new("fake".into(), Some("model-x".into()), None);
+        let bindings = Bindings::from_json(
+            r#"{"prompt.submit":["ctrl+enter"],"history.open":["f4"],"theme.toggle":[]}"#,
+        )
+        .unwrap();
+        let rendered = render_to_string_with_bindings(
+            220,
+            18,
+            &state,
+            &PromptEditor::default(),
+            None,
+            &bindings,
+        );
+        assert!(rendered.contains("Ctrl+Enter send"));
+        assert!(rendered.contains("F4 history"));
+        assert!(rendered.contains("Unbound theme"));
+        assert!(!rendered.contains("Ctrl+T theme"));
     }
 
     #[test]
@@ -1368,7 +1427,7 @@ mod tests {
         assert!(!rendered.contains("TAIL"));
         assert!(!rendered.contains("steering arrives"));
         assert!(rendered.contains("Enter steer"));
-        assert!(rendered.contains("Alt-Enter later"));
+        assert!(rendered.contains("Alt+Enter later"));
         assert!(!rendered.contains('\u{1b}'));
         assert!(!rendered.contains('\u{202e}'));
 
@@ -1549,13 +1608,26 @@ mod tests {
         let state = UiState::new("fake".into(), None, None);
         let mut editor = PromptEditor::default();
         let prompt = format!("{}TAIL", "x".repeat(70_000));
-        editor.insert_paste(&prompt);
+        editor.replace_range(0..0, &prompt);
         assert_eq!(
             source_display_column_window(&prompt, 70_000, 4).text,
             "TAIL"
         );
         let rendered = render_to_string(40, 14, &state, &editor);
         assert!(rendered.contains("TAIL"));
+    }
+
+    #[test]
+    fn composer_renders_large_paste_marker_from_display_projection() {
+        let state = UiState::new("fake".into(), None, None);
+        let mut editor = PromptEditor::default();
+        let raw = format!("{}\nTAIL", "界".repeat(2_001));
+        editor.insert_paste(&raw);
+
+        let rendered = render_to_string(80, 14, &state, &editor);
+        assert!(rendered.contains("Pasted content #1"));
+        assert!(!rendered.contains("TAIL"));
+        assert_eq!(editor.text(), raw);
     }
 
     #[test]
@@ -1769,6 +1841,7 @@ mod tests {
                     true,
                     None,
                     Palette::default(),
+                    &Bindings::default(),
                 );
             })
             .unwrap();
@@ -1813,6 +1886,7 @@ mod tests {
                     false,
                     None,
                     Palette::default(),
+                    &Bindings::default(),
                 );
                 let area = overlay_area(frame.area()).unwrap();
                 clear_overlay(frame, area, Palette::default());

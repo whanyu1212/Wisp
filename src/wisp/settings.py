@@ -58,8 +58,14 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "update_check_enabled",
         "mcp_servers",
         "openai_compatible",
+        "tui_keybindings",
     }
 )
+
+_MAX_TUI_KEYBINDINGS_BYTES = 64 * 1024
+_MAX_TUI_KEYBINDING_ACTIONS = 64
+_MAX_TUI_KEYBINDINGS_PER_ACTION = 8
+_MAX_TUI_KEYBINDING_CHARS = 64
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
 # from being pulled into model context by an over-eager read/grep. Bare patterns
@@ -125,6 +131,14 @@ class WispSettings(BaseModel):
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
     openai_compatible: OpenAICompatibleSettings | None = None
+    tui_keybindings: dict[str, list[str]] | None = None
+
+    @field_validator("tui_keybindings", mode="before")
+    @classmethod
+    def _validate_tui_keybindings(cls, value: Any) -> dict[str, list[str]] | None:
+        if value is None:
+            return None
+        return _validate_tui_keybindings_map(value)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -203,6 +217,7 @@ class ResolvedSettings(BaseModel):
     update_check_enabled: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     openai_compatible: OpenAICompatibleSettings | None = None
+    tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -290,6 +305,7 @@ def resolve_settings(
         update_check_enabled=user_settings.update_check_enabled,
         mcp_servers=user_settings.mcp_servers,
         openai_compatible=user_settings.openai_compatible,
+        tui_keybindings=user_settings.tui_keybindings or {},
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )
@@ -475,6 +491,17 @@ def _load_settings_file(
     if ignored_fields:
         data = {key: value for key, value in data.items() if key not in ignored_fields}
 
+    # Keybinding syntax and conflicts belong to the Rust frontend. Python validates
+    # only the bounded transport shape. A bad presentation preference must not make
+    # otherwise-valid runtime settings disappear, so drop this field independently.
+    if data.get("tui_keybindings") is not None:
+        try:
+            _validate_tui_keybindings_map(data["tui_keybindings"])
+        except ValueError as exc:
+            _warn(f"ignoring invalid tui_keybindings in {path}: {exc}")
+            data = dict(data)
+            data.pop("tui_keybindings", None)
+
     try:
         return WispSettings.model_validate(data)
     except ValidationError as exc:
@@ -489,6 +516,61 @@ def _coalesce(*values: str | None) -> str | None:
         if value and value.strip():
             return value.strip()
     return None
+
+
+def _validate_tui_keybindings_map(value: Any) -> dict[str, list[str]]:
+    """Validate the bounded JSON transport shape for Rust TUI keybindings.
+
+    Args:
+        value (Any): Unvalidated settings field; key semantics are checked by Rust.
+
+    Returns:
+        dict[str, list[str]]: A copied map suitable for the private launch snapshot.
+
+    Raises:
+        ValueError: If the shape, Unicode encoding, or transport bounds are invalid.
+    """
+
+    if not isinstance(value, dict):
+        raise ValueError("expected an object mapping action names to key lists")
+    if len(value) > _MAX_TUI_KEYBINDING_ACTIONS:
+        raise ValueError(f"at most {_MAX_TUI_KEYBINDING_ACTIONS} actions are allowed")
+
+    bindings: dict[str, list[str]] = {}
+    for action, raw_chords in value.items():
+        if not isinstance(action, str):
+            raise ValueError("action names must be strings")
+        if not isinstance(raw_chords, list):
+            raise ValueError("each action's bindings must be a list")
+        if len(raw_chords) > _MAX_TUI_KEYBINDINGS_PER_ACTION:
+            raise ValueError(
+                f"each action may contain at most {_MAX_TUI_KEYBINDINGS_PER_ACTION} keys"
+            )
+        chords: list[str] = []
+        for chord in raw_chords:
+            if not isinstance(chord, str):
+                raise ValueError("each action's bindings must contain only strings")
+            if len(chord) > _MAX_TUI_KEYBINDING_CHARS:
+                raise ValueError(
+                    f"each binding may contain at most {_MAX_TUI_KEYBINDING_CHARS} characters"
+                )
+            chords.append(chord)
+        bindings[action] = chords
+
+    try:
+        serialized = json.dumps(
+            bindings,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("bindings must contain valid Unicode") from exc
+    if len(serialized) > _MAX_TUI_KEYBINDINGS_BYTES:
+        raise ValueError(
+            f"serialized bindings may use at most {_MAX_TUI_KEYBINDINGS_BYTES} UTF-8 bytes"
+        )
+    return bindings
 
 
 def _coalesce_paths(*values: list[str] | None) -> tuple[str, ...] | None:

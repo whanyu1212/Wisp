@@ -13,6 +13,10 @@ mod discovery_view;
 mod file_picker;
 mod framing;
 pub mod history;
+mod key_help;
+#[cfg(test)]
+mod keybinding_tests;
+mod keybindings;
 mod markdown;
 mod model_picker;
 mod mouse;
@@ -56,6 +60,7 @@ use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
 use file_picker::{FilePicker, PickerAction};
 use framing::FrameReader;
+use keybindings::{Action as KeyAction, Bindings};
 use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
@@ -453,6 +458,8 @@ struct DeferredQueueRecovery {
 
 struct LiveUi {
     state: UiState,
+    bindings: Bindings,
+    key_help: Option<key_help::KeyHelp>,
     theme: ThemeSelection,
     theme_preferences: Option<ThemePreferences>,
     theme_picker: Option<ThemePicker>,
@@ -490,6 +497,8 @@ impl Default for LiveUi {
     fn default() -> Self {
         Self {
             state: UiState::unconfigured(),
+            bindings: Bindings::default(),
+            key_help: None,
             theme: ThemeSelection::default(),
             theme_preferences: None,
             theme_picker: None,
@@ -1010,13 +1019,17 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         let blocked_context = self.unsendable_response_context.clone();
-        let follow_after_update = matches!(&action, UiAction::Submit(_));
+        let follow_after_update = matches!(
+            &action,
+            UiAction::Submit(_) | UiAction::SubmitPresented { .. }
+        );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
         if previous_decision != self.current_decision_context() {
             self.rendered_overlay = None;
             self.rendered_decision_context = None;
+            self.key_help = None;
         }
         let transcript_replaced = effects
             .iter()
@@ -1083,6 +1096,14 @@ impl LiveUi {
         let control = self.apply_effects(effects, writer, limit).await?;
         if control != LoopControl::Exit {
             self.sync_file_picker(writer, limit).await?;
+            if self
+                .key_help
+                .as_ref()
+                .is_some_and(|help| help.owner != self.key_help_owner())
+            {
+                self.key_help = None;
+                self.render_pending = true;
+            }
         }
         Ok(control)
     }
@@ -1182,6 +1203,29 @@ impl LiveUi {
         self.dispatch(action, writer, limit).await
     }
 
+    fn key_help_owner(&self) -> key_help::Owner {
+        if let Some(decision) = self.current_decision_context() {
+            key_help::Owner::Decision(decision)
+        } else if let Some(overlay) = self.active_overlay() {
+            key_help::Owner::Overlay(overlay)
+        } else if self.browse_selected.is_some() {
+            key_help::Owner::Browse
+        } else if self.file_picker.is_open() {
+            key_help::Owner::Files
+        } else if self
+            .completion
+            .view(
+                self.state.command_catalog.as_deref(),
+                self.state.skills.snapshot.as_deref(),
+            )
+            .is_some()
+        {
+            key_help::Owner::Completion
+        } else {
+            key_help::Owner::Composer
+        }
+    }
+
     fn active_overlay(&self) -> Option<OverlayKind> {
         if matches!(
             self.state.view_status,
@@ -1271,7 +1315,14 @@ impl LiveUi {
                 overlay.is_none() && self.browse_selected.is_none(),
                 completion_view.as_ref(),
                 palette,
+                &self.bindings,
             );
+            if let Some(help) = &mut self.key_help {
+                if let Some(area) = ui::overlay_area(frame.area()) {
+                    help.render(frame, area, &self.bindings, palette);
+                }
+                return;
+            }
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = self.current_decision_context();
             }
@@ -1332,6 +1383,7 @@ impl LiveUi {
                         self.state.command_catalog_loading(),
                         self.state.command_catalog_error.as_deref(),
                         palette,
+                        &self.bindings,
                     );
                     mouse::Rows::default()
                 }
@@ -1545,7 +1597,13 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
-        let clear_editor = matches!(&action, UiAction::Steer(_) | UiAction::FollowUp(_));
+        let clear_editor = matches!(
+            &action,
+            UiAction::Steer(_)
+                | UiAction::FollowUp(_)
+                | UiAction::SteerPresented { .. }
+                | UiAction::FollowUpPresented { .. }
+        );
         if clear_editor
             && !self.deferred_queue_recovery.is_empty()
             && !self.recovered_queue_recovery
@@ -1568,7 +1626,7 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         let command = match &action {
-            UiAction::Steer(content) => {
+            UiAction::Steer(content) | UiAction::SteerPresented { content, .. } => {
                 if let Err(error) = self.state.queue_submission_preflight(content) {
                     self.notice = Some(error.notice().into());
                     self.render_pending = true;
@@ -1582,7 +1640,7 @@ impl LiveUi {
                     )?,
                 ))
             }
-            UiAction::FollowUp(content) => {
+            UiAction::FollowUp(content) | UiAction::FollowUpPresented { content, .. } => {
                 if let Err(error) = self.state.queue_submission_preflight(content) {
                     self.notice = Some(error.notice().into());
                     self.render_pending = true;
@@ -1879,6 +1937,18 @@ impl LiveUi {
         self.completion.dismiss();
         match command {
             Command::Quit => Ok(LoopControl::Exit),
+            Command::UpdateGuidance => {
+                if !self.unsendable_current_response() {
+                    self.notice = Some(
+                        "External update only: run wisp update --check after quitting.".into(),
+                    );
+                }
+                self.key_help = Some(key_help::KeyHelp::updates(self.key_help_owner()));
+                self.mouse_frame = None;
+                self.rendered_overlay = None;
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Command::Theme(selection) => {
                 self.editor.clear();
                 if let Some(theme) = selection {
@@ -2058,8 +2128,11 @@ impl LiveUi {
             self.completion
                 .move_selection(key.code == KeyCode::Down, view.items.len());
         } else if (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE)
-            || (key.code == KeyCode::Enter
-                && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
+            || ((matches!(
+                self.bindings.action(key),
+                Some(KeyAction::Submit | KeyAction::AlternateSubmit)
+            ) || (key.code == KeyCode::Enter
+                && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)))
                 && !self.completion.is_exact(view.items[view.selected]))
         {
             if let Some((range, replacement)) = self
@@ -2396,12 +2469,13 @@ impl LiveUi {
                 self.browse_selected = None;
                 self.notice = None;
             }
-            KeyCode::F(6) | KeyCode::Tab => self.cycle_browse(false),
+            KeyCode::Tab => self.cycle_browse(false),
             KeyCode::BackTab => self.cycle_browse(true),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 return self.request_selected_detail(writer, limit).await;
             }
-            _ if transcript_view_action(key).is_some() => {
+            _ if self.bindings.action(key) == Some(KeyAction::Browse) => self.cycle_browse(false),
+            _ if self.bound_transcript_action(key).is_some() => {
                 let control = self.navigate_transcript(key, writer, limit).await?;
                 self.reconcile_browse_selection();
                 return Ok(control);
@@ -2418,7 +2492,9 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let action = transcript_view_action(key).expect("navigation key is prefiltered");
+        let action = self
+            .bound_transcript_action(key)
+            .expect("navigation key is prefiltered");
         self.navigate_transcript_action(action, writer, limit).await
     }
 
@@ -2547,6 +2623,49 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if matches!(&input, Input::Key(key) if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL)
+        {
+            self.key_help = if self.key_help.is_some() {
+                None
+            } else {
+                Some(key_help::KeyHelp::new(self.key_help_owner()))
+            };
+            self.rendered_overlay = None;
+            self.rendered_decision_context = None;
+            self.mouse_frame = None;
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if self.key_help.is_some() {
+            match &input {
+                Input::Key(key) if is_ctrl_c(*key) => {
+                    self.key_help = None;
+                    return self.handle_focused_input(input, writer, limit).await;
+                }
+                Input::Key(key) if is_escape(*key) => {
+                    self.key_help = None;
+                    self.render_pending = true;
+                }
+                Input::Key(key)
+                    if printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))
+                        && self.current_decision_context().is_some() =>
+                {
+                    self.key_help = None;
+                    return self.handle_focused_input(input, writer, limit).await;
+                }
+                Input::Key(key) => {
+                    let help = self.key_help.as_mut().expect("open key help");
+                    help.scroll.scroll(key.code, help.rendered_rows);
+                    self.render_pending = true;
+                }
+                Input::Redraw => {
+                    self.render_pending = true;
+                    self.mouse_frame = None;
+                }
+                _ => {}
+            }
+            return Ok(LoopControl::Continue);
+        }
         self.sync_file_picker(writer, limit).await?;
         let control = match input {
             Input::Mouse(event) => self.handle_mouse(event, writer, limit).await?,
@@ -2556,6 +2675,50 @@ impl LiveUi {
             self.sync_file_picker(writer, limit).await?;
         }
         Ok(control)
+    }
+
+    async fn submit_editor(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let prompt = self.editor.text().to_owned();
+        if prompt.trim().is_empty() {
+            self.notice = Some("Enter a non-empty prompt before sending.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        self.notice = None;
+        let action = if self.editor.has_folds() {
+            UiAction::SubmitPresented {
+                content: prompt,
+                presentation: self.editor.compact_text(),
+            }
+        } else {
+            UiAction::Submit(prompt)
+        };
+        let control = self.dispatch(action, writer, limit).await?;
+        if self.notice.is_none() {
+            self.editor.clear();
+        }
+        Ok(control)
+    }
+
+    fn bound_transcript_action(&self, key: KeyEvent) -> Option<TranscriptViewAction> {
+        match self.bindings.action(key)? {
+            KeyAction::PageUp => Some(TranscriptViewAction::PageUp),
+            KeyAction::PageDown => Some(TranscriptViewAction::PageDown),
+            KeyAction::Home => Some(TranscriptViewAction::Home),
+            KeyAction::Tail => Some(TranscriptViewAction::FollowTail),
+            KeyAction::LineUp => Some(TranscriptViewAction::ScrollLines(-1)),
+            KeyAction::LineDown => Some(TranscriptViewAction::ScrollLines(1)),
+            _ => None,
+        }
     }
 
     /// Keep discovery lazy and single-flight as the editable reference gains/loses focus.
@@ -2652,7 +2815,8 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        if matches!(&input, Input::Key(key) if key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL)
+        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ToggleTheme)
+            && key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL)
         {
             // Like Textual, a preview cannot accidentally be committed by toggling.
             if self.theme_picker.is_none() {
@@ -2779,9 +2943,12 @@ impl LiveUi {
                         .dispatch(UiAction::LoadCommandCatalog, writer, limit)
                         .await;
                 } else {
-                    let rows =
-                        commands::help_rows(self.state.command_catalog.as_deref(), self.palette())
-                            .len();
+                    let rows = commands::help_rows(
+                        self.state.command_catalog.as_deref(),
+                        self.palette(),
+                        &self.bindings,
+                    )
+                    .len();
                     self.command_help
                         .as_mut()
                         .expect("open help")
@@ -2831,18 +2998,6 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Key(key)
-                if self.editor_editable()
-                    && key.code == KeyCode::Char('r')
-                    && key.modifiers == KeyModifiers::CONTROL =>
-            {
-                self.open_prompt_history();
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if !decision_pending && is_browse_key(key) => {
-                self.enter_or_cycle_browse();
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
                 if !matches!(
                     self.state.view_status,
                     ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -2850,9 +3005,52 @@ impl LiveUi {
             {
                 Ok(LoopControl::Continue)
             }
+            Input::Key(key)
+                if !decision_pending
+                    && key.code == KeyCode::Enter
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
+                    && self
+                        .completion
+                        .view(
+                            self.state.command_catalog.as_deref(),
+                            self.state.skills.snapshot.as_deref(),
+                        )
+                        .is_some()
+                    && commands::classify(
+                        self.editor.text(),
+                        self.state.command_catalog.as_deref(),
+                    )
+                    .is_some() =>
+            {
+                let command =
+                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
+                        .expect("recognized completion");
+                self.handle_command(command, writer, limit).await
+            }
+            Input::Key(key)
+                if !decision_pending
+                    && self.bindings.action(key) == Some(KeyAction::ToggleTheme) =>
+            {
+                self.theme.toggle();
+                self.finish_theme_change();
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key)
+                if self.editor_editable()
+                    && self.bindings.action(key) == Some(KeyAction::History) =>
+            {
+                self.open_prompt_history();
+                Ok(LoopControl::Continue)
+            }
+            Input::Key(key)
+                if !decision_pending && self.bindings.action(key) == Some(KeyAction::Browse) =>
+            {
+                self.enter_or_cycle_browse();
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
             Input::Key(key)
-                if transcript_view_action(key).is_some()
+                if self.bound_transcript_action(key).is_some()
                     && !matches!(
                         self.state.view_status,
                         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -2899,13 +3097,14 @@ impl LiveUi {
                 }
             }
             Input::Key(key)
-                if key.code == KeyCode::Enter
-                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
-                    && commands::classify(
-                        self.editor.text(),
-                        self.state.command_catalog.as_deref(),
-                    )
-                    .is_some() =>
+                if matches!(
+                    self.bindings.action(key),
+                    Some(KeyAction::Submit | KeyAction::AlternateSubmit)
+                ) && commands::classify(
+                    self.editor.text(),
+                    self.state.command_catalog.as_deref(),
+                )
+                .is_some() =>
             {
                 let command =
                     commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
@@ -2914,8 +3113,7 @@ impl LiveUi {
             }
             Input::Key(key)
                 if self.editor_editable()
-                    && key.code == KeyCode::Up
-                    && key.modifiers == KeyModifiers::ALT =>
+                    && self.bindings.action(key) == Some(KeyAction::RestoreQueue) =>
             {
                 if self.retry_deferred_queue_recovery() {
                     Ok(LoopControl::Continue)
@@ -2926,46 +3124,56 @@ impl LiveUi {
                     Ok(LoopControl::Continue)
                 }
             }
-            Input::Key(key) if self.active_prompt_editable() && active_queue_submit(key) => {
-                let action = if key.modifiers.contains(KeyModifiers::ALT) {
-                    UiAction::FollowUp(self.editor.text().to_owned())
-                } else {
-                    UiAction::Steer(self.editor.text().to_owned())
-                };
-                self.dispatch_queue_action(action, writer, limit).await
+            Input::Key(key) if self.editor_editable() => {
+                match self.bindings.action(key) {
+                    Some(KeyAction::Submit | KeyAction::AlternateSubmit)
+                        if self.active_prompt_editable() =>
+                    {
+                        let content = self.editor.text().to_owned();
+                        let alternate =
+                            self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
+                        let action = match (alternate, self.editor.has_folds()) {
+                            (true, true) => UiAction::FollowUpPresented {
+                                content,
+                                presentation: self.editor.compact_text(),
+                            },
+                            (false, true) => UiAction::SteerPresented {
+                                content,
+                                presentation: self.editor.compact_text(),
+                            },
+                            (true, false) => UiAction::FollowUp(content),
+                            (false, false) => UiAction::Steer(content),
+                        };
+                        self.dispatch_queue_action(action, writer, limit).await
+                    }
+                    Some(KeyAction::Submit) => self.submit_editor(writer, limit).await,
+                    Some(KeyAction::Newline | KeyAction::AlternateSubmit) => {
+                        let cursor = self.editor.cursor_offset();
+                        let outcome = self.editor.replace_range(cursor..cursor, "\n");
+                        self.update_edit_notice(outcome);
+                        self.render_pending = true;
+                        Ok(LoopControl::Continue)
+                    }
+                    Some(_) => Ok(LoopControl::Continue),
+                    // Submission/newline belong to resolved actions, never the raw
+                    // editor fallback after a default has been replaced or unbound.
+                    None if key.code == KeyCode::Enter
+                        || (key.code == KeyCode::Char('j')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                    {
+                        Ok(LoopControl::Continue)
+                    }
+                    None => {
+                        if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
+                            let changed = self.update_edit_notice(outcome);
+                            if outcome.changed || changed {
+                                self.render_pending = true;
+                            }
+                        }
+                        Ok(LoopControl::Continue)
+                    }
+                }
             }
-            Input::Key(key) if self.editor_editable() => match self.editor.handle_key(key) {
-                EditorAction::Submit => {
-                    let prompt = self.editor.text().to_owned();
-
-                    if prompt.trim().is_empty() {
-                        self.notice = Some("Enter a non-empty prompt before sending.".into());
-                        self.render_pending = true;
-                        return Ok(LoopControl::Continue);
-                    }
-                    if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
-                        self.notice = Some(notice);
-                        self.render_pending = true;
-                        return Ok(LoopControl::Continue);
-                    }
-                    self.notice = None;
-                    let control = self
-                        .dispatch(UiAction::Submit(prompt), writer, limit)
-                        .await?;
-                    if self.notice.is_none() {
-                        self.editor.clear();
-                    }
-                    Ok(control)
-                }
-                EditorAction::Edit(outcome) => {
-                    let notice_changed = self.update_edit_notice(outcome);
-                    if outcome.changed || notice_changed {
-                        self.render_pending = true;
-                    }
-                    Ok(LoopControl::Continue)
-                }
-                EditorAction::Ignored => Ok(LoopControl::Continue),
-            },
             Input::Paste(pasted) if self.editor_editable() => {
                 let outcome = self.editor.insert_paste(&pasted);
                 let notice_changed = self.update_edit_notice(outcome);
@@ -3038,14 +3246,7 @@ fn is_escape(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
 }
 
-fn is_browse_key(key: KeyEvent) -> bool {
-    key.code == KeyCode::F(6) && key.modifiers == KeyModifiers::NONE
-}
-
-fn active_queue_submit(key: KeyEvent) -> bool {
-    key.code == KeyCode::Enter && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
-}
-
+#[cfg(test)]
 fn transcript_view_action(key: KeyEvent) -> Option<TranscriptViewAction> {
     match (key.code, key.modifiers) {
         (KeyCode::PageUp, KeyModifiers::NONE) => Some(TranscriptViewAction::PageUp),
@@ -3138,6 +3339,21 @@ pub async fn run_from_env() -> Result<(), Error> {
 
 async fn run(cli: Cli) -> Result<(), Error> {
     validate_frontend_version(&cli.expected_backend_version)?;
+    let (bindings, binding_warning) = match std::env::var_os("WISP_RUST_TUI_BINDINGS_JSON") {
+        None => (Bindings::default(), None),
+        Some(value) => match value
+            .to_str()
+            .ok_or_else(|| "Bindings snapshot is not UTF-8.".to_owned())
+            .and_then(Bindings::from_json)
+        {
+            Ok(bindings) => (bindings, None),
+            Err(error) => {
+                let warning = format!("Invalid keybindings; using defaults. {error}");
+                eprintln!("{warning}");
+                (Bindings::default(), Some(warning))
+            }
+        },
+    };
     let _panic_hook = PanicHookGuard::install();
     let (mut backend, stdin, stdout, stderr) = BackendProcess::spawn(&cli.backend)?;
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
@@ -3198,7 +3414,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 protocol_version: protocol,
                 event_schema_version: events,
             };
-            let mut live_ui = LiveUi { theme, theme_preferences, no_color, mouse_enabled, ..LiveUi::default() };
+            let mut live_ui = LiveUi { bindings, notice: binding_warning, theme, theme_preferences, no_color, mouse_enabled, ..LiveUi::default() };
             let mut transport_closed_diagnostic = None;
             let loop_result = async {
             live_ui
