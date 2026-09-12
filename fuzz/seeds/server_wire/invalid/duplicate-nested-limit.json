@@ -1,0 +1,1 @@
+{"type": "rpc.handshake.accepted", "backend_package_version": "0.1.0", "protocol_version": 6, "event_schema_version": 37, "min_protocol_version": 6, "max_protocol_version": 6, "capabilities": [], "limits": {"max_client_frame_bytes": 1024, "max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}}

@@ -1,0 +1,107 @@
+name: Rust protocol fuzzing
+
+on:
+  pull_request:
+    paths:
+      - 'rust/wisp-protocol/**'
+      - 'rust/wisp-tui/src/framing.rs'
+      - 'rust/wisp-tui/src/framing/**'
+      - 'rust/wisp-tui/Cargo.toml'
+      - 'schemas/**'
+      - 'fuzz/**'
+      - 'scripts/prepare_fuzz_corpus.py'
+      - 'tests/test_fuzz_corpus.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/rust-fuzz.yml'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Campaign minutes per target
+        type: choice
+        default: '15'
+        options: ['5', '15', '60']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 80 || 20 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [client_wire, server_wire]
+    env:
+      FUZZ_TARGET: ${{ matrix.target }}
+      FUZZ_MINUTES: ${{ inputs.minutes }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-09-11
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        with:
+          workspaces: fuzz -> target
+          key: protocol-fuzz-${{ matrix.target }}
+      - name: Install pinned runner
+        run: cargo +nightly-2026-09-11 install cargo-fuzz --version 0.13.2 --locked
+      - name: Fetch locked harness dependencies
+        run: cargo +nightly-2026-09-11 fetch --locked --manifest-path fuzz/Cargo.toml
+      - name: Prepare canonical corpus and record environment
+        run: |
+          mkdir -p fuzz/logs fuzz/artifacts
+          python scripts/prepare_fuzz_corpus.py fuzz/corpus
+          {
+            git rev-parse HEAD
+            rustc +nightly-2026-09-11 -Vv
+            cargo +nightly-2026-09-11 fuzz --version
+            sha256sum Cargo.lock fuzz/Cargo.lock
+          } > fuzz/logs/environment.txt
+      - name: Build instrumented target
+        shell: bash
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          cargo +nightly-2026-09-11 fmt --manifest-path fuzz/Cargo.toml --check
+          cargo +nightly-2026-09-11 fuzz build "$FUZZ_TARGET" --sanitizer address 2>&1 | tee fuzz/logs/build.txt
+          git diff --exit-code -- fuzz/Cargo.lock
+      - name: Replay seeds and run bounded campaign
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(-seed=468 -max_len=65536 -timeout=3 -rss_limit_mb=1024 -print_final_stats=1)
+          cargo +nightly-2026-09-11 fuzz run "$FUZZ_TARGET" --sanitizer address -- "${common[@]}" -runs=0 2>&1 | tee fuzz/logs/replay.txt
+          budget=(-runs=10000 -max_total_time=60)
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            case "$FUZZ_MINUTES" in
+              5|15|60) budget=(-max_total_time=$((FUZZ_MINUTES * 60))) ;;
+              *) echo 'Unsupported campaign duration' >&2; exit 2 ;;
+            esac
+          fi
+          cargo +nightly-2026-09-11 fuzz run "$FUZZ_TARGET" --sanitizer address -- "${common[@]}" "${budget[@]}" 2>&1 | tee fuzz/logs/campaign.txt
+          git diff --exit-code -- fuzz/Cargo.lock
+      - name: Preserve diagnostics and reproducing inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/
+            fuzz/logs/
+          retention-days: 14
+          if-no-files-found: warn

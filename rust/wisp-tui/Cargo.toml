@@ -30,6 +30,7 @@ wisp-protocol = { path = "../wisp-protocol" }
 
 [dev-dependencies]
 jsonschema.workspace = true
+proptest = { version = "=1.7.0", default-features = false, features = ["std"] }
 
 [[example]]
 name = "transcript_benchmark"

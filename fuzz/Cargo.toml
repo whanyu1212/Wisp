@@ -1,0 +1,31 @@
+[package]
+name = "wisp-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+serde = "1.0.219"
+serde_json = "1.0.143"
+wisp-protocol = { path = "../rust/wisp-protocol" }
+
+[[bin]]
+name = "client_wire"
+path = "fuzz_targets/client_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_wire"
+path = "fuzz_targets/server_wire.rs"
+test = false
+doc = false
+bench = false

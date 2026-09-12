@@ -70,6 +70,9 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 }
 
 #[cfg(test)]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::VecDeque,
