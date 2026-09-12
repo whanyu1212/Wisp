@@ -1186,7 +1186,20 @@ for line in sys.stdin:
                     except json.JSONDecodeError:
                         continue
             command_types = [command["type"] for command in commands]
-            if phase == "startup" and b"Type a prompt" in output:
+            if (
+                phase == "startup"
+                and command_types[:7]
+                == [
+                    "get_messages",
+                    "get_connection_catalog",
+                    "get_model_catalog",
+                    "get_commands",
+                    "get_state",
+                    "get_skills",
+                    "get_queue_state",
+                ]
+                and b"Type a prompt" in output
+            ):
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"
                 phase_started = now
@@ -1510,17 +1523,18 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
                 phase = "context closed"
                 output.clear()
-            elif phase == "context closed" and b"idle" in output:
+            elif phase == "context closed" and b"Type a prompt or / for commands." in output:
                 os.write(terminal_fd, b"/context auto off\r")
                 phase = "auto disabled"
                 output.clear()
-            elif phase == "auto disabled" and b"Automatic compaction disabled." in output:
+            elif phase == "auto disabled" and any(
+                command["type"] == "configure" and command.get("auto_compaction_enabled") is False
+                for command in commands
+            ):
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
             elif phase == "compacting" and b"compacting" in output:
-                # Header status is contiguous; the reason line can arrive as
-                # cell-level diffs against the previous identity details.
                 os.write(terminal_fd, b"\x03")
                 phase = "cancelled"
                 output.clear()
@@ -1552,7 +1566,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
                 phase = "cached closed"
                 output.clear()
-            elif phase == "cached closed" and b"idle" in output:
+            elif phase == "cached closed" and b"working" in output and b"/skill:review" in output:
                 assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/mcp\r")
                 phase = "mcp"

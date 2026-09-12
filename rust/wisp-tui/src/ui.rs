@@ -311,7 +311,19 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-fn footer_status_parts(state: &UiState, ctx_width: usize) -> Vec<String> {
+fn session_label(state: &UiState) -> Option<String> {
+    let session = state.selected_session.as_ref()?;
+    let label = session
+        .session_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&session.session_path);
+    let sanitized = sanitize_for_terminal(label);
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn footer_leading_parts(state: &UiState) -> Vec<String> {
     let mut parts = vec![status_label(state).to_string()];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
@@ -327,7 +339,14 @@ fn footer_status_parts(state: &UiState, ctx_width: usize) -> Vec<String> {
     if state.mode_confirmed {
         parts.push(state.mode.as_str().to_string());
     }
-    parts.push(crate::context_view::indicator(state, ctx_width));
+    parts
+}
+
+fn footer_trailing_parts(state: &UiState) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(session) = session_label(state) {
+        parts.push(session);
+    }
     if let Some(identity) = header_identity(state) {
         parts.push(identity);
     }
@@ -1123,7 +1142,19 @@ fn render_footer(
 ) {
     let width = usize::from(area.width);
     let notice = notice.or(state.context.compaction_notice.as_deref());
-    let mut status = footer_status_parts(state, width.saturating_sub(24));
+    let status_budget = if notice.is_some() {
+        if width >= 80 { (width / 2).max(24) } else { 0 }
+    } else {
+        (width / 2).max(18)
+    };
+    let leading = footer_leading_parts(state);
+    let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
+    let ctx_width = status_budget
+        .saturating_sub(leading_width)
+        .saturating_sub(if leading_width == 0 { 0 } else { 3 });
+    let mut status = leading;
+    status.push(crate::context_view::indicator(state, ctx_width));
+    status.extend(footer_trailing_parts(state));
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
     } else if viewport.has_unseen_output() {
@@ -1131,11 +1162,6 @@ fn render_footer(
     } else if !viewport.follows_tail() {
         status.push("scrolled".into());
     }
-    let status_budget = if notice.is_some() {
-        if width >= 80 { (width / 2).max(24) } else { 0 }
-    } else {
-        (width / 2).max(18)
-    };
     let status_line = join_hints(status, status_budget);
     let status_width = status_line.width();
     let remaining = width.saturating_sub(status_width.saturating_add(2));
@@ -1367,11 +1393,12 @@ mod tests {
     use super::*;
     use crate::reducer::{
         ActiveCommand, ActiveCommandType, AgentMode, BackendEvent, CommandIdSource, CommandKind,
-        InteractionStatus, PendingApproval, reduce,
+        InteractionStatus, PendingApproval, SessionIdentity, reduce,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+    use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
 
     #[derive(Default)]
     struct TestIds(u64);
@@ -1585,6 +1612,44 @@ mod tests {
             Some("manual compaction cancelled. Compaction cancelled".into());
         let cancelled = render_to_string(100, 18, &state, &PromptEditor::default());
         assert!(cancelled.contains("cancelled"), "{cancelled}");
+    }
+
+    #[test]
+    fn footer_keeps_compact_context_and_session_on_an_80_column_run() {
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+        state.mode = AgentMode::Build;
+        state.mode_confirmed = true;
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate { total_tokens: 4000 },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        });
+        state.selected_session = Some(SessionIdentity {
+            session_id: "demo".into(),
+            session_path: "/sessions/demo.jsonl".into(),
+            session_name: Some("demo-session".into()),
+        });
+        let running = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(running.contains("s:0/l:0"), "{running}");
+        assert!(running.contains("ctx"), "{running}");
+        assert!(running.contains('~') || running.contains('%'), "{running}");
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
+        let idle = render_to_string(100, 18, &state, &PromptEditor::default());
+        assert!(idle.contains("demo-session"), "{idle}");
+        assert!(idle.contains("ctx"), "{idle}");
     }
 
     #[test]
