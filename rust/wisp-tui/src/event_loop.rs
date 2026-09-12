@@ -203,11 +203,16 @@ async fn receive_writer(outcome: &mut WriterOutcome) -> Result<(), Error> {
     }
 }
 
-async fn receive_interrupt(signal: &mut tokio::signal::unix::Signal) -> Result<(), Error> {
-    signal
-        .recv()
-        .await
-        .ok_or_else(|| Error::Io(std::io::Error::other("terminal signal stream ended")))
+trait InterruptSource {
+    async fn receive(&mut self) -> Result<(), Error>;
+}
+
+impl InterruptSource for tokio::signal::unix::Signal {
+    async fn receive(&mut self) -> Result<(), Error> {
+        self.recv()
+            .await
+            .ok_or_else(|| Error::Io(std::io::Error::other("terminal signal stream ended")))
+    }
 }
 
 fn poll_outcomes(sources: &mut Sources<'_>, eof: &mut bool) -> Result<(), Error> {
@@ -247,34 +252,53 @@ pub(super) async fn run<B: Backend>(
     ui: &mut LiveUi,
     terminal: &mut Terminal<B>,
     connection: &ConnectionInfo,
-    mut sources: Sources<'_>,
+    sources: Sources<'_>,
     writer: &mpsc::Sender<WriterMessage>,
     limit: usize,
 ) -> Result<Exit, Error> {
-    let mut pending_input: Option<PendingInput> = None;
     // Keep the registration alive while dispatch awaits writes. Recreating a
     // ctrl_c() future leaves a listener gap until its next poll.
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut signal_ready = false;
+    run_with_interrupts(
+        ui,
+        terminal,
+        connection,
+        sources,
+        writer,
+        limit,
+        &mut signal,
+    )
+    .await
+}
+
+async fn run_with_interrupts<B: Backend>(
+    ui: &mut LiveUi,
+    terminal: &mut Terminal<B>,
+    connection: &ConnectionInfo,
+    mut sources: Sources<'_>,
+    writer: &mpsc::Sender<WriterMessage>,
+    limit: usize,
+    signal: &mut impl InterruptSource,
+) -> Result<Exit, Error> {
+    let mut pending_input: Option<PendingInput> = None;
+    let mut pending_interrupt: Option<usize> = None;
     let mut eof = false;
     let mut events_open = true;
     let mut next_paint = Instant::now();
     loop {
         poll_outcomes(&mut sources, &mut eof)?;
         let mut progressed = false;
-        let handled_signal = signal_ready
-            || tokio::select! {
+        if pending_interrupt.is_none()
+            && tokio::select! {
                 biased;
-                result = receive_interrupt(&mut signal) => { result?; true }
+                result = signal.receive() => { result?; true }
                 _ = std::future::ready(()) => false,
-            };
-        if handled_signal {
-            signal_ready = false;
-            progressed = true;
-            if !eof && ui.interrupt(writer, limit, true).await? == LoopControl::Exit {
-                return Ok(Exit::User);
             }
+        {
+            pending_interrupt = Some(captured_event_prefix(&sources));
+            progressed = true;
         }
+        let handled_signal = pending_interrupt.is_some();
         if pending_input.is_none() && !eof && !handled_signal {
             match sources.inputs.try_recv() {
                 Ok(input) => {
@@ -293,9 +317,8 @@ pub(super) async fn run<B: Backend>(
             // Stop at the captured prefix boundary. Later output belongs after
             // this input even if it was admitted while dispatch awaited a write.
             if !eof
-                && pending_input
-                    .as_ref()
-                    .is_some_and(|input| input.remaining == 0)
+                && pending_interrupt.or_else(|| pending_input.as_ref().map(|input| input.remaining))
+                    == Some(0)
             {
                 break;
             }
@@ -306,6 +329,9 @@ pub(super) async fn run<B: Backend>(
             let Some(event) = event else { break };
             if let Some(input) = &mut pending_input {
                 input.remaining = input.remaining.saturating_sub(1);
+            }
+            if let Some(remaining) = &mut pending_interrupt {
+                *remaining = remaining.saturating_sub(1);
             }
             progressed = true;
             if ui
@@ -318,6 +344,13 @@ pub(super) async fn run<B: Backend>(
             // The remaining field retains the wire permit through dispatch.
         }
         poll_outcomes(&mut sources, &mut eof)?;
+        if !eof && pending_interrupt == Some(0) {
+            pending_interrupt = None;
+            progressed = true;
+            if ui.interrupt(writer, limit, true).await? == LoopControl::Exit {
+                return Ok(Exit::User);
+            }
+        }
         if !eof
             && !handled_signal
             && pending_input
@@ -355,11 +388,11 @@ pub(super) async fn run<B: Backend>(
                 result?;
                 eof = true;
             }
-            result = receive_interrupt(&mut signal) => {
+            result = signal.receive(), if pending_interrupt.is_none() => {
                 result?;
-                signal_ready = true;
+                pending_interrupt = Some(captured_event_prefix(&sources));
             }
-            input = sources.inputs.recv(), if pending_input.is_none() && !eof => {
+            input = sources.inputs.recv(), if pending_input.is_none() && pending_interrupt.is_none() && !eof => {
                 match input {
                     Some(input) => pending_input = Some(PendingInput::capture(input, ui, captured_event_prefix(&sources))),
                     None => return Ok(Exit::User),

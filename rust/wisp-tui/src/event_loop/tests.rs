@@ -60,6 +60,194 @@ async fn queued(event: BackendEvent, budget: &Arc<Semaphore>) -> QueuedEvent {
     }
 }
 
+impl InterruptSource for mpsc::Receiver<()> {
+    async fn receive(&mut self) -> Result<(), Error> {
+        self.recv().await.ok_or(Error::ReaderStopped)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn external_interrupt_includes_reserved_completion_but_not_later_output() {
+    for reserved_resolution in [false, true] {
+        let (writer, mut commands) = mpsc::channel(16);
+        let mut ui = active_ui();
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageStarted { turn: 1 }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        ui.dispatch(approval("old"), &writer, 8192).await.unwrap();
+        draw(&mut ui);
+        let budget = Arc::new(Semaphore::new(64));
+        let (events_tx, mut events) = mpsc::channel(64);
+        for _ in 0..63 {
+            events_tx
+                .send(queued(delta("x"), &budget).await)
+                .await
+                .unwrap();
+        }
+        let resolution = queued(
+            BackendEvent::CommandFinished {
+                command_id: "prompt-1".into(),
+                command_type: "prompt".into(),
+                ok: true,
+                error: None,
+            },
+            &budget,
+        )
+        .await;
+        let reserved = if reserved_resolution {
+            Some((events_tx.clone().reserve_owned().await.unwrap(), resolution))
+        } else {
+            events_tx.send(resolution).await.unwrap();
+            None
+        };
+        let producer = tokio::spawn(async move {
+            if let Some((slot, resolution)) = reserved {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                slot.send(resolution);
+            }
+            for _ in 0..2048 {
+                if events_tx
+                    .send(queued(delta("y"), &budget).await)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let (signal_tx, mut signals) = mpsc::channel(1);
+        signal_tx.send(()).await.unwrap();
+        let (input_tx, mut inputs) = mpsc::channel(16);
+        input_tx
+            .send(Input::Error(std::io::Error::other("test stop")))
+            .await
+            .unwrap();
+        let mut ready_event = None;
+        let mut reader = None;
+        let mut writer_outcome = None;
+        let result = run_with_interrupts(
+            &mut ui,
+            &mut Terminal::new(TestBackend::new(100, 24)).unwrap(),
+            &connection(),
+            Sources {
+                events: &mut events,
+                ready_event: &mut ready_event,
+                inputs: &mut inputs,
+                reader: &mut reader,
+                writer: &mut writer_outcome,
+            },
+            &writer,
+            8192,
+            &mut signals,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(Exit::User)));
+        while let Ok(message) = commands.try_recv() {
+            let WriterMessage::Frame { payload, .. } = message else {
+                panic!("unexpected close")
+            };
+            let command: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(
+                command["type"], "get_session_stats",
+                "unexpected command: {command}"
+            );
+        }
+        assert!(
+            !producer.is_finished(),
+            "later output must not extend the interrupt barrier"
+        );
+        assert!(ui.state.latest_assistant_text().unwrap().len() <= 127);
+        producer.abort();
+        let _ = producer.await;
+    }
+}
+
+#[tokio::test]
+async fn external_interrupt_waits_for_admitted_completion_before_acting() {
+    for decision in [
+        approval("old"),
+        UiAction::BackendEvent(BackendEvent::TrustRequested {
+            request_id: "old".into(),
+            project_path: "/project".into(),
+        }),
+    ] {
+        let (writer, mut commands) = mpsc::channel(16);
+        let mut ui = active_ui();
+        ui.dispatch(decision, &writer, 8192).await.unwrap();
+        draw(&mut ui);
+        let budget = Arc::new(Semaphore::new(64));
+        let (events_tx, mut events) = mpsc::channel(64);
+        let mut ready_event = Some(queued(delta("held"), &budget).await);
+        for _ in 0..16 {
+            events_tx
+                .send(queued(delta("prefix"), &budget).await)
+                .await
+                .unwrap();
+        }
+        events_tx
+            .send(
+                queued(
+                    BackendEvent::CommandFinished {
+                        command_id: "prompt-1".into(),
+                        command_type: "prompt".into(),
+                        ok: true,
+                        error: None,
+                    },
+                    &budget,
+                )
+                .await,
+            )
+            .await
+            .unwrap();
+        let (signal_tx, mut signals) = mpsc::channel(1);
+        signal_tx.send(()).await.unwrap();
+        let (input_tx, mut inputs) = mpsc::channel(16);
+        input_tx
+            .send(Input::Paste("must wait for the signal".into()))
+            .await
+            .unwrap();
+        let mut reader = None;
+        let mut writer_outcome = None;
+        let result = run_with_interrupts(
+            &mut ui,
+            &mut Terminal::new(TestBackend::new(100, 24)).unwrap(),
+            &connection(),
+            Sources {
+                events: &mut events,
+                ready_event: &mut ready_event,
+                inputs: &mut inputs,
+                reader: &mut reader,
+                writer: &mut writer_outcome,
+            },
+            &writer,
+            8192,
+            &mut signals,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(Exit::User)));
+        while let Ok(message) = commands.try_recv() {
+            let WriterMessage::Frame { payload, .. } = message else {
+                panic!("unexpected close")
+            };
+            let command: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(
+                command["type"], "get_session_stats",
+                "unexpected command: {command}"
+            );
+        }
+        assert!(ui.current_decision_context().is_none());
+        assert!(ui.editor.text().is_empty());
+        assert!(ready_event.is_none());
+        assert_eq!(budget.available_permits(), 64);
+    }
+}
+
 #[tokio::test]
 async fn replacement_approval_cannot_use_a_key_captured_before_redraw() {
     let (writer, mut commands) = mpsc::channel(16);
