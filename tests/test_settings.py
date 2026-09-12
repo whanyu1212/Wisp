@@ -238,6 +238,59 @@ def test_project_cannot_introduce_update_check_setting(tmp_path: Path) -> None:
     assert settings.update_check_enabled is None
 
 
+def test_tui_keybindings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, tui_keybindings={"prompt.submit": ["ctrl+enter"]})
+    _write_settings(project, tui_keybindings={"prompt.submit": ["f12"]})
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.tui_keybindings == {"prompt.submit": ["ctrl+enter"]}
+
+
+def test_missing_tui_keybindings_resolve_to_empty_map(tmp_path: Path) -> None:
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=tmp_path / "home")
+
+    assert settings.tui_keybindings == {}
+
+
+@pytest.mark.parametrize(
+    ("invalid_bindings", "message"),
+    [
+        (["ctrl+enter"], "expected an object"),
+        ({"prompt.submit": "ctrl+enter"}, "bindings must be a list"),
+        ({"prompt.submit": [1]}, "must contain only strings"),
+        ({f"action-{index}": [] for index in range(65)}, "at most 64 actions"),
+        ({"prompt.submit": [f"f{index}" for index in range(9)]}, "at most 8 keys"),
+        ({"prompt.submit": ["x" * 65]}, "at most 64 characters"),
+    ],
+)
+def test_invalid_user_tui_keybindings_preserve_other_settings(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+    invalid_bindings: object,
+    message: str,
+) -> None:
+    home = tmp_path / "home"
+    _write_settings(home, provider="valid-provider", tui_keybindings=invalid_bindings)
+
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=home)
+    warning = capsys.readouterr().err
+
+    assert settings.provider == "valid-provider"
+    assert settings.tui_keybindings == {}
+    assert "ignoring invalid tui_keybindings" in warning
+    assert message in warning
+
+
+def test_tui_keybindings_reject_serialized_payload_over_64_kib() -> None:
+    bindings = {f"action-{index}-{'x' * 1024}": ["ctrl+a"] for index in range(64)}
+
+    with pytest.raises(ValidationError, match="at most 65536 UTF-8 bytes"):
+        WispSettings.model_validate({"tui_keybindings": bindings})
+
+
 def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

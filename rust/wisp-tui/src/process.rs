@@ -30,6 +30,7 @@ impl BackendProcess {
         let mut command = Command::new(program);
         command
             .args(arguments)
+            .env_remove("WISP_RUST_TUI_BINDINGS_JSON")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
