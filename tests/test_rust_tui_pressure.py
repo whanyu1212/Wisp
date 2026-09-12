@@ -192,7 +192,7 @@ class _TuiProcess:
 
     def wait_ready(self) -> None:
         self.wait_for(
-            b"Type a prompt below to start.",
+            b"Type a prompt or / for commands.",
             failure="Rust TUI did not finish startup",
         )
 

@@ -1,7 +1,7 @@
 # Rust TUI transport pressure (#468)
 
-This focused slice builds on `e0c7548` (#549). It replaces immediate queue-full failure with
-bounded waiting, makes the live loop fair under input/output traffic, and checks transport failures
+This focused slice builds on #549 and is verified against `d9a13c0` (#552). It replaces immediate
+queue-full failure with bounded waiting, makes the live loop fair under input/output traffic, and checks transport failures
 without requiring another outgoing command. It does not close #468 or authorize a default switch.
 Textual remains the supported default; Rust remains experimental on macOS/Linux.
 
@@ -75,12 +75,12 @@ secret cleanup, remaining lifecycle races and platform recovery remain under #46
 
 ## Local verification
 
-The full Rust workspace passed 608 tests with all features. Cargo formatting and Clippy passed.
+The full Rust workspace passed 610 tests with all features. Cargo formatting and Clippy passed.
 The handoff suite passed all 35 cases, including five pressure cases, against the final rebuilt binary.
 Shared traces/RPC contract checks passed (including the
 new four-way parametrized trace), and process-retention/shared-trace checks passed 229 cases with
 one existing skip. Ruff formatting/lint, configured mypy, immutable-schema verification against
-`e0c7548`, and the documentation build passed. The sandbox blocked `ps` in the existing Rust
+`d9a13c0`, and the documentation build passed. The sandbox blocked `ps` in the existing Rust
 process-group test; the complete workspace gate passed when run with process inspection enabled.
 
 ## Reproduction
@@ -95,7 +95,7 @@ RUST_TUI_BINARY_UNDER_TEST="$PWD/target/debug/wisp-tui" uv run pytest \
   tests/test_rust_tui_mouse.py tests/test_rust_tui_readiness.py tests/test_rust_tui_pressure.py
 uv run pytest tests/test_tui_traces.py tests/test_rpc_protocol.py tests/test_rpc_protocol_schema.py \
   tests/test_tui_process_lifecycle.py tests/test_process_manager.py
-uv run python -m wisp.rpc.protocol_schema --check --immutable-base e0c7548
+uv run python -m wisp.rpc.protocol_schema --check --immutable-base d9a13c0
 ```
 
 The handoff suite is configured on both Linux and macOS. Local PTY results alone do not establish
