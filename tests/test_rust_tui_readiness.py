@@ -61,11 +61,15 @@ class _TuiProcess:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
+            if self.status is None:
+                waited_pid, waited_status = os.waitpid(self.pid, os.WNOHANG)
+                if waited_pid == self.pid:
+                    self.status = waited_status
+            # Poll once before checking the condition. A reaped exit can satisfy
+            # quit's condition rather than falling through as an unexpected exit.
             if predicate(bytes(self.output)):
                 return bytes(self.output)
-            waited_pid, waited_status = os.waitpid(self.pid, os.WNOHANG)
-            if waited_pid == self.pid:
-                self.status = waited_status
+            if self.status is not None:
                 break
         pytest.fail(f"{failure}; terminal tail={bytes(self.output[-8000:])!r}")
 
@@ -89,19 +93,12 @@ class _TuiProcess:
     def quit(self) -> None:
         self.send(b"\x03")
         self.wait_until(
-            lambda _output: self._poll_exit(),
+            lambda _output: self.status is not None,
             failure="Rust TUI did not exit after Ctrl+C",
         )
         assert self.status is not None
         assert os.waitstatus_to_exitcode(self.status) == 0, bytes(self.output)
         assert termios.tcgetattr(self.fd) == self.initial_terminal
-
-    def _poll_exit(self) -> bool:
-        waited_pid, waited_status = os.waitpid(self.pid, os.WNOHANG)
-        if waited_pid != self.pid:
-            return False
-        self.status = waited_status
-        return True
 
     def close(self) -> None:
         if self.status is None:
@@ -337,3 +334,16 @@ def test_context_help_preserves_draft_and_update_is_local_guidance(tmp_path: Pat
         tui.quit()
     finally:
         tui.close()
+
+
+def test_wait_until_accepts_an_exit_reaped_after_the_first_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = _TuiProcess(pid=17, fd=3, initial_terminal=[])
+    polls = iter([(0, 0), (17, 0)])
+    monkeypatch.setattr(select, "select", lambda *_args: ([], [], []))
+    monkeypatch.setattr(os, "waitpid", lambda *_args: next(polls))
+
+    tui.wait_until(lambda _output: tui.status is not None, failure="expected clean exit")
+
+    assert tui.status == 0
