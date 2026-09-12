@@ -420,13 +420,13 @@ fn render_transcript(
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let sticky = sticky_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
-    if !sticky.is_empty()
-        && !rows
-            .iter()
-            .any(|row| row.anchor.entry_id == sticky[0].anchor.entry_id)
-    {
-        let drop = sticky.len().min(rows.len());
-        rows.drain(..drop);
+    if !sticky.is_empty() {
+        let user_id = sticky[0].anchor.entry_id;
+        rows.retain(|row| row.anchor.entry_id != user_id);
+        let budget = visible_lines.saturating_sub(sticky.len());
+        if rows.len() > budget {
+            rows.drain(..rows.len() - budget);
+        }
         let mut combined = sticky;
         combined.append(&mut rows);
         rows = combined;
@@ -1544,6 +1544,36 @@ mod tests {
         assert!(rendered.contains("Pasted content #1"));
         assert!(rendered.contains("2006"));
         assert!(rendered.contains("6011"));
+    }
+
+    #[test]
+    fn follow_tail_keeps_the_latest_user_turn_at_the_top_when_it_is_still_in_view() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_prompt("older-prompt".into());
+        state.transcript.complete_message(
+            1,
+            (0..40)
+                .map(|index| format!("OLDER-ASSISTANT-LINE-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        state
+            .transcript
+            .append_prompt("latest-prompt-marker".into());
+        state.transcript.complete_message(2, "short-ok".into());
+        let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+        let latest = rendered
+            .find("latest-prompt-marker")
+            .expect("latest user turn");
+        let short = rendered.find("short-ok").expect("latest assistant");
+        assert!(latest < short);
+        if let Some(older) = rendered.find("OLDER-ASSISTANT-LINE-") {
+            assert!(
+                latest < older,
+                "latest user turn should stay above leftover older assistant rows: {rendered}"
+            );
+        }
+        assert!(!rendered.contains("older-prompt"));
     }
 
     #[test]
