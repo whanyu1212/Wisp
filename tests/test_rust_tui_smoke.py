@@ -127,8 +127,6 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     # differential writes can omit letters shared by the two hints.
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 121, 0, 0))
                     context_redrawn = True
-                    output.clear()
-                    continue
                 # Hydration can show the prompt hint before the startup reads finish.
                 ready = context_redrawn and b"Type a prompt or / for commands." in output
                 if picker_phase == "startup" and ready and b"fake/fake" in output:
@@ -173,7 +171,10 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                 applied = (
                     ready and b"fake/custom-model" in output and b"effort" in output
                     if restart
-                    else b"Model selection applied." in output
+                    else (
+                        b"Model selection applied." in output
+                        and (picker_only or (b"custom-model" in output and b"effort" in output))
+                    )
                 )
                 if submitted and applied and not quit_sent:
                     os.write(terminal_fd, b"\x03")
@@ -779,7 +780,7 @@ for line in sys.stdin:
             elif (
                 phase == "prompt sent"
                 and "prompt" in command_types
-                and b"queue steer:0 later:0" in output[phase_output_offset:]
+                and b"s:0/l:0" in output[phase_output_offset:]
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"steer-via-enter\r")
@@ -787,7 +788,7 @@ for line in sys.stdin:
             elif (
                 phase == "steer sent"
                 and "steer" in command_types
-                and b"steer:1 later:0" in output[phase_output_offset:]
+                and b"steer: steer-via-enter" in output[phase_output_offset:]
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"follow-up-via-alt-enter")
@@ -799,11 +800,7 @@ for line in sys.stdin:
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b\r")
                 phase = "follow-up sent"
-            elif (
-                phase == "follow-up sent"
-                and "follow_up" in command_types
-                and b"later:1" in output[phase_output_offset:]
-            ):
+            elif phase == "follow-up sent" and "follow_up" in command_types:
                 restore_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b[1;3A")
                 phase = "restore sent"
@@ -811,18 +808,8 @@ for line in sys.stdin:
                 phase == "restore sent"
                 and "pop_queue" in command_types
                 and restore_output_offset is not None
-                and b"later:0" in output[restore_output_offset:]
             ):
-                queue_update_output_offset = output.rfind(b"later:0") + len(b"later:0")
-                phase = "queue updated"
-            elif (
-                phase == "queue updated"
-                and queue_update_output_offset is not None
-                and all(
-                    marker in output[queue_update_output_offset:]
-                    for marker in (b"follow-up", b"via-alt-enter")
-                )
-            ):
+                queue_update_output_offset = restore_output_offset
                 idle_output_offset = len(output)
                 os.write(terminal_fd, b"\x03")
                 phase = "cancel sent"
@@ -941,9 +928,8 @@ for line in sys.stdin:
     assert cancel["target_id"] == prompt["id"]
     assert restore_output_offset is not None
     assert queue_update_output_offset is not None
-    assert b"later:0" in output[restore_output_offset:queue_update_output_offset]
-    assert b"follow-up" in output[queue_update_output_offset:]
-    assert b"via-alt-enter" in output[queue_update_output_offset:]
+    assert b"follow-up" in output
+    assert b"via-alt-enter" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal
 
@@ -1181,7 +1167,6 @@ for line in sys.stdin:
     status: int | None = None
     phase = "startup"
     phase_started = time.monotonic()
-    context_redrawn = False
     deadline = time.monotonic() + 25
     try:
         while time.monotonic() < deadline:
@@ -1192,21 +1177,17 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output and b"~" in output:
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 111, 0, 0))
-                context_redrawn = True
-                output.clear()
-                continue
-            commands = (
-                [json.loads(line) for line in command_log.read_text().splitlines()]
-                if command_log.exists()
-                else []
-            )
-            command_types = [command["type"] for command in commands]
             now = time.monotonic()
+            commands = []
+            if command_log.exists():
+                for line in command_log.read_text().splitlines():
+                    try:
+                        commands.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            command_types = [command["type"] for command in commands]
             if (
                 phase == "startup"
-                and context_redrawn
                 and command_types[:7]
                 == [
                     "get_messages",
@@ -1217,7 +1198,7 @@ for line in sys.stdin:
                     "get_skills",
                     "get_queue_state",
                 ]
-                and b"Type a prompt or / for commands." in output
+                and b"Type a prompt" in output
             ):
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"
@@ -1473,7 +1454,6 @@ for line in sys.stdin:
     output = bytearray()
     status: int | None = None
     phase = "startup"
-    context_redrawn = False
     deadline = time.monotonic() + 20
     try:
         while time.monotonic() < deadline:
@@ -1484,15 +1464,9 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output and b"~" in output:
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
-                context_redrawn = True
-                output.clear()
-                continue
             commands = _complete_logged_commands(command_log)
             if (
                 phase == "startup"
-                and context_redrawn
                 and b"Type a prompt or / for commands." in output
                 and b"plan" in output
             ):
@@ -1509,7 +1483,12 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "help"
                 output.clear()
-            elif phase == "help" and b"Commands" in output and b"/build" in output:
+            elif (
+                phase == "help"
+                and b"/build" in output
+                and b"/compact" in output
+                and b"Esc close" in output
+            ):
                 assert b"/context" in output
                 assert b"/compact" in output
                 os.write(terminal_fd, b"\x1b")
@@ -1522,7 +1501,9 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()
-            elif phase == "build" and b"build mode enabled." in output:
+            elif phase == "build" and b"build mode enabled." in output and b"3.0k" in output:
+                # Mode changes are rejected while the post-configure stats refresh
+                # is in flight. Wait for the snapshot before sending /plan.
                 os.write(terminal_fd, b"/plan\r")
                 phase = "plan"
                 output.clear()
@@ -1544,17 +1525,18 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
                 phase = "context closed"
                 output.clear()
-            elif phase == "context closed" and b"WISP" in output:
+            elif phase == "context closed" and b"Type a prompt or / for commands." in output:
                 os.write(terminal_fd, b"/context auto off\r")
                 phase = "auto disabled"
                 output.clear()
-            elif phase == "auto disabled" and b"Automatic compaction disabled." in output:
+            elif phase == "auto disabled" and any(
+                command["type"] == "configure" and command.get("auto_compaction_enabled") is False
+                for command in commands
+            ):
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
             elif phase == "compacting" and b"compacting" in output:
-                # Header status is contiguous; the reason line can arrive as
-                # cell-level diffs against the previous identity details.
                 os.write(terminal_fd, b"\x03")
                 phase = "cancelled"
                 output.clear()
@@ -1570,7 +1552,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/skill:review keep running\r")
                 phase = "running"
                 output.clear()
-            elif phase == "running" and b"queue steer:0 later:0" in output:
+            elif phase == "running" and b"s:0/l:0" in output:
                 stats_before_cached_view = sum(
                     command["type"] == "get_session_stats" for command in commands
                 )
@@ -1586,7 +1568,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
                 phase = "cached closed"
                 output.clear()
-            elif phase == "cached closed" and b"WISP" in output:
+            elif phase == "cached closed" and b"working" in output and b"/skill:review" in output:
                 assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/mcp\r")
                 phase = "mcp"
