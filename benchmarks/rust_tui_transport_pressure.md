@@ -25,6 +25,8 @@ Textual remains the supported default; Rust remains experimental on macOS/Linux.
 - User exit observes/releases any held event, then drains inbound events while admitting shutdown and
   awaiting the writer outcome. Per-operation transport deadlines remain in force; the short task-join
   timeout applies only after the writer has reported completion. Ready reader failures take precedence.
+  Successful shutdown also requires the reader's clean EOF, so a zero backend exit cannot hide a
+  trailing protocol error.
 - EOF drains the finite admitted prefix before projecting transport closure. Fatal reader/writer
   errors abandon the admitted prefix explicitly, project closure without dispatching that prefix,
   report bounded sanitized diagnostics and abandoned event/wire-byte counts, then use existing
@@ -63,7 +65,7 @@ blocked terminal itself is outside that fairness guarantee.
 | Fair turns and finite input barriers | `event_loop::tests::{saturated_fifo_gets_a_paint_after_eight_events_and_does_not_starve_input,later_events_do_not_extend_the_captured_input_prefix}` | First paint after eight events, FIFO state, input progress while a finite 2,048-event producer is still active |
 | Deferred activation | `event_loop::tests` approval/trust/model, first-paint and browse tests; existing file/mouse/overlay tests | Original decision, catalog, visibility and entry ownership survive an intervening redraw |
 | EOF/fatal outcome handling | `event_loop::tests` EOF and writer-outcome tests | FIFO drain on EOF; fatal failure preempts input/events even without another command; held event remains accounted |
-| Process/terminal pressure | `tests/test_rust_tui_pressure.py` | 192 × 1-KiB burst, 1,024 × 1-KiB burst with external SIGINT, synchronized EOF/malformed frame, visible final state, terminal restoration and backend PID cleanup |
+| Process/terminal pressure | `tests/test_rust_tui_pressure.py` | 192 × 1-KiB burst, 1,024 × 1-KiB burst with external SIGINT, synchronized EOF/malformed frame, malformed output after shutdown success, visible final state, terminal restoration and backend PID cleanup |
 | Shared control ordering | `tests/fixtures/tui_traces/approval_resolution_then_cancel.json`, existing cancel-before-approval/trust and decision traces | Python and Rust agree on exact commands and terminal state; these reducer traces do not test live channel scheduling |
 | Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `test_process_manager.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no whole-session memory claim |
 
@@ -74,8 +76,8 @@ secret cleanup, remaining lifecycle races and platform recovery remain under #46
 ## Local verification
 
 The full Rust workspace passed 607 tests with all features. Cargo formatting and Clippy passed.
-The handoff suite passed all 34 cases; the four pressure cases were rerun against the rebuilt binary
-after the final signal and fatal-drain fixes. Shared traces/RPC contract checks passed (including the
+The handoff suite passed all 35 cases, including five pressure cases, against the final rebuilt binary.
+Shared traces/RPC contract checks passed (including the
 new four-way parametrized trace), and process-retention/shared-trace checks passed 229 cases with
 one existing skip. Ruff formatting/lint, configured mypy, immutable-schema verification against
 `e0c7548`, and the documentation build passed. The sandbox blocked `ps` in the existing Rust

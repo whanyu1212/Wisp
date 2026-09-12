@@ -127,6 +127,9 @@ for line in sys.stdin:
             command_type="shutdown",
             ok=True,
         ))
+        if mode == "shutdown-malformed":
+            sys.stdout.buffer.write(b'{"type": definitely-not-json}\n')
+            sys.stdout.buffer.flush()
         break
     else:
         emit(RpcCommandFinished(
@@ -364,6 +367,22 @@ def test_transport_fault_restores_terminal_and_cleans_up_backend(
     else:
         assert b"invalid UTF-8 JSON RPC object" in output
         assert b"abandoned queued events=" in output
+
+    backend_pid = int(backend_pid_path.read_text(encoding="utf-8"))
+    assert _backend_process_has_exited(backend_pid)
+
+
+@pytest.mark.process
+def test_shutdown_success_cannot_hide_a_trailing_protocol_error(tmp_path: Path) -> None:
+    tui, backend_pid_path, _release, _burst_done = _launch(tmp_path, mode="shutdown-malformed")
+    try:
+        tui.wait_ready()
+        tui.send(b"\x03")
+        assert tui.wait_for_exit(failure="Rust TUI did not settle shutdown") != 0
+        assert b"invalid UTF-8 JSON RPC object" in tui.output
+        assert termios.tcgetattr(tui.fd) == tui.initial_terminal
+    finally:
+        tui.close()
 
     backend_pid = int(backend_pid_path.read_text(encoding="utf-8"))
     assert _backend_process_has_exited(backend_pid)

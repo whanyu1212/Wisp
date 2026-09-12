@@ -3533,7 +3533,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 if let Some(status) = backend.try_wait()? {
                     shutdown.observe_exit(status)?;
                 }
-                if shutdown.completed() {
+                // A zero process exit must not hide a trailing protocol error.
+                if shutdown.completed() && reader_outcome.is_none() {
                     return Ok(());
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3554,7 +3555,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             if let Some(status) = backend.try_wait()? {
                 shutdown.observe_exit(status)?;
             }
-            if shutdown.completed() {
+            if shutdown.completed() && reader_outcome.is_none() {
                 return Ok(());
             }
             Err(shutdown.deadline_error())
