@@ -10,6 +10,7 @@ mod connection_panel;
 mod context_view;
 mod detail_view;
 mod discovery_view;
+mod event_loop;
 mod file_picker;
 mod framing;
 pub mod history;
@@ -46,6 +47,7 @@ mod transcript;
 #[cfg(feature = "transcript-benchmark")]
 pub mod transcript_benchmark;
 mod transcript_view;
+mod transport;
 mod ui;
 
 use bytes::Bytes;
@@ -59,7 +61,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
 use file_picker::{FilePicker, PickerAction};
-use framing::FrameReader;
+use transport::{
+    QueuedEvent, ReaderTermination, WriterMessage, queue_shutdown_and_close, send_payload,
+    send_payload_confirmed, send_value, stdout_reader_task, writer_task,
+};
+
 use keybindings::{Action as KeyAction, Bindings};
 use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
@@ -86,11 +92,14 @@ use theme::Palette;
 use theme_picker::{ThemePicker, ThemePickerAction};
 use theme_preferences::{ThemePreferences, ThemeSelection};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+#[cfg(test)]
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
+use tokio::time::{Instant, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
 use transcript_view::{
@@ -98,9 +107,11 @@ use transcript_view::{
 };
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
+#[cfg(test)]
 use wisp_protocol::events::WispCurrentLiveEventOutput;
+
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
-use wisp_protocol::handshake_response::RpcHandshakeResponse;
+
 use wisp_protocol::{
     EVENT_SCHEMA_VERSION, HANDSHAKE_FRAME_BYTES, LIVE_RPC_PROTOCOL_VERSION,
     MAX_APPLICATION_FRAME_BYTES, ProtocolDecodeError,
@@ -167,11 +178,17 @@ pub enum Error {
     ContractMismatch { protocol: u32, events: u32 },
     #[error("RPC writer stopped unexpectedly")]
     WriterStopped,
+    #[error("RPC writer admission stalled for 5 seconds")]
+    WriterAdmissionTimeout,
+    #[error("RPC writer failed to complete a frame within 5 seconds")]
+    WriterStallTimeout,
     #[error("queue submission was not accepted by the writer within 5 seconds")]
     QueueSubmissionTimeout,
     #[error("RPC reader stopped unexpectedly")]
     ReaderStopped,
-    #[error("RPC stdout event queue is full; the frontend cannot keep up with the backend")]
+    #[error(
+        "RPC stdout admission stalled for 5 seconds; the frontend cannot keep up with the backend"
+    )]
     InboundOverloaded,
     #[error("RPC backend stdout ended unexpectedly")]
     BackendStreamEnded,
@@ -299,25 +316,6 @@ fn render_unsent_queue_diagnostics<'a>(
         ));
     }
     lines
-}
-
-enum WriterMessage {
-    Frame {
-        payload: Bytes,
-        limit: usize,
-        ack: Option<oneshot::Sender<Result<(), ()>>>,
-    },
-    Close,
-}
-
-#[derive(Debug)]
-enum ReaderTermination {
-    Eof,
-}
-
-struct QueuedEvent {
-    event: BackendEvent,
-    _wire_bytes: OwnedSemaphorePermit,
 }
 
 #[derive(Debug)]
@@ -477,6 +475,7 @@ struct LiveUi {
     notice: Option<String>,
     render_pending: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
+    activation_revision: u64,
     unsendable_response_context: Option<UnsendableResponseContext>,
     deferred_queue_recovery: Vec<DeferredQueueRecovery>,
     recovered_queue_recovery: bool,
@@ -516,6 +515,7 @@ impl Default for LiveUi {
             notice: None,
             render_pending: true,
             rendered_decision_context: None,
+            activation_revision: 0,
             unsendable_response_context: None,
             deferred_queue_recovery: Vec::new(),
             recovered_queue_recovery: false,
@@ -1011,6 +1011,11 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        // Preserve the identity of input captured before buffered workflow updates.
+        // Streaming text and telemetry cannot replace a selected workflow target.
+        if event_loop::changes_activation_target(&action) {
+            self.activation_revision = self.activation_revision.wrapping_add(1);
+        }
         let automatic_decision_response = self.automatic_decision_label(&action).is_some();
         if let Some(notice) = self.automatic_decision_frame_limit_notice(&action, limit)? {
             self.unsendable_response_context = self.current_unsendable_response_context();
@@ -1501,6 +1506,7 @@ impl LiveUi {
         )
     }
 
+    #[cfg(test)]
     async fn drain_backend_events(
         &mut self,
         events: &mut mpsc::Receiver<QueuedEvent>,
@@ -2573,7 +2579,7 @@ impl LiveUi {
         self.render_pending = true;
     }
 
-    /// Observe buffered policy/workflow changes before committing a displayed choice.
+    #[cfg(test)]
     async fn handle_received_input(
         &mut self,
         input: Input,
@@ -2581,40 +2587,18 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let theme_enter = self.active_overlay() == Some(OverlayKind::Theme)
-            && matches!(&input, Input::Key(key) if key.code == KeyCode::Enter);
-        let mouse_layer = (self.mouse_enabled
-            && matches!(&input, Input::Mouse(event) if mouse::supported(*event)))
-        .then(|| self.mouse_layer());
-        if theme_enter
-            || mouse_layer.is_some()
-            || (self.file_picker.is_open()
-                && matches!(&input, Input::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Right)))
-        {
-            // Snapshot the prefix length: continuous output must not turn an
-            // activation into an unbounded drain. Preserve backend FIFO ordering.
-            for _ in 0..events.len() {
-                let Ok(event) = events.try_recv() else {
-                    break;
-                };
-                if self
-                    .dispatch(UiAction::BackendEvent(event.event), writer, limit)
-                    .await?
-                    == LoopControl::Exit
-                {
-                    return Ok(LoopControl::Exit);
-                }
+        let pending = event_loop::PendingInput::capture(input, self, events.len());
+        for _ in 0..events.len() {
+            let Ok(event) = events.try_recv() else { break };
+            if self
+                .dispatch(UiAction::BackendEvent(event.event), writer, limit)
+                .await?
+                == LoopControl::Exit
+            {
+                return Ok(LoopControl::Exit);
             }
         }
-        if theme_enter && self.active_overlay() != Some(OverlayKind::Theme) {
-            // This key belonged to the displaced preview, not a restored draft or
-            // a replacement workflow that the user has not yet seen.
-            return Ok(LoopControl::Continue);
-        }
-        if mouse_layer.is_some_and(|layer| layer != self.mouse_layer()) {
-            return Ok(LoopControl::Continue);
-        }
-        self.handle_input(input, writer, limit).await
+        pending.apply(self, writer, limit).await
     }
 
     async fn handle_input(
@@ -3361,7 +3345,11 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
     let event_wire_budget = Arc::new(Semaphore::new(EVENT_RETAINED_WIRE_BYTES));
     let (reader_outcome_tx, reader_outcome_rx) = oneshot::channel();
-    let mut writer = Some(tokio::spawn(writer_task(stdin, writer_rx)));
+    let (writer_outcome_tx, writer_outcome_rx) = oneshot::channel();
+    let mut writer = Some(tokio::spawn(async move {
+        let _ = writer_outcome_tx.send(writer_task(stdin, writer_rx).await);
+    }));
+    let mut writer_outcome = Some(writer_outcome_rx);
     let reader = tokio::spawn(stdout_reader_task(
         stdout,
         handshake_tx,
@@ -3416,6 +3404,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             };
             let mut live_ui = LiveUi { bindings, notice: binding_warning, theme, theme_preferences, no_color, mouse_enabled, ..LiveUi::default() };
             let mut transport_closed_diagnostic = None;
+            let mut ready_event = None;
             let loop_result = async {
             live_ui
                 .dispatch_session_action(UiAction::StartupHydration, &writer_tx, max_client_frame)
@@ -3433,101 +3422,44 @@ async fn run(cli: Cli) -> Result<(), Error> {
             live_ui.dispatch(UiAction::LoadCommandCatalog, &writer_tx, max_client_frame).await?;
             live_ui.dispatch(UiAction::LoadInitialMode, &writer_tx, max_client_frame).await?;
             live_ui.dispatch(UiAction::LoadSkills, &writer_tx, max_client_frame).await?;
-            let mut redraw = interval(FRAME_INTERVAL);
-            redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            loop {
-                match input_rx.try_recv() {
-                    Ok(input) => {
-                        if live_ui
-                            .handle_received_input(input, &mut event_rx, &writer_tx, max_client_frame)
-                            .await?
-                            == LoopControl::Exit
-                        {
-                            break Ok(());
-                        }
-                        continue;
-                    }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => break Ok(()),
-                }
-                tokio::select! {
-                    input = input_rx.recv() => {
-                        match input {
-                            Some(input) => {
-                                if live_ui.handle_received_input(input, &mut event_rx, &writer_tx, max_client_frame).await?
-                                    == LoopControl::Exit
-                                {
-                                    break Ok(());
-                                }
-                            }
-                            None => break Ok(()),
-                        }
-                    }
-                    event = receive_event(&mut event_rx, events_open) => {
-                        match event {
-                            Some(event) => {
-                                if live_ui.dispatch(
-                                    UiAction::BackendEvent(event.event),
-                                    &writer_tx,
-                                    max_client_frame,
-                                ).await? == LoopControl::Exit {
-                                    break Ok(());
-                                }
-                            }
-                            None => events_open = false,
-                        }
-                    }
-                    outcome = receive_reader_outcome(&mut reader_outcome) => {
-                        reader_outcome = None;
-                        match outcome {
-                            Ok(ReaderTermination::Eof) => {
-                                live_ui
-                                    .drain_backend_events(
-                                        &mut event_rx,
-                                        &writer_tx,
-                                        max_client_frame,
-                                    )
-                                    .await?;
-                                live_ui
-                                    .close_transport(
-                                        terminal.terminal(),
-                                        &connection,
-                                        &writer_tx,
-                                        max_client_frame,
-                                        None,
-                                    )
-                                    .await?;
-                                transport_closed_diagnostic =
-                                    Some(render_transport_closed_diagnostic(&live_ui.state));
-                                backend
-                                    .wait_gracefully(Duration::from_millis(100))
-                                    .await?;
-                                let error = match backend.try_wait()? {
-                                    Some(status) => classify_backend_exit(status),
-                                    None => Error::BackendStreamEnded,
-                                };
-                                break Err(error);
-                            }
-                            Err(error) => break Err(error),
-                        }
-                    }
-                    signal = tokio::signal::ctrl_c() => {
-                        signal?;
-                        if live_ui.interrupt(&writer_tx, max_client_frame, true).await?
-                            == LoopControl::Exit
-                        {
-                            break Ok(());
-                        }
-                    }
-                    _ = redraw.tick() => {
-                        if live_ui.render_pending {
-                            live_ui.draw(terminal.terminal(), &connection)?;
-                        }
-                    }
+            let exit = event_loop::run(
+                &mut live_ui,
+                terminal.terminal(),
+                &connection,
+                event_loop::Sources {
+                    events: &mut event_rx,
+                    ready_event: &mut ready_event,
+                    inputs: &mut input_rx,
+                    reader: &mut reader_outcome,
+                    writer: &mut writer_outcome,
+                },
+                &writer_tx,
+                max_client_frame,
+            ).await?;
+            match exit {
+                event_loop::Exit::User => Ok(()),
+                event_loop::Exit::Eof => {
+                    live_ui.close_transport(terminal.terminal(), &connection, &writer_tx, max_client_frame, None).await?;
+                    transport_closed_diagnostic = Some(render_transport_closed_diagnostic(&live_ui.state));
+                    backend.wait_gracefully(Duration::from_millis(100)).await?;
+                    Err(match backend.try_wait()? {
+                        Some(status) => classify_backend_exit(status),
+                        None => Error::BackendStreamEnded,
+                    })
                 }
             }
         }
         .await;
+            if let Err(error) = &loop_result {
+                if transport_closed_diagnostic.is_none() {
+                    let (abandoned_events, abandoned_wire_bytes) =
+                        transport::abandon_events(&mut event_rx, ready_event.take()).await;
+                    let diagnostic = format!("{}; abandoned queued events={abandoned_events}, wire_bytes={abandoned_wire_bytes}", render_top_level_error(error));
+                    // Closing only settles local state; the reducer emits no commands.
+                    let _ = live_ui.close_transport(terminal.terminal(), &connection, &writer_tx, max_client_frame, Some(diagnostic.clone())).await;
+                    transport_closed_diagnostic = Some(diagnostic);
+                }
+            }
             let _ = input_stop_tx.send(true);
             drop(input_rx);
             let input_result = input.await.map_err(Error::Task).and_then(|result| result);
@@ -3545,9 +3477,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
 
             queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
             let shutdown_writer = writer.take().expect("RPC writer is still owned");
-            finish_task("RPC writer", shutdown_writer)
-                .await
-                .and_then(|result| result)?;
+            finish_task("RPC writer", shutdown_writer).await?;
+            event_loop::finish_writer(&mut writer_outcome).await?;
             let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
             let mut shutdown = ShutdownObservation::default();
             while Instant::now() < deadline {
@@ -3593,9 +3524,10 @@ async fn run(cli: Cli) -> Result<(), Error> {
         Err(error) => Err(error),
     };
     let writer_result = match writer {
-        Some(writer) => finish_task("RPC writer", writer)
-            .await
-            .and_then(|result| result),
+        Some(writer) => match finish_task("RPC writer", writer).await {
+            Ok(()) => event_loop::finish_writer(&mut writer_outcome).await,
+            Err(error) => Err(error),
+        },
         None => Ok(()),
     };
     let reader_result = finish_task("RPC reader", reader).await;
@@ -3695,186 +3627,6 @@ async fn finish_task<T>(name: &'static str, mut task: JoinHandle<T>) -> Result<T
             Err(Error::TaskTimeout(name))
         }
     }
-}
-
-async fn send_value<T: serde::Serialize>(
-    writer: &mpsc::Sender<WriterMessage>,
-    value: &T,
-    limit: usize,
-) -> Result<(), Error> {
-    let payload = Bytes::from(serde_json::to_vec(value)?);
-    send_payload(writer, payload, limit).await
-}
-
-async fn send_payload(
-    writer: &mpsc::Sender<WriterMessage>,
-    payload: Bytes,
-    limit: usize,
-) -> Result<(), Error> {
-    if payload.len() > limit {
-        return Err(Error::FrameTooLarge { limit });
-    }
-    writer
-        .send(WriterMessage::Frame {
-            payload,
-            limit,
-            ack: None,
-        })
-        .await
-        .map_err(|_| Error::WriterStopped)
-}
-
-async fn send_payload_confirmed(
-    writer: &mpsc::Sender<WriterMessage>,
-    payload: Bytes,
-    limit: usize,
-) -> Result<(), Error> {
-    if payload.len() > limit {
-        return Err(Error::FrameTooLarge { limit });
-    }
-    let (ack_tx, ack_rx) = oneshot::channel();
-    timeout(HANDSHAKE_TIMEOUT, async {
-        writer
-            .send(WriterMessage::Frame {
-                payload,
-                limit,
-                ack: Some(ack_tx),
-            })
-            .await
-            .map_err(|_| Error::WriterStopped)?;
-        ack_rx
-            .await
-            .map_err(|_| Error::WriterStopped)?
-            .map_err(|_| Error::WriterStopped)
-    })
-    .await
-    .map_err(|_| Error::QueueSubmissionTimeout)?
-}
-
-async fn queue_shutdown_and_close(
-    writer: &mpsc::Sender<WriterMessage>,
-    limit: usize,
-) -> Result<(), Error> {
-    let shutdown = WispTypedClientRpcCommands::shutdown(SHUTDOWN_COMMAND_ID)?;
-    send_value(writer, &shutdown, limit).await?;
-    writer
-        .send(WriterMessage::Close)
-        .await
-        .map_err(|_| Error::WriterStopped)
-}
-
-async fn writer_task<W: AsyncWrite + Unpin>(
-    mut writer: W,
-    mut messages: mpsc::Receiver<WriterMessage>,
-) -> Result<(), Error> {
-    while let Some(message) = messages.recv().await {
-        match message {
-            WriterMessage::Frame {
-                payload,
-                limit,
-                ack,
-            } => {
-                let result = async {
-                    if payload.len() > limit {
-                        return Err(Error::FrameTooLarge { limit });
-                    }
-                    writer.write_all(&payload).await?;
-                    writer.write_all(b"\n").await?;
-                    writer.flush().await?;
-                    Ok(())
-                }
-                .await;
-                match result {
-                    Ok(()) => {
-                        if let Some(ack) = ack {
-                            let _ = ack.send(Ok(()));
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(ack) = ack {
-                            let _ = ack.send(Err(()));
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-            WriterMessage::Close => break,
-        }
-    }
-    writer.shutdown().await?;
-    Ok(())
-}
-
-async fn stdout_reader_task<R: AsyncRead + Unpin>(
-    reader: R,
-    handshake: oneshot::Sender<Result<RpcHandshakeResponse, Error>>,
-    events: mpsc::Sender<QueuedEvent>,
-    event_wire_budget: Arc<Semaphore>,
-    outcome: oneshot::Sender<Result<ReaderTermination, Error>>,
-) {
-    let mut frames = FrameReader::new(reader);
-    let handshake_frame = match frames.read_frame(HANDSHAKE_FRAME_BYTES).await {
-        Ok(Some(frame)) => frame,
-        Ok(None) => {
-            let _ = handshake.send(Err(Error::HandshakeEof));
-            return;
-        }
-        Err(error) => {
-            let _ = handshake.send(Err(error));
-            return;
-        }
-    };
-    let response = match serde_json::from_slice::<RpcHandshakeResponse>(&handshake_frame) {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = handshake.send(Err(Error::InvalidProtocolFrame(error)));
-            return;
-        }
-    };
-    let server_limit = response
-        .accepted_contract()
-        .map_or(HANDSHAKE_FRAME_BYTES, |contract| contract.3);
-    if handshake.send(Ok(response)).is_err() {
-        return;
-    }
-    let result = loop {
-        match frames.read_frame(server_limit).await {
-            Ok(Some(frame)) => match serde_json::from_slice::<WispCurrentLiveEventOutput>(&frame) {
-                Ok(event) => {
-                    if event.schema_version() != EVENT_SCHEMA_VERSION {
-                        break Err(Error::ContractMismatch {
-                            protocol: LIVE_RPC_PROTOCOL_VERSION,
-                            events: event.schema_version(),
-                        });
-                    }
-                    let wire_bytes = u32::try_from(frame.len())
-                        .expect("negotiated event frame lengths fit in u32");
-                    let permit =
-                        match Arc::clone(&event_wire_budget).try_acquire_many_owned(wire_bytes) {
-                            Ok(permit) => permit,
-                            Err(_) => break Err(Error::InboundOverloaded),
-                        };
-                    let event = match BackendEvent::from_live(&event) {
-                        Ok(event) => event,
-                        Err(error) => break Err(Error::EventProjection(error)),
-                    };
-                    let queued = QueuedEvent {
-                        event,
-                        _wire_bytes: permit,
-                    };
-                    match events.try_send(queued) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => break Err(Error::InboundOverloaded),
-                        Err(TrySendError::Closed(_)) => break Err(Error::ReaderStopped),
-                    }
-                }
-                Err(error) => break Err(Error::InvalidProtocolFrame(error)),
-            },
-            Ok(None) => break Ok(ReaderTermination::Eof),
-            Err(error) => break Err(error),
-        }
-    };
-    let _ = outcome.send(result);
 }
 
 async fn stderr_drainer_task<R: AsyncRead + Unpin>(mut stderr: R) -> Result<StderrCapture, Error> {
@@ -4579,8 +4331,8 @@ mod tests {
         task.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn reader_fails_fast_when_the_event_count_is_exhausted() {
+    #[tokio::test(start_paused = true)]
+    async fn reader_times_out_when_the_event_count_is_exhausted() {
         let (mut server, client) = duplex(32 * 1024);
         let (handshake_tx, handshake_rx) = oneshot::channel();
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -4599,9 +4351,9 @@ mod tests {
         }
         server.write_all(input.as_bytes()).await.unwrap();
         handshake_rx.await.unwrap().unwrap();
-        let outcome = timeout(Duration::from_secs(1), outcome_rx)
+        let outcome = timeout(Duration::from_secs(6), outcome_rx)
             .await
-            .expect("reader must not wait for a full event queue")
+            .expect("reader admission must have a deadline")
             .unwrap();
         assert!(matches!(outcome, Err(Error::InboundOverloaded)));
         assert_eq!(event_rx.len(), EVENT_CHANNEL_CAPACITY);
@@ -4609,8 +4361,8 @@ mod tests {
         task.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn reader_fails_fast_when_the_event_byte_budget_is_exhausted() {
+    #[tokio::test(start_paused = true)]
+    async fn reader_times_out_when_the_event_byte_budget_is_exhausted() {
         let (mut server, client) = duplex(4096);
         let (handshake_tx, handshake_rx) = oneshot::channel();
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -4628,9 +4380,9 @@ mod tests {
             .await
             .unwrap();
         handshake_rx.await.unwrap().unwrap();
-        let outcome = timeout(Duration::from_secs(1), outcome_rx)
+        let outcome = timeout(Duration::from_secs(6), outcome_rx)
             .await
-            .expect("reader must not wait for event-byte permits")
+            .expect("reader byte admission must have a deadline")
             .unwrap();
         assert!(matches!(outcome, Err(Error::InboundOverloaded)));
         assert!(event_rx.try_recv().is_err());

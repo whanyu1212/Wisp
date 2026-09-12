@@ -39,7 +39,7 @@ pub(crate) enum Layer {
 }
 
 /// Only complete rendered rows are clickable; border, status and clipped rows are not.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Rows {
     area: Rect,
     first: usize,
@@ -69,7 +69,7 @@ impl Rows {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Editor {
     pub area: Rect,
     pub revision: u64,
@@ -100,7 +100,7 @@ impl Editor {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
     pub editor: Option<Editor>,
@@ -108,6 +108,7 @@ pub(crate) struct Conversation {
     pub completion_visible: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Frame {
     pub layer: Layer,
     pub conversation: Conversation,

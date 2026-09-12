@@ -30,6 +30,11 @@ pub(crate) struct PromptHistoryView {
 }
 
 impl PromptHistoryView {
+    // The scheduler preserves this painted choice while draining a finite event prefix.
+    pub fn rendered_selection(&self) -> Option<u64> {
+        self.rendered
+    }
+
     pub fn new(history: &PromptHistory) -> Self {
         let mut view = Self::default();
         view.sync(history);

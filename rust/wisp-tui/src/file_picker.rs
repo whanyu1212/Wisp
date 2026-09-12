@@ -181,6 +181,11 @@ pub(crate) enum PickerAction {
 }
 
 impl FilePicker {
+    // The scheduler preserves this painted choice while draining a finite event prefix.
+    pub fn rendered_selection(&self) -> Option<usize> {
+        self.rendered
+    }
+
     pub fn is_open(&self) -> bool {
         self.context.is_some() && !self.dismissed
     }

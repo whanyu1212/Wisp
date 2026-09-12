@@ -31,6 +31,14 @@ pub(crate) enum DiscoveryView {
 }
 
 impl DiscoveryView {
+    // The scheduler preserves this painted choice while draining a finite event prefix.
+    pub fn rendered_selection(&self) -> Option<&str> {
+        match self {
+            Self::Skills(view) => view.rendered.as_deref(),
+            Self::Mcp(_) => None,
+        }
+    }
+
     pub fn skills(catalog: Option<&SkillCatalogSnapshot>) -> Self {
         let mut view = SkillsView::default();
         view.sync(catalog);
