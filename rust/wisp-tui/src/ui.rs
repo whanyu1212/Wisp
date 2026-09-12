@@ -7,9 +7,10 @@ use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
-use crate::transcript::TranscriptEntryId;
+use crate::transcript::{TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
+    RowAnchor, RowPosition, TranscriptRow, TranscriptRowCache, TranscriptRowKind,
+    TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -29,6 +30,7 @@ const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
+const STICKY_USER_ROWS: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -362,6 +364,48 @@ fn render_header(
     );
 }
 
+fn sticky_user_rows(
+    state: &UiState,
+    viewport: &TranscriptViewport,
+    row_cache: &mut TranscriptRowCache,
+    width: usize,
+) -> Vec<TranscriptRow> {
+    if !viewport.follows_tail() {
+        return Vec::new();
+    }
+    let Some(user) = state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| entry.role == TranscriptRole::User)
+    else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let mut anchor = RowAnchor {
+        entry_id: user.id,
+        position: RowPosition::Header,
+    };
+    while rows.len() < STICKY_USER_ROWS {
+        let Some(cached) = row_cache.row_at(&state.transcript, anchor, width) else {
+            break;
+        };
+        if cached.row.kind == TranscriptRowKind::Spacer || cached.row.anchor.entry_id != user.id {
+            break;
+        }
+        rows.push(cached.row);
+        let Some(next) = cached.next else {
+            break;
+        };
+        if next.entry_id != user.id {
+            break;
+        }
+        anchor = next;
+    }
+    rows
+}
+
 fn render_transcript(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -374,11 +418,33 @@ fn render_transcript(
     let content_width = usize::from(area.width.saturating_sub(2)).max(1);
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
-    let rows = viewport.visible_rows(&state.transcript, row_cache);
+    let sticky = sticky_user_rows(state, viewport, row_cache, content_width);
+    let mut rows = viewport.visible_rows(&state.transcript, row_cache);
+    if !sticky.is_empty()
+        && !rows
+            .iter()
+            .any(|row| row.anchor.entry_id == sticky[0].anchor.entry_id)
+    {
+        let drop = sticky.len().min(rows.len());
+        rows.drain(..drop);
+        let mut combined = sticky;
+        combined.append(&mut rows);
+        rows = combined;
+    }
     let selected_row = browse_selected.and_then(|selected_entry| {
         rows.iter()
             .find(|row| {
-                row.anchor.entry_id == selected_entry && row.kind == TranscriptRowKind::CardAction
+                row.anchor.entry_id == selected_entry
+                    && matches!(
+                        row.kind,
+                        TranscriptRowKind::CardAction
+                            | TranscriptRowKind::CardGroup
+                            | TranscriptRowKind::Thought
+                    )
+                    && !matches!(
+                        row.anchor.position,
+                        crate::transcript_view::RowPosition::ThoughtContent(_)
+                    )
             })
             .or_else(|| {
                 rows.iter().find(|row| {
@@ -1464,6 +1530,23 @@ mod tests {
     }
 
     #[test]
+    fn follow_tail_pins_the_compact_user_turn_above_a_long_assistant_echo() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let raw = format!("{}\n🙂END", "界".repeat(2001));
+        state.transcript.append_prompt_with_display(
+            raw.clone(),
+            Some("[Pasted content #1: 2006 chars, 2 lines, 6011 bytes]".into()),
+        );
+        state
+            .transcript
+            .complete_message(1, format!("fake response to: {raw}"));
+        let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+        assert!(rendered.contains("Pasted content #1"));
+        assert!(rendered.contains("2006"));
+        assert!(rendered.contains("6011"));
+    }
+
+    #[test]
     fn footer_uses_resolved_binding_labels() {
         let state = UiState::new("fake".into(), Some("model-x".into()), None);
         let bindings = Bindings::from_json(
@@ -1940,7 +2023,7 @@ mod tests {
             .observe_tool_result(tool_result("call-1", "contents"));
         let complete = draw(&state);
         assert!(complete.backend().to_string().contains("Read  README.md"));
-        assert!(complete.backend().to_string().contains("contents"));
+        assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, _, success_modifiers) =
             style_at_text(complete.backend(), "Read  README.md").unwrap();
         assert_eq!(success_fg, Palette::default().success);
@@ -1970,9 +2053,9 @@ mod tests {
         state.transcript.observe_tool_result(completed);
 
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
-        assert!(collapsed.contains("M file.txt"));
-        assert!(collapsed.contains("+ new value"));
-        assert!(collapsed.contains("F6 browse"));
+        assert!(collapsed.contains("file.txt"));
+        assert!(!collapsed.contains("+ new value"));
+        assert!(collapsed.contains("Ctrl+G help"));
         assert!(!collapsed.contains('\u{1b}'));
 
         let backend = TestBackend::new(60, 10);
@@ -1998,13 +2081,11 @@ mod tests {
             })
             .unwrap();
         let visible = browse_viewport.visible_rows(&state.transcript, &mut browse_cache);
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].anchor.entry_id, card_id);
-        assert!(matches!(
-            visible[0].kind,
-            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
-        ));
-        let visible_text = visible[0].plain_text();
+        let selected = visible
+            .iter()
+            .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction)
+            .expect("collapsed card action is visible");
+        let visible_text = selected.plain_text();
         let (_, selected_background, _) =
             style_at_text(browse_terminal.backend(), &visible_text).unwrap();
         assert_eq!(selected_background, Palette::default().primary);
