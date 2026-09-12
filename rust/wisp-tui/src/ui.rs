@@ -28,6 +28,7 @@ const MAX_COMPOSER_HEIGHT: u16 = 8;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
+pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -240,11 +241,73 @@ pub fn render_interactive(
     }
 }
 
+fn status_label(state: &UiState) -> &'static str {
+    if state.configuration_active() {
+        "configuring"
+    } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
+        "compacting"
+    } else {
+        match state.view_status {
+            ViewStatus::Idle => "idle",
+            ViewStatus::Running => "working",
+            ViewStatus::WaitingForApproval => "approval",
+            ViewStatus::WaitingForTrust => "trust",
+            ViewStatus::Error => "error",
+        }
+    }
+}
+
+fn header_identity(state: &UiState) -> Option<String> {
+    let provider = state.provider.as_deref()?;
+    let mut identity = provider.to_string();
+    if let Some(model) = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref())
+    {
+        identity.push('/');
+        identity.push_str(model);
+    }
+    if let Some(effort) = state.effort.as_deref() {
+        identity.push_str(" · ");
+        identity.push_str(effort);
+    }
+    if state.model_selection_stale {
+        identity.push_str(" (last confirmed; selection unavailable)");
+    }
+    Some(identity)
+}
+
+fn header_details(state: &UiState) -> String {
+    if let Some(reason) = state.context.compaction {
+        return format!("Compacting ({})…", reason.as_str());
+    }
+    if let Some(notice) = &state.context.compaction_notice {
+        return notice.clone();
+    }
+    let mut parts = Vec::new();
+    if let Some(identity) = header_identity(state) {
+        parts.push(identity);
+    }
+    if let Some(session) = state.selected_session.as_ref() {
+        parts.push(
+            session
+                .session_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&session.session_path)
+                .to_string(),
+        );
+    }
+    parts.join("  ·  ")
+}
+
 fn render_header(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
-    connection: &ConnectionInfo,
+    _connection: &ConnectionInfo,
     palette: Palette,
 ) {
     let status_style = match state.view_status {
@@ -255,40 +318,6 @@ fn render_header(
         }
         ViewStatus::Error => Style::default().fg(palette.error),
     };
-    let mut details = format!(
-        "backend {}  •  rpc v{} / events v{}",
-        connection.backend_version, connection.protocol_version, connection.event_schema_version
-    );
-    if let Some(provider) = state.provider.as_deref() {
-        details.push_str("  •  ");
-        details.push_str(provider);
-        if let Some(model) = state
-            .model_catalog
-            .as_ref()
-            .and_then(|catalog| catalog.selection.effective_model.as_deref())
-            .or(state.model.as_deref())
-        {
-            details.push('/');
-            details.push_str(model);
-        }
-        if let Some(effort) = state.effort.as_deref() {
-            details.push_str(" · ");
-            details.push_str(effort);
-        }
-        if state.model_selection_stale {
-            details.push_str(" (last confirmed; selection unavailable)");
-        }
-    }
-    if let Some(session) = state.selected_session.as_ref() {
-        details.push_str("  •  ");
-        details.push_str(
-            session
-                .session_name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(&session.session_path),
-        );
-    }
     let mut title = vec![
         Span::styled(
             " WISP ",
@@ -305,29 +334,19 @@ fn render_header(
             }
         )),
         Span::styled(
-            if state.configuration_active() {
-                "configuring"
-            } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-                "compacting"
-            } else {
-                state.view_status.as_str()
-            },
+            status_label(state),
             status_style.add_modifier(Modifier::BOLD),
         ),
     ];
     if state.active_prompt_editable() {
-        title.push(Span::raw(format!(
-            " • s:{}/l:{}",
-            state.queued_steering(),
-            state.queued_follow_ups()
-        )));
+        let steering = state.queued_steering();
+        let follow_up = state.queued_follow_ups();
+        if steering > 0 || follow_up > 0 {
+            title.push(Span::raw(format!(" • s:{steering}/l:{follow_up}")));
+        }
     }
     let title = Line::from(title);
-    if let Some(reason) = state.context.compaction {
-        details = format!("Compacting ({})…", reason.as_str());
-    } else if let Some(notice) = &state.context.compaction_notice {
-        details = notice.clone();
-    }
+    let details = header_details(state);
     let context = crate::context_view::indicator(state, usize::from(area.width.saturating_sub(4)));
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(&details))
@@ -373,14 +392,7 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let lines = if rows.is_empty() {
-        let message = if state.context.loading() {
-            "Refreshing context… You can keep editing your draft."
-        } else if editable(state) {
-            "Type a prompt below to start."
-        } else {
-            ""
-        };
-        vec![Line::styled(message, Style::default().fg(palette.muted))]
+        empty_transcript_lines(state, palette, visible_lines)
     } else {
         rows.into_iter()
             .map(|row| {
@@ -642,7 +654,7 @@ fn render_composer(
     } else {
         match state.view_status {
             ViewStatus::Idle => " prompt ",
-            ViewStatus::Running => " running ",
+            ViewStatus::Running => " working ",
             ViewStatus::WaitingForApproval => " approval required ",
             ViewStatus::WaitingForTrust => " trust required ",
             ViewStatus::Error => " prompt failed ",
@@ -936,6 +948,112 @@ fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str, palett
     );
 }
 
+fn join_hints(parts: impl IntoIterator<Item = String>, width: usize) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        let candidate = if out.is_empty() {
+            part
+        } else {
+            format!("{out} · {part}")
+        };
+        if !out.is_empty() && candidate.width() > width {
+            break;
+        }
+        out = candidate;
+    }
+    out
+}
+
+fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
+    let label = bindings.label(action);
+    label
+        .split(" / ")
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or("Unbound")
+        .to_string()
+}
+
+fn empty_transcript_lines(state: &UiState, palette: Palette, height: usize) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    if state.context.loading() {
+        return vec![Line::styled(
+            "Refreshing context… You can keep editing your draft.",
+            muted,
+        )];
+    }
+    if !editable(state) {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::styled(EMPTY_TRANSCRIPT_HINT, muted)];
+    if height < 3 {
+        return lines;
+    }
+    lines.push(Line::default());
+    if state.provider.is_none() {
+        lines.push(Line::styled(
+            "Use /connect to add a provider, then type a prompt.",
+            muted,
+        ));
+    } else if let Some(identity) = header_identity(state) {
+        lines.push(Line::styled(sanitize_for_terminal(&identity), muted));
+        if height >= 5 {
+            lines.push(Line::styled(
+                "/resume previous sessions. @ to mention a file.",
+                muted,
+            ));
+        }
+    }
+    lines
+}
+
+fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
+    let parts = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
+        vec![
+            "y once".into(),
+            "t tool".into(),
+            "a all".into(),
+            "n deny".into(),
+            "Ctrl+G help".into(),
+        ]
+    } else if matches!(state.view_status, ViewStatus::WaitingForTrust) {
+        vec!["y trust".into(), "n deny".into(), "Ctrl+G help".into()]
+    } else if state.active_prompt_editable() {
+        vec![
+            format!("{} steer", primary_label(bindings, KeyAction::Submit)),
+            format!(
+                "{} later",
+                primary_label(bindings, KeyAction::AlternateSubmit)
+            ),
+            "Esc/Ctrl-C cancels".into(),
+            format!(
+                "{} restore",
+                primary_label(bindings, KeyAction::RestoreQueue)
+            ),
+            "Ctrl+G help".into(),
+        ]
+    } else if state.cancel_requested {
+        vec!["Ctrl+G help".into()]
+    } else if matches!(state.view_status, ViewStatus::Running)
+        || state.interaction_status == crate::reducer::InteractionStatus::Compacting
+    {
+        vec!["Esc/Ctrl-C cancels".into(), "Ctrl+G help".into()]
+    } else {
+        vec![
+            format!("{} send", primary_label(bindings, KeyAction::Submit)),
+            "/ commands".into(),
+            "@ files".into(),
+            "Ctrl+G help".into(),
+            format!("{} history", primary_label(bindings, KeyAction::History)),
+            format!("{} newline", primary_label(bindings, KeyAction::Newline)),
+        ]
+    };
+    join_hints(parts, width)
+}
+
 fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -944,32 +1062,14 @@ fn render_footer(
     palette: Palette,
     bindings: &Bindings,
 ) {
+    let width = usize::from(area.width);
     let (content, style) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
             Style::default().fg(palette.warning),
         ),
-        None if state.active_prompt_editable() => (
-            format!(
-                "{} steer • {} later • {} restore • Ctrl+G help • Esc/Ctrl-C cancels",
-                bindings.label(KeyAction::Submit),
-                bindings.label(KeyAction::AlternateSubmit),
-                bindings.label(KeyAction::RestoreQueue),
-            ),
-            Style::default().fg(palette.muted),
-        ),
         None => (
-            format!(
-                "{} send • Ctrl+G help • {} history • {} newline • {}/{} scroll • {} tail • {} details • {} theme • Ctrl-C quit",
-                bindings.label(KeyAction::Submit),
-                bindings.label(KeyAction::History),
-                bindings.label(KeyAction::Newline),
-                bindings.label(KeyAction::PageUp),
-                bindings.label(KeyAction::PageDown),
-                bindings.label(KeyAction::Tail),
-                bindings.label(KeyAction::Browse),
-                bindings.label(KeyAction::ToggleTheme),
-            ),
+            footer_hints(state, bindings, width),
             Style::default().fg(palette.muted),
         ),
     };
@@ -1338,10 +1438,29 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("rpc v3 / events v35"));
+        assert!(rendered.contains("fake/model-x"));
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
+        assert!(rendered.contains("/ commands"));
         assert!(rendered.contains("Ctrl+G help"));
+        assert!(!rendered.contains("rpc v"));
+        assert!(!rendered.contains("events v"));
+        assert!(!rendered.contains("backend "));
+        assert!(!rendered.contains("PgUp"));
+        assert!(!rendered.contains("theme"));
+    }
+
+    #[test]
+    fn empty_idle_transcript_invites_prompt_and_commands() {
+        let state = UiState::new("fake".into(), Some("model-x".into()), None);
+        let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(rendered.contains(EMPTY_TRANSCRIPT_HINT));
+        assert!(rendered.contains("/resume previous sessions"));
+        assert!(rendered.contains("fake/model-x"));
+        let compact = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(compact.contains("WISP"));
+        assert!(compact.contains("Enter send") || compact.contains("/ commands"));
+        assert!(!compact.contains("/resume previous sessions"));
     }
 
     #[test]
@@ -1361,8 +1480,38 @@ mod tests {
         );
         assert!(rendered.contains("Ctrl+Enter send"));
         assert!(rendered.contains("F4 history"));
-        assert!(rendered.contains("Unbound theme"));
+        assert!(rendered.contains("Ctrl+G help"));
+        assert!(!rendered.contains("Unbound theme"));
         assert!(!rendered.contains("Ctrl+T theme"));
+    }
+
+    #[test]
+    fn footer_matches_approval_and_running_workflows() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        let approval = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(approval.contains("y once"));
+        assert!(approval.contains("n deny"));
+        assert!(!approval.contains("Enter send"));
+
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let running = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(running.contains("Enter steer"));
+        assert!(running.contains("Alt+Enter later"));
+        assert!(running.contains("working"));
+        assert!(!running.contains("running"));
+
+        state.current_command = None;
+        state.interaction_status = InteractionStatus::Compacting;
+        let compacting = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(compacting.contains("Esc/Ctrl-C cancels"));
+        assert!(compacting.contains("compacting"));
+        assert!(!compacting.contains("Enter send"));
     }
 
     #[test]
@@ -1370,7 +1519,8 @@ mod tests {
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::Running;
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(!rendered.contains("Type a prompt below to start."));
+        assert!(!rendered.contains(EMPTY_TRANSCRIPT_HINT));
+        assert!(!rendered.contains("/connect"));
     }
 
     #[test]
@@ -1391,7 +1541,9 @@ mod tests {
         state.cancel_requested = true;
         let cancelling = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(cancelling.contains("Cancelling current prompt"));
+        assert!(cancelling.contains("Ctrl+G help"));
         assert!(!cancelling.contains("Esc/Ctrl-C cancels"));
+        assert!(!cancelling.contains("Enter send"));
     }
 
     #[test]

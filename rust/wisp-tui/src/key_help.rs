@@ -148,6 +148,7 @@ impl KeyHelp {
         area: Rect,
         bindings: &Bindings,
         palette: Palette,
+        connection: Option<&crate::ui::ConnectionInfo>,
     ) {
         crate::ui::clear_overlay(frame, area, palette);
         let block = Block::default()
@@ -167,7 +168,16 @@ impl KeyHelp {
         // Materialize visual rows so even a long configured alias list can be
         // scrolled a row at a time at the minimum supported terminal size.
         let mut rows = Vec::new();
-        for line in self.rows(bindings) {
+        let mut lines = self.rows(bindings);
+        if !self.update_guidance && matches!(self.owner, Owner::Composer) {
+            if let Some(info) = connection {
+                lines.push(Line::raw(format!(
+                    "Backend {} · rpc v{} / events v{}",
+                    info.backend_version, info.protocol_version, info.event_schema_version
+                )));
+            }
+        }
+        for line in lines {
             let source = line.to_string();
             let mut row = String::new();
             let mut columns = 0;
