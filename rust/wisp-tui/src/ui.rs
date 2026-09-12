@@ -32,7 +32,8 @@ const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
 const STICKY_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
-const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 14;
+const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
+const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 15;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -97,7 +98,9 @@ fn inner_composer_shows_decision(area: Rect) -> bool {
 }
 
 fn parked_decision_area(state: &UiState, area: Rect) -> Option<Rect> {
-    if !decision_pending(state) || area.height < PARKED_DECISION_HEIGHT + 2 {
+    if !decision_pending(state)
+        || area.height < PARKED_DECISION_HEIGHT + PARKED_CONVERSATION_MIN_HEIGHT
+    {
         return None;
     }
     Some(Rect {
@@ -1946,6 +1949,36 @@ mod tests {
         let rendered = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(rendered.contains("WISP"));
         assert!(!rendered.contains("terminal too"));
+    }
+
+    #[test]
+    fn parked_decision_layout_keeps_transcript_context_at_the_cutoff() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "ask".into(),
+        });
+        state
+            .transcript
+            .append_prompt("context-for-approval".into());
+
+        let compact = render_to_string(80, 14, &state, &PromptEditor::default());
+        assert!(compact.contains("context-for-approval"));
+        assert!(compact.contains("[y once/t tool/a all/N]"));
+        assert!(compact.contains("args:"));
+        assert!(compact.contains("rm -rf /tmp/example"));
+        assert!(!compact.contains("Approve the parked request"));
+
+        let parked = render_to_string(80, 15, &state, &PromptEditor::default());
+        assert!(parked.contains("conversation"));
+        assert!(parked.contains("you"));
+        assert!(parked.contains("Approve the parked request"));
+        assert!(parked.contains("[y once/t tool/a all/N]"));
+        assert!(parked.contains("args:"));
     }
 
     #[test]
