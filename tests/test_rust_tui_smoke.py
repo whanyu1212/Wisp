@@ -1501,7 +1501,9 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()
-            elif phase == "build" and b"build mode enabled." in output:
+            elif phase == "build" and b"build mode enabled." in output and b"3.0k" in output:
+                # Mode changes are rejected while the post-configure stats refresh
+                # is in flight. Wait for the snapshot before sending /plan.
                 os.write(terminal_fd, b"/plan\r")
                 phase = "plan"
                 output.clear()
