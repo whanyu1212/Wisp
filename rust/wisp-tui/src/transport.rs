@@ -232,32 +232,38 @@ pub(crate) async fn stdout_reader_task<R: AsyncRead + Unpin>(
             Ok(Err(error)) => break Err(error),
             Err(_) => break Err(Error::InboundOverloaded),
         };
+        if let Err(error) = publish_admitted_frame(&frame, slot, permit) {
+            break Err(error);
+        }
         if events.is_closed() {
             break Err(Error::ReaderStopped);
         }
-        let event = match serde_json::from_slice::<WispCurrentLiveEventOutput>(&frame) {
-            Ok(event) => event,
-            Err(error) => break Err(Error::InvalidProtocolFrame(error)),
-        };
-        if event.schema_version() != EVENT_SCHEMA_VERSION {
-            break Err(Error::ContractMismatch {
-                protocol: LIVE_RPC_PROTOCOL_VERSION,
-                events: event.schema_version(),
-            });
-        }
-        let event = match BackendEvent::from_live(&event) {
-            Ok(event) => event,
-            Err(error) => break Err(Error::EventProjection(error)),
-        };
-        if events.is_closed() {
-            break Err(Error::ReaderStopped);
-        }
-        slot.send(QueuedEvent {
-            event,
-            _wire_bytes: permit,
-        });
     };
     let _ = outcome.send(result);
+}
+
+/// Publish valid admitted frames even after closure so abandonment counts them.
+fn publish_admitted_frame(
+    frame: &[u8],
+    slot: mpsc::Permit<'_, QueuedEvent>,
+    wire_bytes: OwnedSemaphorePermit,
+) -> Result<(), Error> {
+    let event = serde_json::from_slice::<WispCurrentLiveEventOutput>(frame)
+        .map_err(Error::InvalidProtocolFrame)?;
+    if event.schema_version() != EVENT_SCHEMA_VERSION {
+        return Err(Error::ContractMismatch {
+            protocol: LIVE_RPC_PROTOCOL_VERSION,
+            events: event.schema_version(),
+        });
+    }
+    let event = BackendEvent::from_live(&event).map_err(Error::EventProjection)?;
+    // The reserved slot remains usable after Receiver::close(). Dropping it here
+    // would hide this valid admitted frame from fatal-cleanup diagnostics.
+    slot.send(QueuedEvent {
+        event,
+        _wire_bytes: wire_bytes,
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -774,5 +780,25 @@ mod tests {
         assert_eq!(abandon_events(&mut events, Some(ready)).await, (2, 30));
         assert_eq!(budget.available_permits(), 64);
         late_send.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_closure_after_admission_preserves_frame_accounting() {
+        let frame = event("admitted-before-failure");
+        let budget = Arc::new(Semaphore::new(frame.len()));
+        let (sender, mut events) = mpsc::channel(1);
+        let slot = sender.reserve().await.unwrap();
+        let wire_bytes = budget
+            .clone()
+            .acquire_many_owned(frame.len() as u32)
+            .await
+            .unwrap();
+
+        events.close();
+        publish_admitted_frame(frame.as_bytes(), slot, wire_bytes).unwrap();
+
+        assert_eq!(budget.available_permits(), 0);
+        assert_eq!(abandon_events(&mut events, None).await, (1, frame.len()));
+        assert_eq!(budget.available_permits(), frame.len());
     }
 }
