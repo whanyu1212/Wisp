@@ -34,6 +34,7 @@ pub struct PromptEditor {
     text: String,
     cursor: usize,
     preferred_column: Option<usize>,
+    revision: u64,
 }
 
 impl PromptEditor {
@@ -42,6 +43,7 @@ impl PromptEditor {
     }
 
     pub fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.text.clear();
         self.cursor = 0;
         self.preferred_column = None;
@@ -61,6 +63,30 @@ impl PromptEditor {
 
     pub(crate) fn cursor_offset(&self) -> usize {
         self.cursor
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Place the cursor at a grapheme boundary in a painted source line. Clicking
+    /// inside a wide glyph or tab selects its leading boundary, never a UTF-8 byte.
+    pub(crate) fn place_cursor(&mut self, row: usize, column: usize) -> EditOutcome {
+        let mut start = 0;
+        for (index, line) in self.text.split('\n').enumerate() {
+            if index == row {
+                let cursor = start + byte_at_display_column(line, column);
+                if self.cursor == cursor && self.preferred_column.is_none() {
+                    return EditOutcome::default();
+                }
+                self.cursor = cursor;
+                self.preferred_column = None;
+                self.revision = self.revision.wrapping_add(1);
+                return EditOutcome::changed();
+            }
+            start += line.len() + 1;
+        }
+        EditOutcome::default()
     }
 
     /// Replace an exact UTF-8 range atomically, preserving surrounding text and limits.
@@ -88,6 +114,7 @@ impl PromptEditor {
             };
         }
         self.text.replace_range(range.clone(), replacement);
+        self.revision = self.revision.wrapping_add(1);
         self.cursor = range.start + replacement.len();
         self.preferred_column = None;
         EditOutcome::changed()
@@ -98,6 +125,15 @@ impl PromptEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> EditorAction {
+        let cursor = self.cursor;
+        let action = self.handle_editor_key(key);
+        if self.cursor != cursor {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        action
+    }
+
+    fn handle_editor_key(&mut self, key: KeyEvent) -> EditorAction {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alternate = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -156,6 +192,7 @@ impl PromptEditor {
         let mut replacement = Self::default();
         let mut outcome = replacement.insert_paste(prompt);
         if !outcome.rejected_limit {
+            replacement.revision = self.revision.wrapping_add(1);
             *self = replacement;
             outcome.changed = true;
         }
@@ -187,6 +224,7 @@ impl PromptEditor {
         let separator = usize::from(!self.text.is_empty());
         let prefix_len = safe.len().saturating_add(separator);
         self.text.insert_str(0, &safe);
+        self.revision = self.revision.wrapping_add(1);
         if separator != 0 {
             self.text.insert(safe.len(), '\n');
         }
@@ -233,6 +271,7 @@ impl PromptEditor {
             };
         }
         self.text.insert_str(self.cursor, &safe);
+        self.revision = self.revision.wrapping_add(1);
         self.cursor += safe.len();
         self.preferred_column = None;
         EditOutcome {
@@ -247,6 +286,7 @@ impl PromptEditor {
             return EditOutcome::default();
         };
         self.text.drain(previous..self.cursor);
+        self.revision = self.revision.wrapping_add(1);
         self.cursor = previous;
         self.preferred_column = None;
         EditOutcome::changed()
@@ -257,6 +297,7 @@ impl PromptEditor {
             return EditOutcome::default();
         };
         self.text.drain(self.cursor..next);
+        self.revision = self.revision.wrapping_add(1);
         self.preferred_column = None;
         EditOutcome::changed()
     }

@@ -1,5 +1,6 @@
 //! Theme preview has no persistence or runtime effects until explicitly applied.
 
+use crate::mouse::Rows;
 use crate::theme::{self, Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -39,6 +40,15 @@ impl ThemePicker {
         self.rendered = None;
     }
 
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        if self.rendered.is_none() || index >= theme::themes().len() {
+            return false;
+        }
+        self.selected = index;
+        self.invalidate();
+        true
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> ThemePickerAction {
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
@@ -65,7 +75,13 @@ impl ThemePicker {
         ThemePickerAction::None
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, palette: Palette, no_color: bool) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        palette: Palette,
+        no_color: bool,
+    ) -> Rows {
         self.invalidate();
         let block = Block::default()
             .borders(Borders::ALL)
@@ -75,7 +91,7 @@ impl ThemePicker {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height < 2 || inner.width == 0 {
-            return;
+            return Rows::default();
         }
         frame.render_widget(
             Paragraph::new(if no_color {
@@ -113,5 +129,6 @@ impl ThemePicker {
             &mut state,
         );
         self.rendered = Some(self.selected);
+        Rows::new(rows_area, offset + state.offset(), theme::themes().len(), 1)
     }
 }

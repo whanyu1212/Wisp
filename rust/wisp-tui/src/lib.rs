@@ -15,6 +15,9 @@ mod framing;
 pub mod history;
 mod markdown;
 mod model_picker;
+mod mouse;
+#[cfg(test)]
+mod mouse_tests;
 #[cfg(test)]
 mod overlay_tests;
 mod process;
@@ -48,7 +51,7 @@ use cli::Cli;
 use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
 use file_picker::{FilePicker, PickerAction};
@@ -454,6 +457,8 @@ struct LiveUi {
     theme_preferences: Option<ThemePreferences>,
     theme_picker: Option<ThemePicker>,
     no_color: bool,
+    mouse_enabled: bool,
+    mouse_frame: Option<mouse::Frame>,
     transcript_viewport: TranscriptViewport,
     transcript_row_cache: TranscriptRowCache,
     detail_view: DetailView,
@@ -489,6 +494,8 @@ impl Default for LiveUi {
             theme_preferences: None,
             theme_picker: None,
             no_color: false,
+            mouse_enabled: false,
+            mouse_frame: None,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
             detail_view: DetailView::default(),
@@ -520,6 +527,7 @@ impl Default for LiveUi {
 
 impl LiveUi {
     fn reset_transcript_presentation(&mut self) {
+        self.mouse_frame = None;
         self.transcript_viewport = TranscriptViewport::default();
         self.transcript_row_cache = TranscriptRowCache::default();
         self.detail_view = DetailView::default();
@@ -963,6 +971,13 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let startup = matches!(&action, UiAction::StartupHydration);
+        // Loading another tree page is navigation, not a newly submitted command.
+        let paging_tree = matches!(
+            &action,
+            UiAction::LoadSessionTree {
+                after_entry_id: Some(_)
+            }
+        );
         if let Some(notice) =
             self.reduced_action_frame_limit_notice(&action, "session command", limit)?
         {
@@ -975,7 +990,7 @@ impl LiveUi {
         }
         self.notice = None;
         let control = self.dispatch(action, writer, limit).await?;
-        if self.notice.is_none() {
+        if !paging_tree && self.notice.is_none() {
             self.editor.clear();
         }
         Ok(control)
@@ -1213,6 +1228,12 @@ impl LiveUi {
     ) -> Result<(), Error> {
         let overlay = self.active_overlay();
         let palette = self.palette();
+        let mut painted = mouse::Frame {
+            layer: self.mouse_layer(),
+            conversation: mouse::Conversation::default(),
+            popup: None,
+            rows: mouse::Rows::default(),
+        };
         let mut rendered_decision_context = None;
         let mut rendered_model_picker = false;
         let mut rendered_overlay = None;
@@ -1238,7 +1259,7 @@ impl LiveUi {
                 })
                 .flatten();
             // Popup focus does not change the background's geometry or scroll intent.
-            let completion_visible = ui::render_interactive(
+            painted.conversation = ui::render_interactive(
                 frame,
                 &self.state,
                 &mut self.transcript_viewport,
@@ -1254,7 +1275,7 @@ impl LiveUi {
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = self.current_decision_context();
             }
-            if overlay.is_none() && completion_visible {
+            if overlay.is_none() && painted.conversation.completion_visible {
                 if let Some(view) = completion_view {
                     rendered_completion = Some(view.items[view.selected].spelling().into_owned());
                 }
@@ -1265,15 +1286,18 @@ impl LiveUi {
                 && self.file_picker.is_open()
             {
                 if let Some(area) = ui::file_picker_area(frame.area(), &self.state, &self.editor) {
-                    self.file_picker
-                        .render(frame, area, &self.state.project_files, palette);
+                    painted.popup = Some(area);
+                    painted.rows =
+                        self.file_picker
+                            .render(frame, area, &self.state.project_files, palette);
                 }
             }
             let Some((kind, area)) = overlay.zip(ui::overlay_area(frame.area())) else {
                 return;
             };
             ui::clear_overlay(frame, area, palette);
-            match kind {
+            painted.popup = Some(area);
+            painted.rows = match kind {
                 OverlayKind::Theme => self.theme_picker.as_mut().expect("active theme").render(
                     frame,
                     area,
@@ -1290,21 +1314,27 @@ impl LiveUi {
                     .as_mut()
                     .expect("active discovery")
                     .render(frame, area, &self.state, self.notice.as_deref(), palette),
-                OverlayKind::Context => self.context_view.as_mut().expect("active context").render(
-                    frame,
-                    area,
-                    &self.state,
-                    palette,
-                ),
-                OverlayKind::Help => commands::render_help(
-                    frame,
-                    area,
-                    self.command_help.as_ref().expect("active help"),
-                    self.state.command_catalog.as_deref(),
-                    self.state.command_catalog_loading(),
-                    self.state.command_catalog_error.as_deref(),
-                    palette,
-                ),
+                OverlayKind::Context => {
+                    self.context_view.as_mut().expect("active context").render(
+                        frame,
+                        area,
+                        &self.state,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
+                OverlayKind::Help => {
+                    commands::render_help(
+                        frame,
+                        area,
+                        self.command_help.as_ref().expect("active help"),
+                        self.state.command_catalog.as_deref(),
+                        self.state.command_catalog_loading(),
+                        self.state.command_catalog_error.as_deref(),
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
                 OverlayKind::Model => {
                     rendered_model_picker = true;
                     model_picker::render(
@@ -1314,7 +1344,7 @@ impl LiveUi {
                         self.state.model_configuration_active(),
                         self.notice.as_deref(),
                         palette,
-                    );
+                    )
                 }
                 OverlayKind::Connection => connection_panel::render(
                     frame,
@@ -1336,19 +1366,23 @@ impl LiveUi {
                     self.session_picker.as_ref().expect("active session picker"),
                     palette,
                 ),
-                OverlayKind::Detail => ui::render_detail_overlay(
-                    frame,
-                    area,
-                    &self.state,
-                    &mut self.detail_view,
-                    palette,
-                ),
-            }
+                OverlayKind::Detail => {
+                    ui::render_detail_overlay(
+                        frame,
+                        area,
+                        &self.state,
+                        &mut self.detail_view,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
+            };
             rendered_overlay = Some(kind);
         })?;
         self.rendered_decision_context = rendered_decision_context;
         self.rendered_model_picker = rendered_model_picker;
         self.rendered_overlay = rendered_overlay;
+        self.mouse_frame = self.mouse_enabled.then_some(painted);
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
             self.completion.mark_rendered(name);
@@ -2385,20 +2419,33 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let action = transcript_view_action(key).expect("navigation key is prefiltered");
+        self.navigate_transcript_action(action, writer, limit).await
+    }
+
+    async fn navigate_transcript_action(
+        &mut self,
+        action: TranscriptViewAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         self.transcript_viewport.reduce(
             action,
             &self.state.transcript,
             &mut self.transcript_row_cache,
         );
         let history_action = match action {
-            TranscriptViewAction::PageUp | TranscriptViewAction::Home
+            TranscriptViewAction::PageUp
+            | TranscriptViewAction::Home
+            | TranscriptViewAction::ScrollLines(i32::MIN..=-1)
                 if self
                     .transcript_viewport
                     .at_oldest(&self.state.transcript, &mut self.transcript_row_cache) =>
             {
                 Some(UiAction::LoadOlderHistory)
             }
-            TranscriptViewAction::PageDown | TranscriptViewAction::FollowTail
+            TranscriptViewAction::PageDown
+            | TranscriptViewAction::FollowTail
+            | TranscriptViewAction::ScrollLines(1..=i32::MAX)
                 if self.transcript_viewport.follows_tail() && self.state.history.tail_evicted =>
             {
                 Some(UiAction::LoadNewerHistory)
@@ -2460,7 +2507,11 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         let theme_enter = self.active_overlay() == Some(OverlayKind::Theme)
             && matches!(&input, Input::Key(key) if key.code == KeyCode::Enter);
+        let mouse_layer = (self.mouse_enabled
+            && matches!(&input, Input::Mouse(event) if mouse::supported(*event)))
+        .then(|| self.mouse_layer());
         if theme_enter
+            || mouse_layer.is_some()
             || (self.file_picker.is_open()
                 && matches!(&input, Input::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Right)))
         {
@@ -2484,6 +2535,9 @@ impl LiveUi {
             // a replacement workflow that the user has not yet seen.
             return Ok(LoopControl::Continue);
         }
+        if mouse_layer.is_some_and(|layer| layer != self.mouse_layer()) {
+            return Ok(LoopControl::Continue);
+        }
         self.handle_input(input, writer, limit).await
     }
 
@@ -2494,7 +2548,10 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         self.sync_file_picker(writer, limit).await?;
-        let control = self.handle_focused_input(input, writer, limit).await?;
+        let control = match input {
+            Input::Mouse(event) => self.handle_mouse(event, writer, limit).await?,
+            input => self.handle_focused_input(input, writer, limit).await?,
+        };
         if control != LoopControl::Exit {
             self.sync_file_picker(writer, limit).await?;
         }
@@ -2932,6 +2989,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Redraw => {
+                self.mouse_frame = None;
                 self.rendered_overlay = None;
                 self.completion.invalidate();
                 self.file_picker.invalidate();
@@ -2947,6 +3005,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Error(error) => Err(Error::Io(error)),
+            Input::Mouse(_) => Ok(LoopControl::Continue),
             Input::Key(_) => Ok(LoopControl::Continue),
         }
     }
@@ -3129,16 +3188,17 @@ async fn run(cli: Cli) -> Result<(), Error> {
             let theme_preferences = ThemePreferences::from_environment();
             let theme = theme_preferences.as_ref().map(ThemePreferences::load).unwrap_or_default();
             let no_color = std::env::var_os("NO_COLOR").is_some();
-            let mut terminal = TerminalGuard::enter()?;
+            let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
+            let mut terminal = TerminalGuard::enter(mouse_enabled)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
             let (input_stop_tx, input_stop_rx) = watch::channel(false);
-            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx));
+            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled));
             let connection = ConnectionInfo {
                 backend_version: actual_version,
                 protocol_version: protocol,
                 event_schema_version: events,
             };
-            let mut live_ui = LiveUi { theme, theme_preferences, no_color, ..LiveUi::default() };
+            let mut live_ui = LiveUi { theme, theme_preferences, no_color, mouse_enabled, ..LiveUi::default() };
             let mut transport_closed_diagnostic = None;
             let loop_result = async {
             live_ui
@@ -3729,12 +3789,17 @@ fn is_bidi_control(character: char) -> bool {
 
 enum Input {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Paste(String),
     Redraw,
     Error(io::Error),
 }
 
-fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> Result<(), Error> {
+fn input_task(
+    sender: mpsc::Sender<Input>,
+    mut stop: watch::Receiver<bool>,
+    mouse_enabled: bool,
+) -> Result<(), Error> {
     while !*stop.borrow() {
         if !event::poll(Duration::from_millis(50))? {
             match stop.has_changed() {
@@ -3761,6 +3826,11 @@ fn input_task(sender: mpsc::Sender<Input>, mut stop: watch::Receiver<bool>) -> R
             }
             Ok(Event::Resize(_, _)) => {
                 if sender.blocking_send(Input::Redraw).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(Event::Mouse(event)) if mouse_enabled && mouse::supported(event) => {
+                if sender.blocking_send(Input::Mouse(event)).is_err() {
                     return Ok(());
                 }
             }

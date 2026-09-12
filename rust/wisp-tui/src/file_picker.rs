@@ -1,5 +1,6 @@
 //! Composer-local reference editing and bounded views of backend-authorized paths.
 
+use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::project_files::ProjectFiles;
 use crate::theme::Palette;
@@ -213,6 +214,15 @@ impl FilePicker {
         self.rendered = None;
     }
 
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        if self.rendered.is_none() || index >= self.rows.len() {
+            return false;
+        }
+        self.selected = index;
+        self.invalidate();
+        true
+    }
+
     pub fn sync_snapshot(&mut self, snapshot: Option<&Arc<ProjectFileSnapshot>>) {
         if match (&self.snapshot, snapshot) {
             (Some(old), Some(new)) => Arc::ptr_eq(old, new),
@@ -388,7 +398,7 @@ impl FilePicker {
         area: Rect,
         files: &ProjectFiles,
         palette: Palette,
-    ) {
+    ) -> Rows {
         self.invalidate();
         crate::ui::clear_overlay(frame, area, palette);
         let block = Block::default()
@@ -403,7 +413,7 @@ impl FilePicker {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height == 0 || inner.width == 0 {
-            return;
+            return Rows::default();
         }
         let message = if self
             .context
@@ -432,7 +442,7 @@ impl FilePicker {
         };
         if let Some(message) = message {
             frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: true }), inner);
-            return;
+            return Rows::default();
         }
         let limited = files.snapshot.as_ref().is_some_and(|s| s.truncated);
         frame.render_widget(
@@ -451,7 +461,7 @@ impl FilePicker {
             ..inner
         };
         if list_area.height == 0 {
-            return;
+            return Rows::default();
         }
         let snapshot = self.snapshot.as_ref().expect("rows have snapshot");
         let offset = self
@@ -495,5 +505,6 @@ impl FilePicker {
             &mut selection,
         );
         self.rendered = self.rows.get(self.selected).copied();
+        Rows::new(list_area, offset + selection.offset(), self.rows.len(), 1)
     }
 }

@@ -223,6 +223,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("mouse_enabled", [False, True], ids=["keyboard", "mouse"])
 @pytest.mark.parametrize(
     ("exercise_prompt", "expected_exit"),
     [(True, 0), (False, 1)],
@@ -232,6 +233,7 @@ def test_rust_tui_cross_language_smoke(
     tmp_path: Path,
     exercise_prompt: bool,
     expected_exit: int,
+    mouse_enabled: bool,
 ) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
@@ -246,6 +248,7 @@ def test_rust_tui_cross_language_smoke(
             "WISP_MODEL": "",
             "WISP_RUST_TUI_BINARY": str(binary),
             "WISP_TRUST": "1",
+            "WISP_TUI_MOUSE": "1" if mouse_enabled else "0",
         }
         os.execve(
             sys.executable,
@@ -271,13 +274,16 @@ def test_rust_tui_cross_language_smoke(
     prompt_sent = False
     response_seen = False
     quit_sent = False
+    terminal_output = bytearray()
     rust_process_group: int | None = None
     try:
         while time.monotonic() < deadline:
             readable, _, _ = select.select([terminal_fd], [], [], 0.05)
             if readable:
                 try:
-                    output.extend(os.read(terminal_fd, 65536))
+                    chunk = os.read(terminal_fd, 65536)
+                    output.extend(chunk)
+                    terminal_output.extend(chunk)
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
@@ -329,6 +335,11 @@ def test_rust_tui_cross_language_smoke(
 
     assert prompt_sent, bytes(output)
     assert quit_sent, bytes(output)
+    for mode in (1000, 1006):
+        assert (f"\x1b[?{mode}h".encode() in terminal_output) is mouse_enabled
+        if mouse_enabled:
+            assert f"\x1b[?{mode}l".encode() in terminal_output
+    assert b"\x1b[?1003h" not in terminal_output, "navigation must not request all-motion reports"
     if exercise_prompt:
         assert response_seen, bytes(output)
         # Ratatui may place cursor-control sequences between adjacent cells, so

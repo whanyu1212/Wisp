@@ -1,4 +1,4 @@
-//! Fixed, keyboard-only persisted-session picker.
+//! Persisted-session picker with keyboard activation and pointer selection.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::mouse::Rows;
 use crate::reducer::SessionSummary;
 use crate::theme::Palette;
 
@@ -80,7 +81,7 @@ impl SessionPicker {
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette: Palette) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette: Palette) -> Rows {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -127,6 +128,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette
         .style(Style::default().fg(palette.muted)),
         chunks[1],
     );
+    Rows::new(
+        chunks[0].inner(ratatui::layout::Margin::new(1, 1)),
+        start,
+        picker.sessions.len(),
+        1,
+    )
+}
+
+impl SessionPicker {
+    pub fn select_mouse(&mut self, index: usize) -> bool {
+        if index >= self.sessions.len() {
+            return false;
+        }
+        self.selected = Some(index);
+        true
+    }
 }
 
 fn session_line(

@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use wisp_protocol::commands::ModelConfiguration;
 use wisp_protocol::events::{ModelCatalogSnapshot, ModelLifecycle};
 
+use crate::mouse::Rows;
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
 
@@ -87,6 +88,20 @@ pub struct ModelPicker {
 }
 
 impl ModelPicker {
+    pub fn select_mouse(&mut self, index: usize, applying: bool) -> bool {
+        let Some(catalog) = &self.catalog else {
+            return false;
+        };
+        let Some(Row::Model { provider, .. }) = self.rows.get(index) else {
+            return false;
+        };
+        if applying || self.loading || !catalog.providers[*provider].available {
+            return false;
+        }
+        self.selected = Some(index);
+        true
+    }
+
     pub fn loading() -> Self {
         Self {
             loading: true,
@@ -280,7 +295,7 @@ pub fn render(
     applying: bool,
     notice: Option<&str>,
     palette: Palette,
-) {
+) -> Rows {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -421,6 +436,16 @@ pub fn render(
         )),
         chunks[4],
     );
+    if picker.loading || applying {
+        Rows::default()
+    } else {
+        Rows::new(
+            chunks[1].inner(ratatui::layout::Margin::new(1, 1)),
+            start,
+            picker.rows.len(),
+            1,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -568,7 +593,7 @@ pub(crate) mod tests {
                         false,
                         None,
                         Palette::default(),
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
