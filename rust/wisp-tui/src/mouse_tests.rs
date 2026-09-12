@@ -804,3 +804,27 @@ async fn file_popup_click_selects_a_reference_but_never_inserts_until_enter() {
     assert_eq!(ui.editor.text(), "@\"second file.rs\" ");
     assert!(receiver.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn clicking_unchanged_empty_composer_returns_focus_from_card_browse() {
+    let mut ui = ui("");
+    draw(&mut ui, 80, 24);
+    let area = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap()
+        .area;
+    // Use any retained entry identity: the click must clear browse focus even
+    // when placing the empty editor's cursor does not mutate it.
+    ui.browse_selected = Some(ui.state.transcript.append_prompt("card".into()));
+    let (writer, _) = mpsc::channel(8);
+    ui.handle_input(click(area.x, area.y), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(ui.browse_selected.is_none());
+    assert!(ui.editor.text().is_empty());
+}
