@@ -48,6 +48,11 @@ completion, themes, opt-in mouse navigation, configurable bindings, and compact 
 Rust uses external update instructions instead of Textual's install/restart flow, as described below.
 Hardening and binary distribution remain required before supported opt-in.
 
+During a backend output burst, Rust waits up to five seconds for inbound queue capacity while
+continuing to give input and redraws turns. Sustained transport stalls and failed command writes
+end the session with a diagnostic and terminal cleanup. A choice that changed while a key or mouse
+input was waiting must be selected again; a redraw cannot apply that input to a replacement choice.
+
 ```bash
 wisp tui --renderer rust
 wisp --mode tui --tui-renderer rust
