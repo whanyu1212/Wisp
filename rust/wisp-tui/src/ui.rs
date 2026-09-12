@@ -33,7 +33,9 @@ pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.
 const STICKY_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
-const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 15;
+const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
+const COMPOSER_PREFIX: &str = "> ";
+const TRANSCRIPT_GUTTER: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -46,12 +48,8 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
-fn header_height(area: Rect) -> u16 {
-    // Keep one editable row plus its borders, the transcript borders and footer.
-    area.height.saturating_sub(6).min(3)
-}
-
 fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
+    let ceiling = area.height.saturating_sub(3).clamp(2, MAX_COMPOSER_HEIGHT);
     if editable(state) {
         let queue_rows = if state.active_prompt_editable() {
             state
@@ -66,23 +64,18 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
                 .projection()
                 .line_count()
                 .saturating_add(queue_rows)
-                .saturating_add(2),
+                .saturating_add(1),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
-        .clamp(
-            3,
-            area.height
-                .saturating_sub(header_height(area) + 3)
-                .clamp(3, MAX_COMPOSER_HEIGHT),
-        )
+        .clamp(2, ceiling)
     } else if decision_pending(state) {
         if area.height >= PARKED_DECISION_LAYOUT_MIN_HEIGHT {
-            3
+            2
         } else {
             5
         }
     } else {
-        3
+        2
     }
 }
 
@@ -93,8 +86,8 @@ fn decision_pending(state: &UiState) -> bool {
     )
 }
 
-fn inner_composer_shows_decision(area: Rect) -> bool {
-    area.height >= PARKED_DECISION_HEIGHT
+fn inner_composer_shows_decision(area: Rect, state: &UiState) -> bool {
+    decision_pending(state) && area.height >= PARKED_DECISION_HEIGHT
 }
 
 fn parked_decision_area(state: &UiState, area: Rect) -> Option<Rect> {
@@ -213,7 +206,7 @@ pub fn render_interactive(
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
     editor: &PromptEditor,
-    connection: &ConnectionInfo,
+    _connection: &ConnectionInfo,
     notice: Option<&str>,
     browse_selected: Option<TranscriptEntryId>,
     composer_focused: bool,
@@ -236,25 +229,20 @@ pub fn render_interactive(
     if decision_pending(state) && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(5)])
+            .constraints([Constraint::Min(5), Constraint::Length(1)])
             .split(area);
-        if let Some(notice) = notice {
-            render_compact_notice(frame, chunks[0], notice, palette);
-        } else {
-            render_header(frame, chunks[0], state, connection, palette);
-        }
-        render_composer(frame, chunks[1], state, editor, composer_focused, palette);
+        render_composer(frame, chunks[0], state, editor, composer_focused, palette);
+        render_footer(frame, chunks[1], state, viewport, notice, palette, bindings);
         return mouse::Conversation::default();
     }
 
     let composer_height = composer_height(area, state, editor);
     let completion_height = completion.map_or(0, |view| {
-        (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 4))
+        (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 3))
     });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(header_height(area)),
             Constraint::Min(if completion_height > 0 { 0 } else { 2 }),
             Constraint::Length(completion_height),
             Constraint::Length(composer_height),
@@ -262,10 +250,9 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    render_header(frame, chunks[0], state, connection, palette);
     render_transcript(
         frame,
-        chunks[1],
+        chunks[0],
         state,
         viewport,
         row_cache,
@@ -274,12 +261,12 @@ pub fn render_interactive(
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
-        .map(|view| crate::commands::render_completion(frame, chunks[2], view, palette))
+        .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
-    let editor = render_composer(frame, chunks[3], state, editor, composer_focused, palette);
-    render_footer(frame, chunks[4], state, notice, palette, bindings);
+    let editor = render_composer(frame, chunks[2], state, editor, composer_focused, palette);
+    render_footer(frame, chunks[3], state, viewport, notice, palette, bindings);
     mouse::Conversation {
-        transcript: chunks[1],
+        transcript: chunks[0],
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
@@ -324,87 +311,30 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-fn header_details(state: &UiState) -> String {
-    if let Some(reason) = state.context.compaction {
-        return format!("Compacting ({})…", reason.as_str());
-    }
-    if let Some(notice) = &state.context.compaction_notice {
-        return notice.clone();
-    }
-    let mut parts = Vec::new();
-    if let Some(identity) = header_identity(state) {
-        parts.push(identity);
-    }
-    if let Some(session) = state.selected_session.as_ref() {
-        parts.push(
-            session
-                .session_name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(&session.session_path)
-                .to_string(),
-        );
-    }
-    parts.join("  ·  ")
-}
-
-fn render_header(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &UiState,
-    _connection: &ConnectionInfo,
-    palette: Palette,
-) {
-    let status_style = match state.view_status {
-        ViewStatus::Idle => Style::default().fg(palette.success),
-        ViewStatus::Running => Style::default().fg(palette.primary),
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
-            Style::default().fg(palette.warning)
-        }
-        ViewStatus::Error => Style::default().fg(palette.error),
-    };
-    let mut title = vec![
-        Span::styled(
-            " WISP ",
-            Style::default()
-                .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "{} • ",
-            if state.mode_confirmed {
-                state.mode.as_str()
-            } else {
-                "?"
-            }
-        )),
-        Span::styled(
-            status_label(state),
-            status_style.add_modifier(Modifier::BOLD),
-        ),
-    ];
+fn footer_status_parts(state: &UiState, ctx_width: usize) -> Vec<String> {
+    let mut parts = vec![status_label(state).to_string()];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
         let follow_up = state.queued_follow_ups();
-        if steering > 0 || follow_up > 0 {
-            title.push(Span::raw(format!(" • s:{steering}/l:{follow_up}")));
+        let omitted = steering.saturating_add(follow_up).saturating_sub(3);
+        parts.push(format!("s:{steering}/l:{follow_up}"));
+        if omitted > 0 {
+            parts.push(format!("+{omitted}"));
         }
     }
-    let title = Line::from(title);
-    let details = header_details(state);
-    let context = crate::context_view::indicator(state, usize::from(area.width.saturating_sub(4)));
-    frame.render_widget(
-        Paragraph::new(sanitize_for_terminal(&details))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .title(title)
-                    .border_style(palette.border())
-                    .title_bottom(Line::raw(format!(" {context} ")).right_aligned())
-                    .borders(Borders::ALL),
-            ),
-        area,
-    );
+    // Queue and mode stay ahead of identity so a long model name cannot hide
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer.
+    if state.mode_confirmed {
+        parts.push(state.mode.as_str().to_string());
+    }
+    parts.push(crate::context_view::indicator(state, ctx_width));
+    if let Some(identity) = header_identity(state) {
+        parts.push(identity);
+    }
+    if let Some(reason) = state.context.compaction {
+        parts.push(format!("compacting ({})", reason.as_str()));
+    }
+    parts
 }
 
 fn sticky_user_rows(
@@ -465,8 +395,8 @@ fn render_transcript(
         width: area.width,
         height: area.height.saturating_sub(parked.height),
     });
-    let content_width = usize::from(conversation.width.saturating_sub(2)).max(1);
-    let visible_lines = usize::from(conversation.height.saturating_sub(2)).max(1);
+    let content_width = usize::from(conversation.width.saturating_sub(TRANSCRIPT_GUTTER)).max(1);
+    let visible_lines = usize::from(conversation.height).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let sticky = sticky_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
@@ -508,7 +438,7 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let lines = if rows.is_empty() {
-        empty_transcript_lines(state, palette, visible_lines)
+        empty_transcript_lines(state, palette, visible_lines, content_width)
     } else {
         rows.into_iter()
             .map(|row| {
@@ -563,22 +493,17 @@ fn render_transcript(
             })
             .collect()
     };
-    let title = if state.history.tail_evicted && viewport.follows_tail() {
-        " conversation • more history ↓ "
-    } else if viewport.has_unseen_output() {
-        " conversation • new ↓ "
-    } else if viewport.follows_tail() {
-        " conversation "
-    } else {
-        " conversation • scrolled "
-    };
-    let paragraph = Paragraph::new(Text::from(lines)).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(palette.border()),
-    );
-    frame.render_widget(paragraph, conversation);
+    let gutter = Span::raw(" ".repeat(usize::from(TRANSCRIPT_GUTTER)));
+    let padded = lines
+        .into_iter()
+        .map(|line| {
+            let style = line.style;
+            let mut spans = vec![gutter.clone()];
+            spans.extend(line.spans);
+            Line::from(spans).style(style)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(padded)), conversation);
     if let Some(parked) = parked_area {
         render_parked_decision(frame, parked, state, palette);
     }
@@ -758,34 +683,6 @@ fn render_composer(
     let queued_total = state
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
-    let title = if state.active_prompt_editable() {
-        let omitted = queued_total.saturating_sub(3);
-        format!(
-            " queue steer:{} later:{}{} ",
-            state.queued_steering(),
-            state.queued_follow_ups(),
-            (omitted > 0)
-                .then(|| format!(" +{omitted}"))
-                .unwrap_or_default()
-        )
-    } else if state.session_operation.is_some() {
-        " session ".into()
-    } else {
-        match state.view_status {
-            ViewStatus::Idle => " prompt ",
-            ViewStatus::Running => " working ",
-            ViewStatus::WaitingForApproval if inner_composer_shows_decision(area) => {
-                " approval required "
-            }
-            ViewStatus::WaitingForApproval => " waiting ",
-            ViewStatus::WaitingForTrust if inner_composer_shows_decision(area) => {
-                " trust required "
-            }
-            ViewStatus::WaitingForTrust => " waiting ",
-            ViewStatus::Error => " prompt failed ",
-        }
-        .into()
-    };
     let border_style = match state.view_status {
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
             Style::default().fg(palette.warning)
@@ -793,10 +690,22 @@ fn render_composer(
         ViewStatus::Error => Style::default().fg(palette.error),
         _ => palette.border(),
     };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style);
+    let full_box = inner_composer_shows_decision(area, state);
+    let block = if full_box {
+        let title = match state.view_status {
+            ViewStatus::WaitingForApproval => " approval required ",
+            ViewStatus::WaitingForTrust => " trust required ",
+            _ => "",
+        };
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style)
+    } else {
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(border_style)
+    };
     let inner = block.inner(area);
     if editable(state) {
         frame.render_widget(block, area);
@@ -823,12 +732,27 @@ fn render_composer(
                 preview_area,
             );
         }
-        let editor_area = Rect {
+        let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
+        let prefix_area = Rect {
             x: inner.x,
             y: inner
                 .y
                 .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
-            width: inner.width,
+            width: prefix_width.min(inner.width),
+            height: 1,
+        };
+        if prefix_area.width > 0 && prefix_area.y < inner.bottom() {
+            frame.render_widget(
+                Paragraph::new(COMPOSER_PREFIX).style(Style::default().fg(palette.muted)),
+                prefix_area,
+            );
+        }
+        let editor_area = Rect {
+            x: inner.x.saturating_add(prefix_width).min(inner.right()),
+            y: inner
+                .y
+                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            width: inner.width.saturating_sub(prefix_width),
             height: inner
                 .height
                 .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
@@ -871,7 +795,7 @@ fn render_composer(
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
     ) {
-        let lines = if inner_composer_shows_decision(area) {
+        let lines = if inner_composer_shows_decision(area, state) {
             decision_detail_lines(state, usize::from(inner.width))
         } else {
             vec![Line::from(decision_row(
@@ -1070,16 +994,6 @@ fn push_source_grapheme_window(
     Some(column)
 }
 
-fn render_compact_notice(frame: &mut Frame<'_>, area: Rect, notice: &str, palette: Palette) {
-    frame.render_widget(
-        Paragraph::new(sanitize_for_terminal(notice))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(palette.warning))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
 fn join_hints(parts: impl IntoIterator<Item = String>, width: usize) -> String {
     let mut out = String::new();
     for part in parts {
@@ -1091,7 +1005,7 @@ fn join_hints(parts: impl IntoIterator<Item = String>, width: usize) -> String {
         } else {
             format!("{out} · {part}")
         };
-        if !out.is_empty() && candidate.width() > width {
+        if candidate.width() > width {
             break;
         }
         out = candidate;
@@ -1109,13 +1023,25 @@ fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
         .to_string()
 }
 
-fn empty_transcript_lines(state: &UiState, palette: Palette, height: usize) -> Vec<Line<'static>> {
+fn empty_transcript_lines(
+    state: &UiState,
+    palette: Palette,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
     if state.context.loading() {
-        return vec![Line::styled(
+        let mut lines = vec![Line::styled(
             "Refreshing context… You can keep editing your draft.",
             muted,
         )];
+        if height >= 3 {
+            if let Some(identity) = header_identity(state) {
+                lines.push(Line::default());
+                lines.push(Line::styled(sanitize_for_terminal(&identity), muted));
+            }
+        }
+        return lines;
     }
     if !editable(state) {
         return Vec::new();
@@ -1132,7 +1058,7 @@ fn empty_transcript_lines(state: &UiState, palette: Palette, height: usize) -> V
         ));
     } else if let Some(identity) = header_identity(state) {
         lines.push(Line::styled(sanitize_for_terminal(&identity), muted));
-        if height >= 5 {
+        if height >= 5 && width >= 40 {
             lines.push(Line::styled(
                 "/resume previous sessions. @ to mention a file.",
                 muted,
@@ -1190,27 +1116,52 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
+    viewport: &TranscriptViewport,
     notice: Option<&str>,
     palette: Palette,
     bindings: &Bindings,
 ) {
     let width = usize::from(area.width);
-    let (content, style) = match notice {
+    let notice = notice.or(state.context.compaction_notice.as_deref());
+    let mut status = footer_status_parts(state, width.saturating_sub(24));
+    if state.history.tail_evicted && viewport.follows_tail() {
+        status.push("more ↓".into());
+    } else if viewport.has_unseen_output() {
+        status.push("new ↓".into());
+    } else if !viewport.follows_tail() {
+        status.push("scrolled".into());
+    }
+    let status_budget = if notice.is_some() {
+        if width >= 80 { (width / 2).max(24) } else { 0 }
+    } else {
+        (width / 2).max(18)
+    };
+    let status_line = join_hints(status, status_budget);
+    let status_width = status_line.width();
+    let remaining = width.saturating_sub(status_width.saturating_add(2));
+    let (rest, rest_style) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
             Style::default().fg(palette.warning),
         ),
         None => (
-            footer_hints(state, bindings, width),
+            footer_hints(state, bindings, remaining),
             Style::default().fg(palette.muted),
         ),
     };
-    frame.render_widget(
-        Paragraph::new(content)
-            .alignment(Alignment::Center)
-            .style(style),
-        area,
-    );
+    let line = if rest.is_empty() {
+        Line::from(Span::styled(
+            status_line,
+            Style::default().fg(palette.muted),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(status_line, Style::default().fg(palette.muted)),
+            Span::raw("  "),
+            Span::styled(rest, rest_style),
+        ])
+    };
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn editable(state: &UiState) -> bool {
@@ -1415,7 +1366,7 @@ fn terminal_control_character(character: char) -> bool {
 mod tests {
     use super::*;
     use crate::reducer::{
-        ActiveCommand, ActiveCommandType, BackendEvent, CommandIdSource, CommandKind,
+        ActiveCommand, ActiveCommandType, AgentMode, BackendEvent, CommandIdSource, CommandKind,
         InteractionStatus, PendingApproval, reduce,
     };
     use ratatui::Terminal;
@@ -1598,9 +1549,42 @@ mod tests {
         assert!(rendered.contains("/resume previous sessions"));
         assert!(rendered.contains("fake/model-x"));
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
-        assert!(compact.contains("WISP"));
-        assert!(compact.contains("Enter send") || compact.contains("/ commands"));
+        assert!(compact.contains("idle"));
+        assert!(
+            compact.contains("Enter send")
+                || compact.contains("/ commands")
+                || compact.contains("Ctrl+G")
+        );
         assert!(!compact.contains("/resume previous sessions"));
+    }
+
+    #[test]
+    fn footer_keeps_mode_context_and_identity_beside_a_notice() {
+        let mut state = UiState::new(
+            "fake".into(),
+            Some("custom-model".into()),
+            Some("effort".into()),
+        );
+        state.mode = AgentMode::Plan;
+        state.mode_confirmed = true;
+        let rendered = render_to_string_with_notice(
+            100,
+            18,
+            &state,
+            &PromptEditor::default(),
+            Some("Model catalog unavailable. Use /model <model> or press r to retry."),
+        );
+        assert!(rendered.contains("plan"), "{rendered}");
+        assert!(rendered.contains("ctx"), "{rendered}");
+        assert!(rendered.contains('~'), "{rendered}");
+        assert!(rendered.contains("fake/custom-model"), "{rendered}");
+        assert!(rendered.contains("effort"), "{rendered}");
+        assert!(rendered.contains("Model catalog unavailable"), "{rendered}");
+
+        state.context.compaction_notice =
+            Some("manual compaction cancelled. Compaction cancelled".into());
+        let cancelled = render_to_string(100, 18, &state, &PromptEditor::default());
+        assert!(cancelled.contains("cancelled"), "{cancelled}");
     }
 
     #[test]
@@ -1760,7 +1744,8 @@ mod tests {
 
         let rendered = render_to_string(80, 18, &state, &editor);
         assert!(rendered.contains("new steering"));
-        assert!(rendered.contains("queue steer:2 later:2 +1"));
+        assert!(rendered.contains("s:2/l:2"));
+        assert!(rendered.contains("+1"));
         assert!(rendered.contains("steer: first�[2J�spoof"));
         assert!(rendered.contains("later: later one"));
         assert!(!rendered.contains("TAIL"));
@@ -1787,9 +1772,7 @@ mod tests {
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(approval.contains("conversation"));
-        assert!(approval.contains("approval required"));
-        assert!(approval.contains("waiting"));
+        assert!(approval.contains("approval"));
         assert!(approval.contains("Approve the parked request"));
         assert!(approval.contains("tool: shell (ask)"));
         assert!(approval.contains("args:"));
@@ -1871,9 +1854,7 @@ mod tests {
         state.pending_trust_project_path =
             Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(trust.contains("conversation"));
-        assert!(trust.contains("trust required"));
-        assert!(trust.contains("waiting"));
+        assert!(trust.contains("trust"));
         assert!(trust.contains("Trust the parked project"));
         assert!(trust.contains("[y trust/N deny]"));
         assert!(trust.contains("trust project:"));
@@ -1947,7 +1928,7 @@ mod tests {
     fn minimum_supported_terminal_renders_without_layout_underflow() {
         let state = UiState::unconfigured();
         let rendered = render_to_string(30, 8, &state, &PromptEditor::default());
-        assert!(rendered.contains("WISP"));
+        assert!(rendered.contains("idle"));
         assert!(!rendered.contains("terminal too"));
     }
 
@@ -1966,15 +1947,14 @@ mod tests {
             .transcript
             .append_prompt("context-for-approval".into());
 
-        let compact = render_to_string(80, 14, &state, &PromptEditor::default());
+        let compact = render_to_string(80, 11, &state, &PromptEditor::default());
         assert!(compact.contains("context-for-approval"));
         assert!(compact.contains("[y once/t tool/a all/N]"));
         assert!(compact.contains("args:"));
         assert!(compact.contains("rm -rf /tmp/example"));
         assert!(!compact.contains("Approve the parked request"));
 
-        let parked = render_to_string(80, 15, &state, &PromptEditor::default());
-        assert!(parked.contains("conversation"));
+        let parked = render_to_string(80, 12, &state, &PromptEditor::default());
         assert!(parked.contains("you"));
         assert!(parked.contains("Approve the parked request"));
         assert!(parked.contains("[y once/t tool/a all/N]"));
@@ -2111,7 +2091,7 @@ mod tests {
             })
             .unwrap();
 
-        assert!(terminal.backend().to_string().contains("more history ↓"));
+        assert!(terminal.backend().to_string().contains("more ↓"));
     }
 
     #[test]

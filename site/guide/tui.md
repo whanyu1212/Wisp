@@ -59,11 +59,11 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The Rust header shows mode, a human status (`idle`, `working`, `approval`, `trust`), model, and
-context. It does not show live RPC or event-schema versions; those remain in Ctrl+G help on the
-composer. An empty transcript invites a prompt or `/` commands and points at `/resume`, `/connect`,
-and `@` when there is room. The footer lists only the keys for the current workflow; Ctrl+G lists
-every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
+The transcript is an unboxed document. The composer is a `>` prompt under a single rule. The footer
+holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, and the keys for the
+current workflow. Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
+invites a prompt or `/` commands and points at `/resume`, `/connect`, and `@` when there is room.
+Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
@@ -120,7 +120,7 @@ Successful Rust selections update the live session and save user defaults for la
 Existing environment, CLI, and project settings keep their normal precedence over saved defaults.
 If saving fails, the applied live selection remains active and a warning is shown. Catalog discovery
 runs in the background; a failed catalog does not prevent prompts or typed model commands. If a
-successful configuration cannot report its selection, the header marks the last confirmed selection
+successful configuration cannot report its selection, the footer marks the last confirmed selection
 until a fresh catalog succeeds.
 
 Rust pickers, help, context, skills/MCP, prompt history, and retained tool details open over the
@@ -199,7 +199,7 @@ This is Rust-local presentation state, not a backend setting or persisted prefer
   login or rolling back a theme preview. That click is consumed, never passed to the background.
 - With no popup open, click in the main composer to position its cursor at a grapheme boundary.
   Tabs, wide/combining characters, and horizontal/vertical editor scrolling retain their source
-  positions. At the minimum 30×8 size, a tall draft keeps one editable row; header details may be
+  positions. At the minimum 30×8 size, a tall draft keeps one editable row; footer details may be
   omitted. Stale coordinates after resize, text replacement, or catalog refresh cannot select a
   new unseen target.
 
@@ -317,7 +317,7 @@ experimental Rust TUIs:
 
 A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
 count indicates when more are queued. Python fullscreen TUIs report separate steering and follow-up
-totals in the footer; Rust shows them in its header and composer. Python returns failed submissions to
+totals in the footer; Rust shows them in its footer and composer. Python returns failed submissions to
 the composer. Rust retains them as recoverable drafts: `Alt+Up` restores one ahead of the current
 draft. The Rust TUI clears a submitted draft only after the JSONL writer flushes it, refreshes queue
 state after startup and session changes, and reports queued or recovering text as unsent if the

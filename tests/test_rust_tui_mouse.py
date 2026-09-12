@@ -84,16 +84,16 @@ def test_native_mouse_moves_only_the_opted_in_composer_cursor(
                 phase = "draft"
                 output.clear()
             elif phase == "draft" and b"draft" in output:
-                # SGR is one-based. At 24 rows the one-line composer starts at
-                # column 2, row 22. Release is deliberately ignored by navigation.
-                os.write(terminal_fd, b"\x1b[<0;2;22M\x1b[<0;2;22m")
+                # SGR is one-based. At 24 rows the composer is a top rule plus
+                # one prompt row: `> ` at column 1, editor at column 3, row 23.
+                os.write(terminal_fd, b"\x1b[<0;3;23M\x1b[<0;3;23m")
                 output.clear()
                 if mouse_enabled:
                     phase = "cursor moved"
                 else:
                     os.write(terminal_fd, b"X\r")
                     phase = "submitted"
-            elif phase == "cursor moved" and b"\x1b[22;2H" in output:
+            elif phase == "cursor moved" and b"\x1b[23;3H" in output:
                 os.write(terminal_fd, b"X\r")
                 phase = "submitted"
                 output.clear()

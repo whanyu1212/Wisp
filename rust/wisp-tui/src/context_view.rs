@@ -43,9 +43,9 @@ fn abbreviated(value: u64) -> String {
 pub(crate) fn indicator(state: &UiState, width: usize) -> String {
     let Some(budget) = &state.context.budget else {
         return if state.context.loading() {
-            "ctx …"
+            "ctx ~…"
         } else {
-            "ctx ?"
+            "ctx ~?"
         }
         .into();
     };
