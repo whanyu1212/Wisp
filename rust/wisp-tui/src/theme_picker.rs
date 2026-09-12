@@ -22,6 +22,11 @@ pub(crate) struct ThemePicker {
 }
 
 impl ThemePicker {
+    // The scheduler preserves this painted choice while draining a finite event prefix.
+    pub fn rendered_selection(&self) -> Option<usize> {
+        self.rendered
+    }
+
     pub fn new(current: &Theme) -> Self {
         Self {
             selected: theme::themes()

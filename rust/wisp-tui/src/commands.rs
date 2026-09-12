@@ -220,6 +220,11 @@ impl<'a> CompletionItem<'a> {
 }
 
 impl Completion {
+    // The scheduler preserves this painted choice while draining a finite event prefix.
+    pub fn rendered_selection(&self) -> Option<&str> {
+        self.rendered.as_deref()
+    }
+
     pub fn sync(&mut self, editor: &PromptEditor) {
         let context = token_context(editor);
         if self.context != context {
