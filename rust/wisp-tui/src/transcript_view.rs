@@ -600,8 +600,8 @@ impl TranscriptRowCache {
             }
             RowPosition::Content(start)
                 if entry.role != TranscriptRole::Assistant
-                    && start <= entry.content.len()
-                    && entry.content.is_char_boundary(start) =>
+                    && start <= entry.display_content().len()
+                    && entry.display_content().is_char_boundary(start) =>
             {
                 self.build_content_row(transcript, entry, anchor, start, width)
             }
@@ -623,7 +623,7 @@ impl TranscriptRowCache {
                     entry.role,
                     TranscriptRowKind::Spacer,
                     String::new(),
-                    entry.content.len(),
+                    entry.display_content().len(),
                 ),
                 next: next_entry(),
             },
@@ -633,7 +633,7 @@ impl TranscriptRowCache {
             row: projected.row,
             next: projected.next,
             entry_revision: entry.revision(),
-            content_len: entry.content.len(),
+            content_len: entry.display_content().len(),
             markdown_presentation_identity,
         })
     }
@@ -654,7 +654,8 @@ impl TranscriptRowCache {
         start: usize,
         width: usize,
     ) -> ProjectedRow {
-        if entry.content.is_empty() {
+        let content = entry.display_content();
+        if content.is_empty() {
             let pending = entry.state != TranscriptEntryState::Complete;
             return ProjectedRow {
                 row: TranscriptRow::plain(
@@ -675,7 +676,7 @@ impl TranscriptRowCache {
                 next: separator_after(transcript, entry),
             };
         }
-        if start == entry.content.len() {
+        if start == content.len() {
             return ProjectedRow {
                 row: TranscriptRow::plain(
                     anchor,
@@ -692,7 +693,7 @@ impl TranscriptRowCache {
         let mut column = 0_usize;
         let mut next_offset = None;
         let mut ended_with_break = false;
-        for (relative_offset, grapheme) in entry.content[start..].grapheme_indices(true) {
+        for (relative_offset, grapheme) in content[start..].grapheme_indices(true) {
             self.work.graphemes_scanned = self.work.graphemes_scanned.saturating_add(1);
             self.work.bytes_scanned = self.work.bytes_scanned.saturating_add(grapheme.len());
             let absolute_offset = start + relative_offset;
@@ -716,11 +717,11 @@ impl TranscriptRowCache {
         }
 
         let next = match next_offset {
-            Some(offset) if offset < entry.content.len() => Some(RowAnchor {
+            Some(offset) if offset < content.len() => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Content(offset),
             }),
-            Some(offset) if ended_with_break && offset == entry.content.len() => Some(RowAnchor {
+            Some(offset) if ended_with_break && offset == content.len() => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Content(offset),
             }),
@@ -1411,7 +1412,8 @@ impl TranscriptRowCache {
                 let snapshot = self.markdown_snapshot(entry);
                 (snapshot.output_len, snapshot.ends_with_line_break())
             } else {
-                (entry.content.len(), ends_with_line_break(&entry.content))
+                let content = entry.display_content();
+                (content.len(), ends_with_line_break(content))
             };
         if target == 0 || ends_with_break {
             return RowAnchor {
@@ -2031,7 +2033,7 @@ fn cached_row_valid(
                 position: RowPosition::Content(offset),
             }) if entry_id == entry.id
                 && offset <= cached.content_len
-                && entry.content.len() >= cached.content_len
+                && entry.display_content().len() >= cached.content_len
         ),
         TranscriptRowKind::CardAction
         | TranscriptRowKind::CardDetail
@@ -2092,12 +2094,13 @@ fn normalize_anchor(
             cache.content_anchor_before(transcript, entry, snapshot.next_boundary(output), width)
         }
         RowPosition::Content(offset) => {
+            let content = entry.display_content();
             let presentation_start = presentation_start(entry);
-            let mut clamped = offset.clamp(presentation_start, entry.content.len());
-            while clamped > presentation_start && !entry.content.is_char_boundary(clamped) {
+            let mut clamped = offset.clamp(presentation_start, content.len());
+            while clamped > presentation_start && !content.is_char_boundary(clamped) {
                 clamped -= 1;
             }
-            let target = entry.content[clamped..]
+            let target = content[clamped..]
                 .chars()
                 .next()
                 .map_or(clamped, |character| clamped + character.len_utf8());
@@ -2186,12 +2189,13 @@ fn content_start(entry: &TranscriptEntry) -> usize {
 }
 
 fn presentation_start(entry: &TranscriptEntry) -> usize {
-    if entry.content.len() <= ENTRY_PRESENTATION_MAX_BYTES {
+    let content = entry.display_content();
+    if content.len() <= ENTRY_PRESENTATION_MAX_BYTES {
         return 0;
     }
-    let overflow = entry.content.len() - ENTRY_PRESENTATION_MAX_BYTES;
+    let overflow = content.len() - ENTRY_PRESENTATION_MAX_BYTES;
     let mut start = overflow - (overflow % ENTRY_PRESENTATION_CHUNK_BYTES);
-    while start < entry.content.len() && !entry.content.is_char_boundary(start) {
+    while start < content.len() && !content.is_char_boundary(start) {
         start += 1;
     }
     start
@@ -2285,6 +2289,30 @@ mod tests {
         transcript.start_message(1);
         transcript.complete_message(1, numbered_lines("line", lines));
         transcript
+    }
+
+    #[test]
+    fn user_rows_project_local_presentation_without_laying_out_raw_content() {
+        let mut transcript = Transcript::default();
+        let raw = "raw line\n".repeat(10_000);
+        transcript.append_prompt_with_display(
+            raw.clone(),
+            Some("[pasted text: 90,000 characters, 10,001 lines]".into()),
+        );
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 8);
+
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let rendered = rows
+            .iter()
+            .map(TranscriptRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("[pasted text:"));
+        assert!(!rendered.contains("raw line"));
+        assert_eq!(transcript.latest_user_text(), Some(raw.as_str()));
+        assert!(cache.work().bytes_scanned < 1_000);
     }
 
     fn tool_result(call_id: &str, output: &str) -> crate::tool_cards::ToolResultInput {
