@@ -138,9 +138,12 @@ impl PendingInput {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let recovery = matches!(&self.input, Input::Key(key) if is_ctrl_c(*key) || is_escape(*key)
-            || (self.target.decision.is_some() && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
         let current = ActivationTarget::capture(ui, &self.input);
+        // A negative decision may deny a replacement decision, but must never
+        // become literal text after the waiting workflow has finished.
+        let recovery = matches!(&self.input, Input::Key(key) if is_ctrl_c(*key) || is_escape(*key)
+            || (self.target.decision.is_some() && current.decision.is_some()
+                && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
         let same_editor = self.editor_input
             && self.target.help_owner == current.help_owner
             && self.target.overlay == current.overlay

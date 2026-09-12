@@ -543,3 +543,40 @@ async fn rebound_submit_does_not_let_enter_activate_a_completion_first_painted_w
         .unwrap();
     assert_eq!(ui.editor.text(), "/theme ");
 }
+
+#[tokio::test]
+async fn a_stale_denial_cannot_become_text_after_approval_or_trust_finishes() {
+    for decision in [
+        approval("old"),
+        UiAction::BackendEvent(BackendEvent::TrustRequested {
+            request_id: "old".into(),
+            project_path: "/project".into(),
+        }),
+    ] {
+        let (writer, mut commands) = mpsc::channel(16);
+        let mut ui = active_ui();
+        ui.editor.insert_paste("next draft");
+        ui.dispatch(decision, &writer, 8192).await.unwrap();
+        draw(&mut ui);
+        let pending = PendingInput::capture(key(KeyCode::Char('n')), &ui, 16);
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "prompt-1".into(),
+                command_type: "prompt".into(),
+                ok: false,
+                error: Some("RPC command cancelled: requested by user".into()),
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.current_decision_context().is_none());
+        assert!(ui.editor_editable());
+        while commands.try_recv().is_ok() {}
+        draw(&mut ui);
+        pending.apply(&mut ui, &writer, 8192).await.unwrap();
+        assert_eq!(ui.editor.text(), "next draft");
+        assert!(commands.try_recv().is_err());
+    }
+}
