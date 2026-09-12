@@ -3533,6 +3533,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 if let Some(status) = backend.try_wait()? {
                     shutdown.observe_exit(status)?;
                 }
+                poll_shutdown_reader(&mut reader_outcome)?;
                 // A zero process exit must not hide a trailing protocol error.
                 if shutdown.completed() && reader_outcome.is_none() {
                     return Ok(());
@@ -3555,6 +3556,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             if let Some(status) = backend.try_wait()? {
                 shutdown.observe_exit(status)?;
             }
+            poll_shutdown_reader(&mut reader_outcome)?;
             if shutdown.completed() && reader_outcome.is_none() {
                 return Ok(());
             }
@@ -3648,6 +3650,21 @@ fn shutdown_reader_outcome(outcome: Result<ReaderTermination, Error>) -> Result<
     match outcome {
         Ok(ReaderTermination::Eof) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// Observe ready EOF/errors even when the shutdown deadline wins the last turn.
+fn poll_shutdown_reader(
+    outcome: &mut Option<oneshot::Receiver<Result<ReaderTermination, Error>>>,
+) -> Result<(), Error> {
+    let Some(reader) = outcome else { return Ok(()) };
+    match reader.try_recv() {
+        Ok(result) => {
+            *outcome = None;
+            shutdown_reader_outcome(result)
+        }
+        Err(oneshot::error::TryRecvError::Closed) => Err(Error::ReaderStopped),
+        Err(oneshot::error::TryRecvError::Empty) => Ok(()),
     }
 }
 
@@ -4727,6 +4744,34 @@ mod tests {
     #[test]
     fn graceful_reader_eof_is_not_a_reader_failure() {
         assert!(shutdown_reader_outcome(Ok(ReaderTermination::Eof)).is_ok());
+    }
+
+    #[test]
+    fn shutdown_deadline_observes_ready_eof_and_reader_errors() {
+        let (sender, receiver) = oneshot::channel();
+        let mut outcome = Some(receiver);
+        poll_shutdown_reader(&mut outcome).unwrap();
+        assert!(
+            outcome.is_some(),
+            "a pending reader cannot count as clean EOF"
+        );
+        sender.send(Ok(ReaderTermination::Eof)).unwrap();
+        poll_shutdown_reader(&mut outcome).unwrap();
+        assert!(outcome.is_none());
+
+        let (sender, receiver) = oneshot::channel();
+        sender.send(Err(Error::InboundOverloaded)).unwrap();
+        assert!(matches!(
+            poll_shutdown_reader(&mut Some(receiver)),
+            Err(Error::InboundOverloaded)
+        ));
+
+        let (sender, receiver) = oneshot::channel();
+        drop(sender);
+        assert!(matches!(
+            poll_shutdown_reader(&mut Some(receiver)),
+            Err(Error::ReaderStopped)
+        ));
     }
 
     #[test]

@@ -75,7 +75,7 @@ secret cleanup, remaining lifecycle races and platform recovery remain under #46
 
 ## Local verification
 
-The full Rust workspace passed 607 tests with all features. Cargo formatting and Clippy passed.
+The full Rust workspace passed 608 tests with all features. Cargo formatting and Clippy passed.
 The handoff suite passed all 35 cases, including five pressure cases, against the final rebuilt binary.
 Shared traces/RPC contract checks passed (including the
 new four-way parametrized trace), and process-retention/shared-trace checks passed 229 cases with
