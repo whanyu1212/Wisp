@@ -89,7 +89,6 @@ to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls b
 the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
 do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)
 for source use. Stage 3 (supported opt-in with binaries) remains blocked on
-[#467](https://github.com/whanyu1212/Wisp/issues/467),
 [#468](https://github.com/whanyu1212/Wisp/issues/468), and
 [#469](https://github.com/whanyu1212/Wisp/issues/469).
 

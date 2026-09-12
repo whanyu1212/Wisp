@@ -38,17 +38,15 @@ compact billing and context fields.
 The two frontends coexist during this period. Features may land in Rust first without changing the
 default. [#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the supported
 product TUI; Rust stays an experimental opt-in on macOS and Linux, source-build only, with no
-fallback and no stage-3 supported-opt-in claim. [#467](https://github.com/whanyu1212/Wisp/issues/467),
-[#468](https://github.com/whanyu1212/Wisp/issues/468), and
+fallback and no stage-3 supported-opt-in claim. [#468](https://github.com/whanyu1212/Wisp/issues/468), and
 [#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage. A
 default switch requires a new explicit issue.
 
 The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
-slices through #548: model selection, command discovery, context/compaction, skills/MCP, prompt
-history, overlays, file completion, themes, and opt-in mouse navigation. Remaining readiness work
-includes configurable bindings, full layout/focus acceptance, hardening, and binary distribution.
-Rust also lacks Textual's `/update` notice/install/restart flow; its delivery or an explicit
-alternative remains part of the workflow and distribution decisions.
+model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
+completion, themes, opt-in mouse navigation, configurable bindings, and compact paste presentation.
+Rust uses external update instructions instead of Textual's install/restart flow, as described below.
+Hardening and binary distribution remain required before supported opt-in.
 
 ```bash
 wisp tui --renderer rust
@@ -106,8 +104,7 @@ Existing environment, CLI, and project settings keep their normal precedence ove
 If saving fails, the applied live selection remains active and a warning is shown. Catalog discovery
 runs in the background; a failed catalog does not prevent prompts or typed model commands. If a
 successful configuration cannot report its selection, the header marks the last confirmed selection
-until a fresh catalog succeeds. Other command-workflow parity remains tracked in
-[#467](https://github.com/whanyu1212/Wisp/issues/467).
+until a fresh catalog succeeds.
 
 Rust pickers, help, context, skills/MCP, prompt history, and retained tool details open over the
 conversation. Output continues updating behind the popup; closing it preserves the draft and
@@ -202,6 +199,86 @@ unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See
 [Development setup](../contributing/development#rust-tui-scaffold), or select Textual explicitly with
 `wisp tui --renderer textual`.
+
+The daily-use acceptance inventory for [#467](https://github.com/whanyu1212/Wisp/issues/467) is
+recorded in the parity matrix.
+
+### Rust keybinding preferences
+
+Add `tui_keybindings` to your user `~/.wisp/settings.json`, alongside existing settings:
+
+```json
+{
+  "tui_keybindings": {
+    "prompt.submit": ["F3", "Ctrl+Enter"],
+    "history.open": ["F4"],
+    "transcript.browse": []
+  }
+}
+```
+
+Restart Wisp to apply changes. Missing actions inherit defaults; an array replaces all keys for that
+one action. `[]` disables an optional action. `prompt.submit` and `prompt.newline` must each retain
+at least one key. To recover, remove `tui_keybindings` and restart. Invalid shapes, unknown action
+IDs, malformed chords, duplicate keys, and overlapping action bindings produce a warning and restore
+the entire default keymap; other valid user settings still apply.
+
+| Action ID | Default keys | Behavior |
+|---|---|---|
+| `prompt.submit` | Enter | Send a prompt; steer while running |
+| `prompt.alternate_submit` | Alt+Enter | Newline while idle; follow-up while running |
+| `prompt.newline` | Shift+Enter, Ctrl+J | Insert newline |
+| `queue.restore` | Alt+Up | Restore newest queued draft |
+| `history.open` | Ctrl+R | Search submitted prompts |
+| `theme.toggle` | Ctrl+T | Toggle Paper / last dark theme |
+| `transcript.browse` | F6 | Select transcript cards |
+| `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
+| `transcript.home`, `transcript.tail` | Ctrl+Home, Ctrl+End | Oldest content / live tail |
+| `transcript.line_up`, `transcript.line_down` | Ctrl+Up, Ctrl+Down | Scroll one line |
+
+Chords accept case-insensitive `Ctrl`, `Alt` and `Shift`, an ASCII character, Enter, navigation keys,
+or F1–F12, for example `Ctrl+F`, `Alt+Enter`, or `Ctrl+Shift+F3`. Printable keys require Ctrl or Alt.
+Escape, Ctrl+C, Ctrl+G, Ctrl+A/E, unmodified editor arrows/Home/End, and Tab/BackTab/Backspace/Delete
+are reserved. Default Ctrl+Enter submits; other combined Enter modifiers preserve legacy newline
+behavior. Default Ctrl+J and Ctrl+navigation accept extra modifiers. Replacing an action removes
+these inherited aliases too. Some terminals cannot distinguish every modified chord; use a function
+key if your chosen combination does not arrive distinctly.
+
+Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing
+Tab/Shift+Tab/Enter/Space, decision approval/denial, and editor navigation. They take precedence over
+custom application bindings. The existing Ctrl+T toggle remains global except during theme preview.
+Ctrl+G opens read-only help for the current workflow, with resolved keys; Ctrl+G or Escape closes it
+without closing the underlying workflow. Ctrl+C keeps that workflow's cancellation behavior.
+Approval/trust requests preempt help, and positive decisions require the request to be visible.
+Scroll help with arrows, PageUp/PageDown, Home/End, including at 30×8.
+
+Only user settings supply this preference; project files are ignored even after trust. There is no
+public environment or CLI keybinding override. The launcher resolves user settings once and passes a
+private snapshot to Rust; the backend child does not inherit it. Bindings change frontend input only,
+not runtime policy. Limits are 64 KiB of configuration, 64 entries, eight chords per action, and 64
+characters per chord. Textual keeps its existing bindings.
+
+### Rust large pastes
+
+A paste over 2,000 Unicode characters is displayed as a numbered marker with character, line, and
+byte counts. Ordinary text around it remains editable. Moving into the hidden range or editing at
+its boundary first expands it; repeat the action to edit the revealed text. Mouse cursor placement
+uses the displayed marker. At most 64 folds are retained; further pastes stay inline.
+
+The raw draft remains subject to the existing 1 MiB and 10,000-line limits. Submission, steering,
+follow-up, history search, and queue recovery use exact raw text. Compact live transcript echoes are
+local and bounded (32 presentations / 4 MiB each for queued and transcript metadata); eviction or
+historical replay displays raw content. Markers are never written into session history.
+
+### Rust updates
+
+`/update`, `/update check`, and `/update install` open scrollable external instructions and preserve
+the draft. They do not check the network, install, quit, or restart. Finish work and quit, then run
+`wisp update --check` in a shell. Eligible uv tool installations can use `wisp update`; source
+installations should follow the [development guide](../contributing/development#rust-tui-scaffold).
+Rebuild or select a Rust binary matching the updated Python package before relaunching.
+Automatic notices, binary installation, rollback, and coordinated restart remain distribution work
+under [#469](https://github.com/whanyu1212/Wisp/issues/469).
 
 Unlike print mode, **the Textual TUI exposes the full tool registry by default** — otherwise it would
 be a chatbot that can't read files or run commands. Mutating and command tools still pause for

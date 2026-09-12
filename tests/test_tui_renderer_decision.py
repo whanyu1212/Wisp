@@ -52,7 +52,6 @@ def test_docs_record_that_rust_selection_does_not_fall_back_to_textual() -> None
 def test_docs_name_stage_three_blockers_and_closed_decision() -> None:
     for document in (_ARCHITECTURE, _TUI_GUIDE, _CLI, _ENVIRONMENT, _ARCHITECTURE_INDEX):
         assert "#470" in document
-        assert "#467" in document
         assert "#468" in document
         assert "#469" in document
         assert "stage 3" in document.lower() or "stage-3" in document
