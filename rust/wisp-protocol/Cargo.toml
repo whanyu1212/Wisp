@@ -16,3 +16,4 @@ jsonschema.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+proptest = { version = "=1.7.0", default-features = false, features = ["std"] }
