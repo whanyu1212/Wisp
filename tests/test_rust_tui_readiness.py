@@ -84,7 +84,7 @@ class _TuiProcess:
         self.resize(width=101)
         offset = len(self.output)
         self.wait_for(
-            b"Type a prompt below to start.",
+            b"Type a prompt or / for commands.",
             b"fake/fake",
             since=offset,
             failure="Rust TUI did not finish startup hydration",
@@ -199,7 +199,7 @@ def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: 
         tui.wait_until(
             lambda output: (
                 _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ),
             failure="custom F3 submit did not complete",
         )
@@ -230,7 +230,7 @@ def test_invalid_binding_settings_keep_provider_and_restore_defaults(tmp_path: P
         tui.wait_until(
             lambda output: (
                 _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ),
             failure="default Enter submit did not recover",
         )
@@ -265,7 +265,7 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         tui.wait_until(
             lambda output: (
                 _has_fragments(output, offset, b"idle", b"END")
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ),
             timeout=20,
             failure="large pasted prompt did not complete",

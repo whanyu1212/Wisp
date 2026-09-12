@@ -54,6 +54,12 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
+The Rust header shows mode, a human status (`idle`, `working`, `approval`, `trust`), model, and
+context. It does not show live RPC or event-schema versions; those remain in Ctrl+G help on the
+composer. An empty transcript invites a prompt or `/` commands and points at `/resume`, `/connect`,
+and `@` when there is room. The footer lists only the keys for the current workflow; Ctrl+G lists
+every resolved binding.
+
 The Rust TUI negotiates and validates live RPC v6/event schema v37, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.

@@ -78,7 +78,7 @@ def test_native_mouse_moves_only_the_opted_in_composer_cursor(
             if (
                 phase == "startup"
                 and context_redrawn
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
             ):
                 os.write(terminal_fd, b"mouse draft")
                 phase = "draft"
