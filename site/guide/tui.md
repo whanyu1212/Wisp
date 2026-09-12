@@ -43,6 +43,13 @@ fallback and no stage-3 supported-opt-in claim. [#467](https://github.com/whanyu
 [#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage. A
 default switch requires a new explicit issue.
 
+The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
+slices through #548: model selection, command discovery, context/compaction, skills/MCP, prompt
+history, overlays, file completion, themes, and opt-in mouse navigation. Remaining readiness work
+includes configurable bindings, full layout/focus acceptance, hardening, and binary distribution.
+Rust also lacks Textual's `/update` notice/install/restart flow; its delivery or an explicit
+alternative remains part of the workflow and distribution decisions.
+
 ```bash
 wisp tui --renderer rust
 wisp --mode tui --tui-renderer rust
