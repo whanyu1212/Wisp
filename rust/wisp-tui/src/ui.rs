@@ -31,6 +31,9 @@ const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
 const STICKY_USER_ROWS: usize = 4;
+const PARKED_DECISION_HEIGHT: u16 = 5;
+const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
+const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 15;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -72,14 +75,58 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
                 .saturating_sub(header_height(area) + 3)
                 .clamp(3, MAX_COMPOSER_HEIGHT),
         )
-    } else if matches!(
-        state.view_status,
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-    ) {
-        5
+    } else if decision_pending(state) {
+        if area.height >= PARKED_DECISION_LAYOUT_MIN_HEIGHT {
+            3
+        } else {
+            5
+        }
     } else {
         3
     }
+}
+
+fn decision_pending(state: &UiState) -> bool {
+    matches!(
+        state.view_status,
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    )
+}
+
+fn inner_composer_shows_decision(area: Rect) -> bool {
+    area.height >= PARKED_DECISION_HEIGHT
+}
+
+fn parked_decision_area(state: &UiState, area: Rect) -> Option<Rect> {
+    if !decision_pending(state)
+        || area.height < PARKED_DECISION_HEIGHT + PARKED_CONVERSATION_MIN_HEIGHT
+    {
+        return None;
+    }
+    Some(Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(PARKED_DECISION_HEIGHT),
+        width: area.width,
+        height: PARKED_DECISION_HEIGHT,
+    })
+}
+
+fn render_parked_decision(frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
+    let title = match state.view_status {
+        ViewStatus::WaitingForApproval => " approval required ",
+        ViewStatus::WaitingForTrust => " trust required ",
+        _ => return,
+    };
+    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
+    frame.render_widget(
+        Paragraph::new(Text::from(decision_detail_lines(state, inner_width))).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.warning)),
+        ),
+        area,
+    );
 }
 
 /// Anchor suggestions above the composer without changing transcript geometry.
@@ -186,11 +233,7 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
-    let decision_pending = matches!(
-        state.view_status,
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-    );
-    if decision_pending && area.height < 11 {
+    if decision_pending(state) && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(5)])
@@ -415,8 +458,15 @@ fn render_transcript(
     browse_selected: Option<TranscriptEntryId>,
     palette: Palette,
 ) {
-    let content_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
+    let parked_area = parked_decision_area(state, area);
+    let conversation = parked_area.map_or(area, |parked| Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(parked.height),
+    });
+    let content_width = usize::from(conversation.width.saturating_sub(2)).max(1);
+    let visible_lines = usize::from(conversation.height.saturating_sub(2)).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let sticky = sticky_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
@@ -528,7 +578,10 @@ fn render_transcript(
             .borders(Borders::ALL)
             .border_style(palette.border()),
     );
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, conversation);
+    if let Some(parked) = parked_area {
+        render_parked_decision(frame, parked, state, palette);
+    }
 }
 
 fn selected_detail<'a>(
@@ -721,8 +774,14 @@ fn render_composer(
         match state.view_status {
             ViewStatus::Idle => " prompt ",
             ViewStatus::Running => " working ",
-            ViewStatus::WaitingForApproval => " approval required ",
-            ViewStatus::WaitingForTrust => " trust required ",
+            ViewStatus::WaitingForApproval if inner_composer_shows_decision(area) => {
+                " approval required "
+            }
+            ViewStatus::WaitingForApproval => " waiting ",
+            ViewStatus::WaitingForTrust if inner_composer_shows_decision(area) => {
+                " trust required "
+            }
+            ViewStatus::WaitingForTrust => " waiting ",
             ViewStatus::Error => " prompt failed ",
         }
         .into()
@@ -812,12 +871,19 @@ fn render_composer(
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
     ) {
-        let lines = match state.view_status {
-            ViewStatus::WaitingForApproval => {
-                approval_composer_lines(state, usize::from(inner.width))
-            }
-            ViewStatus::WaitingForTrust => trust_composer_lines(state, usize::from(inner.width)),
-            _ => unreachable!("decision rows require a decision view"),
+        let lines = if inner_composer_shows_decision(area) {
+            decision_detail_lines(state, usize::from(inner.width))
+        } else {
+            vec![Line::from(decision_row(
+                match state.view_status {
+                    ViewStatus::WaitingForApproval => {
+                        "Approve the parked request, or n/Esc to deny."
+                    }
+                    ViewStatus::WaitingForTrust => "Trust the parked project, or n/Esc to deny.",
+                    _ => unreachable!("decision rows require a decision view"),
+                },
+                usize::from(inner.width),
+            ))]
         };
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
         return None;
@@ -1149,6 +1215,14 @@ fn render_footer(
 
 fn editable(state: &UiState) -> bool {
     state.editor_editable()
+}
+
+fn decision_detail_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+    match state.view_status {
+        ViewStatus::WaitingForApproval => approval_composer_lines(state, width),
+        ViewStatus::WaitingForTrust => trust_composer_lines(state, width),
+        _ => Vec::new(),
+    }
 }
 
 fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
@@ -1713,10 +1787,15 @@ mod tests {
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(approval.contains("conversation"));
+        assert!(approval.contains("approval required"));
+        assert!(approval.contains("waiting"));
+        assert!(approval.contains("Approve the parked request"));
         assert!(approval.contains("tool: shell (ask)"));
         assert!(approval.contains("args:"));
         assert!(approval.contains("rm -rf /tmp/example"));
         assert!(approval.contains("[y once/t tool/a all/N]"));
+        assert!(approval.contains("y once"));
 
         state.pending_approval = Some(PendingApproval {
             call_id: "call-2".into(),
@@ -1792,6 +1871,10 @@ mod tests {
         state.pending_trust_project_path =
             Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(trust.contains("conversation"));
+        assert!(trust.contains("trust required"));
+        assert!(trust.contains("waiting"));
+        assert!(trust.contains("Trust the parked project"));
         assert!(trust.contains("[y trust/N deny]"));
         assert!(trust.contains("trust project:"));
         assert!(trust.contains("/workspace/project�[2J�spoof next"));
@@ -1866,6 +1949,36 @@ mod tests {
         let rendered = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(rendered.contains("WISP"));
         assert!(!rendered.contains("terminal too"));
+    }
+
+    #[test]
+    fn parked_decision_layout_keeps_transcript_context_at_the_cutoff() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "ask".into(),
+        });
+        state
+            .transcript
+            .append_prompt("context-for-approval".into());
+
+        let compact = render_to_string(80, 14, &state, &PromptEditor::default());
+        assert!(compact.contains("context-for-approval"));
+        assert!(compact.contains("[y once/t tool/a all/N]"));
+        assert!(compact.contains("args:"));
+        assert!(compact.contains("rm -rf /tmp/example"));
+        assert!(!compact.contains("Approve the parked request"));
+
+        let parked = render_to_string(80, 15, &state, &PromptEditor::default());
+        assert!(parked.contains("conversation"));
+        assert!(parked.contains("you"));
+        assert!(parked.contains("Approve the parked request"));
+        assert!(parked.contains("[y once/t tool/a all/N]"));
+        assert!(parked.contains("args:"));
     }
 
     #[test]
