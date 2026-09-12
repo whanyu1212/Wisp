@@ -103,7 +103,8 @@ use tokio::time::{Instant, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
 use transcript_view::{
-    TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
+    RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
+    explore_run,
 };
 use ui::ConnectionInfo;
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
@@ -582,6 +583,7 @@ impl LiveUi {
         self.transcript_row_cache = TranscriptRowCache::default();
         self.detail_view = DetailView::default();
         self.browse_selected = None;
+        self.transcript_row_cache.fold_mut().clear();
     }
 
     fn deferred_queue_recovery_bytes(&self) -> usize {
@@ -1810,38 +1812,63 @@ impl LiveUi {
         )))
     }
 
-    fn visible_detail_entries(&mut self) -> Vec<TranscriptEntryId> {
+    fn visible_foldable_entries(&mut self) -> Vec<TranscriptEntryId> {
         let rows = self
             .transcript_viewport
             .visible_rows(&self.state.transcript, &mut self.transcript_row_cache);
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            if !matches!(
+            let foldable = matches!(
                 row.kind,
                 TranscriptRowKind::CardAction
-                    | TranscriptRowKind::CardDetail
-                    | TranscriptRowKind::CardOmission
-            ) || !seen.insert(row.anchor.entry_id)
-            {
+                    | TranscriptRowKind::CardGroup
+                    | TranscriptRowKind::Thought
+            ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_));
+            if !foldable || !seen.insert(row.anchor.entry_id) {
                 continue;
             }
-            let eligible = self
-                .state
-                .transcript
-                .entry(row.anchor.entry_id)
-                .and_then(|entry| entry.tool_card())
-                .is_some_and(|card| card.has_retained_detail())
-                || self
-                    .state
-                    .transcript
-                    .exact_historical_detail_target(row.anchor.entry_id)
-                    .is_some();
-            if eligible {
-                entries.push(row.anchor.entry_id);
-            }
+            entries.push(row.anchor.entry_id);
         }
         entries
+    }
+
+    fn browse_notice() -> String {
+        "Browse: Tab select · Right expand · Left collapse · Enter details · Esc prompt".into()
+    }
+
+    fn selected_explore_group(&self) -> Option<TranscriptEntryId> {
+        let selected = self.browse_selected?;
+        let (start, _) = explore_run(&self.state.transcript, selected)?;
+        (!self.transcript_row_cache.fold().is_group_expanded(start)).then_some(start)
+    }
+
+    fn expand_selected_fold(&mut self) {
+        let Some(selected) = self.browse_selected else {
+            return;
+        };
+        if let Some(start) = self.selected_explore_group() {
+            self.transcript_row_cache.fold_mut().expand_group(start);
+            self.browse_selected = Some(start);
+        } else {
+            self.transcript_row_cache.fold_mut().expand(selected);
+        }
+        self.notice = Some(Self::browse_notice());
+        self.render_pending = true;
+    }
+
+    fn collapse_selected_fold(&mut self) {
+        let Some(selected) = self.browse_selected else {
+            return;
+        };
+        if self.transcript_row_cache.fold().is_expanded(selected) {
+            self.transcript_row_cache.fold_mut().collapse(selected);
+        } else if let Some((start, _)) = explore_run(&self.state.transcript, selected) {
+            self.transcript_row_cache.fold_mut().collapse_group(start);
+            self.browse_selected = Some(start);
+        }
+        self.notice = Some(Self::browse_notice());
+        self.render_pending = true;
     }
 
     fn enter_or_cycle_browse(&mut self) {
@@ -1851,33 +1878,29 @@ impl LiveUi {
         ) {
             return;
         }
-        let entries = self.visible_detail_entries();
+        let entries = self.visible_foldable_entries();
         if entries.is_empty() {
             self.browse_selected = None;
-            self.notice =
-                Some("No visible tool card has retained detail; scroll one into view.".into());
+            self.notice = Some("No foldable transcript row is in view.".into());
         } else if let Some(selected) = self.browse_selected {
             let next = entries
                 .iter()
                 .position(|entry| *entry == selected)
                 .map_or(entries.len() - 1, |index| (index + 1) % entries.len());
             self.browse_selected = Some(entries[next]);
-            self.notice =
-                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into());
+            self.notice = Some(Self::browse_notice());
         } else {
             self.browse_selected = entries.last().copied();
-            self.notice =
-                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into());
+            self.notice = Some(Self::browse_notice());
         }
         self.render_pending = true;
     }
 
     fn cycle_browse(&mut self, reverse: bool) {
-        let entries = self.visible_detail_entries();
+        let entries = self.visible_foldable_entries();
         if entries.is_empty() {
             self.browse_selected = None;
-            self.notice =
-                Some("No visible tool card has retained detail; scroll one into view.".into());
+            self.notice = Some("No foldable transcript row is in view.".into());
             self.render_pending = true;
             return;
         }
@@ -1898,13 +1921,13 @@ impl LiveUi {
         if self.browse_selected.is_none() || self.detail_view.is_open() {
             return;
         }
-        let entries = self.visible_detail_entries();
+        let entries = self.visible_foldable_entries();
         if !entries.contains(&self.browse_selected.expect("checked above")) {
             self.browse_selected = entries.last().copied();
             self.notice = if self.browse_selected.is_some() {
-                Some("Card browse: Tab/Shift-Tab select · Enter details · Esc prompt".into())
+                Some(Self::browse_notice())
             } else {
-                Some("No visible tool card has retained detail; scroll one into view.".into())
+                Some("No foldable transcript row is in view.".into())
             };
         }
     }
@@ -2518,8 +2541,27 @@ impl LiveUi {
             }
             KeyCode::Tab => self.cycle_browse(false),
             KeyCode::BackTab => self.cycle_browse(true),
+            KeyCode::Right => self.expand_selected_fold(),
+            KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                return self.request_selected_detail(writer, limit).await;
+                if self.selected_explore_group().is_some() {
+                    self.expand_selected_fold();
+                    return Ok(LoopControl::Continue);
+                }
+                let selected = self.browse_selected;
+                let has_detail = selected.is_some_and(|entry_id| {
+                    retained_detail(&self.state, entry_id).is_some()
+                        || self
+                            .state
+                            .transcript
+                            .exact_historical_detail_target(entry_id)
+                            .is_some()
+                });
+                if has_detail {
+                    return self.request_selected_detail(writer, limit).await;
+                }
+                self.expand_selected_fold();
+                return Ok(LoopControl::Continue);
             }
             _ if self.bindings.action(key) == Some(KeyAction::Browse) => self.cycle_browse(false),
             _ if self.bound_transcript_action(key).is_some() => {
@@ -7534,7 +7576,7 @@ mod tests {
             );
         }
         assert!(spacer_visible);
-        assert!(live_ui.visible_detail_entries().is_empty());
+        assert!(live_ui.visible_foldable_entries().is_empty());
         assert_eq!(live_ui.browse_selected, Some(card_id));
 
         let connection = ConnectionInfo {
@@ -7550,7 +7592,7 @@ mod tests {
             live_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.starts_with("No visible tool card"))
+                .is_some_and(|notice| notice.starts_with("No foldable transcript row"))
         );
         assert!(live_ui.render_pending);
     }
@@ -7593,7 +7635,7 @@ mod tests {
         );
         live_ui.enter_or_cycle_browse();
         assert_eq!(live_ui.browse_selected, Some(card_id));
-        assert_eq!(live_ui.visible_detail_entries(), vec![card_id]);
+        assert_eq!(live_ui.visible_foldable_entries(), vec![card_id]);
 
         let (writer_tx, _writer_rx) = mpsc::channel(4);
         live_ui
@@ -7619,7 +7661,7 @@ mod tests {
             live_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.starts_with("No visible tool card"))
+                .is_some_and(|notice| notice.starts_with("No foldable transcript row"))
         );
     }
 

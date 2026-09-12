@@ -3929,6 +3929,14 @@ fn handle_backend_event(
             state.transcript.append_message_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::MessageDelta {
+            turn,
+            delta,
+            content_kind: MessageContentKind::Thinking,
+        } => {
+            state.transcript.append_thinking_delta(turn, &delta);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::MessageDelta { .. } | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted { turn, content } => {
             state.transcript.complete_message(turn, content);
@@ -4221,7 +4229,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_ignored_and_a_new_text_turn_appends_a_response() {
+    fn thinking_is_retained_and_a_new_text_turn_appends_a_response() {
         let mut state = UiState::new("fake".into(), None, None);
         state.transcript.complete_message(1, "older answer".into());
         let mut ids = DeterministicIds::default();
@@ -4235,8 +4243,16 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert!(effects.is_empty());
-        assert_eq!(state.latest_assistant_text(), Some("older answer"));
+        assert!(!effects.is_empty());
+        assert_eq!(state.latest_assistant_text(), Some(""));
+        assert_eq!(
+            state
+                .transcript
+                .entries()
+                .last()
+                .map(|entry| entry.thinking()),
+            Some("private thought")
+        );
 
         reduce(
             &mut state,
@@ -4250,6 +4266,7 @@ mod tests {
         .unwrap();
         assert_eq!(state.latest_assistant_text(), Some("new answer"));
         assert_eq!(state.transcript.entries().len(), 2);
+        assert_eq!(state.transcript.entries()[1].thinking(), "private thought");
     }
 
     #[test]

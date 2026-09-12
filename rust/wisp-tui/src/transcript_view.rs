@@ -1,6 +1,6 @@
 //! Bounded styled projection and viewport navigation for transcripts.
 
-use std::collections::{HashMap, VecDeque, hash_map::Entry};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -31,6 +31,8 @@ const OVERSCAN_ROWS: usize = 8;
 pub enum RowPosition {
     Header,
     Omission,
+    Thought,
+    ThoughtContent(usize),
     Content(usize),
     Markdown(MarkdownPosition),
     Card(CardPosition),
@@ -68,7 +70,9 @@ pub enum TranscriptRowKind {
     Content,
     Placeholder,
     Omission,
+    Thought,
     CardAction,
+    CardGroup,
     CardDetail,
     CardOmission,
     Spacer,
@@ -146,7 +150,10 @@ impl TranscriptRow {
 
 fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
     match kind {
-        TranscriptRowKind::Placeholder | TranscriptRowKind::Omission => TranscriptRowTone::Muted,
+        TranscriptRowKind::Placeholder
+        | TranscriptRowKind::Omission
+        | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
+        TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
             TranscriptRowTone::Assistant
@@ -179,6 +186,64 @@ pub struct LayoutWork {
     pub syntax_fragments: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct FoldState {
+    expanded: HashSet<TranscriptEntryId>,
+    expanded_groups: HashSet<TranscriptEntryId>,
+    generation: u64,
+}
+
+impl FoldState {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn clear(&mut self) {
+        if self.expanded.is_empty() && self.expanded_groups.is_empty() {
+            return;
+        }
+        self.expanded.clear();
+        self.expanded_groups.clear();
+        self.bump();
+    }
+
+    pub fn is_expanded(&self, id: TranscriptEntryId) -> bool {
+        self.expanded.contains(&id)
+    }
+
+    pub fn expand(&mut self, id: TranscriptEntryId) {
+        if self.expanded.insert(id) {
+            self.bump();
+        }
+    }
+
+    pub fn collapse(&mut self, id: TranscriptEntryId) {
+        if self.expanded.remove(&id) {
+            self.bump();
+        }
+    }
+
+    pub fn is_group_expanded(&self, start: TranscriptEntryId) -> bool {
+        self.expanded_groups.contains(&start)
+    }
+
+    pub fn expand_group(&mut self, start: TranscriptEntryId) {
+        if self.expanded_groups.insert(start) {
+            self.bump();
+        }
+    }
+
+    pub fn collapse_group(&mut self, start: TranscriptEntryId) {
+        if self.expanded_groups.remove(&start) {
+            self.bump();
+        }
+    }
+
+    fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RowKey {
     entry_id: TranscriptEntryId,
@@ -186,12 +251,13 @@ struct RowKey {
     presentation_start: usize,
     width: usize,
     position: RowPosition,
+    fold_generation: u64,
 }
 
 #[derive(Clone, Debug)]
-struct CachedRow {
-    row: TranscriptRow,
-    next: Option<RowAnchor>,
+pub(crate) struct CachedRow {
+    pub row: TranscriptRow,
+    pub next: Option<RowAnchor>,
     entry_revision: u64,
     content_len: usize,
     markdown_presentation_identity: Option<u64>,
@@ -485,9 +551,29 @@ pub struct TranscriptRowCache {
     card_order: VecDeque<CardKey>,
     card_retained_bytes: usize,
     work: LayoutWork,
+    fold: FoldState,
 }
 
 impl TranscriptRowCache {
+    pub fn fold(&self) -> &FoldState {
+        &self.fold
+    }
+
+    pub fn fold_mut(&mut self) -> &mut FoldState {
+        &mut self.fold
+    }
+
+    fn row_key(&self, entry: &TranscriptEntry, width: usize, position: RowPosition) -> RowKey {
+        RowKey {
+            entry_id: entry.id,
+            layout_epoch: entry.layout_epoch(),
+            presentation_start: presentation_start(entry),
+            width: width.max(1),
+            position,
+            fold_generation: self.fold.generation(),
+        }
+    }
+
     #[cfg(any(test, feature = "transcript-benchmark"))]
     pub fn work(&self) -> LayoutWork {
         self.work
@@ -498,25 +584,25 @@ impl TranscriptRowCache {
         self.work = LayoutWork::default();
     }
 
-    fn row_at(
+    pub(crate) fn row_at(
         &mut self,
         transcript: &Transcript,
         anchor: RowAnchor,
         width: usize,
     ) -> Option<CachedRow> {
         let entry = transcript.entry(anchor.entry_id)?;
-        let key = RowKey {
-            entry_id: entry.id,
-            layout_epoch: entry.layout_epoch(),
-            presentation_start: presentation_start(entry),
-            width: width.max(1),
-            position: anchor.position,
-        };
+        let key = self.row_key(entry, width, anchor.position);
         let markdown_snapshot = (entry.role == TranscriptRole::Assistant
             && !entry.content.is_empty())
         .then(|| self.markdown_snapshot(entry));
         if let Some(cached) = self.rows.get(&key).cloned() {
-            if cached_row_valid(transcript, &cached, entry, markdown_snapshot.as_deref()) {
+            if cached_row_valid(
+                transcript,
+                &self.fold,
+                &cached,
+                entry,
+                markdown_snapshot.as_deref(),
+            ) {
                 self.work.cache_hits = self.work.cache_hits.saturating_add(1);
                 return Some(cached);
             }
@@ -558,7 +644,11 @@ impl TranscriptRowCache {
         };
         let projected = match anchor.position {
             RowPosition::Header if !matches!(entry.kind, TranscriptEntryKind::Message) => {
-                self.build_card_row(transcript, entry, anchor, CardSection::Action, 0, width)?
+                if let Some(row) = self.build_explore_group_row(transcript, entry, anchor) {
+                    row
+                } else {
+                    self.build_card_row(transcript, entry, anchor, CardSection::Action, 0, width)?
+                }
             }
             RowPosition::Header => ProjectedRow {
                 row: TranscriptRow::plain(
@@ -575,13 +665,19 @@ impl TranscriptRowCache {
                 ),
                 next: Some(RowAnchor {
                     entry_id: entry.id,
-                    position: if presentation_start(entry) > 0 {
-                        RowPosition::Omission
-                    } else {
-                        self.position_for_offset(entry, content_start(entry))
-                    },
+                    position: self.after_header_position(entry),
                 }),
             },
+            RowPosition::Thought if !entry.thinking().is_empty() => {
+                self.build_thought_row(transcript, entry, anchor, width)
+            }
+            RowPosition::ThoughtContent(start)
+                if self.fold.is_expanded(entry.id)
+                    && start <= entry.thinking().len()
+                    && entry.thinking().is_char_boundary(start) =>
+            {
+                self.build_thought_content_row(transcript, entry, anchor, start, width)
+            }
             RowPosition::Omission if presentation_start(entry) > 0 => {
                 let omitted = presentation_start(entry);
                 ProjectedRow {
@@ -644,6 +740,174 @@ impl TranscriptRowCache {
         } else {
             RowPosition::Content(offset)
         }
+    }
+
+    fn after_header_position(&mut self, entry: &TranscriptEntry) -> RowPosition {
+        if !entry.thinking().is_empty() {
+            RowPosition::Thought
+        } else if presentation_start(entry) > 0 {
+            RowPosition::Omission
+        } else {
+            self.position_for_offset(entry, content_start(entry))
+        }
+    }
+
+    fn after_thought_position(&mut self, entry: &TranscriptEntry) -> RowPosition {
+        if presentation_start(entry) > 0 {
+            RowPosition::Omission
+        } else {
+            self.position_for_offset(entry, content_start(entry))
+        }
+    }
+
+    fn build_thought_row(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        width: usize,
+    ) -> ProjectedRow {
+        let line_count = entry
+            .thinking()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .count();
+        let text = if line_count > 1 {
+            format!("thought · {line_count} lines")
+        } else {
+            "thought".into()
+        };
+        let next = if self.fold.is_expanded(entry.id) && !entry.thinking().is_empty() {
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::ThoughtContent(0),
+            })
+        } else {
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: self.after_thought_position(entry),
+            })
+            .filter(|_| {
+                !entry.content.is_empty()
+                    || entry.state != TranscriptEntryState::Complete
+                    || presentation_start(entry) > 0
+                    || separator_after(transcript, entry).is_some()
+            })
+            .or_else(|| separator_after(transcript, entry))
+        };
+        let next = next.or_else(|| {
+            if entry.content.is_empty() {
+                separator_after(transcript, entry)
+            } else {
+                Some(RowAnchor {
+                    entry_id: entry.id,
+                    position: self.after_thought_position(entry),
+                })
+            }
+        });
+        let _ = width;
+        ProjectedRow {
+            row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, 0),
+            next,
+        }
+    }
+
+    fn build_thought_content_row(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        start: usize,
+        width: usize,
+    ) -> ProjectedRow {
+        let content = entry.thinking();
+        if start >= content.len() {
+            return ProjectedRow {
+                row: TranscriptRow::plain(
+                    anchor,
+                    entry.role,
+                    TranscriptRowKind::Thought,
+                    String::new(),
+                    start,
+                ),
+                next: Some(RowAnchor {
+                    entry_id: entry.id,
+                    position: self.after_thought_position(entry),
+                })
+                .or_else(|| separator_after(transcript, entry)),
+            };
+        }
+        let mut text = String::new();
+        let mut column = 0_usize;
+        let mut next_offset = None;
+        let mut ended_with_break = false;
+        for (relative_offset, grapheme) in content[start..].grapheme_indices(true) {
+            self.work.graphemes_scanned = self.work.graphemes_scanned.saturating_add(1);
+            self.work.bytes_scanned = self.work.bytes_scanned.saturating_add(grapheme.len());
+            let absolute_offset = start + relative_offset;
+            if is_line_break(grapheme) {
+                next_offset = Some(absolute_offset + grapheme.len());
+                ended_with_break = true;
+                break;
+            }
+            let safe = sanitize_grapheme(grapheme, column);
+            let grapheme_width = UnicodeWidthStr::width(safe.as_str());
+            if !text.is_empty() && column.saturating_add(grapheme_width) > width {
+                next_offset = Some(absolute_offset);
+                break;
+            }
+            text.push_str(&safe);
+            column = column.saturating_add(grapheme_width);
+            if column >= width {
+                next_offset = Some(absolute_offset + grapheme.len());
+                break;
+            }
+        }
+        let next = match next_offset {
+            Some(offset) if offset < content.len() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::ThoughtContent(offset),
+            }),
+            Some(offset) if ended_with_break && offset == content.len() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::ThoughtContent(offset),
+            }),
+            _ => Some(RowAnchor {
+                entry_id: entry.id,
+                position: self.after_thought_position(entry),
+            }),
+        };
+        ProjectedRow {
+            row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, start),
+            next,
+        }
+    }
+
+    fn build_explore_group_row(
+        &self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+    ) -> Option<ProjectedRow> {
+        let (start, members) = explore_run(transcript, entry.id)?;
+        if start != entry.id || self.fold.is_group_expanded(start) {
+            return None;
+        }
+        let last_id = *members.last()?;
+        let last = transcript.entry(last_id)?;
+        let count = members.len();
+        let mut row = TranscriptRow::plain(
+            anchor,
+            TranscriptRole::Tool,
+            TranscriptRowKind::CardGroup,
+            format!("explored {count} files"),
+            0,
+        );
+        row.tone = explore_group_tone(transcript, &members);
+        Some(ProjectedRow {
+            row,
+            next: separator_after(transcript, last),
+        })
     }
 
     fn build_content_row(
@@ -777,7 +1041,12 @@ impl TranscriptRowCache {
         let projection = self.card_snapshot(entry)?;
         match section {
             CardSection::Action => {
-                let next = card_position_after_action(entry, &projection);
+                let next = if self.fold.is_expanded(entry.id) {
+                    card_position_after_action(entry, &projection)
+                        .or_else(|| separator_after(transcript, entry))
+                } else {
+                    separator_after(transcript, entry)
+                };
                 Some(self.build_card_text_row(
                     entry,
                     anchor,
@@ -788,7 +1057,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
-                    next.or_else(|| separator_after(transcript, entry)),
+                    next,
                 ))
             }
             CardSection::Detail if !projection.detail.is_empty() => {
@@ -1256,43 +1525,58 @@ impl TranscriptRowCache {
     ) -> Option<RowAnchor> {
         let entry = transcript.entry(anchor.entry_id)?;
         match anchor.position {
-            RowPosition::Header => transcript.entry_before(entry.id).map(|previous| RowAnchor {
-                entry_id: previous.id,
-                position: RowPosition::Spacer,
+            RowPosition::Header => transcript.entry_before(entry.id).map(|previous| {
+                if let Some(start) = collapsed_group_start(&self.fold, transcript, previous.id) {
+                    RowAnchor {
+                        entry_id: start,
+                        position: RowPosition::Header,
+                    }
+                } else {
+                    RowAnchor {
+                        entry_id: previous.id,
+                        position: RowPosition::Spacer,
+                    }
+                }
             }),
-            RowPosition::Omission => Some(RowAnchor {
+            RowPosition::Thought => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Header,
+            }),
+            RowPosition::ThoughtContent(_) => {
+                self.thought_anchor_before(transcript, entry, anchor, width)
+            }
+            RowPosition::Omission => Some(RowAnchor {
+                entry_id: entry.id,
+                position: if entry.thinking().is_empty() {
+                    RowPosition::Header
+                } else {
+                    RowPosition::Thought
+                },
             }),
             RowPosition::Content(offset) => {
                 let start = content_start(entry);
                 if offset <= start {
-                    return Some(RowAnchor {
-                        entry_id: entry.id,
-                        position: if presentation_start(entry) > 0 {
-                            RowPosition::Omission
-                        } else {
-                            RowPosition::Header
-                        },
-                    });
+                    return Some(self.before_body_anchor(transcript, entry, width));
                 }
                 self.content_anchor_before(transcript, entry, offset, width)
             }
             RowPosition::Markdown(position) => {
                 if position.output_offset == 0 {
-                    return Some(RowAnchor {
-                        entry_id: entry.id,
-                        position: if presentation_start(entry) > 0 {
-                            RowPosition::Omission
-                        } else {
-                            RowPosition::Header
-                        },
-                    });
+                    return Some(self.before_body_anchor(transcript, entry, width));
                 }
                 self.content_anchor_before(transcript, entry, position.output_offset, width)
             }
             RowPosition::Card(_) => self.card_anchor_before(transcript, entry, anchor, width),
-            RowPosition::Spacer => Some(self.last_anchor(transcript, entry, width)),
+            RowPosition::Spacer => {
+                if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
+                    Some(RowAnchor {
+                        entry_id: start,
+                        position: RowPosition::Header,
+                    })
+                } else {
+                    Some(self.last_anchor(transcript, entry, width))
+                }
+            }
         }
     }
 
@@ -1307,13 +1591,7 @@ impl TranscriptRowCache {
         let content_start = content_start(entry);
         let width = width.max(1);
         let target_position = self.position_for_offset(entry, target);
-        let target_key = RowKey {
-            entry_id: entry.id,
-            layout_epoch: entry.layout_epoch(),
-            presentation_start,
-            width,
-            position: target_position,
-        };
+        let target_key = self.row_key(entry, width, target_position);
         if let Some(previous) = self.predecessors.get(&target_key).copied() {
             return Some(previous);
         }
@@ -1356,13 +1634,7 @@ impl TranscriptRowCache {
         target: RowAnchor,
         width: usize,
     ) -> Option<RowAnchor> {
-        let target_key = RowKey {
-            entry_id: entry.id,
-            layout_epoch: entry.layout_epoch(),
-            presentation_start: 0,
-            width: width.max(1),
-            position: target.position,
-        };
+        let target_key = self.row_key(entry, width, target.position);
         if let Some(previous) = self.predecessors.get(&target_key).copied() {
             return Some(previous);
         }
@@ -1383,6 +1655,70 @@ impl TranscriptRowCache {
         }
     }
 
+    fn before_body_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
+        if entry.thinking().is_empty() {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: if presentation_start(entry) > 0 {
+                    RowPosition::Omission
+                } else {
+                    RowPosition::Header
+                },
+            };
+        }
+        if !self.fold.is_expanded(entry.id) {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Thought,
+            };
+        }
+        let mut current = RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Thought,
+        };
+        loop {
+            let Some(cached) = self.row_at(transcript, current, width) else {
+                return current;
+            };
+            let Some(next) = cached.next else {
+                return current;
+            };
+            match next.position {
+                RowPosition::Thought | RowPosition::ThoughtContent(_) => current = next,
+                _ => return current,
+            }
+        }
+    }
+
+    fn thought_anchor_before(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        target: RowAnchor,
+        width: usize,
+    ) -> Option<RowAnchor> {
+        let mut current = RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Thought,
+        };
+        loop {
+            let cached = self.row_at(transcript, current, width)?;
+            let next = cached.next?;
+            if next == target {
+                return Some(current);
+            }
+            match next.position {
+                RowPosition::Thought | RowPosition::ThoughtContent(_) => current = next,
+                _ => return Some(current),
+            }
+        }
+    }
+
     fn last_anchor(
         &mut self,
         transcript: &Transcript,
@@ -1390,6 +1726,12 @@ impl TranscriptRowCache {
         width: usize,
     ) -> RowAnchor {
         if !matches!(entry.kind, TranscriptEntryKind::Message) {
+            if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
+                return RowAnchor {
+                    entry_id: start,
+                    position: RowPosition::Header,
+                };
+            }
             let mut current = RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Header,
@@ -1673,6 +2015,69 @@ fn card_position_after_action(
     })
 }
 
+fn explore_group_tone(transcript: &Transcript, members: &[TranscriptEntryId]) -> TranscriptRowTone {
+    let mut tone = TranscriptRowTone::Pending;
+    let mut saw_card = false;
+    for id in members {
+        let Some(card) = transcript.entry(*id).and_then(TranscriptEntry::tool_card) else {
+            continue;
+        };
+        let member = tool_status_tone(card.status);
+        if !saw_card || explore_tone_rank(member) > explore_tone_rank(tone) {
+            tone = member;
+        }
+        saw_card = true;
+    }
+    tone
+}
+
+fn explore_tone_rank(tone: TranscriptRowTone) -> u8 {
+    match tone {
+        TranscriptRowTone::Error => 4,
+        TranscriptRowTone::Pending => 3,
+        TranscriptRowTone::Warning => 2,
+        TranscriptRowTone::Success => 1,
+        _ => 0,
+    }
+}
+
+fn explore_card_cache_valid(
+    transcript: &Transcript,
+    fold: &FoldState,
+    entry: &TranscriptEntry,
+    cached: &CachedRow,
+) -> bool {
+    if cached.entry_revision != entry.revision() {
+        return false;
+    }
+    let grouped_start = collapsed_group_start(fold, transcript, entry.id);
+    match cached.row.kind {
+        TranscriptRowKind::CardGroup => {
+            let Some(start) = grouped_start else {
+                return false;
+            };
+            if start != entry.id {
+                return false;
+            }
+            let Some((_, members)) = explore_run(transcript, entry.id) else {
+                return false;
+            };
+            let Some(last) = members.last().copied().and_then(|id| transcript.entry(id)) else {
+                return false;
+            };
+            let expected = format!("explored {} files", members.len());
+            cached.next == separator_after(transcript, last)
+                && cached.row.spans.len() == 1
+                && cached.row.spans[0].text == expected
+                && cached.row.tone == explore_group_tone(transcript, &members)
+        }
+        TranscriptRowKind::CardAction => {
+            grouped_start.is_none_or(|start| start != entry.id || fold.is_group_expanded(start))
+        }
+        _ => false,
+    }
+}
+
 fn tool_status_tone(status: ToolStatus) -> TranscriptRowTone {
     match status {
         ToolStatus::Requested | ToolStatus::AwaitingApproval | ToolStatus::Running => {
@@ -1818,7 +2223,7 @@ impl TranscriptViewport {
                 let amount = self.height.saturating_sub(1).max(1);
                 self.scroll_down(transcript, cache, amount);
             }
-            TranscriptViewAction::Home => self.scroll_up(transcript, cache, usize::MAX),
+            TranscriptViewAction::Home => self.jump_home(transcript, cache),
             TranscriptViewAction::ScrollLines(lines) if lines < 0 => {
                 self.scroll_up(transcript, cache, lines.unsigned_abs() as usize);
             }
@@ -1859,6 +2264,22 @@ impl TranscriptViewport {
             .is_some_and(|top| cache.previous_anchor(transcript, top, self.width).is_none())
     }
 
+    fn jump_home(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) {
+        let Some(first) = transcript.entries().first() else {
+            return;
+        };
+        let oldest = RowAnchor {
+            entry_id: first.id,
+            position: RowPosition::Header,
+        };
+        let _ = self.visible_rows(transcript, cache);
+        if self.top == Some(oldest) {
+            return;
+        }
+        self.top = Some(oldest);
+        self.follow_tail = false;
+    }
+
     fn scroll_up(
         &mut self,
         transcript: &Transcript,
@@ -1870,10 +2291,14 @@ impl TranscriptViewport {
             return;
         };
         let mut moved = false;
+        let mut seen = HashSet::from([top]);
         for _ in 0..amount {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
             };
+            if !seen.insert(previous) {
+                break;
+            }
             top = previous;
             moved = true;
         }
@@ -1973,6 +2398,7 @@ impl TranscriptViewport {
 
 fn cached_row_valid(
     transcript: &Transcript,
+    fold: &FoldState,
     cached: &CachedRow,
     entry: &TranscriptEntry,
     markdown: Option<&MarkdownSnapshot>,
@@ -1984,6 +2410,12 @@ fn cached_row_valid(
         })
     {
         return false;
+    }
+    if matches!(
+        cached.row.kind,
+        TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
+    ) {
+        return explore_card_cache_valid(transcript, fold, entry, cached);
     }
     if cached.entry_revision == entry.revision() {
         return true;
@@ -2036,10 +2468,12 @@ fn cached_row_valid(
                 && entry.display_content().len() >= cached.content_len
         ),
         TranscriptRowKind::CardAction
+        | TranscriptRowKind::CardGroup
         | TranscriptRowKind::CardDetail
         | TranscriptRowKind::CardOmission
         | TranscriptRowKind::Placeholder
-        | TranscriptRowKind::Omission => false,
+        | TranscriptRowKind::Omission
+        | TranscriptRowKind::Thought => false,
     }
 }
 
@@ -2107,6 +2541,15 @@ fn normalize_anchor(
             cache.content_anchor_before(transcript, entry, target, width)
         }
         RowPosition::Card(position) => {
+            if !cache.fold.is_expanded(entry.id)
+                || collapsed_group_start(&cache.fold, transcript, entry.id).is_some()
+            {
+                return Some(RowAnchor {
+                    entry_id: collapsed_group_start(&cache.fold, transcript, entry.id)
+                        .unwrap_or(entry.id),
+                    position: RowPosition::Header,
+                });
+            }
             let projection = cache.card_snapshot(entry)?;
             let normalized = match position.section {
                 CardSection::Action => {
@@ -2173,8 +2616,10 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
     match position {
         RowPosition::Content(offset) => Some(offset),
         RowPosition::Markdown(position) => Some(position.output_offset),
+        RowPosition::ThoughtContent(offset) => Some(offset),
         RowPosition::Header
         | RowPosition::Omission
+        | RowPosition::Thought
         | RowPosition::Card(_)
         | RowPosition::Spacer => None,
     }
@@ -2226,6 +2671,48 @@ fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<R
         entry_id: entry.id,
         position: RowPosition::Spacer,
     })
+}
+
+fn is_explore_tool(entry: &TranscriptEntry) -> bool {
+    entry
+        .tool_card()
+        .is_some_and(|card| matches!(card.name.as_str(), "read" | "grep" | "find" | "ls"))
+}
+
+pub(crate) fn explore_run(
+    transcript: &Transcript,
+    entry_id: TranscriptEntryId,
+) -> Option<(TranscriptEntryId, Vec<TranscriptEntryId>)> {
+    let entry = transcript.entry(entry_id)?;
+    if !is_explore_tool(entry) {
+        return None;
+    }
+    let mut start = entry_id;
+    while let Some(previous) = transcript.entry_before(start) {
+        if !is_explore_tool(previous) {
+            break;
+        }
+        start = previous.id;
+    }
+    let mut members = vec![start];
+    let mut current = start;
+    while let Some(next) = transcript.entry_after(current) {
+        if !is_explore_tool(next) {
+            break;
+        }
+        current = next.id;
+        members.push(current);
+    }
+    (members.len() >= 2).then_some((start, members))
+}
+
+fn collapsed_group_start(
+    fold: &FoldState,
+    transcript: &Transcript,
+    entry_id: TranscriptEntryId,
+) -> Option<TranscriptEntryId> {
+    let (start, _) = explore_run(transcript, entry_id)?;
+    (!fold.is_group_expanded(start)).then_some(start)
 }
 
 fn is_line_break(grapheme: &str) -> bool {
@@ -2376,6 +2863,7 @@ mod tests {
         transcript.observe_approval_resolved("call-1", true, None);
         transcript.observe_tool_result(tool_result("call-1", "first\nsecond"));
         viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        cache.fold_mut().expand(card_id);
         cache.reset_work();
         let completed = viewport.visible_rows(&transcript, &mut cache);
         let action = completed
@@ -2387,6 +2875,211 @@ mod tests {
         assert!(completed.iter().any(|row| {
             row.kind == TranscriptRowKind::CardDetail && row.plain_text() == "first"
         }));
+    }
+
+    #[test]
+    fn cards_are_collapsed_until_expanded_and_explore_runs_group() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explore".into());
+        let first = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "a.rs"}),
+        });
+        transcript.observe_tool_result(tool_result("read-1", "alpha"));
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-2".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "b.rs"}),
+        });
+        let mut second = tool_result("read-2", "beta");
+        second.call_id = "read-2".into();
+        transcript.observe_tool_result(second);
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 12);
+        let collapsed = viewport.visible_rows(&transcript, &mut cache);
+        assert!(collapsed.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardGroup
+                && row.plain_text().contains("explored 2 files")
+        }));
+        assert!(
+            !collapsed
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardDetail)
+        );
+
+        cache.fold_mut().expand_group(first);
+        let grouped = viewport.visible_rows(&transcript, &mut cache);
+        assert!(grouped.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
+        }));
+        assert!(
+            !grouped
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardDetail)
+        );
+
+        cache.fold_mut().expand(first);
+        let expanded = viewport.visible_rows(&transcript, &mut cache);
+        assert!(expanded.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardDetail && row.plain_text() == "alpha"
+        }));
+    }
+
+    #[test]
+    fn explore_group_forms_when_a_consecutive_read_arrives_after_the_first_was_cached() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explore".into());
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "a.rs"}),
+        });
+        transcript.observe_tool_result(tool_result("read-1", "alpha"));
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 12);
+        let first_pass = viewport.visible_rows(&transcript, &mut cache);
+        assert!(first_pass.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
+        }));
+        assert!(
+            !first_pass
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardGroup)
+        );
+
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-2".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "b.rs"}),
+        });
+        let mut second = tool_result("read-2", "beta");
+        second.call_id = "read-2".into();
+        transcript.observe_tool_result(second);
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+
+        let grouped = viewport.visible_rows(&transcript, &mut cache);
+        assert!(grouped.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardGroup
+                && row.plain_text().contains("explored 2 files")
+        }));
+        assert!(!grouped.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
+        }));
+    }
+
+    #[test]
+    fn collapsed_explore_group_uses_the_worst_member_tone() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explore".into());
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-ok".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "ok.rs"}),
+        });
+        let mut failed = tool_result("read-ok", "missing");
+        failed.is_error = true;
+        transcript.observe_tool_result(failed);
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "read-later".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "later.rs"}),
+        });
+        let mut ok = tool_result("read-later", "beta");
+        ok.call_id = "read-later".into();
+        transcript.observe_tool_result(ok);
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 12);
+        let grouped = viewport.visible_rows(&transcript, &mut cache);
+        let row = grouped
+            .iter()
+            .find(|row| {
+                row.kind == TranscriptRowKind::CardGroup
+                    && row.plain_text().contains("explored 2 files")
+            })
+            .expect("collapsed explore group");
+        assert_eq!(row.tone, TranscriptRowTone::Error);
+    }
+
+    #[test]
+    fn thinking_is_collapsed_by_default_and_does_not_replace_text() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("why".into());
+        transcript.append_thinking_delta(1, "secret plan\nmore");
+        transcript.append_message_delta(1, "visible answer");
+        transcript.complete_message(1, "visible answer".into());
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 12);
+        let collapsed = viewport.visible_rows(&transcript, &mut cache);
+        assert!(collapsed.iter().any(|row| {
+            row.kind == TranscriptRowKind::Thought && row.plain_text().contains("thought")
+        }));
+        assert!(
+            !collapsed
+                .iter()
+                .any(|row| row.plain_text().contains("secret plan"))
+        );
+        assert!(
+            collapsed
+                .iter()
+                .any(|row| row.plain_text().contains("visible answer"))
+        );
+
+        let assistant = transcript.entries().last().unwrap().id;
+        cache.fold_mut().expand(assistant);
+        let expanded = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            expanded
+                .iter()
+                .any(|row| row.plain_text().contains("secret plan"))
+        );
+        assert_eq!(transcript.latest_assistant_text(), Some("visible answer"));
+    }
+
+    #[test]
+    fn home_jumps_to_the_compact_user_echo_across_a_long_assistant_tail() {
+        let mut transcript = Transcript::default();
+        let raw = format!("{}\n🙂END", "界".repeat(2001));
+        transcript.append_prompt_with_display(
+            raw.clone(),
+            Some("[Pasted content #1: 2006 chars, 2 lines, 6011 bytes]".into()),
+        );
+        transcript.complete_message(1, format!("fake response to: {raw}"));
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 12);
+        let tail = viewport.visible_rows(&transcript, &mut cache);
+        assert!(viewport.follows_tail());
+        assert!(
+            !tail
+                .iter()
+                .any(|row| row.plain_text().contains("Pasted content #1"))
+        );
+
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let home = viewport.visible_rows(&transcript, &mut cache);
+        let text = home
+            .iter()
+            .map(TranscriptRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Pasted content #1"));
+        assert!(!viewport.follows_tail());
     }
 
     #[test]
@@ -2515,6 +3208,7 @@ mod tests {
 
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card_id);
         viewport.set_geometry(&transcript, &mut cache, 100, 20);
         let rows = viewport.visible_rows(&transcript, &mut cache);
         let card_rows = rows
@@ -2592,6 +3286,7 @@ mod tests {
         transcript.observe_tool_result(tool_result("call-1", "1234\nnext"));
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card_id);
         viewport.set_geometry(&transcript, &mut cache, 4, 20);
         let details = viewport
             .visible_rows(&transcript, &mut cache)
@@ -2615,6 +3310,7 @@ mod tests {
         sanitized.observe_tool_result(tool_result("call-2", source));
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card_id);
         viewport.set_geometry(&sanitized, &mut cache, 40, 20);
         let detail = viewport
             .visible_rows(&sanitized, &mut cache)
@@ -2672,6 +3368,7 @@ mod tests {
             height: 5,
         };
         let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card_id);
         let before = viewport.visible_rows(&transcript, &mut cache);
         assert!(
             before
@@ -2745,6 +3442,7 @@ mod tests {
             height: 4,
         };
         let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card_id);
 
         viewport.set_geometry(&transcript, &mut cache, 8, 4);
 

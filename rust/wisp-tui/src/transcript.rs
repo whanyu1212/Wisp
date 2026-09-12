@@ -13,6 +13,7 @@ const MAX_PENDING_DETAIL_SOURCES: usize = 128;
 const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_DISPLAY_ENTRIES: usize = 32;
 const MAX_LOCAL_DISPLAY_BYTES: usize = 4 * 1024 * 1024;
+const THINKING_MAX_BYTES: usize = 64 * 1024;
 const HISTORY_OMISSION_MARKER: &str = "[earlier session history omitted]";
 
 use crate::tool_cards::{
@@ -91,6 +92,8 @@ pub struct TranscriptEntry {
     pub content: String,
     /// Ephemeral text used only to render a locally submitted user message.
     local_display: Option<String>,
+    /// Display-only reasoning streamed for this assistant turn.
+    thinking: String,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
     revision: u64,
@@ -120,6 +123,10 @@ impl TranscriptEntry {
     /// source verbatim.
     pub(crate) fn display_content(&self) -> &str {
         self.local_display.as_deref().unwrap_or(&self.content)
+    }
+
+    pub fn thinking(&self) -> &str {
+        &self.thinking
     }
 
     pub fn tool_card(&self) -> Option<&ToolCardSnapshot> {
@@ -252,6 +259,26 @@ impl Transcript {
             entry.content.push_str(delta);
             Self::bump_revision(entry);
             self.bump_generation();
+        }
+        entry_id
+    }
+
+    pub fn append_thinking_delta(&mut self, turn: u64, delta: &str) -> TranscriptEntryId {
+        let entry_id = self.response_for_turn(turn);
+        if !delta.is_empty() {
+            let entry = self.entry_mut(entry_id);
+            let remaining = THINKING_MAX_BYTES.saturating_sub(entry.thinking.len());
+            if remaining > 0 {
+                let mut take = remaining.min(delta.len());
+                while take > 0 && !delta.is_char_boundary(take) {
+                    take -= 1;
+                }
+                if take > 0 {
+                    entry.thinking.push_str(&delta[..take]);
+                    Self::bump_revision(entry);
+                    self.bump_generation();
+                }
+            }
         }
         entry_id
     }
@@ -1121,6 +1148,7 @@ impl Transcript {
                         role: TranscriptRole::Assistant,
                         content: HISTORY_OMISSION_MARKER.into(),
                         local_display: None,
+                        thinking: String::new(),
                         state: TranscriptEntryState::Complete,
                         kind: TranscriptEntryKind::Message,
                         revision: 0,
@@ -1792,6 +1820,7 @@ impl Transcript {
             role,
             content,
             local_display,
+            thinking: String::new(),
             state,
             kind: TranscriptEntryKind::Message,
             revision: 0,
@@ -1874,6 +1903,7 @@ impl Transcript {
             role: TranscriptRole::Tool,
             content: String::new(),
             local_display: None,
+            thinking: String::new(),
             state,
             kind,
             revision: 0,

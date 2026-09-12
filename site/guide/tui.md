@@ -63,7 +63,11 @@ The Rust header shows mode, a human status (`idle`, `working`, `approval`, `trus
 context. It does not show live RPC or event-schema versions; those remain in Ctrl+G help on the
 composer. An empty transcript invites a prompt or `/` commands and points at `/resume`, `/connect`,
 and `@` when there is room. The footer lists only the keys for the current workflow; Ctrl+G lists
-every resolved binding.
+every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
+`read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
+`thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
+detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
+pane until you scroll away.
 
 The Rust TUI negotiates and validates live RPC v6/event schema v37, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,

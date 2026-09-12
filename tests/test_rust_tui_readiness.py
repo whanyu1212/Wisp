@@ -264,19 +264,11 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         tui.send(b"\r")
         tui.wait_until(
             lambda output: (
-                _has_fragments(output, offset, b"idle", b"END")
+                _has_fragments(output, offset, b"idle", b"END", *marker_fragments)
                 and output.rfind(b"idle") > output.rfind(b"working")
             ),
             timeout=20,
-            failure="large pasted prompt did not complete",
-        )
-        # The fake assistant echoes the full prompt, scrolling the user entry off
-        # screen. Return to the oldest transcript rows to inspect its live echo.
-        offset = len(tui.output)
-        tui.send(b"\x1b[1;5H")  # Ctrl+Home
-        tui.wait_until(
-            lambda output: _has_fragments(output, offset, *marker_fragments),
-            failure="submitted user message did not retain its compact presentation",
+            failure="large pasted prompt did not complete with compact echo",
         )
         tui.quit()
     finally:

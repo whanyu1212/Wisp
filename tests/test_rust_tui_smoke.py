@@ -532,15 +532,8 @@ for line in sys.stdin:
                 marker in output
                 for marker in (
                     b"README.md",
-                    b"contents",
                     b"Process completed",
-                    b"safe",
-                    b"tail",
                     b"demo.txt",
-                    b"new",
-                    b"value",
-                    b"F6",
-                    b"browse",
                 )
             )
             if (
@@ -548,8 +541,10 @@ for line in sys.stdin:
                 and not browse_sent
                 and output.rfind(b"idle") > output.rfind(b"working")
             ):
-                # F6 enters visible-card browse mode; Enter opens retained detail.
-                os.write(terminal_fd, b"\x1b[17~\r")
+                # F6 selects the last card (edit), BackTab+Right expands the
+                # process card so sanitized stdout is painted, Tab returns to
+                # edit, and Enter opens retained detail.
+                os.write(terminal_fd, b"\x1b[17~\x1b[Z\x1b[C\t\r")
                 browse_sent = True
             if (
                 browse_sent
@@ -603,9 +598,9 @@ for line in sys.stdin:
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     assert b"Process completed" in output
-    assert b"safe" in output and b"tail" in output
-    assert b"safe\xef\xbf\xbd[2Jtail" in output
-    assert b"safe\x1b[2Jtail" not in output
+    assert b"safe" in output
+    assert b"safe\xef\xbf\xbd[2J" in output
+    assert b"safe\x1b[2J" not in output
     assert b"old\xef\xbf\xbd[2J" in output
     assert b"old\x1b[2J" not in output
     assert b"live retained detail" in output
