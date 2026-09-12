@@ -330,7 +330,48 @@ struct ShutdownObservation {
     backend_status: Option<std::process::ExitStatus>,
 }
 
+struct ShutdownSources<'a> {
+    events: &'a mut mpsc::Receiver<QueuedEvent>,
+    ready_event: &'a mut Option<QueuedEvent>,
+    reader: &'a mut Option<oneshot::Receiver<Result<ReaderTermination, Error>>>,
+    writer: &'a mut Option<oneshot::Receiver<Result<(), Error>>>,
+}
+
 impl ShutdownObservation {
+    /// Drain inbound events while admitting shutdown and finishing bounded writes.
+    async fn flush_writer(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+        sources: ShutdownSources<'_>,
+    ) -> Result<bool, Error> {
+        if let Some(event) = sources.ready_event.take() {
+            self.observe_event(&event.event)?;
+        }
+        let finish = async {
+            queue_shutdown_and_close(writer, limit).await?;
+            event_loop::finish_writer(sources.writer).await
+        };
+        tokio::pin!(finish);
+        let mut events_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                outcome = receive_reader_outcome(sources.reader) => {
+                    *sources.reader = None;
+                    shutdown_reader_outcome(outcome)?;
+                }
+                result = &mut finish => return result.map(|()| events_open),
+                event = sources.events.recv(), if events_open => {
+                    match event {
+                        Some(event) => self.observe_event(&event.event)?,
+                        None => events_open = false,
+                    }
+                }
+            }
+        }
+    }
+
     fn observe_event(&mut self, event: &BackendEvent) -> Result<(), Error> {
         let BackendEvent::CommandFinished {
             command_id,
@@ -3359,7 +3400,6 @@ async fn run(cli: Cli) -> Result<(), Error> {
     ));
     let stderr_drainer = tokio::spawn(stderr_drainer_task(stderr));
     let mut reader_outcome = Some(reader_outcome_rx);
-    let mut events_open = true;
 
     let result =
         async {
@@ -3475,12 +3515,20 @@ async fn run(cli: Cli) -> Result<(), Error> {
             loop_result?;
             input_result?;
 
-            queue_shutdown_and_close(&writer_tx, max_client_frame).await?;
+            let mut shutdown = ShutdownObservation::default();
+            let mut events_open = shutdown.flush_writer(
+                &writer_tx,
+                max_client_frame,
+                ShutdownSources {
+                    events: &mut event_rx,
+                    ready_event: &mut ready_event,
+                    reader: &mut reader_outcome,
+                    writer: &mut writer_outcome,
+                },
+            ).await?;
             let shutdown_writer = writer.take().expect("RPC writer is still owned");
             finish_task("RPC writer", shutdown_writer).await?;
-            event_loop::finish_writer(&mut writer_outcome).await?;
             let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
-            let mut shutdown = ShutdownObservation::default();
             while Instant::now() < deadline {
                 if let Some(status) = backend.try_wait()? {
                     shutdown.observe_exit(status)?;
@@ -4506,6 +4554,163 @@ mod tests {
             json!({"type": "shutdown", "id": SHUTDOWN_COMMAND_ID})
         );
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_shutdown_releases_held_bytes_and_drains_while_writer_recovers() {
+        let budget = Arc::new(Semaphore::new(64));
+        let mut ready = Some(QueuedEvent {
+            event: BackendEvent::Diagnostic("held at user exit".into()),
+            _wire_bytes: budget.clone().acquire_many_owned(64).await.unwrap(),
+        });
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let (events_done_tx, events_done_rx) = oneshot::channel();
+        let producer_budget = budget.clone();
+        let producer = tokio::spawn(async move {
+            for index in 0..3 {
+                let wire_bytes = producer_budget
+                    .clone()
+                    .acquire_many_owned(64)
+                    .await
+                    .unwrap();
+                let event = if index == 2 {
+                    projected_event(shutdown_event(SHUTDOWN_COMMAND_ID))
+                } else {
+                    BackendEvent::Diagnostic("output before reading shutdown".into())
+                };
+                assert!(
+                    events_tx
+                        .send(QueuedEvent {
+                            event,
+                            _wire_bytes: wire_bytes
+                        })
+                        .await
+                        .is_ok()
+                );
+            }
+            events_done_tx.send(()).unwrap();
+        });
+        let (client, mut server) = duplex(1);
+        let backend = tokio::spawn(async move {
+            events_done_rx.await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let mut output = Vec::new();
+            server.read_to_end(&mut output).await.unwrap();
+            output
+        });
+        let (writer_tx, writer_rx) = mpsc::channel(1);
+        send_payload(&writer_tx, Bytes::from_static(b"{}"), 256)
+            .await
+            .unwrap();
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _ = outcome_tx.send(writer_task(client, writer_rx).await);
+        });
+        let mut writer_outcome = Some(outcome_rx);
+        let mut reader_outcome = None;
+        let mut shutdown = ShutdownObservation::default();
+        let started = Instant::now();
+        shutdown
+            .flush_writer(
+                &writer_tx,
+                256,
+                ShutdownSources {
+                    events: &mut events_rx,
+                    ready_event: &mut ready,
+                    reader: &mut reader_outcome,
+                    writer: &mut writer_outcome,
+                },
+            )
+            .await
+            .unwrap();
+        finish_task("RPC writer", writer).await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() < transport::TRANSPORT_STALL_TIMEOUT);
+        assert!(ready.is_none());
+        assert!(shutdown.command_succeeded);
+        assert_eq!(budget.available_permits(), 64);
+        producer.await.unwrap();
+        let output = backend.await.unwrap();
+        let frames = output.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+        assert_eq!(frames[0], b"{}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(frames[1]).unwrap(),
+            json!({"type": "shutdown", "id": SHUTDOWN_COMMAND_ID})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_shutdown_preserves_the_writer_stall_error() {
+        let (client, _blocked_server) = duplex(1);
+        let (writer_tx, writer_rx) = mpsc::channel(1);
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _ = outcome_tx.send(writer_task(client, writer_rx).await);
+        });
+        let (_events_tx, mut events_rx) = mpsc::channel(1);
+        let mut writer_outcome = Some(outcome_rx);
+        let mut reader_outcome = None;
+        let mut ready = None;
+        let mut shutdown = ShutdownObservation::default();
+        let started = Instant::now();
+        let result = shutdown
+            .flush_writer(
+                &writer_tx,
+                256,
+                ShutdownSources {
+                    events: &mut events_rx,
+                    ready_event: &mut ready,
+                    reader: &mut reader_outcome,
+                    writer: &mut writer_outcome,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(Error::WriterStallTimeout)));
+        assert_eq!(started.elapsed(), transport::TRANSPORT_STALL_TIMEOUT);
+        finish_task("RPC writer", writer).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_prioritizes_a_ready_reader_failure() {
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let (writer_outcome_tx, writer_outcome_rx) = oneshot::channel();
+        writer_outcome_tx.send(Ok(())).unwrap();
+        let (reader_outcome_tx, reader_outcome_rx) = oneshot::channel();
+        reader_outcome_tx
+            .send(Err(Error::InboundOverloaded))
+            .unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let budget = Arc::new(Semaphore::new(1));
+        assert!(
+            events_tx
+                .send(QueuedEvent {
+                    event: projected_event(shutdown_event(SHUTDOWN_COMMAND_ID)),
+                    _wire_bytes: budget.acquire_owned().await.unwrap(),
+                })
+                .await
+                .is_ok()
+        );
+        let mut ready = None;
+        let mut writer_outcome = Some(writer_outcome_rx);
+        let mut reader_outcome = Some(reader_outcome_rx);
+        let mut shutdown = ShutdownObservation::default();
+        let result = shutdown
+            .flush_writer(
+                &writer_tx,
+                256,
+                ShutdownSources {
+                    events: &mut events_rx,
+                    ready_event: &mut ready,
+                    reader: &mut reader_outcome,
+                    writer: &mut writer_outcome,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::InboundOverloaded)));
+        assert!(!shutdown.command_succeeded);
+        assert_eq!(events_rx.len(), 1);
     }
 
     #[test]
