@@ -1035,6 +1035,8 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
             ),
             "Ctrl+G help".into(),
         ]
+    } else if state.cancel_requested {
+        vec!["Ctrl+G help".into()]
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
@@ -1539,7 +1541,9 @@ mod tests {
         state.cancel_requested = true;
         let cancelling = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(cancelling.contains("Cancelling current prompt"));
+        assert!(cancelling.contains("Ctrl+G help"));
         assert!(!cancelling.contains("Esc/Ctrl-C cancels"));
+        assert!(!cancelling.contains("Enter send"));
     }
 
     #[test]
