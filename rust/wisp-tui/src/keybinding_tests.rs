@@ -321,6 +321,8 @@ fn minimum_size_help_scrolls_all_rows_of_long_alias_lists() {
     let seen = all_help_text(&mut ui, 30, 8);
     assert!(seen.contains("Ctrl+Alt+Shift+F8"));
     assert!(seen.contains("Open prompt history"));
+    assert!(seen.contains("Backend test"));
+    assert!(seen.contains("rpc v"));
 }
 
 // Read each painted visual row once, excluding borders and right-hand padding.

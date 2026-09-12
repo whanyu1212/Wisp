@@ -1365,7 +1365,7 @@ impl LiveUi {
             );
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
-                    help.render(frame, area, &self.bindings, palette);
+                    help.render(frame, area, &self.bindings, palette, Some(connection));
                 }
                 return;
             }

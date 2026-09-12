@@ -159,7 +159,7 @@ def _run_theme_session(
             if (
                 phase == "startup"
                 and context_redrawn
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
             ):
                 assert _background(initial, no_color) in backgrounds
                 os.write(terminal_fd, b"/theme\r" if preview else b"\x14")

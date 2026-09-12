@@ -130,7 +130,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     output.clear()
                     continue
                 # Hydration can show the prompt hint before the startup reads finish.
-                ready = context_redrawn and b"Type a prompt below to start." in output
+                ready = context_redrawn and b"Type a prompt or / for commands." in output
                 if picker_phase == "startup" and ready and b"fake/fake" in output:
                     os.write(terminal_fd, b"/model\r")
                     picker_phase = "loading"
@@ -292,7 +292,11 @@ def test_rust_tui_cross_language_smoke(
                 context_redrawn = True
                 output.clear()
                 continue
-            if context_redrawn and not prompt_sent and b"Type a prompt below to start." in output:
+            if (
+                context_redrawn
+                and not prompt_sent
+                and b"Type a prompt or / for commands." in output
+            ):
                 if not exercise_prompt:
                     rust_process_group = os.tcgetpgrp(terminal_fd)
                     os.kill(rust_process_group, signal.SIGKILL)
@@ -308,7 +312,7 @@ def test_rust_tui_cross_language_smoke(
                 exercise_prompt
                 and response_seen
                 and not quit_sent
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ):
                 # Ctrl-C while the prompt is still running now cancels rather
                 # than quitting. Wait until the header returns to idle first.
@@ -521,7 +525,7 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not prompt_sent and b"Type a prompt below to start." in output:
+            if not prompt_sent and b"Type a prompt or / for commands." in output:
                 os.write(terminal_fd, b"tools\r")
                 prompt_sent = True
             cards_visible = all(
@@ -542,7 +546,7 @@ for line in sys.stdin:
             if (
                 cards_visible
                 and not browse_sent
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ):
                 # F6 enters visible-card browse mode; Enter opens retained detail.
                 os.write(terminal_fd, b"\x1b[17~\r")
@@ -759,7 +763,7 @@ for line in sys.stdin:
             command_types = [command["type"] for command in commands]
             if (
                 phase == "startup"
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
                 and command_types[:7]
                 == [
                     "get_messages",
@@ -1218,7 +1222,7 @@ for line in sys.stdin:
                     "get_skills",
                     "get_queue_state",
                 ]
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
             ):
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"
@@ -1494,7 +1498,7 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and context_redrawn
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
                 and b"plan" in output
             ):
                 os.write(terminal_fd, b"/he")
@@ -1519,7 +1523,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "closed"
                 output.clear()
-            elif phase == "closed" and b"Type a prompt below to start." in output:
+            elif phase == "closed" and b"Type a prompt or / for commands." in output:
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()
@@ -1553,7 +1557,9 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
-            elif phase == "compacting" and b"Compacting (manual)" in output:
+            elif phase == "compacting" and b"compacting" in output:
+                # Header status is contiguous; the reason line can arrive as
+                # cell-level diffs against the previous identity details.
                 os.write(terminal_fd, b"\x03")
                 phase = "cancelled"
                 output.clear()
@@ -1744,7 +1750,7 @@ SKILL_EXPANSION_MARKER
             if (
                 phase == "startup"
                 and context_redrawn
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
             ):
                 os.write(terminal_fd, b"/skills\r")
                 phase = "browser"
@@ -1771,7 +1777,7 @@ SKILL_EXPANSION_MARKER
             elif (
                 phase == "submitted"
                 and b"SKILL_EXPANSION_MARKER" in output
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and output.rfind(b"idle") > output.rfind(b"working")
             ):
                 # FakeProvider echoes its expanded input as assistant output.
                 os.write(terminal_fd, b"\x03")
@@ -1896,7 +1902,7 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
             if (
                 phase == "startup"
                 and context_redrawn
-                and b"Type a prompt below to start." in output
+                and b"Type a prompt or / for commands." in output
             ):
                 os.write(terminal_fd, b"Explain @")
                 phase = "all files"
