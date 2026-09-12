@@ -291,6 +291,13 @@ Transport pressure evidence is recorded in
 The transport budgets cover queued encoded bytes and a bounded pending frame. They do not bound
 whole-process memory or cumulative live transcript retention; the latter remains separate work.
 
+Protocol hardening also includes fixed-seed raw-wire and JSONL framing properties, canonical
+fixture/seed replay, and bounded AddressSanitizer fuzz campaigns for client and server wire
+decoding. See the [fuzzing instructions](https://github.com/whanyu1212/Wisp/blob/main/fuzz/README.md)
+for budgets, manual extended runs, and failure reproduction. These checks cover protocol parsing
+and logical frame buffering; terminal/Unicode rendering, secret lifecycle, recovery races,
+dependency auditing, and whole-session memory remain separate #468 acceptance work.
+
 The remaining stage-3 work is hardening (#468) and distribution (#469), including coordinated updates.
 Closing those issues does not itself authorize a default switch or Textual deprecation. Optional
 experience improvements under [#237](https://github.com/whanyu1212/Wisp/issues/237), including draft
