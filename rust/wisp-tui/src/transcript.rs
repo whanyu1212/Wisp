@@ -1940,6 +1940,10 @@ impl Transcript {
             .and_then(|index| self.entries.get(*index))
     }
 
+    pub(crate) fn entry_index(&self, entry_id: TranscriptEntryId) -> Option<usize> {
+        self.entry_indexes.get(&entry_id).copied()
+    }
+
     pub(crate) fn entry_before(&self, entry_id: TranscriptEntryId) -> Option<&TranscriptEntry> {
         let index = *self.entry_indexes.get(&entry_id)?;
         self.entries.get(index.checked_sub(1)?)

@@ -2388,6 +2388,30 @@ impl TranscriptViewport {
             .is_some_and(|top| cache.previous_anchor(transcript, top, self.width).is_none())
     }
 
+    /// Estimate the visible interval in retained history without laying out offscreen rows.
+    /// Entry order and source offsets provide a stable, bounded-cost approximation;
+    /// wrapped rows, Markdown tables, and folded groups need not have equal heights.
+    pub(crate) fn scrollbar_range(
+        &self,
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        rows: &[TranscriptRow],
+    ) -> Option<(f64, f64)> {
+        let top = self.top?;
+        let last = rows.last()?;
+        let count = transcript.entries().len().max(1) as f64;
+        let start = scroll_anchor_rank(transcript, cache, top)? / count;
+        let next = cache
+            .row_at(transcript, last.anchor, self.width)
+            .and_then(|row| row.next);
+        let end = if self.follow_tail || next.is_none() {
+            1.0
+        } else {
+            scroll_anchor_rank(transcript, cache, next?)? / count
+        };
+        (start > 0.0 || end < 1.0).then_some((start.clamp(0.0, 1.0), end.clamp(start, 1.0)))
+    }
+
     fn jump_home(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) {
         let Some(first) = transcript.entries().first() else {
             return;
@@ -2458,13 +2482,14 @@ impl TranscriptViewport {
             };
             top = next;
         }
-        let remaining = collect_rows(transcript, cache, top, self.width, self.height);
-        let reaches_tail = remaining.last().is_some_and(|row| {
-            cache
-                .row_at(transcript, row.anchor, self.width)
-                .is_some_and(|cached| cached.next.is_none())
+        // The live view may start at the latest prompt even when older turns
+        // would also fit. Rejoin only after scrolling into that live interval.
+        let reaches_tail = self.tail_top(transcript, cache).is_some_and(|tail| {
+            collect_rows(transcript, cache, tail, self.width, self.height)
+                .iter()
+                .any(|row| row.anchor == top)
         });
-        if remaining.len() < self.height || reaches_tail {
+        if reaches_tail {
             self.follow_tail = true;
             self.unseen_output = false;
             self.top = None;
@@ -2479,8 +2504,22 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
         let entry = transcript.entries().last()?;
+        let latest_user = transcript
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| entry.role == TranscriptRole::User)
+            .map(|entry| RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Header,
+            });
         let mut top = cache.last_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
+            // Following the current turn must not place older replies below its
+            // pinned prompt. Those turns remain reachable through normal scrolling.
+            if Some(top) == latest_user {
+                break;
+            }
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
             };
@@ -2518,6 +2557,49 @@ impl TranscriptViewport {
             after = next;
         }
     }
+}
+
+fn scroll_anchor_rank(
+    transcript: &Transcript,
+    cache: &mut TranscriptRowCache,
+    anchor: RowAnchor,
+) -> Option<f64> {
+    let index = transcript.entry_index(anchor.entry_id)?;
+    let entry = transcript.entry(anchor.entry_id)?;
+    let source_length = entry
+        .display_content()
+        .len()
+        .saturating_add(entry.thinking().len())
+        .max(1);
+    let content_fraction = |offset: usize| {
+        0.05 + 0.9
+            * (entry.thinking().len().saturating_add(offset) as f64 / source_length as f64).min(1.0)
+    };
+    let fraction = match anchor.position {
+        RowPosition::Header => 0.0,
+        RowPosition::Spacer => 1.0,
+        RowPosition::Omission | RowPosition::Thought => 0.025,
+        RowPosition::ThoughtContent(offset) => {
+            0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
+        }
+        RowPosition::Content(offset) => content_fraction(offset),
+        RowPosition::Markdown(position) => content_fraction(position.source_offset),
+        RowPosition::Card(position) => {
+            let card = cache.card_snapshot(entry)?;
+            let total = card.action.len().saturating_add(card.detail.len()).max(1);
+            let offset = match position.section {
+                CardSection::Action => position.absolute_byte_offset,
+                CardSection::Detail => card.action.len().saturating_add(
+                    position
+                        .absolute_byte_offset
+                        .saturating_sub(card.detail_base),
+                ),
+                CardSection::Omission => total,
+            };
+            0.05 + 0.9 * (offset as f64 / total as f64).min(1.0)
+        }
+    };
+    Some(index as f64 + fraction)
 }
 
 fn cached_row_valid(
@@ -2882,6 +2964,81 @@ fn terminal_control_character(character: char) -> bool {
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    #[test]
+    fn short_history_scrolls_row_by_row_until_the_live_turn_boundary() {
+        let mut transcript = Transcript::default();
+        let first = transcript.append_prompt("first prompt".into());
+        transcript.complete_message(1, "first answer".into());
+        let latest = transcript.append_prompt("latest prompt".into());
+        transcript.complete_message(2, "latest answer".into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 40);
+        assert_eq!(
+            viewport.visible_rows(&transcript, &mut cache)[0]
+                .anchor
+                .entry_id,
+            latest
+        );
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        viewport.reduce(
+            TranscriptViewAction::ScrollLines(1),
+            &transcript,
+            &mut cache,
+        );
+        assert!(!viewport.follows_tail());
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert_eq!(rows[0].anchor.entry_id, first);
+        assert_eq!(rows[0].plain_text(), "first prompt");
+        for _ in 0..20 {
+            if viewport.follows_tail() {
+                break;
+            }
+            viewport.reduce(
+                TranscriptViewAction::ScrollLines(1),
+                &transcript,
+                &mut cache,
+            );
+        }
+        assert!(viewport.follows_tail());
+        assert_eq!(
+            viewport.visible_rows(&transcript, &mut cache)[0]
+                .anchor
+                .entry_id,
+            latest
+        );
+    }
+
+    #[test]
+    fn scrollbar_advances_inside_one_long_reply_and_reaches_both_ends() {
+        let mut transcript = Transcript::default();
+        transcript.complete_message(1, numbered_lines("line", 100));
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 8);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let first = viewport
+            .scrollbar_range(&transcript, &mut cache, &rows)
+            .unwrap();
+        assert_eq!(first.0, 0.0);
+        assert!(first.1 < 1.0);
+        viewport.reduce(TranscriptViewAction::PageDown, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let next = viewport
+            .scrollbar_range(&transcript, &mut cache, &rows)
+            .unwrap();
+        assert!(next.0 > first.0);
+        assert!(next.1 > first.1);
+        viewport.reduce(TranscriptViewAction::FollowTail, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let tail = viewport
+            .scrollbar_range(&transcript, &mut cache, &rows)
+            .unwrap();
+        assert!(tail.0 > next.0);
+        assert_eq!(tail.1, 1.0);
+    }
 
     #[test]
     fn styled_tool_actions_preserve_source_ranges_across_unicode_and_tab_wrapping() {
@@ -3779,10 +3936,20 @@ mod tests {
             let mut viewport = TranscriptViewport::default();
             let mut cache = TranscriptRowCache::default();
             viewport.set_geometry(&transcript, &mut cache, 100, 15);
-            let _ = viewport.visible_rows(&transcript, &mut cache);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            assert!(
+                viewport
+                    .scrollbar_range(&transcript, &mut cache, &rows)
+                    .is_some()
+            );
             let cold = cache.work();
             cache.reset_work();
-            let _ = viewport.visible_rows(&transcript, &mut cache);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            assert!(
+                viewport
+                    .scrollbar_range(&transcript, &mut cache, &rows)
+                    .is_some()
+            );
             (cold, cache.work())
         }
 
@@ -3951,6 +4118,7 @@ mod tests {
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
         viewport.set_geometry(&transcript, &mut cache, 80, 40);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
         let _ = viewport.visible_rows(&transcript, &mut cache);
 
         let reused = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {

@@ -36,6 +36,8 @@ These are visual review artifacts, not pixel-equality assertions across renderer
 | [Approval at 30 × 8](approval-30x8.png) | Minimum supported decision surface |
 | [Selected, expanded tool](selected-tool.png) | Selection contrast and output hierarchy |
 | [Working at 80 × 24](working.png) | Partial reply, editable steering, activity indicator |
+| [New turn](new-turn.png) | Previous reply stays out of the live turn; spinner sits in transcript |
+| [Scrollback](scrollback.png) | Earlier turns remain accessible and the scrollbar moves upward |
 
 ## Reproduce
 
@@ -46,8 +48,9 @@ WISP_VISUAL_OUTPUT=/tmp/wisp-tui-captures cargo test -p wisp-tui capture_convers
 uv run python -m benchmarks.tui_visual_capture /tmp/wisp-tui-captures --textual
 ```
 
-This emits 48 Rust JSON buffers and SVGs: conversation, expanded tool, working,
-and approval at 100 × 30, 80 × 24, 40 × 16, and 30 × 8 in dark, light, and monochrome.
+This emits 72 Rust JSON buffers and SVGs: conversation, expanded tool, working,
+approval, new turn, and scrollback at 100 × 30, 80 × 24, 40 × 16, and 30 × 8 in dark,
+light, and monochrome.
 It also emits 16 Textual SVG references at the two larger sizes in dark and light.
 The working indicator is fixed at its first frame; animation is covered by the
 existing runtime tests. The committed PNGs were rasterized with `rsvg-convert`:

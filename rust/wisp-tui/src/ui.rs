@@ -275,7 +275,6 @@ pub fn render_interactive(
             state,
             viewport,
             notice,
-            activity_frame,
             palette,
             bindings,
         );
@@ -304,6 +303,7 @@ pub fn render_interactive(
         row_cache,
         browse_selected,
         connection,
+        activity_frame,
         palette,
         bindings,
     );
@@ -326,33 +326,29 @@ pub fn render_interactive(
         state,
         viewport,
         notice,
-        activity_frame,
         palette,
         bindings,
     );
     mouse::Conversation {
-        transcript: chunks[0],
+        transcript: Rect {
+            width: frame.area().right().saturating_sub(chunks[0].x),
+            ..chunks[0]
+        },
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
     }
 }
 
-fn status_label(state: &UiState, activity_frame: u8) -> String {
+fn status_label(state: &UiState) -> String {
     if state.configuration_active() {
         "configuring".into()
     } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        format!(
-            "compacting {}",
-            ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
-        )
+        "compacting".into()
     } else {
         match state.view_status {
             ViewStatus::Idle => "idle".into(),
-            ViewStatus::Running => format!(
-                "working {}",
-                ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
-            ),
+            ViewStatus::Running => "working".into(),
             ViewStatus::WaitingForApproval => "approval".into(),
             ViewStatus::WaitingForTrust => "trust".into(),
             ViewStatus::Error => "error".into(),
@@ -394,8 +390,8 @@ fn session_label(state: &UiState) -> Option<String> {
     (!sanitized.is_empty()).then_some(sanitized)
 }
 
-fn footer_leading_parts(state: &UiState, activity_frame: u8) -> Vec<String> {
-    let mut parts = vec![status_label(state, activity_frame)];
+fn footer_leading_parts(state: &UiState) -> Vec<String> {
+    let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
         let follow_up = state.queued_follow_ups();
@@ -511,9 +507,18 @@ fn render_transcript(
     row_cache: &mut TranscriptRowCache,
     browse_selected: Option<TranscriptEntryId>,
     connection: &ConnectionInfo,
+    activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
 ) {
+    let padding = u16::from(
+        !state.transcript.entries().is_empty()
+            && area.height >= if decision_pending(state) { 10 } else { 8 },
+    );
+    let area = area.inner(Margin {
+        horizontal: 0,
+        vertical: padding,
+    });
     let parked_area = parked_decision_area(state, area);
     let conversation = parked_area.map_or(area, |parked| Rect {
         x: area.x,
@@ -521,9 +526,22 @@ fn render_transcript(
         width: area.width,
         height: area.height.saturating_sub(parked.height),
     });
-    let content = content_area(conversation);
+    let activity = activity_label(state, activity_frame);
+    let activity_height = if activity.is_some() {
+        conversation
+            .height
+            .saturating_sub(1)
+            .min(if conversation.height >= 8 { 2 } else { 1 })
+    } else {
+        0
+    };
+    let rows_area = Rect {
+        height: conversation.height.saturating_sub(activity_height),
+        ..conversation
+    };
+    let content = content_area(rows_area);
     let content_width = usize::from(content.width).max(1);
-    let visible_lines = usize::from(conversation.height).max(1);
+    let visible_lines = usize::from(rows_area.height).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut sticky = sticky_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
@@ -533,7 +551,7 @@ fn render_transcript(
     }
     // Reserve a row for the active assistant's identity and one for its tail.
     // A compact user projection may otherwise consume the whole viewport.
-    sticky.truncate(visible_lines.saturating_sub(2));
+    sticky.truncate(visible_lines.saturating_sub(rows.len().min(2)));
     if !sticky.is_empty() && visible_lines >= sticky.len() + 3 {
         let mut spacer = sticky.last().expect("nonempty user projection").clone();
         spacer.kind = TranscriptRowKind::Spacer;
@@ -560,6 +578,8 @@ fn render_transcript(
         combined.append(&mut rows);
         rows = combined;
     }
+    let painted_rows = rows.len();
+    let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
     let selected_row = browse_selected.and_then(|selected_entry| {
         rows.iter()
             .find(|row| {
@@ -586,7 +606,7 @@ fn render_transcript(
             })
             .map(|row| row.anchor)
     });
-    if rows.is_empty() {
+    if rows.is_empty() && activity.is_none() {
         let lines = empty_transcript_lines(
             state,
             connection,
@@ -607,8 +627,63 @@ fn render_transcript(
             render_transcript_row(frame, area, row, selected_row, palette);
         }
     }
+    if let Some(label) = activity.filter(|_| activity_height > 0) {
+        let y = (conversation.y + painted_rows as u16 + u16::from(painted_rows > 0))
+            .min(conversation.bottom().saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(palette.primary)),
+            Rect::new(content.x, y, content.width, 1),
+        );
+    }
+    if let Some((start, end)) = scroll {
+        render_scrollbar(frame, rows_area, start, end, palette);
+    }
     if let Some(parked) = parked_area {
         render_parked_decision(frame, parked, state, palette);
+    }
+}
+
+fn activity_label(state: &UiState, activity_frame: u8) -> Option<String> {
+    (!state.configuration_active()
+        && (state.view_status == ViewStatus::Running
+            || state.interaction_status == crate::reducer::InteractionStatus::Compacting))
+        .then(|| {
+            format!(
+                "{} {}",
+                status_label(state),
+                ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
+            )
+        })
+}
+
+fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, palette: Palette) {
+    let height = usize::from(area.height);
+    if height == 0 {
+        return;
+    }
+    let thumb_height = ((end - start) * height as f64).round().max(1.0) as usize;
+    let thumb_height = thumb_height.min(height);
+    let travel = height - thumb_height;
+    let position = if end >= 1.0 {
+        travel
+    } else {
+        (start * height as f64).floor() as usize
+    }
+    .min(travel);
+    let x = frame.area().right().saturating_sub(1);
+    for offset in 0..height {
+        let thumb = (position..position + thumb_height).contains(&offset);
+        let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
+        cell.set_symbol(if thumb { "┃" } else { "│" });
+        cell.set_style(
+            Style::default()
+                .fg(if thumb {
+                    palette.primary
+                } else {
+                    palette.muted
+                })
+                .bg(palette.background),
+        );
     }
 }
 
@@ -1426,7 +1501,6 @@ fn render_footer(
     state: &UiState,
     viewport: &TranscriptViewport,
     notice: Option<&str>,
-    activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
 ) {
@@ -1441,14 +1515,14 @@ fn render_footer(
             && (state.view_status == ViewStatus::Running
                 || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
         {
-            status_label(state, activity_frame).width()
+            status_label(state).width()
         } else {
             0
         }
     } else {
         (terminal_width / 2).max(19)
     };
-    let leading = footer_leading_parts(state, activity_frame);
+    let leading = footer_leading_parts(state);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
     let ctx_width = status_budget
         .saturating_sub(leading_width)
@@ -1476,7 +1550,7 @@ fn render_footer(
             Style::default().fg(palette.muted),
         ),
     };
-    let label = status_label(state, activity_frame);
+    let label = status_label(state);
     let mut spans = Vec::new();
     if let Some(tail) = status_line.strip_prefix(&label) {
         let active = matches!(
@@ -2105,12 +2179,7 @@ mod tests {
             .expect("latest user turn");
         let short = rendered.find("short-ok").expect("latest assistant");
         assert!(latest < short);
-        if let Some(older) = rendered.find("OLDER-ASSISTANT-LINE-") {
-            assert!(
-                latest < older,
-                "latest user turn should stay above leftover older assistant rows: {rendered}"
-            );
-        }
+        assert!(!rendered.contains("OLDER-ASSISTANT-LINE-"), "{rendered}");
         assert!(!rendered.contains("older-prompt"));
     }
 
@@ -3154,7 +3223,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_renders_multiple_retained_turns() {
+    fn transcript_live_view_only_renders_the_current_retained_turn() {
         let mut state = UiState::unconfigured();
         state.transcript.append_exchange("first prompt".into());
         state.transcript.complete_message(1, "first answer".into());
@@ -3163,10 +3232,11 @@ mod tests {
 
         let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
 
-        assert!(rendered.contains("first prompt"));
-        assert!(rendered.contains("first answer"));
+        assert!(!rendered.contains("first prompt"));
+        assert!(!rendered.contains("first answer"));
         assert!(rendered.contains("second prompt"));
         assert!(rendered.contains("second answer"));
+        assert_eq!(state.transcript.entries().len(), 4);
     }
 
     #[test]

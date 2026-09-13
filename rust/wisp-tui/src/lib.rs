@@ -7567,6 +7567,11 @@ mod tests {
             58,
             10,
         );
+        live_ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+        );
         live_ui.enter_or_cycle_browse();
         assert_eq!(live_ui.browse_selected, Some(card_id));
 

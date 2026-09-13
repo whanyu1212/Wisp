@@ -61,6 +61,7 @@ WISP_TUI_RENDERER=rust wisp
 
 The conversation uses the terminal width with modest side margins. User turns have a subtle
 background; assistant prose and collapsed tool rows stay open on the transcript background.
+The transcript has space at the top and above the composer, collapsing on short terminals.
 The composer is a filled writing surface with an accent rail and a `>` prompt. Its vertical padding
 collapses on short terminals. The footer
 holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, the selected session
@@ -85,8 +86,12 @@ Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
-pane until you scroll away, and a clipped assistant reply keeps its `wisp` label visible. The footer
-animates a spinner while Wisp is working or compacting, including when no output is arriving.
+pane until you scroll away. The live view contains only that prompt and the replies and tools that
+follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
+A spinner below the visible transcript animates while Wisp is working or compacting, including
+when no output is arriving. The footer keeps a static status label. A scrollbar on the right shows
+the approximate position in retained history without laying out every offscreen row. Keyboard
+scrolling and opt-in wheel/trackpad scrolling update it.
 A pending tool approval or project-trust request parks as a compact card
 at the bottom of that pane (`y`/`t`/`a`/`n` or trust `y`/`n`); the composer stays a short waiting
 strip instead of a five-row args panel.

@@ -68,6 +68,25 @@ fn fixture(scenario: &str) -> LiveUi {
     });
     ui.state.transcript.complete_message(1, fixture.reply);
     ui.editor.insert_paste(&fixture.draft);
+    if matches!(scenario, "new-turn" | "scrollback") {
+        ui.state
+            .transcript
+            .append_prompt("Now check the remaining edge cases.".into());
+        ui.editor = PromptEditor::default();
+        ui.state.view_status = ViewStatus::Running;
+        ui.state.interaction_status = InteractionStatus::Running;
+        ui.state.current_command = Some(reducer::ActiveCommand {
+            id: "visual-next-prompt".into(),
+            command_type: reducer::ActiveCommandType::Prompt,
+        });
+        if scenario == "scrollback" {
+            ui.transcript_viewport.reduce(
+                TranscriptViewAction::Home,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+            );
+        }
+    }
     if scenario == "tools" {
         ui.transcript_row_cache.fold_mut().expand(tool);
         ui.browse_selected = Some(tool);
@@ -203,6 +222,102 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
     }
 }
 
+fn screen_text(buffer: &ratatui::buffer::Buffer) -> String {
+    buffer.content.iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn transcript_padding_and_activity_stay_above_the_composer() {
+    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+        let mut ui = fixture("working");
+        ui.mouse_enabled = true;
+        let buffer = draw(&mut ui, width, height);
+        let activity = row_containing(&buffer, "working ⠋");
+        let editor = ui
+            .mouse_frame
+            .as_ref()
+            .unwrap()
+            .conversation
+            .editor
+            .as_ref()
+            .unwrap();
+        let composer_top = editor.area.y - u16::from(height >= 16);
+        assert!(activity < composer_top);
+        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
+        if height >= 16 {
+            for x in 0..width {
+                assert_eq!(buffer[(x, 0)].symbol(), " ");
+                assert_eq!(buffer[(x, composer_top - 1)].symbol(), " ");
+                assert_eq!(buffer[(x, composer_top - 1)].bg, ui.palette().background);
+            }
+        }
+        ui.activity_frame = 1;
+        let next = draw(&mut ui, width, height);
+        assert!(screen_text(&next).contains("working ⠙"));
+        ui.state.view_status = ViewStatus::Idle;
+        ui.state.interaction_status = InteractionStatus::Idle;
+        ui.state.current_command = None;
+        assert!(!screen_text(&draw(&mut ui, width, height)).contains("working ⠙"));
+    }
+}
+
+#[test]
+fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
+    let mut ui = fixture("new-turn");
+    let live = draw(&mut ui, 80, 24);
+    let text = screen_text(&live);
+    assert!(text.contains("Now check the remaining edge cases."));
+    assert!(!text.contains("Startup review"));
+    assert!(!text.contains("Configuration loads"));
+    assert!(text.contains("working ⠋"));
+    let thumb = |buffer: &ratatui::buffer::Buffer| {
+        (0..buffer.area.height)
+            .filter(|&y| buffer[(79, y)].symbol() == "┃")
+            .collect::<Vec<_>>()
+    };
+    let live_thumb = thumb(&live);
+    assert!(!live_thumb.is_empty());
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::Home,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    let history = draw(&mut ui, 80, 24);
+    assert!(screen_text(&history).contains("Startup review"));
+    assert!(thumb(&history)[0] < live_thumb[0]);
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::FollowTail,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    ui.state
+        .transcript
+        .append_message_delta(2, "The next review has started.");
+    let streaming = screen_text(&draw(&mut ui, 80, 24));
+    assert!(streaming.contains("The next review has started."));
+    assert!(!streaming.contains("Startup review"));
+    ui.state
+        .transcript
+        .complete_message(2, "The edge cases are covered.".into());
+    let completed = screen_text(&draw(&mut ui, 80, 24));
+    assert!(completed.contains("The edge cases are covered."));
+    assert!(!completed.contains("Startup review"));
+    assert_eq!(ui.state.transcript.entries().len(), 5);
+}
+
+#[test]
+fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
+    let mut ui = fixture("new-turn");
+    let text = screen_text(&draw(&mut ui, 30, 8));
+    let compact: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃'))
+        .collect();
+    assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
+    assert!(text.contains("working ⠋"), "{text}");
+    assert!(!text.contains("Startup review"));
+}
+
 #[test]
 #[ignore = "writes review artifacts only when explicitly requested"]
 fn capture_conversation_screens() {
@@ -215,7 +330,14 @@ fn capture_conversation_screens() {
             ("light", theme::paper_theme(), false),
             ("mono", theme::default_theme(), true),
         ] {
-            for scenario in ["conversation", "tools", "working", "approval"] {
+            for scenario in [
+                "conversation",
+                "tools",
+                "working",
+                "approval",
+                "new-turn",
+                "scrollback",
+            ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
                 ui.no_color = no_color;
