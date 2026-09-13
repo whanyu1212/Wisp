@@ -33,9 +33,11 @@ Textual remains the supported default; Rust remains experimental on macOS/Linux.
   terminal/process cleanup and a nonzero exit.
 
 These are encoded-wire and queue bounds, not a 64-MiB process-memory claim. Decoded objects,
-framing allocation, the pending frame, rendering caches and retained transcript have separate costs.
-Live transcript lifetime retention is separate follow-up work; a finite pressure test does not prove
-that an arbitrarily long session has bounded RSS.
+framing allocation, the pending frame and rendering caches have separate costs. Completed live
+transcript presentation is separately limited to 1,200 entries and 16 MiB of retained text/detail
+payloads. The oldest safe completed entries are replaced by one omission marker; streaming responses,
+unresolved tool/process lifecycles and active exact detail remain protected until they settle. These
+logical bounds do not establish an exact or constant process RSS ceiling.
 
 ## Scheduling and activation
 
@@ -69,7 +71,8 @@ blocked terminal itself is outside that fairness guarantee.
 | EOF/fatal outcome handling | `event_loop::tests` EOF and writer-outcome tests | FIFO drain on EOF; fatal failure preempts input/events even without another command; held event remains accounted |
 | Process/terminal pressure | `tests/test_rust_tui_pressure.py` | 192 × 1-KiB burst, 1,024 × 1-KiB burst with external SIGINT, synchronized EOF/malformed frame, malformed output after shutdown success, visible final state, terminal restoration and backend PID cleanup |
 | Shared control ordering | `tests/fixtures/tui_traces/approval_resolution_then_cancel.json`, existing cancel-before-approval/trust and decision traces | Python and Rust agree on exact commands and terminal state; these reducer traces do not test live channel scheduling |
-| Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `test_process_manager.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no whole-session memory claim |
+| Live transcript retention | `transcript::tests::live_retention_*`, `tests/test_rust_tui_pressure.py::test_long_session_bounds_live_transcript_and_remains_responsive` | Completed live presentation stays within count/payload limits while active lifecycle state survives; a 1,205-turn built-binary stream completes and exits cleanly |
+| Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `test_process_manager.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no exact process-RSS claim |
 
 The generated cases are deterministic, finite smoke tests in ordinary Cargo CI. They are not a
 standalone coverage-guided fuzz campaign. Broader fuzz targets/policy, Unicode/terminal injection,

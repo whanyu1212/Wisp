@@ -288,8 +288,10 @@ noncritical** work can wait after stage 3.
 
 Transport pressure evidence is recorded in
 [`benchmarks/rust_tui_transport_pressure.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_transport_pressure.md).
-The transport budgets cover queued encoded bytes and a bounded pending frame. They do not bound
-whole-process memory or cumulative live transcript retention; the latter remains separate work.
+The transport budgets cover queued encoded bytes and a bounded pending frame. Completed live
+transcript presentation has separate 1,200-entry and 16-MiB retained-payload limits, with active
+responses, unresolved tool/process lifecycles and active exact detail protected until they settle.
+These logical limits do not establish an exact whole-process RSS ceiling.
 
 Protocol hardening also includes fixed-seed raw-wire and JSONL framing properties, canonical
 fixture/seed replay, and bounded AddressSanitizer fuzz campaigns for client and server wire
