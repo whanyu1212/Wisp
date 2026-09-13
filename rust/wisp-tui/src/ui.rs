@@ -57,7 +57,7 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
-fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
+fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let ceiling = area.height.saturating_sub(3).clamp(2, MAX_COMPOSER_HEIGHT);
     if editable(state) {
         let queue_rows = if state.active_prompt_editable() {
@@ -68,10 +68,9 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
         } else {
             0
         };
-        let projection = editor.projection();
-        let editor_width = composer_editor_width(area.width);
         u16::try_from(
-            composer_visual_row_count(&projection, editor_width)
+            layout
+                .map_or(1, |layout| layout.rows.len())
                 .saturating_add(queue_rows)
                 .saturating_add(if area.height >= 16 { 2 } else { 0 }),
         )
@@ -150,16 +149,23 @@ fn render_parked_decision(frame: &mut Frame<'_>, area: Rect, state: &UiState, pa
 }
 
 /// Anchor suggestions above the composer without changing transcript geometry.
-pub(crate) fn file_picker_area(area: Rect, state: &UiState, editor: &PromptEditor) -> Option<Rect> {
+pub(crate) fn file_picker_area(
+    area: Rect,
+    state: &UiState,
+    editor: &PromptEditor,
+    layout_cache: &mut ComposerLayoutCache,
+) -> Option<Rect> {
     if !decision_context_visible(area) {
         return None;
     }
     // At short sizes a tall draft leaves no free strip. Cover the upper rows rather
     // than hide all choices or change the transcript's layout to make room.
     let composer = conversation_surface(area);
+    let editor_width = composer_editor_width(composer.width);
+    let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(composer, state, editor) + 1)
+        .saturating_sub(composer_height(composer, state, layout) + 1)
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -211,11 +217,13 @@ pub fn render(
     connection: &ConnectionInfo,
     notice: Option<&str>,
 ) {
+    let mut composer_layout_cache = ComposerLayoutCache::default();
     render_interactive(
         frame,
         state,
         viewport,
         row_cache,
+        &mut composer_layout_cache,
         editor,
         connection,
         notice,
@@ -234,6 +242,7 @@ pub fn render_interactive(
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
+    composer_layout_cache: &mut ComposerLayoutCache,
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
@@ -272,7 +281,7 @@ pub fn render_interactive(
             frame,
             chunks[0],
             state,
-            editor,
+            None,
             composer_focused,
             false,
             palette,
@@ -289,7 +298,10 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
-    let composer_height = composer_height(area, state, editor);
+    let editor_width = composer_editor_width(area.width);
+    let composer_layout =
+        editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
+    let composer_height = composer_height(area, state, composer_layout);
     let completion_height = completion.map_or(0, |view| {
         (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 3))
     });
@@ -323,7 +335,7 @@ pub fn render_interactive(
         frame,
         chunks[2],
         state,
-        editor,
+        composer_layout,
         composer_focused,
         area.height >= 16,
         palette,
@@ -1069,7 +1081,7 @@ fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
-    editor: &PromptEditor,
+    layout: Option<&ComposerLayout>,
     focused: bool,
     padded: bool,
     palette: Palette,
@@ -1156,8 +1168,7 @@ fn render_composer(
                 .height
                 .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
         };
-        let projection = editor.projection();
-        let layout = composer_layout(&projection, usize::from(editor_area.width));
+        let layout = layout.expect("editable composer requires a visual layout");
         let vertical_scroll = layout
             .cursor_row
             .saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
@@ -1167,7 +1178,7 @@ fn render_composer(
             .skip(vertical_scroll)
             .take(usize::from(editor_area.height))
             .collect::<Vec<_>>();
-        if editor.text().is_empty() {
+        if layout.is_empty {
             let placeholder = if state.active_prompt_editable() {
                 let hint = "Steer Wisp, or queue a follow-up…";
                 if hint.width() <= usize::from(editor_area.width) {
@@ -1205,7 +1216,7 @@ fn render_composer(
         }
         return Some(mouse::Editor {
             area: editor_area,
-            revision: editor.revision(),
+            revision: layout.revision,
             rows: visible_rows
                 .into_iter()
                 .map(|row| mouse::EditorRow {
@@ -1306,9 +1317,42 @@ struct ComposerVisualRow {
 }
 
 struct ComposerLayout {
+    revision: u64,
+    is_empty: bool,
     rows: Vec<ComposerVisualRow>,
     cursor_row: usize,
     cursor_column: usize,
+}
+
+/// Reuse the expensive Unicode-aware draft layout until its inputs change.
+#[derive(Default)]
+pub(crate) struct ComposerLayoutCache {
+    revision: Option<u64>,
+    width: usize,
+    layout: Option<ComposerLayout>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+impl ComposerLayoutCache {
+    fn layout(&mut self, editor: &PromptEditor, width: usize) -> &ComposerLayout {
+        let width = width.max(1);
+        if self.revision != Some(editor.revision()) || self.width != width {
+            self.layout = Some(composer_layout(editor, width));
+            self.revision = Some(editor.revision());
+            self.width = width;
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
+            }
+        }
+        self.layout.as_ref().expect("composer layout was cached")
+    }
+
+    #[cfg(test)]
+    fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
 }
 
 fn composer_editor_width(area_width: u16) -> usize {
@@ -1317,6 +1361,7 @@ fn composer_editor_width(area_width: u16) -> usize {
         .max(1)
 }
 
+#[cfg(test)]
 fn composer_visual_row_count(projection: &PromptProjection<'_>, width: usize) -> usize {
     let width = width.max(1);
     projection
@@ -1329,6 +1374,7 @@ fn composer_visual_row_count(projection: &PromptProjection<'_>, width: usize) ->
         )))
 }
 
+#[cfg(test)]
 fn visual_row_count(line: &str, width: usize) -> usize {
     visual_row_metrics(line, width).0
 }
@@ -1370,8 +1416,9 @@ fn cursor_needs_continuation_row(projection: &PromptProjection<'_>, width: usize
     projection.cursor_column() == line_width && final_row_width == width
 }
 
-fn composer_layout(projection: &PromptProjection<'_>, width: usize) -> ComposerLayout {
+fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     let width = width.max(1);
+    let projection = editor.projection();
     let mut rows = Vec::new();
     let mut cursor_row = 0_usize;
     let mut cursor_column = 0_usize;
@@ -1381,7 +1428,7 @@ fn composer_layout(projection: &PromptProjection<'_>, width: usize) -> ComposerL
         if logical_row != projection.cursor_row() {
             continue;
         }
-        if cursor_needs_continuation_row(projection, width) {
+        if cursor_needs_continuation_row(&projection, width) {
             rows.push(ComposerVisualRow {
                 logical_row,
                 column_start: projection.cursor_column(),
@@ -1398,6 +1445,8 @@ fn composer_layout(projection: &PromptProjection<'_>, width: usize) -> ComposerL
             .saturating_sub(rows[cursor_row].column_start);
     }
     ComposerLayout {
+        revision: editor.revision(),
+        is_empty: editor.text().is_empty(),
         rows,
         cursor_row,
         cursor_column,
@@ -2271,6 +2320,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -2278,6 +2328,7 @@ mod tests {
                     state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     editor,
                     &connection(),
                     notice,
@@ -2303,6 +2354,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -2310,6 +2362,7 @@ mod tests {
                     state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -2979,7 +3032,7 @@ mod tests {
             let mut editor = PromptEditor::default();
             editor.restore_prompt(prompt);
             let projection = editor.projection();
-            let layout = composer_layout(&projection, width);
+            let layout = composer_layout(&editor, width);
             assert_eq!(
                 layout
                     .rows
@@ -2996,6 +3049,27 @@ mod tests {
             assert!(layout.cursor_column < width);
             assert_eq!(editor.text(), prompt);
         }
+    }
+
+    #[test]
+    fn composer_layout_cache_reuses_large_unfolded_drafts_until_inputs_change() {
+        let mut editor = PromptEditor::default();
+        editor.replace_range(0..0, &"x".repeat(70_000));
+        let mut cache = ComposerLayoutCache::default();
+
+        assert!(cache.layout(&editor, 40).rows.len() > 1_000);
+        assert_eq!(cache.rebuilds(), 1);
+        assert!(cache.layout(&editor, 40).rows.len() > 1_000);
+        assert_eq!(cache.rebuilds(), 1);
+
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Left,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        cache.layout(&editor, 40);
+        assert_eq!(cache.rebuilds(), 2);
+        cache.layout(&editor, 39);
+        assert_eq!(cache.rebuilds(), 3);
     }
 
     #[test]
@@ -3207,6 +3281,7 @@ mod tests {
         let mut browse_terminal = Terminal::new(backend).unwrap();
         let mut browse_viewport = TranscriptViewport::default();
         let mut browse_cache = TranscriptRowCache::default();
+        let mut browse_composer_cache = ComposerLayoutCache::default();
         browse_terminal
             .draw(|frame| {
                 render_interactive(
@@ -3214,6 +3289,7 @@ mod tests {
                     &state,
                     &mut browse_viewport,
                     &mut browse_cache,
+                    &mut browse_composer_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -3251,6 +3327,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -3258,6 +3335,7 @@ mod tests {
                     &state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -3668,6 +3746,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             let mut viewport = TranscriptViewport::default();
             let mut cache = TranscriptRowCache::default();
+            let mut composer_layout_cache = ComposerLayoutCache::default();
             terminal
                 .draw(|frame| {
                     render_interactive(
@@ -3675,6 +3754,7 @@ mod tests {
                         state,
                         &mut viewport,
                         &mut cache,
+                        &mut composer_layout_cache,
                         &PromptEditor::default(),
                         &connection(),
                         None,
