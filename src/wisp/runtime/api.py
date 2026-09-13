@@ -15,7 +15,7 @@ from wisp.runtime.commands import CommandDescriptor, CommandRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
-from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
     from wisp.mcp.runtime import McpRuntime

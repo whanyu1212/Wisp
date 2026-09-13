@@ -180,9 +180,9 @@ def _scan_directory(
         its budget. Identity changes yield an empty list.
     """
 
-    from wisp.tools.paths import is_protected_path
-    from wisp.tools.search import IGNORED_DIRS
-    from wisp.tools.secure_fs import open_directory, secure_tool_path
+    from wisp.tools.files.paths import is_protected_path
+    from wisp.tools.files.secure_fs import open_directory, secure_tool_path
+    from wisp.tools.search.tools import IGNORED_DIRS
 
     budget.check()
     with open_directory(secure_tool_path(str(current), context)) as directory:

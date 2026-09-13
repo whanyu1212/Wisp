@@ -77,13 +77,13 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.registry import ToolRegistry
 from wisp.tool_types import ToolSafety
-from wisp.tools import shell as shell_module
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.builtin import BashTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.shell import tool as shell_module
 
 
 class NeverToolExecutor:

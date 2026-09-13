@@ -11,7 +11,7 @@ from wisp.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 
 if TYPE_CHECKING:
     from wisp.config import WispConfig
-    from wisp.tools.file_ops import CreateOnlyWriteReceipt
+    from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 
 @dataclass(frozen=True)

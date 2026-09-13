@@ -31,7 +31,7 @@ from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 
 if TYPE_CHECKING:
     from wisp.mcp.runtime import McpRuntime
-from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tools.shell.supervisor import ProcessSupervisor
 
 type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
 

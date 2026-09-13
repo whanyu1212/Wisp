@@ -58,10 +58,6 @@ impl PromptProjection<'_> {
         self.cursor_column
     }
 
-    pub(crate) fn line_count(&self) -> usize {
-        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
-    }
-
     fn target(&self, row: usize, column: usize) -> Option<ProjectedCursor> {
         let mut line_start = 0_usize;
         let line = self.text.split('\n').nth(row)?;

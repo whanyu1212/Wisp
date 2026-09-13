@@ -411,7 +411,7 @@ pub(crate) fn help_rows(
             Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
             Line::raw(format!("{} toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores.", bindings.label(crate::keybindings::Action::ToggleTheme))),
             Line::raw("Ctrl+G shows the resolved shortcuts for the focused workflow."),
-            Line::raw("WISP_TUI_MOUSE=1 enables mouse navigation (off by default)."),
+            Line::raw("Mouse navigation is on by default; WISP_TUI_MOUSE=0 disables it."),
             Line::raw("Wheel scrolls; click selects; Enter activates. Outside click closes a popup."),
             Line::raw("Approvals/trust remain keyboard-only. Drag selection and copy are not implemented."),
         ])

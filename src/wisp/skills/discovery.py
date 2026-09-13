@@ -20,7 +20,7 @@ from wisp.skills.models import (
     SkillSource,
 )
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import is_protected_path
+from wisp.tools.files.paths import is_protected_path
 
 MAX_FRONTMATTER_BYTES = 16 * 1024
 MAX_ROOT_ENTRIES = 256

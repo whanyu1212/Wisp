@@ -13,7 +13,7 @@ from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.skills.tool import SkillTool
 from wisp.tools.base import ToolExecutionMetadata, ToolPromptMetadata
 from wisp.tools.builtin import builtin_tools
-from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tools.shell.supervisor import ProcessSupervisor
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
 _PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)

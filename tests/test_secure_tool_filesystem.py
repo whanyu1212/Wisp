@@ -11,13 +11,13 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.tools import file_ops as file_ops_module
-from wisp.tools import search as search_module
-from wisp.tools import secure_fs as secure_fs_module
 from wisp.tools.context import ToolContext
 from wisp.tools.file_ops import EditTool, ReadTool, WriteTool
+from wisp.tools.files import operations as file_ops_module
+from wisp.tools.files import secure_fs as secure_fs_module
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.search import FindTool, GrepTool, LsTool
+from wisp.tools.search import tools as search_module
 
 
 def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -> ToolResult:

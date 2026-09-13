@@ -8,7 +8,7 @@ use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc;
 
 pub(crate) fn enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
+    value.is_none_or(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "on"
@@ -69,12 +69,17 @@ impl Rows {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EditorRow {
+    pub logical_row: usize,
+    pub column_start: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Editor {
     pub area: Rect,
     pub revision: u64,
-    pub first_line: usize,
-    pub column_starts: Vec<usize>,
+    pub rows: Vec<EditorRow>,
 }
 
 impl Editor {
@@ -82,11 +87,11 @@ impl Editor {
         if self.revision != editor.revision() || !contains(self.area, event) {
             return None;
         }
-        let row = usize::from(event.row - self.area.y);
-        let start = *self.column_starts.get(row)?;
+        let visual_row = usize::from(event.row - self.area.y);
+        let row = self.rows.get(visual_row)?;
         Some((
-            self.first_line + row,
-            start + usize::from(event.column - self.area.x),
+            row.logical_row,
+            row.column_start + usize::from(event.column - self.area.x),
         ))
     }
 
@@ -317,8 +322,10 @@ mod tests {
         let mapping = Editor {
             area: Rect::new(2, 3, 60, 1),
             revision: editor.revision(),
-            first_line: 0,
-            column_starts: vec![0],
+            rows: vec![EditorRow {
+                logical_row: 0,
+                column_start: 0,
+            }],
         };
 
         assert!(mapping.place_cursor(click(8, 3), &mut editor));
@@ -334,8 +341,10 @@ mod tests {
         let mapping = Editor {
             area: Rect::new(0, 0, 60, 1),
             revision: editor.revision(),
-            first_line: 0,
-            column_starts: vec![0],
+            rows: vec![EditorRow {
+                logical_row: 0,
+                column_start: 0,
+            }],
         };
         editor.restore_prompt(&"y".repeat(2_001));
         let before = editor.clone();

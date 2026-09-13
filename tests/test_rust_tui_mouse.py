@@ -19,9 +19,15 @@ import pytest
 
 
 @pytest.mark.process
-@pytest.mark.parametrize("mouse_enabled", [False, True], ids=["keyboard", "mouse"])
-def test_native_mouse_moves_only_the_opted_in_composer_cursor(
-    tmp_path: Path, mouse_enabled: bool
+@pytest.mark.parametrize(
+    ("mouse_setting", "mouse_enabled"),
+    [("0", False), (None, True), ("1", True)],
+    ids=["disabled", "default", "enabled"],
+)
+def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
+    tmp_path: Path,
+    mouse_setting: str | None,
+    mouse_enabled: bool,
 ) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
@@ -30,6 +36,17 @@ def test_native_mouse_moves_only_the_opted_in_composer_cursor(
     session_dir = tmp_path / "sessions"
     child_pid, terminal_fd = pty.fork()
     if child_pid == 0:
+        environment = {
+            **os.environ,
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+            "WISP_TRUST": "1",
+            "WISP_RUST_TUI_BINARY": str(binary),
+        }
+        if mouse_setting is None:
+            environment.pop("WISP_TUI_MOUSE", None)
+        else:
+            environment["WISP_TUI_MOUSE"] = mouse_setting
         os.execve(
             sys.executable,
             [
@@ -42,14 +59,7 @@ def test_native_mouse_moves_only_the_opted_in_composer_cursor(
                 "--session-dir",
                 str(session_dir),
             ],
-            {
-                **os.environ,
-                "WISP_PROVIDER": "fake",
-                "WISP_MODEL": "",
-                "WISP_TRUST": "1",
-                "WISP_RUST_TUI_BINARY": str(binary),
-                "WISP_TUI_MOUSE": "1" if mouse_enabled else "0",
-            },
+            environment,
         )
     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
     initial_terminal = termios.tcgetattr(terminal_fd)

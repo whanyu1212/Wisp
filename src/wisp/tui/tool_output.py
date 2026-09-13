@@ -325,7 +325,7 @@ def normalize_tool_output_for_display(
 ) -> str:
     """Remove the shell's matching synthetic exit prefix from rendered output.
 
-    Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
+    Mirrors the fallback in ``wisp.tools.shell.process._format_process_output``, which
     emits ``Command exited with code N`` alone or followed by ``: `` and the
     command's merged output. The exit code must match the promoted scalar and the
     prefix must start at byte zero; near matches and mismatched codes are kept.

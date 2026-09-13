@@ -24,7 +24,7 @@ from wisp.skills.filesystem import (
 from wisp.skills.models import SkillEntry
 from wisp.tools.common import _truncate_text
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import is_protected_path
+from wisp.tools.files.paths import is_protected_path
 from wisp.tools.result import ToolError
 
 

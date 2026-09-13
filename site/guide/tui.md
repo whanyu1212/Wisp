@@ -44,7 +44,7 @@ default switch requires a new explicit issue.
 
 The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
 model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
-completion, themes, opt-in mouse navigation, configurable bindings, and compact paste presentation.
+completion, themes, mouse navigation, configurable bindings, and compact paste presentation.
 Rust uses external update instructions instead of Textual's install/restart flow, as described below.
 Hardening and binary distribution remain required before supported opt-in.
 
@@ -63,7 +63,9 @@ The conversation uses the terminal width with modest side margins. User turns ha
 background with padding above the speaker label and below the message; assistant prose and collapsed tool rows stay open on the transcript background.
 The transcript has space at the top and above the composer, collapsing on short terminals.
 The composer shares the transcript background, with a thin rounded frame, a `›` prompt, and a hint when
-empty. The frame collapses on short terminals to preserve editing space. The footer separates
+empty. Long logical lines soft-wrap onto additional visual rows without adding newlines to the submitted
+prompt. The composer grows to its bounded height, then keeps the cursor's wrapped row visible. The frame
+collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
 mode, model, context, and the selected session on the right, as space permits.
 Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
@@ -89,14 +91,14 @@ Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
-Before reply text arrives, a working row animates below the transcript. Once text starts streaming,
-the row disappears and a small spinner sits beside the active `wisp` label until the turn finishes,
-fails, or is cancelled. The label stays visible at the live tail during intervening tool calls.
+Before reply text arrives, a working row animates below the transcript. Once text starts
+streaming, the working row and spinner disappear. The `wisp` label stays visible at the live tail
+during intervening tool calls.
 Compaction keeps its separate activity row. Active tool markers pulse gently in brightness;
 completed, failed, denied, cancelled, and approval-waiting calls stay steady. In monochrome mode,
 active markers alternate normal and dim intensity. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard
-scrolling and opt-in wheel/trackpad scrolling update it.
+scrolling and wheel/trackpad scrolling update it.
 A pending tool approval opens a rounded dialog with four choices: `1` allow once, `2` allow
 that tool for this session, `3` YOLO for this project, or `4` deny. The `y`/`t`/`a`/`n`
 aliases also work. Project trust remains a compact card at the bottom of the pane
@@ -209,14 +211,16 @@ needed to retain a 4.5:1 contrast ratio against their rendered backgrounds. Sele
 video as well as a marker; status labels, approval action words, and diff `+`/`-` signs remain visible
 without hue. The theme choice can still be changed and remembered while monochrome is active.
 
-Rust mouse navigation is **off by default**. Enable it for a launch with:
+Rust mouse navigation is **on by default**, so wheel and trackpad scrolling can reach earlier
+turns even though the live view starts at the current prompt. Disable it for a launch with:
 
 ```bash
-WISP_TUI_MOUSE=1 wisp tui --renderer rust
+WISP_TUI_MOUSE=0 wisp tui --renderer rust
 ```
 
-`1`, `true`, and `on` enable capture (case-insensitive); unset, `0`, and other values leave it off.
-This is Rust-local presentation state, not a backend setting or persisted preference.
+Unset enables capture. `1`, `true`, and `on` also enable it (case-insensitive); `0`, `false`, `off`,
+an empty value, and unknown values disable it. This is Rust-local presentation state, not a backend
+setting or persisted preference.
 
 - Wheel/trackpad reports over the conversation scroll three lines without moving composer focus.
   Reading earlier content remains anchored while output streams; paging uses the existing bounded
@@ -238,8 +242,9 @@ This is Rust-local presentation state, not a backend setting or persisted prefer
 Approvals and project-trust decisions remain **keyboard-only**; mouse input is ignored during those
 decisions and when a failed cancellation response requires keyboard recovery. Drag selection,
 clipboard copy, horizontal wheel actions, and middle/right-click actions
-are not implemented. Capture can interfere with terminal-native text selection: leave it off for
-that workflow, or use your terminal's documented modifier override where supported. Only button and
+are not implemented. Capture can interfere with terminal-native text selection: set
+`WISP_TUI_MOUSE=0` for that workflow, or use your terminal's documented modifier override where
+supported. Only button and
 SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
 terminal after exit or failure.
 

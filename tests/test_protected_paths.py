@@ -235,8 +235,8 @@ def test_grep_record_parser_fails_closed_on_separator_in_filename() -> None:
     # Re-review finding 1: rg's \x1f field separator can appear inside a filename,
     # making the record ambiguous. Such a record must fail closed (be dropped),
     # never mis-parsed to a wrong, non-protected path that leaks the secret.
-    from wisp.tools.search import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search import _rg_grep_line_is_protected
+    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
+    from wisp.tools.search.tools import _rg_grep_line_is_protected
 
     context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
     leaky = f"dir{SEP}123{SEP}/id_rsa{SEP}1{SEP}SECRET=leak"
@@ -247,8 +247,8 @@ def test_grep_record_parser_fails_closed_on_separator_in_filename() -> None:
 def test_grep_record_parser_fails_closed_on_truncated_fragment() -> None:
     # Re-review finding 4: a record truncated by output buffering (missing the
     # text field) can't be parsed to a path and must fail closed.
-    from wisp.tools.search import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search import _rg_grep_line_is_protected
+    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
+    from wisp.tools.search.tools import _rg_grep_line_is_protected
 
     context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
     fragment = f"id_rsa{SEP}1"  # truncated: no text field
@@ -257,7 +257,7 @@ def test_grep_record_parser_fails_closed_on_truncated_fragment() -> None:
 
 
 def test_grep_record_parser_keeps_non_file_lines() -> None:
-    from wisp.tools.search import _rg_grep_line_is_protected
+    from wisp.tools.search.tools import _rg_grep_line_is_protected
 
     context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
 
@@ -291,8 +291,8 @@ def test_default_list_covers_common_env_secret_variants(tmp_path: Path, variant:
 def test_dropping_protected_groups_leaves_no_orphan_separator() -> None:
     # Third-review finding: dropping a protected context group must not leave a
     # dangling "--" separator (which would render as output with count == 0).
-    from wisp.tools.search import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search import _result_from_grep_lines
+    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
+    from wisp.tools.search.tools import _result_from_grep_lines
 
     context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
 
@@ -316,8 +316,8 @@ def test_dropping_protected_groups_leaves_no_orphan_separator() -> None:
 
 def test_separator_between_two_kept_groups_is_preserved() -> None:
     # The orphan-separator cleanup must not strip separators between real groups.
-    from wisp.tools.search import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search import _result_from_grep_lines
+    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
+    from wisp.tools.search.tools import _result_from_grep_lines
 
     context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
     result = _result_from_grep_lines(
