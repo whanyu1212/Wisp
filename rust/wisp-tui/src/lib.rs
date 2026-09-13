@@ -49,6 +49,8 @@ pub mod transcript_benchmark;
 mod transcript_view;
 mod transport;
 mod ui;
+#[cfg(test)]
+mod visual_tests;
 
 use bytes::Bytes;
 use clap::Parser;
@@ -7564,6 +7566,11 @@ mod tests {
             &mut live_ui.transcript_row_cache,
             58,
             10,
+        );
+        live_ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
         );
         live_ui.enter_or_cycle_browse();
         assert_eq!(live_ui.browse_selected, Some(card_id));

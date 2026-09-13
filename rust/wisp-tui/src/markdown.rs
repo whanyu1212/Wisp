@@ -45,6 +45,9 @@ pub enum InlineStyle {
     Link,
     QuoteMarker,
     ListMarker,
+    TableBorder,
+    ToolName,
+    ToolStatus,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

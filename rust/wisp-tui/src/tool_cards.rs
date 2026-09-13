@@ -436,13 +436,17 @@ impl ToolCardSnapshot {
         self.apply_result(result)
     }
 
-    pub fn action(&self) -> String {
+    pub fn action_label(&self) -> String {
         let verb = action_verb(&self.name, self.status);
-        let mut action = if known_tool(&self.name) {
+        if known_tool(&self.name) {
             verb.to_owned()
         } else {
             format!("{verb} {}", self.name)
-        };
+        }
+    }
+
+    pub fn action(&self) -> String {
+        let mut action = self.action_label();
         if !self.arguments_available {
             action.push_str("  (arguments unavailable)");
         } else if !self.action_arguments.is_empty() {
@@ -761,8 +765,8 @@ impl ProcessCardSnapshot {
         true
     }
 
-    pub fn action(&self) -> String {
-        let state = match self.display_state {
+    pub fn action_label(&self) -> &'static str {
+        match self.display_state {
             ProcessDisplayState::PollAwaitingApproval => "Process poll awaiting approval",
             ProcessDisplayState::CancelAwaitingApproval => "Process cancellation awaiting approval",
             ProcessDisplayState::Polling => "Polling process",
@@ -779,7 +783,11 @@ impl ProcessCardSnapshot {
             ProcessDisplayState::PollFailed => "Process poll failed",
             ProcessDisplayState::CancelFailed => "Process cancellation failed",
             ProcessDisplayState::Observed => "Observed process",
-        };
+        }
+    }
+
+    pub fn action(&self) -> String {
+        let state = self.action_label();
         format!(
             "{state}  {} · {} call{} · {} poll{}",
             clip_chars(

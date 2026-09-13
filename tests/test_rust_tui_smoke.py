@@ -828,10 +828,14 @@ for line in sys.stdin:
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"steer-via-enter\r")
                 phase = "steer sent"
+            elif phase == "steer sent" and "steer" in command_types:
+                # Queue previews can reuse cells from the submitted draft. Request
+                # a complete frame before checking text in differential PTY output.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                phase = "steer frame"
             elif (
-                phase == "steer sent"
-                and "steer" in command_types
-                and b"steer: steer-via-enter" in output[phase_output_offset:]
+                phase == "steer frame" and b"steer: steer-via-enter" in output[phase_output_offset:]
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"follow-up-via-alt-enter")
@@ -1055,8 +1059,9 @@ for line in sys.stdin:
         log.write(json.dumps(command, sort_keys=True) + "\\n")
     command_type = command["type"]
     if command_type == "get_session_stats":
-        # Keep the initial welcome visible long enough to expose premature input.
-        time.sleep(0.1)
+        # Exceed the test's old 250ms settling delay so metadata readiness must
+        # come from a rendered state, even on fast development machines.
+        time.sleep(0.35)
         report_stats(command, current_session)
     elif command_type == "get_connection_catalog":
         emit(RpcConnectionCatalogReported(
@@ -1213,6 +1218,7 @@ for line in sys.stdin:
     status: int | None = None
     phase = "startup"
     phase_started = time.monotonic()
+    phase_output_offset = 0
     context_redraw_offset: int | None = None
     deadline = time.monotonic() + 25
     try:
@@ -1225,6 +1231,10 @@ for line in sys.stdin:
                     if exc.errno != errno.EIO:
                         raise
             now = time.monotonic()
+            # Observe a fresh ready frame after each operation. Backend receipt
+            # of get_messages does not mean the frontend has finished hydration.
+            emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output[phase_output_offset:])
+            ready = b"Typeapromptor/forcommands." in b"".join(emitted.split())
             commands = []
             if command_log.exists():
                 for line in command_log.read_text().splitlines():
@@ -1257,6 +1267,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "name"
                 and "set_session_name" in command_types
@@ -1265,15 +1276,18 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/clone\r")
                 phase = "clone"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "clone"
                 and "clone_session" in command_types
                 and command_types.count("get_messages") >= 2
+                and ready
                 and now - phase_started > 0.25
             ):
                 os.write(terminal_fd, b"/tree\r")
                 phase = "first tree"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "first tree"
                 and command_types.count("get_session_tree") >= 1
@@ -1282,16 +1296,19 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "navigate"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "navigate"
                 and "navigate_session_tree" in command_types
                 and command_types.count("get_messages") >= 3
+                and ready
                 and now - phase_started > 0.25
             ):
                 os.write(terminal_fd, b"\x7f" * len("nav-restored-z"))
                 os.write(terminal_fd, b"/tree\r")
                 phase = "second tree"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "second tree"
                 and command_types.count("get_session_tree") >= 2
@@ -1300,20 +1317,24 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"f")
                 phase = "fork"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "fork"
                 and "fork_session" in command_types
                 and command_types.count("get_messages") >= 4
+                and ready
                 and now - phase_started > 0.25
             ):
                 os.write(terminal_fd, b"\x7f" * len("fork-restored-z"))
                 os.write(terminal_fd, b"/unrevert\r")
                 phase = "unrevert"
                 phase_started = now
+                phase_output_offset = len(output)
             elif (
                 phase == "unrevert"
                 and "unrevert_session_tree" in command_types
                 and command_types.count("get_messages") >= 5
+                and ready
                 and now - phase_started > 0.25
             ):
                 os.write(terminal_fd, b"\x03")
@@ -1323,7 +1344,9 @@ for line in sys.stdin:
                 status = waited_status
                 break
         if status is None:
-            pytest.fail(f"Rust TUI session workflow test timed out; output={bytes(output)!r}")
+            pytest.fail(
+                f"Rust TUI session workflow timed out in {phase!r}; output={bytes(output)!r}"
+            )
     finally:
         if status is None:
             try:
@@ -1382,13 +1405,14 @@ def test_rust_tui_command_discovery_and_modes_over_pty(tmp_path: Path) -> None:
         + """
 import json
 import sys
+import time
 from pathlib import Path
 from wisp.events import (
     RpcCommandDescriptor, RpcCommandFinished, RpcCommandsReported,
     RpcMessagesReported, RpcStateReported, RpcStateSnapshot,
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
     CompactionStarted, CompactionCompleted, ContextEstimated, SkillInvoked,
-    MessageStarted, MessageDelta,
+    MessageStarted, MessageDelta, ErrorEvent,
     RpcMcpStatusReported, RpcMcpStatusSnapshot, RpcMcpServerSnapshot,
 )
 from wisp.runtime.builtin_commands import builtin_command_descriptors
@@ -1398,6 +1422,7 @@ log_path = Path(sys.argv[1])
 mode = "plan"
 active = None
 auto_compaction = True
+refresh_after_cancel = False
 
 def emit(event):
     print(event.model_dump_json(), flush=True)
@@ -1420,6 +1445,9 @@ for line in sys.stdin:
         log.write(json.dumps(command) + "\\n")
     kind = command["type"]
     if kind == "get_session_stats":
+        if refresh_after_cancel:
+            # Expose the interval between cancellation and input readiness.
+            time.sleep(0.1)
         report_stats(command, "context-session", auto_compaction)
         continue
     elif kind == "get_skills":
@@ -1431,9 +1459,18 @@ for line in sys.stdin:
                 tool_names=("mcp__search__query",)),))))
         emit(MessageDelta(turn=1, delta="LIVEBG\\n"))
     elif kind == "get_messages":
+        if refresh_after_cancel:
+            time.sleep(0.1)
         emit(RpcMessagesReported(command_id=command["id"], session_id="context-session",
                                  session_path=Path("/context-session.jsonl"),
                                  active_leaf_id="leaf"))
+        finish(command)
+        if refresh_after_cancel:
+            # A diagnostic painted after report + finish is a frontend-consumed
+            # barrier, not merely proof that the backend received the request.
+            emit(ErrorEvent(message="SYNCREADY"))
+            refresh_after_cancel = False
+        continue
     elif kind == "get_connection_catalog":
         emit(RpcConnectionCatalogReported(command_id=command["id"],
                                          catalog=RpcConnectionCatalogSnapshot()))
@@ -1458,6 +1495,7 @@ for line in sys.stdin:
         emit(CompactionStarted(session_id="context-session", source_entry_count=4))
         continue
     elif kind == "cancel":
+        refresh_after_cancel = True
         finish(command)
         if active:
             emit(CompactionCompleted(session_id="context-session", outcome="cancelled",
@@ -1602,7 +1640,14 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 105, 0, 0))
                 phase = "cancel confirmed"
                 output.clear()
-            elif phase == "cancel confirmed" and b"cancelled" in output:
+            elif (
+                phase == "cancel confirmed"
+                and b"cancelled" in output
+                # The marker follows both history report and completion. A welcome
+                # alone can appear while post-cancellation hydration is in flight.
+                and b"SYNCREADY"
+                in b"".join(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output).split())
+            ):
                 os.write(terminal_fd, b"/skill:review keep running\r")
                 phase = "running"
                 output.clear()

@@ -59,7 +59,11 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The transcript is an unboxed document. The composer is a `>` prompt under a single rule. The footer
+The conversation uses the terminal width with modest side margins. User turns have a subtle
+background; assistant prose and collapsed tool rows stay open on the transcript background.
+The transcript has space at the top and above the composer, collapsing on short terminals.
+The composer is a filled writing surface with an accent rail and a `>` prompt. Its vertical padding
+collapses on short terminals. The footer
 holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, the selected session
 when one is persisted, and the keys for the current workflow. Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
 shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
@@ -67,12 +71,12 @@ and points at `/resume`, `/connect`, and `@` when there is room. It collapses to
 short or narrow terminals.
 
 Assistant replies render Markdown during streaming and when loading session history: headings,
-emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting, and tables with
+emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
+backgrounds, and tables with
 aligned columns, borders, and bold headers. Descriptions wrap at word boundaries inside their cells;
 very narrow layouts stack cells within each row. Ordinary prose also wraps at word boundaries.
 Very large unfinished blocks temporarily display as plain text and are formatted when the reply
-completes. User prompts
-and tool output retain their literal text.
+completes. User prompts and tool output retain their literal text.
 
 Replies that omit a table header are also supported: a paragraph beginning with at least two
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
@@ -82,8 +86,12 @@ Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
-pane until you scroll away, and a clipped assistant reply keeps its `wisp` label visible. The footer
-animates a spinner while Wisp is working or compacting, including when no output is arriving.
+pane until you scroll away. The live view contains only that prompt and the replies and tools that
+follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
+A spinner below the visible transcript animates while Wisp is working or compacting, including
+when no output is arriving. The footer keeps a static status label. A scrollbar on the right shows
+the approximate position in retained history without laying out every offscreen row. Keyboard
+scrolling and opt-in wheel/trackpad scrolling update it.
 A pending tool approval or project-trust request parks as a compact card
 at the bottom of that pane (`y`/`t`/`a`/`n` or trust `y`/`n`); the composer stays a short waiting
 strip instead of a five-row args panel.
