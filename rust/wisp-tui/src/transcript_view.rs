@@ -529,6 +529,9 @@ impl MarkdownSnapshot {
 #[derive(Debug, Default)]
 struct MarkdownCacheEntry {
     state: IncrementalMarkdownState,
+    parsed_document: MarkdownDocument,
+    stable_blocks: usize,
+    layout_width: Option<usize>,
     snapshot: Arc<MarkdownSnapshot>,
     entry_revision: Option<u64>,
     state_presentation_epoch: Option<u64>,
@@ -594,7 +597,7 @@ impl TranscriptRowCache {
         let key = self.row_key(entry, width, anchor.position);
         let markdown_snapshot = (entry.role == TranscriptRole::Assistant
             && !entry.content.is_empty())
-        .then(|| self.markdown_snapshot(entry));
+        .then(|| self.markdown_snapshot(entry, width));
         if let Some(cached) = self.rows.get(&key).cloned() {
             if cached_row_valid(
                 transcript,
@@ -665,7 +668,7 @@ impl TranscriptRowCache {
                 ),
                 next: Some(RowAnchor {
                     entry_id: entry.id,
-                    position: self.after_header_position(entry),
+                    position: self.after_header_position(entry, width),
                 }),
             },
             RowPosition::Thought if !entry.thinking().is_empty() => {
@@ -690,7 +693,7 @@ impl TranscriptRowCache {
                     ),
                     next: Some(RowAnchor {
                         entry_id: entry.id,
-                        position: self.position_for_offset(entry, content_start(entry)),
+                        position: self.position_for_offset(entry, content_start(entry), width),
                     }),
                 }
             }
@@ -734,29 +737,34 @@ impl TranscriptRowCache {
         })
     }
 
-    fn position_for_offset(&mut self, entry: &TranscriptEntry, offset: usize) -> RowPosition {
+    fn position_for_offset(
+        &mut self,
+        entry: &TranscriptEntry,
+        offset: usize,
+        width: usize,
+    ) -> RowPosition {
         if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
-            RowPosition::Markdown(self.markdown_snapshot(entry).position_at(offset))
+            RowPosition::Markdown(self.markdown_snapshot(entry, width).position_at(offset))
         } else {
             RowPosition::Content(offset)
         }
     }
 
-    fn after_header_position(&mut self, entry: &TranscriptEntry) -> RowPosition {
+    fn after_header_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
         if !entry.thinking().is_empty() {
             RowPosition::Thought
         } else if presentation_start(entry) > 0 {
             RowPosition::Omission
         } else {
-            self.position_for_offset(entry, content_start(entry))
+            self.position_for_offset(entry, content_start(entry), width)
         }
     }
 
-    fn after_thought_position(&mut self, entry: &TranscriptEntry) -> RowPosition {
+    fn after_thought_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
         if presentation_start(entry) > 0 {
             RowPosition::Omission
         } else {
-            self.position_for_offset(entry, content_start(entry))
+            self.position_for_offset(entry, content_start(entry), width)
         }
     }
 
@@ -785,7 +793,7 @@ impl TranscriptRowCache {
         } else {
             Some(RowAnchor {
                 entry_id: entry.id,
-                position: self.after_thought_position(entry),
+                position: self.after_thought_position(entry, width),
             })
             .filter(|_| {
                 !entry.content.is_empty()
@@ -801,7 +809,7 @@ impl TranscriptRowCache {
             } else {
                 Some(RowAnchor {
                     entry_id: entry.id,
-                    position: self.after_thought_position(entry),
+                    position: self.after_thought_position(entry, width),
                 })
             }
         });
@@ -832,7 +840,7 @@ impl TranscriptRowCache {
                 ),
                 next: Some(RowAnchor {
                     entry_id: entry.id,
-                    position: self.after_thought_position(entry),
+                    position: self.after_thought_position(entry, width),
                 })
                 .or_else(|| separator_after(transcript, entry)),
             };
@@ -874,7 +882,7 @@ impl TranscriptRowCache {
             }),
             _ => Some(RowAnchor {
                 entry_id: entry.id,
-                position: self.after_thought_position(entry),
+                position: self.after_thought_position(entry, width),
             }),
         };
         ProjectedRow {
@@ -1204,7 +1212,11 @@ impl TranscriptRowCache {
         ProjectedRow { row, next }
     }
 
-    fn markdown_snapshot(&mut self, entry: &TranscriptEntry) -> Arc<MarkdownSnapshot> {
+    fn markdown_snapshot(
+        &mut self,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> Arc<MarkdownSnapshot> {
         let start = presentation_start(entry);
         let key = MarkdownKey {
             entry_id: entry.id,
@@ -1212,7 +1224,8 @@ impl TranscriptRowCache {
             presentation_start: start,
         };
         if let Some(cached) = self.markdown.get(&key) {
-            if cached.entry_revision == Some(entry.revision()) {
+            if cached.entry_revision == Some(entry.revision()) && cached.layout_width == Some(width)
+            {
                 let snapshot = Arc::clone(&cached.snapshot);
                 self.markdown_order.retain(|candidate| candidate != &key);
                 self.markdown_order.push_back(key);
@@ -1236,16 +1249,25 @@ impl TranscriptRowCache {
                 .get_mut(&key)
                 .expect("Markdown cache entry must exist");
             let old_bytes = cached.retained_bytes;
-            let build = cached.state.build(
-                &entry.content[start..],
-                start,
-                entry.layout_epoch(),
-                entry.state == TranscriptEntryState::Complete,
-            );
-            let presentation_changed = cached
-                .state_presentation_epoch
-                .is_some_and(|epoch| epoch != build.presentation_epoch);
-            cached.state_presentation_epoch = Some(build.presentation_epoch);
+            let build = (cached.entry_revision != Some(entry.revision())).then(|| {
+                cached.state.build(
+                    &entry.content[start..],
+                    start,
+                    entry.layout_epoch(),
+                    entry.state == TranscriptEntryState::Complete,
+                )
+            });
+            let presentation_changed = build.as_ref().is_some_and(|build| {
+                cached
+                    .state_presentation_epoch
+                    .is_some_and(|epoch| epoch != build.presentation_epoch)
+            }) || (cached
+                .layout_width
+                .is_some_and(|previous| previous != width)
+                && cached.parsed_document.has_tables());
+            if let Some(build) = &build {
+                cached.state_presentation_epoch = Some(build.presentation_epoch);
+            }
             (old_bytes, build, presentation_changed)
         };
         if presentation_changed {
@@ -1260,14 +1282,33 @@ impl TranscriptRowCache {
                 .markdown
                 .get_mut(&key)
                 .expect("Markdown cache entry must exist");
-            let work = build.work;
+            let work = build
+                .as_ref()
+                .map_or(MarkdownWork::default(), |build| build.work);
+            let parsed = build
+                .as_ref()
+                .map_or(&cached.parsed_document, |build| &build.document);
+            let document = crate::markdown::layout_document(
+                parsed,
+                width,
+                (cached.layout_width == Some(width))
+                    .then_some((&cached.parsed_document, &cached.snapshot.document)),
+            );
+            if let Some(build) = build {
+                cached.parsed_document = build.document;
+                cached.stable_blocks = build.stable_blocks;
+            }
             cached.snapshot = Arc::new(MarkdownSnapshot::new(
-                build.document,
-                build.stable_blocks,
+                document,
+                cached.stable_blocks,
                 cached.presentation_identity,
             ));
+            cached.layout_width = Some(width);
             cached.entry_revision = Some(entry.revision());
-            cached.retained_bytes = cached.snapshot.retained_bytes();
+            cached.retained_bytes = cached
+                .snapshot
+                .retained_bytes()
+                .saturating_add(cached.parsed_document.retained_bytes());
             (Arc::clone(&cached.snapshot), cached.retained_bytes, work)
         };
         self.markdown_retained_bytes = self
@@ -1379,7 +1420,7 @@ impl TranscriptRowCache {
         start: usize,
         width: usize,
     ) -> ProjectedRow {
-        let snapshot = self.markdown_snapshot(entry);
+        let snapshot = self.markdown_snapshot(entry, width);
         let start = snapshot.normalize_offset(start);
         if start >= snapshot.output_len {
             return ProjectedRow {
@@ -1399,6 +1440,8 @@ impl TranscriptRowCache {
         let mut next_offset = None;
         let mut ended_with_break = false;
         let mut cursor = start;
+        let mut word_break = None::<(usize, usize, usize)>;
+        let mut previous_space = false;
         while cursor < snapshot.output_len {
             let block_index = snapshot
                 .block_starts
@@ -1448,8 +1491,35 @@ impl TranscriptRowCache {
                     }
                     let safe = sanitize_grapheme(grapheme, column);
                     let grapheme_width = UnicodeWidthStr::width(safe.as_str());
+                    let space = span.style.block != crate::markdown::BlockStyle::Code
+                        && span.style.inline != crate::markdown::InlineStyle::ListMarker
+                        && grapheme.chars().all(char::is_whitespace);
+                    if space && column > 0 {
+                        if previous_space {
+                            if let Some((offset, _, _)) = &mut word_break {
+                                *offset = absolute_offset + grapheme.len();
+                            }
+                        } else {
+                            word_break = Some((
+                                absolute_offset + grapheme.len(),
+                                spans.len(),
+                                spans
+                                    .last()
+                                    .map_or(0, |span: &TranscriptSpan| span.text.len()),
+                            ));
+                        }
+                    }
+                    previous_space = space;
                     if !spans.is_empty() && column.saturating_add(grapheme_width) > width {
-                        next_offset = Some(absolute_offset);
+                        if let Some((offset, count, last_len)) = word_break {
+                            spans.truncate(count);
+                            if let Some(last) = spans.last_mut() {
+                                last.text.truncate(last_len);
+                            }
+                            next_offset = Some(offset);
+                        } else {
+                            next_offset = Some(absolute_offset);
+                        }
                         break;
                     }
                     push_styled_span(
@@ -1465,7 +1535,7 @@ impl TranscriptRowCache {
                     column = column.saturating_add(grapheme_width);
                     cursor = absolute_offset + grapheme.len();
                     advanced = true;
-                    if column >= width {
+                    if column >= width && span.style.block == crate::markdown::BlockStyle::Code {
                         if let Some(after_break) = snapshot.line_break_end_at(cursor) {
                             cursor = after_break;
                             ended_with_break = true;
@@ -1590,7 +1660,7 @@ impl TranscriptRowCache {
         let presentation_start = presentation_start(entry);
         let content_start = content_start(entry);
         let width = width.max(1);
-        let target_position = self.position_for_offset(entry, target);
+        let target_position = self.position_for_offset(entry, target, width);
         let target_key = self.row_key(entry, width, target_position);
         if let Some(previous) = self.predecessors.get(&target_key).copied() {
             return Some(previous);
@@ -1606,7 +1676,7 @@ impl TranscriptRowCache {
             .unwrap_or(content_start);
         let mut anchor = RowAnchor {
             entry_id: entry.id,
-            position: self.position_for_offset(entry, candidate_start),
+            position: self.position_for_offset(entry, candidate_start, width),
         };
         let mut previous = anchor;
         loop {
@@ -1751,7 +1821,7 @@ impl TranscriptRowCache {
         }
         let (target, ends_with_break) =
             if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
-                let snapshot = self.markdown_snapshot(entry);
+                let snapshot = self.markdown_snapshot(entry, width);
                 (snapshot.output_len, snapshot.ends_with_line_break())
             } else {
                 let content = entry.display_content();
@@ -1760,7 +1830,7 @@ impl TranscriptRowCache {
         if target == 0 || ends_with_break {
             return RowAnchor {
                 entry_id: entry.id,
-                position: self.position_for_offset(entry, target),
+                position: self.position_for_offset(entry, target, width),
             };
         }
         self.content_anchor_before(transcript, entry, target, width)
@@ -1769,7 +1839,7 @@ impl TranscriptRowCache {
                 position: if presentation_start(entry) > 0 {
                     RowPosition::Omission
                 } else {
-                    self.position_for_offset(entry, content_start(entry))
+                    self.position_for_offset(entry, content_start(entry), width)
                 },
             })
     }
@@ -2515,9 +2585,14 @@ fn normalize_anchor(
     let entry = transcript.entry(anchor.entry_id)?;
     match anchor.position {
         RowPosition::Markdown(position) if entry.role == TranscriptRole::Assistant => {
-            let snapshot = cache.markdown_snapshot(entry);
+            let snapshot = cache.markdown_snapshot(entry, width);
             let output = match normalization {
-                AnchorNormalization::Geometry => snapshot.normalize_offset(position.output_offset),
+                AnchorNormalization::Geometry if !snapshot.document.has_tables() => {
+                    snapshot.normalize_offset(position.output_offset)
+                }
+                AnchorNormalization::Geometry => {
+                    snapshot.output_for_source(position.source_offset, position.output_offset)
+                }
                 AnchorNormalization::Content => {
                     snapshot.output_for_source(position.source_offset, position.output_offset)
                 }
@@ -3991,7 +4066,7 @@ mod tests {
         transcript.append_message_delta(1, "before\n\n```rust\nfn main() {}\n");
         let mut cache = TranscriptRowCache::default();
         let entry = transcript.entry(assistant).unwrap();
-        let snapshot = cache.markdown_snapshot(entry);
+        let snapshot = cache.markdown_snapshot(entry, 80);
         let code_start = snapshot.document.plain_text().find("fn main").unwrap();
         let anchor = RowAnchor {
             entry_id: assistant,
@@ -4032,7 +4107,7 @@ mod tests {
         transcript.append_message_delta(1, "before\n\n```rust\nfn main() {}\n```");
         let mut cache = TranscriptRowCache::default();
         let entry = transcript.entry(assistant).unwrap();
-        let snapshot = cache.markdown_snapshot(entry);
+        let snapshot = cache.markdown_snapshot(entry, 80);
         let code_start = snapshot.document.plain_text().find("fn main").unwrap();
         let anchor = RowAnchor {
             entry_id: assistant,
@@ -4195,7 +4270,7 @@ mod tests {
                 .unwrap()
                 .row
                 .plain_text(),
-            "A │ B"
+            "┌───┬───┐"
         );
         transcript.append_message_delta(1, "| longer name | z |\n\nAfter");
         let warm = cache.row_at(&transcript, anchor, 80).unwrap().row;
@@ -4204,7 +4279,7 @@ mod tests {
             .unwrap()
             .row;
         assert_eq!(warm, fresh);
-        assert_eq!(warm.plain_text(), "A           │ B");
+        assert_eq!(warm.plain_text(), "┌─────────────┬───┐");
     }
 
     #[test]
@@ -4213,7 +4288,8 @@ mod tests {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());
         transcript.complete_message(1, source.into());
-        let expected = "Name   │ Count───────┼──────界界界 │ 12345";
+        let mut expected = "NameCount界界界12345".chars().collect::<Vec<_>>();
+        expected.sort_unstable();
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
         for width in [80, 8, 12, 80] {
@@ -4231,7 +4307,20 @@ mod tests {
                     .iter()
                     .all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= width)
             );
-            assert_eq!(content.concat(), expected);
+            let mut letters = content
+                .concat()
+                .chars()
+                .filter(|ch| ch.is_alphanumeric())
+                .collect::<Vec<_>>();
+            letters.sort_unstable();
+            assert_eq!(letters, expected);
+            let mut fresh_viewport = TranscriptViewport::default();
+            let mut fresh_cache = TranscriptRowCache::default();
+            fresh_viewport.set_geometry(&transcript, &mut fresh_cache, width, 40);
+            assert_eq!(
+                rows,
+                fresh_viewport.visible_rows(&transcript, &mut fresh_cache)
+            );
             if width != 80 {
                 assert_eq!(cache.work().markdown_source_bytes_parsed, 0);
             }
@@ -4248,8 +4337,8 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         for (chunk, expected) in [
             ("| read | text |\n", "| read | text |"),
-            ("| write | file |\n", "read  │ text"),
-            ("| longer name | more |\n\nAfter", "read        │ text"),
+            ("| write | file |\n", "│ read  │ text │"),
+            ("| longer name | more |\n\nAfter", "│ read        │ text │"),
         ] {
             transcript.append_message_delta(1, chunk);
             viewport.set_geometry(&transcript, &mut cache, 40, 20);
@@ -4277,8 +4366,10 @@ mod tests {
             .map(TranscriptRow::plain_text)
             .collect::<String>();
         assert_eq!(
-            text,
-            "read        │ textwrite       │ filelonger name │ moreAfter"
+            text.chars()
+                .filter(|ch| ch.is_alphanumeric())
+                .collect::<String>(),
+            "readtextwritefilelongernamemoreAfter"
         );
         assert_eq!(cache.work().markdown_source_bytes_parsed, 0);
     }
@@ -4321,6 +4412,66 @@ mod tests {
     }
 
     #[test]
+    fn prose_wraps_at_words_without_splitting_commands() {
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.complete_message(
+            1,
+            "Runs tests and long-running commands. Retrieves their output.".into(),
+        );
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 30, 20);
+        let lines = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| {
+                row.role == TranscriptRole::Assistant && row.kind == TranscriptRowKind::Content
+            })
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "Runs tests and long-running",
+                "commands. Retrieves their",
+                "output."
+            ]
+        );
+    }
+
+    #[test]
+    fn resizing_a_wrapped_code_cell_keeps_the_visible_source_row() {
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.complete_message(1, "| path | `alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu` |\n| other | value |".into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 30, 30);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let anchor = rows
+            .iter()
+            .find(|row| row.plain_text().contains("theta"))
+            .unwrap()
+            .anchor;
+        let restored = normalize_anchor(
+            &transcript,
+            &mut cache,
+            anchor,
+            38,
+            AnchorNormalization::Geometry,
+        )
+        .unwrap();
+        let text = cache
+            .row_at(&transcript, restored, 38)
+            .unwrap()
+            .row
+            .plain_text();
+        assert!(text.contains("theta"), "{text}");
+        assert!(!text.contains("alpha"), "{text}");
+    }
+
+    #[test]
     fn markdown_parser_cache_enforces_entry_and_byte_caps() {
         let mut transcript = Transcript::default();
         let mut assistant_ids = Vec::new();
@@ -4335,7 +4486,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         for assistant in assistant_ids {
             let entry = transcript.entry(assistant).unwrap();
-            let _ = cache.markdown_snapshot(entry);
+            let _ = cache.markdown_snapshot(entry, 80);
         }
 
         assert!(cache.markdown.len() <= MARKDOWN_CACHE_MAX_ENTRIES);

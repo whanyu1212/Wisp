@@ -45,6 +45,7 @@ const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
 const COMPOSER_PREFIX: &str = "> ";
 const TRANSCRIPT_GUTTER: u16 = 1;
+const ACTIVITY_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -203,6 +204,7 @@ pub fn render(
         None,
         true,
         None,
+        0,
         Palette::default(),
         &Bindings::default(),
     );
@@ -220,6 +222,7 @@ pub fn render_interactive(
     browse_selected: Option<TranscriptEntryId>,
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
+    activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
 ) -> mouse::Conversation {
@@ -241,7 +244,16 @@ pub fn render_interactive(
             .constraints([Constraint::Min(5), Constraint::Length(1)])
             .split(area);
         render_composer(frame, chunks[0], state, editor, composer_focused, palette);
-        render_footer(frame, chunks[1], state, viewport, notice, palette, bindings);
+        render_footer(
+            frame,
+            chunks[1],
+            state,
+            viewport,
+            notice,
+            activity_frame,
+            palette,
+            bindings,
+        );
         return mouse::Conversation::default();
     }
 
@@ -275,7 +287,16 @@ pub fn render_interactive(
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
     let editor = render_composer(frame, chunks[2], state, editor, composer_focused, palette);
-    render_footer(frame, chunks[3], state, viewport, notice, palette, bindings);
+    render_footer(
+        frame,
+        chunks[3],
+        state,
+        viewport,
+        notice,
+        activity_frame,
+        palette,
+        bindings,
+    );
     mouse::Conversation {
         transcript: chunks[0],
         editor,
@@ -284,18 +305,24 @@ pub fn render_interactive(
     }
 }
 
-fn status_label(state: &UiState) -> &'static str {
+fn status_label(state: &UiState, activity_frame: u8) -> String {
     if state.configuration_active() {
-        "configuring"
+        "configuring".into()
     } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        "compacting"
+        format!(
+            "compacting {}",
+            ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
+        )
     } else {
         match state.view_status {
-            ViewStatus::Idle => "idle",
-            ViewStatus::Running => "working",
-            ViewStatus::WaitingForApproval => "approval",
-            ViewStatus::WaitingForTrust => "trust",
-            ViewStatus::Error => "error",
+            ViewStatus::Idle => "idle".into(),
+            ViewStatus::Running => format!(
+                "working {}",
+                ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
+            ),
+            ViewStatus::WaitingForApproval => "approval".into(),
+            ViewStatus::WaitingForTrust => "trust".into(),
+            ViewStatus::Error => "error".into(),
         }
     }
 }
@@ -334,8 +361,8 @@ fn session_label(state: &UiState) -> Option<String> {
     (!sanitized.is_empty()).then_some(sanitized)
 }
 
-fn footer_leading_parts(state: &UiState) -> Vec<String> {
-    let mut parts = vec![status_label(state).to_string()];
+fn footer_leading_parts(state: &UiState, activity_frame: u8) -> Vec<String> {
+    let mut parts = vec![status_label(state, activity_frame)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
         let follow_up = state.queued_follow_ups();
@@ -409,6 +436,39 @@ fn sticky_user_rows(
     rows
 }
 
+fn clipped_tail_assistant_header(
+    state: &UiState,
+    rows: &[TranscriptRow],
+    row_cache: &mut TranscriptRowCache,
+    width: usize,
+) -> Option<TranscriptRow> {
+    let assistant = state.transcript.entries().last()?;
+    if assistant.role != TranscriptRole::Assistant
+        || !rows.iter().any(|row| {
+            row.anchor.entry_id == assistant.id
+                && !matches!(
+                    row.kind,
+                    TranscriptRowKind::Header | TranscriptRowKind::Spacer
+                )
+        })
+        || rows
+            .iter()
+            .any(|row| row.anchor.entry_id == assistant.id && row.kind == TranscriptRowKind::Header)
+    {
+        return None;
+    }
+    row_cache
+        .row_at(
+            &state.transcript,
+            RowAnchor {
+                entry_id: assistant.id,
+                position: RowPosition::Header,
+            },
+            width,
+        )
+        .map(|cached| cached.row)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transcript(
     frame: &mut Frame<'_>,
@@ -431,16 +491,31 @@ fn render_transcript(
     let content_width = usize::from(conversation.width.saturating_sub(TRANSCRIPT_GUTTER)).max(1);
     let visible_lines = usize::from(conversation.height).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
-    let sticky = sticky_user_rows(state, viewport, row_cache, content_width);
+    let mut sticky = sticky_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
     if !sticky.is_empty() {
         let user_id = sticky[0].anchor.entry_id;
         rows.retain(|row| row.anchor.entry_id != user_id);
-        let budget = visible_lines.saturating_sub(sticky.len());
+    }
+    // Reserve a row for the active assistant's identity and one for its tail.
+    // A compact user projection may otherwise consume the whole viewport.
+    sticky.truncate(visible_lines.saturating_sub(2));
+    let mut budget = visible_lines.saturating_sub(sticky.len());
+    if rows.len() > budget {
+        rows.drain(..rows.len() - budget);
+    }
+    let assistant_header = (viewport.follows_tail() && budget >= 2)
+        .then(|| clipped_tail_assistant_header(state, &rows, row_cache, content_width))
+        .flatten();
+    if assistant_header.is_some() {
+        budget = budget.saturating_sub(1);
         if rows.len() > budget {
             rows.drain(..rows.len() - budget);
         }
+    }
+    if !sticky.is_empty() || assistant_header.is_some() {
         let mut combined = sticky;
+        combined.extend(assistant_header);
         combined.append(&mut rows);
         rows = combined;
     }
@@ -1258,23 +1333,34 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
     join_hints(parts, width)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     viewport: &TranscriptViewport,
     notice: Option<&str>,
+    activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
 ) {
     let width = usize::from(area.width);
     let notice = notice.or(state.context.compaction_notice.as_deref());
     let status_budget = if notice.is_some() {
-        if width >= 80 { (width / 2).max(24) } else { 0 }
+        if width >= 80 {
+            (width / 2).max(24)
+        } else if !state.configuration_active()
+            && (state.view_status == ViewStatus::Running
+                || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
+        {
+            status_label(state, activity_frame).width()
+        } else {
+            0
+        }
     } else {
-        (width / 2).max(18)
+        (width / 2).max(19)
     };
-    let leading = footer_leading_parts(state);
+    let leading = footer_leading_parts(state, activity_frame);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
     let ctx_width = status_budget
         .saturating_sub(leading_width)
@@ -1639,8 +1725,41 @@ mod tests {
                     None,
                     true,
                     None,
+                    0,
                     Palette::default(),
                     bindings,
+                );
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    fn render_to_string_with_activity(
+        width: u16,
+        height: u16,
+        state: &UiState,
+        activity_frame: u8,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    activity_frame,
+                    Palette::default(),
+                    &Bindings::default(),
                 );
             })
             .unwrap();
@@ -1831,6 +1950,34 @@ mod tests {
     }
 
     #[test]
+    fn follow_tail_keeps_both_speaker_labels_with_a_long_assistant_reply() {
+        for (width, height) in [(80, 18), (36, 12)] {
+            let mut state = UiState::new("fake".into(), None, None);
+            state.transcript.append_prompt("LATEST-USER".into());
+            state.transcript.complete_message(
+                1,
+                (0..80)
+                    .map(|index| format!("assistant-line-{index}"))
+                    .chain(std::iter::once("FINAL-ASSISTANT-LINE".into()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+
+            let rendered = render_to_string(width, height, &state, &PromptEditor::default());
+            let user = rendered.find("you").expect("user label");
+            let prompt = rendered.find("LATEST-USER").expect("latest prompt");
+            let assistant = rendered.find("wisp").expect("assistant label");
+            let tail = rendered
+                .find("FINAL-ASSISTANT-LINE")
+                .expect("assistant tail");
+            assert!(
+                user < prompt && prompt < assistant && assistant < tail,
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn follow_tail_keeps_the_latest_user_turn_at_the_top_when_it_is_still_in_view() {
         let mut state = UiState::new("fake".into(), None, None);
         state.transcript.append_prompt("older-prompt".into());
@@ -1914,6 +2061,51 @@ mod tests {
         assert!(compacting.contains("Esc/Ctrl-C cancels"));
         assert!(compacting.contains("compacting"));
         assert!(!compacting.contains("Enter send"));
+    }
+
+    #[test]
+    fn activity_indicator_changes_only_for_active_work() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        let first = render_to_string_with_activity(80, 18, &state, 0);
+        let second = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(first.contains("working ⠋"), "{first}");
+        assert!(second.contains("working ⠙"), "{second}");
+
+        state.interaction_status = InteractionStatus::Compacting;
+        let compacting = render_to_string_with_activity(80, 18, &state, 2);
+        assert!(compacting.contains("compacting ⠹"), "{compacting}");
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        let idle_first = render_to_string_with_activity(80, 18, &state, 0);
+        let idle_second = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(idle_first.contains("idle"), "{idle_first}");
+        assert_eq!(idle_first, idle_second);
+    }
+
+    #[test]
+    fn narrow_footer_keeps_activity_visible_beside_notices() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        for width in [30, 60] {
+            for (interaction, label) in [
+                (InteractionStatus::Running, "working ⠋"),
+                (InteractionStatus::Compacting, "compacting ⠋"),
+            ] {
+                state.interaction_status = interaction;
+                let rendered = render_to_string_with_notice(
+                    width,
+                    18,
+                    &state,
+                    &PromptEditor::default(),
+                    Some("Prompt history is empty"),
+                );
+                assert!(rendered.contains(label), "{rendered}");
+                assert!(rendered.contains("Prompt history"), "{rendered}");
+            }
+        }
     }
 
     #[test]
@@ -2429,6 +2621,7 @@ mod tests {
                     Some(card_id),
                     true,
                     None,
+                    0,
                     Palette::default(),
                     &Bindings::default(),
                 );
@@ -2472,6 +2665,7 @@ mod tests {
                     Some(card_id),
                     false,
                     None,
+                    0,
                     Palette::default(),
                     &Bindings::default(),
                 );
@@ -2509,6 +2703,33 @@ mod tests {
         assert!(rendered.contains("let x = 1;"));
         assert!(!rendered.contains("**bold**"));
         assert!(!rendered.contains("```rust"));
+    }
+
+    #[test]
+    fn reported_tool_table_keeps_borders_and_assistant_identity_on_screen() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state
+            .transcript
+            .append_exchange("Are these sufficient built-in tools?".into());
+        state.transcript.complete_message(1, concat!(
+            "| read | Reads text files, optionally selecting a range of lines. |\n",
+            "| write | Creates or overwrites text files, creating parent directories when needed. |\n",
+            "| edit | Makes precise, exact-text replacements without rewriting the whole file. |\n",
+            "| ls | Lists files and folders in a directory. |\n",
+            "| find | Finds files using patterns, such as *.py. |\n",
+            "| grep | Searches file contents for references to a function. |\n",
+            "| bash | Runs terminal commands: tests, builds, Git, scripts, etc. It can also start long-running commands, retrieve their output, and cancel them. |\n",
+            "| skill | Loads specialized instructions and supporting resources, such as Wisp development or GitHub workflows. |\n",
+            "Additional tools come through MCP integrations."
+        ).into());
+        for (width, height) in [(100, 40), (60, 20)] {
+            let rendered = render_to_string(width, height, &state, &PromptEditor::default());
+            assert!(rendered.contains("you"), "{rendered}");
+            assert!(rendered.contains("wisp"), "{rendered}");
+            assert!(rendered.contains("└"), "{rendered}");
+            assert!(rendered.contains("│ skill │"), "{rendered}");
+            assert!(rendered.contains("MCP integrations."), "{rendered}");
+        }
     }
 
     #[test]

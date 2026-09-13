@@ -68,8 +68,10 @@ short or narrow terminals.
 
 Assistant replies render Markdown during streaming and when loading session history: headings,
 emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting, and tables with
-aligned columns and bold headers. Wide table rows wrap with the transcript. Very large unfinished
-blocks temporarily display as plain text and are formatted when the reply completes. User prompts
+aligned columns, borders, and bold headers. Descriptions wrap at word boundaries inside their cells;
+very narrow layouts stack cells within each row. Ordinary prose also wraps at word boundaries.
+Very large unfinished blocks temporarily display as plain text and are formatted when the reply
+completes. User prompts
 and tool output retain their literal text.
 
 Replies that omit a table header are also supported: a paragraph beginning with at least two
@@ -80,7 +82,9 @@ Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
-pane until you scroll away. A pending tool approval or project-trust request parks as a compact card
+pane until you scroll away, and a clipped assistant reply keeps its `wisp` label visible. The footer
+animates a spinner while Wisp is working or compacting, including when no output is arriving.
+A pending tool approval or project-trust request parks as a compact card
 at the bottom of that pane (`y`/`t`/`a`/`n` or trust `y`/`n`); the composer stays a short waiting
 strip instead of a five-row args panel.
 

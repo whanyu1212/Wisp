@@ -14,6 +14,9 @@ use crate::syntax::{
     SyntaxHighlight, highlight_fence,
 };
 
+mod table_layout;
+pub(crate) use table_layout::layout_document;
+
 const REFERENCE_DEFINITION_MARKER: &str = "]:";
 const MAX_MUTABLE_SOURCE_BYTES: usize = 8 * 1024;
 const MAX_PRESENTATION_OUTPUT_BYTES: usize = 256 * 1024;
@@ -73,12 +76,23 @@ pub struct MarkdownBlock {
     pub source: Range<usize>,
     pub spans: Vec<TranscriptSpan>,
     has_table: bool,
+    tables: Vec<MarkdownTable>,
     syntax_source_bytes: usize,
     syntax_fragments: usize,
     syntax_attempted_source_bytes: usize,
     syntax_attempted_fragments: usize,
     truncated: bool,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownTable {
+    spans: Range<usize>,
+    rows: Vec<Vec<Range<usize>>>,
+    alignments: Vec<Alignment>,
+    continuation_prefix: String,
+}
+
+impl Eq for MarkdownTable {}
 
 impl MarkdownBlock {
     #[cfg(test)]
@@ -102,6 +116,24 @@ impl MarkdownBlock {
                     .len()
                     .saturating_mul(std::mem::size_of::<TranscriptSpan>()),
             )
+            .saturating_add(
+                self.tables
+                    .iter()
+                    .map(|table| {
+                        std::mem::size_of::<MarkdownTable>()
+                            + table.continuation_prefix.len()
+                            + table.alignments.len() * std::mem::size_of::<Alignment>()
+                            + table
+                                .rows
+                                .iter()
+                                .map(|row| {
+                                    std::mem::size_of::<Vec<Range<usize>>>()
+                                        + row.len() * std::mem::size_of::<Range<usize>>()
+                                })
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -111,6 +143,9 @@ pub struct MarkdownDocument {
 }
 
 impl MarkdownDocument {
+    pub(crate) fn has_tables(&self) -> bool {
+        self.blocks.iter().any(|block| block.has_table)
+    }
     #[cfg(test)]
     pub fn plain_text(&self) -> String {
         self.blocks
@@ -378,6 +413,7 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
     MarkdownBlock {
         source: base_offset..(base_offset + source.len()),
         has_table: false,
+        tables: Vec::new(),
         spans: if source.is_empty() {
             Vec::new()
         } else {
@@ -403,6 +439,7 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
     Arc::new(MarkdownBlock {
         source: source_offset..source_offset,
         has_table: false,
+        tables: Vec::new(),
         spans: vec![TranscriptSpan {
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
@@ -902,6 +939,8 @@ struct TableState {
     cell_width: usize,
     trailing_padding: usize,
     header: bool,
+    cell_start: usize,
+    layout: MarkdownTable,
 }
 
 impl TableState {
@@ -934,6 +973,13 @@ impl TableState {
             cell_width: 0,
             trailing_padding: 0,
             header: false,
+            cell_start: 0,
+            layout: MarkdownTable {
+                spans: 0..0,
+                rows: Vec::new(),
+                alignments: alignments.to_vec(),
+                continuation_prefix: String::new(),
+            },
         }
     }
 }
@@ -956,6 +1002,7 @@ struct BlockRenderer {
     paragraph_inline: bool,
     truncated: bool,
     table: Option<TableState>,
+    tables: Vec<MarkdownTable>,
 }
 
 fn collect_code_text(events: &[(Event<'_>, Range<usize>)]) -> (String, Vec<CodeTextSegment>) {
@@ -1048,7 +1095,7 @@ impl BlockRenderer {
         base: usize,
         source: &str,
         syntax_budget: &mut SyntaxBuildBudget,
-    ) -> Vec<TranscriptSpan> {
+    ) -> Self {
         let mut index = 0_usize;
         while index < events.len() {
             if self.truncated {
@@ -1109,7 +1156,23 @@ impl BlockRenderer {
             self.render_event(event, range, base);
             index += 1;
         }
-        self.spans
+        if let Some(mut table) = self.table.take() {
+            // Keep the retained complete rows structured when a later cell exhausts
+            // the presentation budget; leave the truncation marker outside the grid.
+            table.layout.rows.retain(|row| {
+                row.len() == table.alignments.len()
+                    && row.iter().all(|cell| cell.end <= self.spans.len())
+            });
+            if !table.layout.rows.is_empty() {
+                table.layout.spans.end = self
+                    .spans
+                    .iter()
+                    .position(|span| span.text == PRESENTATION_TRUNCATED)
+                    .unwrap_or(self.spans.len());
+                self.tables.push(table.layout);
+            }
+        }
+        self
     }
 
     fn render_event(&mut self, event: &Event<'_>, range: &Range<usize>, base: usize) {
@@ -1207,6 +1270,26 @@ impl BlockRenderer {
                     self.emit_break(source_offset);
                 }
                 if let Some(table) = &mut self.table {
+                    if table.layout.rows.is_empty() {
+                        table.layout.spans.start = self.spans.len();
+                        table.layout.continuation_prefix = self
+                            .spans
+                            .iter()
+                            .rev()
+                            .take_while(|span| !span.text.contains('\n'))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .map(|span| {
+                                if span.style.inline == InlineStyle::QuoteMarker {
+                                    span.text.clone()
+                                } else {
+                                    " ".repeat(span.text.width())
+                                }
+                            })
+                            .collect();
+                    }
+                    table.layout.rows.push(Vec::new());
                     table.column = 0;
                     table.header = matches!(tag, Tag::TableHead);
                 }
@@ -1224,6 +1307,9 @@ impl BlockRenderer {
                     table.trailing_padding = padding - leading;
                     // Emit padding separately so source text keeps its original affinity.
                     self.emit(&" ".repeat(leading), source_offset, self.style);
+                    if let Some(table) = &mut self.table {
+                        table.cell_start = self.spans.len();
+                    }
                 }
             }
             Tag::Link { .. } | Tag::Image { .. } => self.style.inline = InlineStyle::Link,
@@ -1281,6 +1367,9 @@ impl BlockRenderer {
         };
         match tag {
             TagEnd::TableCell => {
+                if let Some(row) = table.layout.rows.last_mut() {
+                    row.push(table.cell_start..self.spans.len());
+                }
                 let trailing = table.trailing_padding;
                 table.column = table.column.saturating_add(1);
                 let last = table.column >= table.widths.len();
@@ -1299,7 +1388,11 @@ impl BlockRenderer {
                     self.emit(&"─".repeat(*width), source_offset, marker_style);
                 }
             }
-            TagEnd::Table => self.table = None,
+            TagEnd::Table => {
+                let mut table = self.table.take().expect("table is active");
+                table.layout.spans.end = self.spans.len();
+                self.tables.push(table.layout);
+            }
             _ => {}
         }
     }
@@ -1436,13 +1529,14 @@ fn render_block(
     let usage_before = syntax_budget.usage;
     let attempted_source_before = syntax_budget.attempted_source_bytes;
     let attempted_fragments_before = syntax_budget.attempted_fragments;
-    let spans = BlockRenderer::default().render(events, base_offset, source, syntax_budget);
+    let rendered = BlockRenderer::default().render(events, base_offset, source, syntax_budget);
     MarkdownBlock {
         source: source_range,
         has_table: events
             .iter()
             .any(|(event, _)| matches!(event, Event::Start(Tag::Table(_)))),
-        spans,
+        spans: rendered.spans,
+        tables: rendered.tables,
         syntax_source_bytes: syntax_budget
             .usage
             .source_bytes
@@ -2119,6 +2213,7 @@ mod tests {
             Arc::new(MarkdownBlock {
                 source: start..start + 1,
                 has_table: false,
+                tables: Vec::new(),
                 spans: (0..fragments)
                     .map(|_| TranscriptSpan {
                         text: "x".repeat(fragment_bytes),
