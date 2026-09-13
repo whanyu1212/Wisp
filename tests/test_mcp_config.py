@@ -33,6 +33,53 @@ def test_mcp_server_config_normalizes_nested_mappings() -> None:
     assert server.tool_safety == (("read-file", "read"), ("write-file", "mutating"))
 
 
+def test_mcp_server_config_accepts_native_https_transport() -> None:
+    server = McpServerConfig(
+        name="docs",
+        url="https://developers.openai.com/mcp",
+        tool_safety={"search_openai_docs": "read"},
+    )
+
+    assert server.command is None
+    assert server.url == "https://developers.openai.com/mcp"
+    assert McpServerConfig.model_validate_json(server.model_dump_json()) == server
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {},
+        {"command": "server", "url": "https://example.com/mcp"},
+        {"url": "https://example.com/mcp", "args": ["unused"]},
+        {"url": "https://example.com/mcp", "env": {"TOKEN": "unused"}},
+        {"url": "http://example.com/mcp"},
+        {"url": "https://user:secret@example.com/mcp"},
+        {"url": "https://example.com/mcp?secret=value"},
+        {"url": "https://example.com/mcp#fragment"},
+        {"url": "https://example.com/mcp", "env_from": ["TOKEN"]},
+        {"url": "https://:443/mcp"},
+        {"url": "https://example.com:bad/mcp"},
+        {"url": "https://example.com:65536/mcp"},
+        {"url": "https://example.com:0/mcp"},
+        {"url": "https://example.com:/mcp"},
+        {"url": "https://example.com/\x00mcp"},
+        {"url": "https://example.com/\nmcp"},
+        {"url": "https://exa mple.com/mcp"},
+    ],
+)
+def test_mcp_server_config_rejects_invalid_transport_combinations(
+    values: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        McpServerConfig(name="server", **values)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_mcp_http_accepts_loopback_development_endpoints(host: str) -> None:
+    url = f"http://{host}:8123/mcp"
+    assert McpServerConfig(name="local", url=url).url == url
+
+
 def test_mcp_server_config_is_frozen_and_hides_literal_environment() -> None:
     server = McpServerConfig(
         name="github",

@@ -182,7 +182,10 @@ class WispSettings(BaseModel):
     ) -> dict[str, dict[str, Any]] | None:
         if value is None:
             return None
-        return {server.name: server.model_dump(mode="json", exclude={"name"}) for server in value}
+        return {
+            server.name: server.model_dump(mode="json", exclude={"name"}, exclude_none=True)
+            for server in value
+        }
 
     @field_validator("mcp_servers")
     @classmethod

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from typing import Annotated, Any, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -30,6 +31,7 @@ _ENVIRONMENT_NAMES_CASE_INSENSITIVE = os.name == "nt"
 
 ServerName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,31}$")]
 Command = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+ServerUrl = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 Argument = Annotated[str, StringConstraints(max_length=4096)]
 EnvironmentName = Annotated[
     str,
@@ -40,7 +42,7 @@ ToolName = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 
 
 class McpServerConfig(BaseModel):
-    """Configuration for one user-owned MCP stdio server.
+    """Configuration for one user-owned MCP stdio or HTTP server.
 
     Environment mappings and safety overrides are stored as sorted tuples so the
     frozen model is deeply immutable and deterministic. ``repr`` deliberately omits
@@ -50,7 +52,8 @@ class McpServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     name: ServerName
-    command: Command
+    command: Command | None = None
+    url: ServerUrl | None = None
     args: tuple[Argument, ...] = Field(default=(), max_length=MAX_MCP_ARGS)
     env: tuple[tuple[EnvironmentName, EnvironmentValue], ...] = Field(
         default=(), max_length=MAX_MCP_ENV_VARS, repr=False
@@ -106,12 +109,38 @@ class McpServerConfig(BaseModel):
 
     @field_validator("command")
     @classmethod
-    def _validate_command(cls, value: str) -> str:
+    def _validate_command(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.strip():
             raise ValueError("command must not be blank")
         if "\x00" in value:
             raise ValueError("command must not contain NUL")
         return value
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("url must not contain control characters")
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("url must be an absolute HTTP or HTTPS URL")
+        # Accessing port also rejects malformed and out-of-range port numbers.
+        if parsed.port == 0 or parsed.netloc.endswith(":"):
+            raise ValueError("url must use a valid port")
+        if any(character.isspace() for character in normalized):
+            raise ValueError("url must not contain whitespace")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("url must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("url must not contain a query or fragment")
+        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("unencrypted HTTP is allowed only for loopback endpoints")
+        return normalized
 
     @field_validator("args")
     @classmethod
@@ -153,7 +182,11 @@ class McpServerConfig(BaseModel):
         return tuple(sorted(values))
 
     @model_validator(mode="after")
-    def _validate_environment_sources(self) -> McpServerConfig:
+    def _validate_transport(self) -> McpServerConfig:
+        if (self.command is None) == (self.url is None):
+            raise ValueError("exactly one of command or url must be configured")
+        if self.url is not None and (self.args or self.env or self.env_from):
+            raise ValueError("HTTP MCP servers do not accept args, env, or env_from")
         literal_names = {_environment_name_key(name) for name, _ in self.env}
         inherited_names = {_environment_name_key(name) for name in self.env_from}
         overlap = literal_names.intersection(inherited_names)

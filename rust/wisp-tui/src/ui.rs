@@ -30,6 +30,15 @@ const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
+const EMPTY_TRANSCRIPT_TAGLINE: &str = "A coding agent that stays in sync";
+const EMPTY_TRANSCRIPT_WORDMARK: [&str; 5] = [
+    "█   █  ███  ████  ████",
+    "█   █   █   █     █  █",
+    "█ █ █   █   ████  ████",
+    "██ ██   █      █  █   ",
+    "█   █  ███  ████  █   ",
+];
+const EMPTY_TRANSCRIPT_FULL_WIDTH: usize = 40;
 const STICKY_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
@@ -206,7 +215,7 @@ pub fn render_interactive(
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
     editor: &PromptEditor,
-    _connection: &ConnectionInfo,
+    connection: &ConnectionInfo,
     notice: Option<&str>,
     browse_selected: Option<TranscriptEntryId>,
     composer_focused: bool,
@@ -257,7 +266,9 @@ pub fn render_interactive(
         viewport,
         row_cache,
         browse_selected,
+        connection,
         palette,
+        bindings,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -398,6 +409,7 @@ fn sticky_user_rows(
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_transcript(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -405,7 +417,9 @@ fn render_transcript(
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
     browse_selected: Option<TranscriptEntryId>,
+    connection: &ConnectionInfo,
     palette: Palette,
+    bindings: &Bindings,
 ) {
     let parked_area = parked_decision_area(state, area);
     let conversation = parked_area.map_or(area, |parked| Rect {
@@ -457,7 +471,14 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let lines = if rows.is_empty() {
-        empty_transcript_lines(state, palette, visible_lines, content_width)
+        empty_transcript_lines(
+            state,
+            connection,
+            palette,
+            visible_lines,
+            content_width,
+            bindings,
+        )
     } else {
         rows.into_iter()
             .map(|row| {
@@ -1042,11 +1063,45 @@ fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
         .to_string()
 }
 
+fn centered_welcome_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let padding = width.saturating_sub(line.width()) / 2;
+    let style = line.style;
+    let mut spans = vec![Span::raw(" ".repeat(padding))];
+    spans.extend(line.spans);
+    Line::from(spans).style(style)
+}
+
+fn welcome_action_line(
+    label: &'static str,
+    shortcut: &str,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let block_width = width.min(44);
+    let content_width = label.width().saturating_add(shortcut.width());
+    let gap = block_width.saturating_sub(content_width).max(2);
+    let line = Line::from(vec![
+        Span::styled(label, Style::default().fg(palette.foreground)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(shortcut.to_owned(), Style::default().fg(palette.muted)),
+    ]);
+    centered_welcome_line(line, width)
+}
+
+fn center_welcome_panel(mut panel: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
+    let top_padding = height.saturating_sub(panel.len()) / 2;
+    let mut lines = vec![Line::default(); top_padding];
+    lines.append(&mut panel);
+    lines
+}
+
 fn empty_transcript_lines(
     state: &UiState,
+    connection: &ConnectionInfo,
     palette: Palette,
     height: usize,
     width: usize,
+    bindings: &Bindings,
 ) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
     if state.context.loading() {
@@ -1065,26 +1120,98 @@ fn empty_transcript_lines(
     if !editable(state) {
         return Vec::new();
     }
-    let mut lines = vec![Line::styled(EMPTY_TRANSCRIPT_HINT, muted)];
-    if height < 3 {
-        return lines;
-    }
-    lines.push(Line::default());
-    if state.provider.is_none() {
-        lines.push(Line::styled(
-            "Use /connect to add a provider, then type a prompt.",
-            muted,
+
+    let version = sanitize_for_terminal(&connection.backend_version);
+    let version_line = || {
+        centered_welcome_line(
+            Line::from(vec![
+                Span::styled(
+                    "Wisp ",
+                    Style::default()
+                        .fg(palette.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(version.clone(), muted),
+            ]),
+            width,
+        )
+    };
+
+    if width >= EMPTY_TRANSCRIPT_FULL_WIDTH {
+        let mut panel = EMPTY_TRANSCRIPT_WORDMARK
+            .iter()
+            .map(|row| {
+                centered_welcome_line(
+                    Line::styled(
+                        *row,
+                        Style::default()
+                            .fg(palette.primary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    width,
+                )
+            })
+            .collect::<Vec<_>>();
+        panel.push(Line::default());
+        panel.push(version_line());
+        panel.push(centered_welcome_line(
+            Line::styled(
+                EMPTY_TRANSCRIPT_TAGLINE,
+                Style::default().fg(palette.foreground),
+            ),
+            width,
         ));
-    } else if let Some(identity) = header_identity(state) {
-        lines.push(Line::styled(sanitize_for_terminal(&identity), muted));
-        if height >= 5 && width >= 40 {
-            lines.push(Line::styled(
-                "/resume previous sessions. @ to mention a file.",
-                muted,
-            ));
+        panel.push(centered_welcome_line(
+            Line::styled(EMPTY_TRANSCRIPT_HINT, muted),
+            width,
+        ));
+
+        let submit = primary_label(bindings, KeyAction::Submit);
+        let mut actions = vec![("Ask Wisp anything", submit.as_str())];
+        if state.provider.is_none() {
+            actions.push(("Connect a provider", "/connect"));
+        }
+        actions.extend([
+            ("Resume a session", "/resume"),
+            ("Browse commands", "/"),
+            ("Mention a project file", "@"),
+        ]);
+        let full_height = panel.len().saturating_add(1).saturating_add(actions.len());
+        if height >= full_height {
+            panel.push(Line::default());
+            panel.extend(
+                actions
+                    .into_iter()
+                    .map(|(label, shortcut)| welcome_action_line(label, shortcut, width, palette)),
+            );
+            return center_welcome_panel(panel, height);
+        }
+        if height >= panel.len() {
+            return center_welcome_panel(panel, height);
         }
     }
-    lines
+
+    let mut panel = vec![version_line()];
+    if height >= 3 && EMPTY_TRANSCRIPT_TAGLINE.width() <= width {
+        panel.push(centered_welcome_line(
+            Line::styled(
+                EMPTY_TRANSCRIPT_TAGLINE,
+                Style::default().fg(palette.foreground),
+            ),
+            width,
+        ));
+    }
+    if height >= 2 {
+        let hint = if state.provider.is_none() {
+            "/connect to add a provider"
+        } else if EMPTY_TRANSCRIPT_HINT.width() <= width {
+            EMPTY_TRANSCRIPT_HINT
+        } else {
+            "Type a prompt or /"
+        };
+        panel.push(centered_welcome_line(Line::styled(hint, muted), width));
+    }
+    center_welcome_panel(panel, height)
 }
 
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
@@ -1569,20 +1696,54 @@ mod tests {
     }
 
     #[test]
-    fn empty_idle_transcript_invites_prompt_and_commands() {
+    fn empty_idle_transcript_shows_a_responsive_wisp_welcome() {
         let state = UiState::new("fake".into(), Some("model-x".into()), None);
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(rendered.contains("Wisp 0.9.0"));
+        assert!(rendered.contains(EMPTY_TRANSCRIPT_TAGLINE));
         assert!(rendered.contains(EMPTY_TRANSCRIPT_HINT));
-        assert!(rendered.contains("/resume previous sessions"));
+        assert!(rendered.contains("Ask Wisp anything"));
+        assert!(rendered.contains("Resume a session"));
+        assert!(rendered.contains("Browse commands"));
+        assert!(rendered.contains("Mention a project file"));
+        assert!(!rendered.contains("Connect a provider"));
         assert!(rendered.contains("fake/model-x"));
+
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(compact.contains("Wisp 0.9.0"));
+        assert!(compact.contains("Type a prompt or /"));
         assert!(compact.contains("idle"));
-        assert!(
-            compact.contains("Enter send")
-                || compact.contains("/ commands")
-                || compact.contains("Ctrl+G")
-        );
-        assert!(!compact.contains("/resume previous sessions"));
+        assert!(!compact.contains("Resume a session"));
+
+        let mut unconfigured = state;
+        unconfigured.provider = None;
+        let rendered = render_to_string(80, 18, &unconfigured, &PromptEditor::default());
+        assert!(rendered.contains("Connect a provider"));
+        assert!(rendered.contains("/connect"));
+    }
+
+    #[test]
+    fn welcome_copy_fits_supported_transcript_sizes() {
+        for configured in [true, false] {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            if !configured {
+                state.provider = None;
+            }
+            for width in [28, 29, 30, 39, 40, 44, 78] {
+                for height in 1..=20 {
+                    let lines = empty_transcript_lines(
+                        &state,
+                        &connection(),
+                        Palette::default(),
+                        height,
+                        width,
+                        &Bindings::default(),
+                    );
+                    assert!(lines.len() <= height);
+                    assert!(lines.iter().all(|line| line.width() <= width));
+                }
+            }
+        }
     }
 
     #[test]
@@ -1715,6 +1876,11 @@ mod tests {
             &bindings,
         );
         assert!(rendered.contains("Ctrl+Enter send"));
+        let welcome_action = rendered
+            .lines()
+            .find(|line| line.contains("Ask Wisp anything"))
+            .unwrap();
+        assert!(welcome_action.contains("Ctrl+Enter"));
         assert!(rendered.contains("F4 history"));
         assert!(rendered.contains("Ctrl+G help"));
         assert!(!rendered.contains("Unbound theme"));

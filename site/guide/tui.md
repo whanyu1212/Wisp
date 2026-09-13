@@ -62,7 +62,9 @@ WISP_TUI_RENDERER=rust wisp
 The transcript is an unboxed document. The composer is a `>` prompt under a single rule. The footer
 holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, the selected session
 when one is persisted, and the keys for the current workflow. Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
-invites a prompt or `/` commands and points at `/resume`, `/connect`, and `@` when there is room.
+shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
+and points at `/resume`, `/connect`, and `@` when there is room. It collapses to compact copy on
+short or narrow terminals.
 Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained

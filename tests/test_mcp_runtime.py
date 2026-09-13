@@ -166,6 +166,38 @@ class _RecordingClient:
         raise AssertionError((name, arguments))
 
 
+def test_native_http_server_uses_streamable_transport(monkeypatch: MonkeyPatch) -> None:
+    _RecordingClient.instances.clear()
+    transport = object()
+    urls: list[str] = []
+
+    def open_http(url: str, **_kwargs: object) -> object:
+        urls.append(url)
+        return transport
+
+    monkeypatch.setattr(mcp_runtime_module, "Client", _RecordingClient)
+    monkeypatch.setattr(mcp_runtime_module, "bounded_http_client", open_http)
+    monkeypatch.setattr(
+        mcp_runtime_module,
+        "bounded_stdio_client",
+        lambda *_args, **_kwargs: pytest.fail("HTTP server started a stdio transport"),
+    )
+    api, tools = _api()
+
+    async def scenario() -> None:
+        runtime = await McpRuntime.start(
+            (McpServerConfig(name="docs", url="https://developers.openai.com/mcp"),),
+            api=api,
+            existing_tool_names=(),
+        )
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert urls == ["https://developers.openai.com/mcp"]
+    assert "mcp__docs__search" in tools.names()
+
+
 def test_client_context_closes_in_its_owner_task_from_cross_task_shutdown(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

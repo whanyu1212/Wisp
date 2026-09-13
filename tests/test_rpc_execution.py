@@ -2511,6 +2511,46 @@ def test_executor_messages_historical_page_refreshes_selected_session_after_exte
     anyio.run(scenario)
 
 
+def test_rpc_session_state_reads_one_coherent_run_snapshot(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="two"))
+        await session.set_name("Named session")
+
+    anyio.run(write)
+    original_read_run_snapshot = session.read_run_snapshot
+    read_count = 0
+
+    def count_reads() -> object:
+        nonlocal read_count
+        read_count += 1
+        return original_read_run_snapshot()
+
+    monkeypatch.setattr(session, "read_run_snapshot", count_reads)
+    monkeypatch.setattr(
+        session,
+        "read_context_messages",
+        lambda: pytest.fail("startup replayed context separately"),
+    )
+    monkeypatch.setattr(
+        session,
+        "read_name",
+        lambda: pytest.fail("startup scanned the session name separately"),
+    )
+
+    state = rpc_execution_module.rpc_session_state(session)
+
+    assert read_count == 1
+    assert state.entry_count == 3
+    assert [message.content for message in state.history] == ["one", "two"]
+    assert state.name == "Named session"
+
+
 def test_updated_rpc_session_state_reads_entries_once(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -12,11 +12,12 @@ from wisp.sessions.replay import replay_session_entries
 def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
     if session is None or not session.path.is_file():
         return _RpcSessionState(session=session, history=(), entry_count=0)
+    snapshot = session.read_run_snapshot()
     return _RpcSessionState(
         session=session,
-        history=session.read_context_messages(),
-        entry_count=len(session.read_entries()),
-        name=session.read_name(),
+        history=snapshot.replay.messages,
+        entry_count=snapshot.entry_count,
+        name=snapshot.name,
     )
 
 
