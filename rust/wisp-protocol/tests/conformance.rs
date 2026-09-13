@@ -33,7 +33,7 @@ fn every_python_command_fixture_round_trips_in_rust() {
     assert_round_trips::<commands::WispTypedClientRpcCommands>(
         fixtures(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/live-rpc/v6/commands.schema.json"
+            "/../../schemas/live-rpc/v7/commands.schema.json"
         ))),
         commands::deserialize,
     );
@@ -519,7 +519,7 @@ fn approval_builder_serializes_every_approved_scope() {
 fn every_python_event_fixture_round_trips_in_rust() {
     let fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v6/events.schema.json"
+        "/../../schemas/live-rpc/v7/events.schema.json"
     )));
     assert_round_trips::<events::WispCurrentLiveEventOutput>(fixtures, events::deserialize);
 }
@@ -528,7 +528,7 @@ fn every_python_event_fixture_round_trips_in_rust() {
 fn model_catalog_projection_is_correlated_and_bounded() {
     let fixture = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v6/events.schema.json"
+        "/../../schemas/live-rpc/v7/events.schema.json"
     )))
     .remove("rpc.model_catalog")
     .unwrap();
@@ -564,7 +564,7 @@ fn model_catalog_projection_is_correlated_and_bounded() {
     assert!(
         events::deserialize(serde_json::json!({
             "type": "rpc.model_catalog",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2025-01-02T03:04:05Z",
             "command_id": "models-oversized",
             "catalog": {
@@ -586,7 +586,7 @@ fn model_catalog_projection_is_correlated_and_bounded() {
 fn future_and_malformed_types_fail_closed() {
     assert!(commands::deserialize(serde_json::json!({"type": "future.command"})).is_err());
     assert!(
-        events::deserialize(serde_json::json!({"schema_version": 37, "type": "future.event"}))
+        events::deserialize(serde_json::json!({"schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "type": "future.event"}))
             .is_err()
     );
     assert!(
@@ -641,7 +641,7 @@ fn canonical_command_cross_field_constraints_fail_closed() {
 fn canonical_event_cross_field_constraints_fail_closed() {
     let mut event_fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v6/events.schema.json"
+        "/../../schemas/live-rpc/v7/events.schema.json"
     )));
     let mut invalid_events = Vec::new();
 
@@ -715,25 +715,25 @@ fn canonical_event_cross_field_constraints_fail_closed() {
 }
 
 #[test]
-fn generated_handshake_types_preserve_the_v6_contract() {
+fn generated_handshake_types_preserve_the_current_contract() {
     let request_value = serde_json::json!({
         "type": "rpc.handshake.request",
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
-        "min_protocol_version": 6,
-        "max_protocol_version": 6,
-        "min_event_schema_version": 37,
-        "max_event_schema_version": 37,
+        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "min_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+        "max_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
         "supported_capabilities": [],
         "required_capabilities": []
     });
     let accepted_value = serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": 6,
-        "event_schema_version": 37,
-        "min_protocol_version": 6,
-        "max_protocol_version": 6,
+        "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     });
@@ -753,10 +753,10 @@ fn handshake_cross_field_invariants_fail_closed() {
             "type": "rpc.handshake.request",
             "frontend_name": "fixture",
             "frontend_version": "0.1.0",
-            "min_protocol_version": 6,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "max_protocol_version": 3,
-            "min_event_schema_version": 37,
-            "max_event_schema_version": 37,
+            "min_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+            "max_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "supported_capabilities": [],
             "required_capabilities": []
         }),
@@ -764,10 +764,10 @@ fn handshake_cross_field_invariants_fail_closed() {
             "type": "rpc.handshake.request",
             "frontend_name": "fixture",
             "frontend_version": "0.1.0",
-            "min_protocol_version": 6,
-            "max_protocol_version": 6,
-            "min_event_schema_version": 38,
-            "max_event_schema_version": 37,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "min_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION + 1,
+            "max_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "supported_capabilities": [],
             "required_capabilities": []
         }),
@@ -775,10 +775,10 @@ fn handshake_cross_field_invariants_fail_closed() {
             "type": "rpc.handshake.request",
             "frontend_name": "fixture",
             "frontend_version": "0.1.0",
-            "min_protocol_version": 6,
-            "max_protocol_version": 6,
-            "min_event_schema_version": 37,
-            "max_event_schema_version": 37,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "min_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+            "max_event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "supported_capabilities": [],
             "required_capabilities": ["missing"]
         }),
@@ -791,10 +791,10 @@ fn handshake_cross_field_invariants_fail_closed() {
         serde_json::json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 7,
-            "event_schema_version": 37,
-            "min_protocol_version": 6,
-            "max_protocol_version": 6,
+            "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION + 1,
+            "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         }),
@@ -803,9 +803,9 @@ fn handshake_cross_field_invariants_fail_closed() {
             "code": "protocol_version_mismatch",
             "message": "No compatible protocol.",
             "backend_package_version": "0.1.0",
-            "min_protocol_version": 6,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "max_protocol_version": 3,
-            "event_schema_version": 37
+            "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION
         }),
     ];
     for response in invalid_responses {
@@ -838,8 +838,14 @@ fn current_helpers_match_the_embedded_manifest_and_wire_contract() {
         .expect("current request is valid")
         .into_value()
         .unwrap();
-    assert_eq!(request["min_protocol_version"], 6);
-    assert_eq!(request["max_event_schema_version"], 37);
+    assert_eq!(
+        request["min_protocol_version"],
+        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        request["max_event_schema_version"],
+        wisp_protocol::EVENT_SCHEMA_VERSION
+    );
 
     let shutdown = commands::WispTypedClientRpcCommands::shutdown("shutdown-1")
         .expect("shutdown command is valid")
@@ -856,21 +862,29 @@ fn response_and_event_accessors_use_validated_wire_values() {
     let accepted = handshake_response::deserialize(serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": 6,
-        "event_schema_version": 37,
-        "min_protocol_version": 6,
-        "max_protocol_version": 6,
+        "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     }))
     .unwrap();
     assert_eq!(accepted.backend_package_version(), "0.1.0");
-    assert_eq!(accepted.accepted_contract(), Some((6, 37, 1024, 2048)));
+    assert_eq!(
+        accepted.accepted_contract(),
+        Some((
+            wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            wisp_protocol::EVENT_SCHEMA_VERSION,
+            1024,
+            2048
+        ))
+    );
     assert!(accepted.rejection().is_none());
 
     let event = events::deserialize(serde_json::json!({
         "type": "rpc.command.finished",
-        "schema_version": 37,
+        "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
         "timestamp": "2026-01-02T03:04:05Z",
         "command_id": "shutdown-1",
         "command_type": "shutdown",
@@ -883,7 +897,7 @@ fn response_and_event_accessors_use_validated_wire_values() {
 
     let failed = events::deserialize(serde_json::json!({
         "type": "rpc.command.finished",
-        "schema_version": 37,
+        "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
         "timestamp": "2026-01-02T03:04:05Z",
         "command_id": "shutdown-1",
         "command_type": "shutdown",
@@ -921,7 +935,7 @@ fn command_discovery_and_mode_projections_use_existing_live_contract() {
     }
     let mut fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v6/events.schema.json"
+        "/../../schemas/live-rpc/v7/events.schema.json"
     )));
     let mut command_report = fixtures.remove("rpc.commands").unwrap();
     command_report["commands"] = serde_json::json!([{

@@ -1245,6 +1245,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "update",
             "skills",
             "mcp",
+            "permissions",
             "plan",
             "build",
             "model",

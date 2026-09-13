@@ -19,6 +19,7 @@ from pydantic import (
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.openai_compatible import OpenAICompatibleSettings
+from wisp.permissions import permissions_directory
 from wisp.retry import RetryPolicy
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
@@ -96,6 +97,8 @@ class WispConfig(BaseModel):
         required = (
             self.auth_path.expanduser().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
+            permissions_directory().resolve(strict=False).as_posix(),
+            f"{permissions_directory().resolve(strict=False).as_posix()}/**",
             *(
                 (self.openai_compatible.ca_bundle.as_posix(),)
                 if self.openai_compatible is not None

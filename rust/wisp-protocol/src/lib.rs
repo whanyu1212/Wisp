@@ -15,12 +15,12 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v6 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v6/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v7 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v7/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 6;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 7;
 /// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 37;
+pub const EVENT_SCHEMA_VERSION: u32 = 38;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -154,22 +154,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v6/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v7/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v6/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v7/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v6/commands.schema.json"
+        "../../../schemas/live-rpc/v7/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v6/events.schema.json"
+        "../../../schemas/live-rpc/v7/events.schema.json"
     ))
 });
 
@@ -431,7 +431,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v6/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v7/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -466,7 +466,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v6/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v7/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -526,7 +526,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v6/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v7/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -534,12 +534,20 @@ pub mod commands {
         generated::WispTypedClientRpcCommands
     );
 
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PermissionMode {
+        Ask,
+        Yolo,
+    }
+
     /// Lifetime granted by an approved tool request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum ApprovalScope {
         Once,
         ToolSession,
         AllSession,
+        AllProject,
     }
 
     /// Backend execution mode, shared by command builders and frontend state.
@@ -596,11 +604,24 @@ pub mod commands {
                 Self::Once => "once",
                 Self::ToolSession => "tool_session",
                 Self::AllSession => "all_session",
+                Self::AllProject => "all_project",
             }
         }
     }
 
     impl WispTypedClientRpcCommands {
+        pub fn permissions(
+            id: &str,
+            mode: Option<PermissionMode>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let value = match mode {
+                Some(mode) => {
+                    serde_json::json!({"type": "set_permissions", "id": id, "mode": mode})
+                }
+                None => serde_json::json!({"type": "get_permissions", "id": id}),
+            };
+            deserialize(value)
+        }
         /// Change only the current process's execution mode.
         pub fn configure_mode(
             id: &str,
@@ -1018,6 +1039,13 @@ pub mod commands {
 }
 
 pub mod events {
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct PermissionState {
+        pub mode: crate::commands::PermissionMode,
+        pub saved_mode: Option<crate::commands::PermissionMode>,
+        pub project_path: Option<String>,
+    }
+
     pub use crate::context::{
         CompactionCompleted, CompactionOutcome, CompactionPolicyStatus, CompactionReason,
         CompactionStarted, ContextAccountingMethod, ContextBudget, ContextEstimate,
@@ -1028,7 +1056,7 @@ pub mod events {
         SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v6/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v7/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(

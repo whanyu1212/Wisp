@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from wisp.agent.mode import AgentMode
+from wisp.permissions import PermissionMode
 from wisp.project_files import (
     MAX_PROJECT_FILES,
     MAX_PROJECT_PATH_CHARS,
@@ -33,7 +34,7 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[37] = 37
+EVENT_SCHEMA_VERSION: Literal[38] = 38
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -157,6 +158,7 @@ class WispEvent(BaseModel):
         35,
         36,
         37,
+        38,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -1157,6 +1159,30 @@ class SessionStatsReported(WispEvent):
         return data
 
 
+class PermissionState(BaseModel):
+    """Effective approval mode and user-owned default for the active project."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: PermissionMode
+    saved_mode: PermissionMode | None = None
+    project_path: Path | None = None
+
+
+class RpcPermissionsReported(WispEvent):
+    """Permission snapshot returned by a permission inspection or change."""
+
+    type: Literal["rpc.permissions"] = "rpc.permissions"
+    command_id: str
+    permissions: PermissionState
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < 38:
+            raise ValueError("Permission reports require schema_version 38 or newer")
+        return self
+
+
 class RpcStateReported(WispEvent):
     """Immediate, non-persisted in-memory state returned over RPC."""
 
@@ -1826,6 +1852,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | RpcStateReported
+    | RpcPermissionsReported
     | RpcCommandsReported
     | RpcModelCatalogReported
     | RpcConnectionCatalogReported

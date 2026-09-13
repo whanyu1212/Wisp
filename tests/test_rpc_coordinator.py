@@ -122,7 +122,10 @@ def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> Non
             entry_count=3,
             name="Previous",
         )
-        coordinator = RpcCoordinator(state)
+        resets: list[object] = []
+        coordinator = RpcCoordinator(
+            state, session_grants_reset=lambda: resets.append(state.session)
+        )
         receiver = _Receiver(
             [
                 _input_command({"id": "new-1", "type": "new_session"}),
@@ -142,6 +145,7 @@ def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> Non
             reject=_ignore_reject,
         )
 
+        assert resets == [session]
         assert state.session is None
         assert state.history == ()
         assert state.entry_count == 0
@@ -1847,5 +1851,33 @@ def test_discovery_does_not_remove_history_read_session_ordering_barrier() -> No
         assert dispatched == ["prompt", "files", "history", "select"]
         assert state.entry_count == 5
         assert not coordinator.auxiliary_commands
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("command_type", ["select_session", "clone_session", "fork_session"])
+@pytest.mark.parametrize("outcome", ["changed", "same", "failed"])
+def test_session_grants_reset_only_after_successful_session_change(
+    tmp_path: Path, command_type: str, outcome: str
+) -> None:
+    async def scenario() -> None:
+        store = JsonlSessionStore(tmp_path)
+        previous = store.create()
+        selected = previous if outcome == "same" else store.create()
+        state = _RpcSessionState(session=previous, history=(), entry_count=0)
+        resets: list[object] = []
+        coordinator = RpcCoordinator(
+            state, session_grants_reset=lambda: resets.append(state.session)
+        )
+        coordinator.running_command = _RpcRunningCommand(
+            "switch", command_type, anyio.CancelScope()
+        )
+        await coordinator.handle_event(
+            _RpcCommandCompleted("switch", command_type, outcome != "failed", (), 0, selected),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=_ignore_reject,
+        )
+        assert resets == ([previous] if outcome == "changed" else [])
+        assert state.session is (previous if outcome == "failed" else selected)
 
     anyio.run(scenario)

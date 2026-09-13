@@ -27,9 +27,10 @@ from wisp.events import (
     QueueKind,
     QueueMode,
 )
+from wisp.permissions import PermissionMode
 from wisp.validation import redact_validation_error_inputs
 
-type ApprovalScope = Literal["once", "tool_session", "all_session"]
+type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project"]
 
 MAX_RPC_COMMAND_ID_CHARS = 256
 MAX_RPC_COMMAND_TYPE_CHARS = 64
@@ -142,6 +143,19 @@ class GetStateCommand(RpcCommandModel):
     """Return an immediate in-memory RPC state snapshot."""
 
     type: Literal["get_state"] = "get_state"
+
+
+class GetPermissionsCommand(RpcCommandModel):
+    """Read the active and saved project permission modes."""
+
+    type: Literal["get_permissions"] = "get_permissions"
+
+
+class SetPermissionsCommand(RpcCommandModel):
+    """Save the project permission mode and reset temporary tool grants."""
+
+    type: Literal["set_permissions"] = "set_permissions"
+    mode: PermissionMode
 
 
 class GetCommandsCommand(RpcCommandModel):
@@ -457,6 +471,8 @@ type RpcCommand = Annotated[
     | CompactCommand
     | GetSessionStatsCommand
     | GetStateCommand
+    | GetPermissionsCommand
+    | SetPermissionsCommand
     | GetCommandsCommand
     | GetModelCatalogCommand
     | GetConnectionCatalogCommand

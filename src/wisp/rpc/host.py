@@ -21,6 +21,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
 from wisp.events import (
+    PermissionState,
     RpcCommandFinished,
     RpcProjectFilesReported,
     SkillCatalogUpdated,
@@ -28,6 +29,7 @@ from wisp.events import (
     TrustResolved,
     WispEvent,
 )
+from wisp.permissions import PermissionMode, load_permission_mode, save_permission_mode
 from wisp.rpc.commands import ApprovalScope, ParsedRpcCommand
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -107,13 +109,56 @@ class _PendingApproval:
 class RpcToolApprovalPolicy(ToolApprovalPolicy):
     """Approval policy resolved by typed ``approval`` commands."""
 
-    def __init__(self, fallback: ToolApprovalPolicy) -> None:
+    def __init__(self, fallback: ToolApprovalPolicy, *, project_path: Path | None = None) -> None:
         super().__init__(
             approved_tools=fallback.approved_tools,
             approved_safety=fallback.approved_safety,
         )
         self._pending: dict[str, _PendingApproval] = {}
         self._input_closed_reason: str | None = None
+        self._project_path = project_path
+        self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
+        if self._saved_mode == "yolo":
+            self.approved_safety = self.approved_safety | {"mutating", "command"}
+        self._baseline_approved_tools = self.approved_tools
+        self._baseline_approved_safety = self.approved_safety
+
+    def reset_session_grants(self) -> None:
+        """Expire temporary grants while retaining the selected project/startup mode."""
+
+        self.approved_tools = self._baseline_approved_tools
+        self.approved_safety = self._baseline_approved_safety
+
+    def permissions_snapshot(self) -> PermissionState:
+        """Return effective permissions without reading the preference store."""
+
+        return PermissionState(
+            mode="yolo" if {"mutating", "command"} <= self.approved_safety else "ask",
+            saved_mode=self._saved_mode,
+            project_path=self._project_path,
+        )
+
+    def set_permissions(self, mode: PermissionMode) -> None:
+        """Save the new default before applying it and clearing temporary grants.
+
+        Args:
+            mode (PermissionMode): Explicit user choice, overriding startup defaults
+                (including an earlier --yes) for the remainder of this run.
+
+        Raises:
+            OSError: Saving fails; current approvals remain unchanged.
+        """
+
+        if self._project_path is None:
+            raise OSError("No project is available for saving permissions")
+        save_permission_mode(self._project_path, mode)
+        self._saved_mode = mode
+        self.approved_tools = frozenset()
+        self.approved_safety = (
+            frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
+        )
+        self._baseline_approved_tools = self.approved_tools
+        self._baseline_approved_safety = self.approved_safety
 
     def prepare_approval(
         self,
@@ -143,11 +188,12 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         arguments: Mapping[str, object],
     ) -> ToolApprovalDecision:
         del arguments
-        if self.approves(tool):
-            return ToolApprovalDecision(approved=True)
         pending = self._pending.get(call_id)
         if pending is None:
-            return ToolApprovalDecision(approved=False, reason=self.block_reason(tool))
+            approved = self.approves(tool)
+            return ToolApprovalDecision(
+                approved=approved, reason=None if approved else self.block_reason(tool)
+            )
         try:
             await pending.event.wait()
             approved = pending.approved is True
@@ -178,11 +224,30 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         pending = self._pending.get(call_id)
         if pending is None or pending.resolved:
             return False
-        if approved and scope == "tool_session":
+        if approved and scope == "all_project":
+            try:
+                self.set_permissions("yolo")
+            except OSError:
+                self._resolve_pending(
+                    pending,
+                    approved=False,
+                    reason="Could not save project permissions. Retry or choose Allow once.",
+                )
+                return True
+        elif approved and scope == "tool_session":
             self.approved_tools = self.approved_tools | {pending.tool_name}
         elif approved and scope == "all_session":
             self.approved_safety = self.approved_safety | {"mutating", "command"}
         self._resolve_pending(pending, approved=approved, reason=reason)
+        if approved and scope != "once":
+            # A scoped grant also releases matching calls that are already waiting.
+            # Explicit denials remain final, regardless of later mode changes.
+            for other in self._pending.values():
+                if not other.resolved and (
+                    other.tool_name in self.approved_tools
+                    or other.tool_safety in self.approved_safety
+                ):
+                    self._resolve_pending(other, approved=True, reason=None)
         return True
 
     def deny_pending_on_input_closed(self) -> None:
@@ -436,7 +501,9 @@ class RpcHost:
             load_startup_state,
             abandon_on_cancel=True,
         )
-        approval_policy = RpcToolApprovalPolicy(tool_approval_policy(options.approve_unsafe_tools))
+        approval_policy = RpcToolApprovalPolicy(
+            tool_approval_policy(options.approve_unsafe_tools), project_path=project_context_root
+        )
         configure_overrides = _RpcConfigureOverrides()
         selected_runtime_builder = runtime_builder or build_runtime_for_config
         project_configuration = RpcProjectConfiguration(
@@ -520,6 +587,7 @@ class RpcHost:
 
         coordinator = RpcCoordinator(
             session_state,
+            session_grants_reset=approval_policy.reset_session_grants,
             input_closed_handlers=(
                 approval_policy.deny_pending_on_input_closed,
                 trust_gate.deny_pending_on_input_closed,

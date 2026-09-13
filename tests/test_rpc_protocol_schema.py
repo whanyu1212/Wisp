@@ -126,30 +126,33 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
         "missing protocol schema directory: v3",
         "missing protocol schema directory: v4",
         "missing protocol schema directory: v5",
+        "missing protocol schema directory: v6",
     )
 
     (directory / "commands.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("commands.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "protocol schema hash mismatch: v6/commands.schema.json",
-        "protocol schema dialect mismatch: v6/commands.schema.json",
+        "protocol schema hash mismatch: v7/commands.schema.json",
+        "protocol schema dialect mismatch: v7/commands.schema.json",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
         "missing protocol schema directory: v4",
         "missing protocol schema directory: v5",
+        "missing protocol schema directory: v6",
     )
 
     write_protocol_artifacts(directory)
     (directory / "obsolete.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("obsolete.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "unexpected protocol artifact set: v6",
+        "unexpected protocol artifact set: v7",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
         "missing protocol schema directory: v4",
         "missing protocol schema directory: v5",
+        "missing protocol schema directory: v6",
     )
 
 
@@ -197,6 +200,7 @@ def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
         "missing protocol schema directory: v4",
         "missing protocol schema directory: v5",
         "missing protocol schema directory: v6",
+        "missing protocol schema directory: v7",
     )
 
     monkeypatch.setattr(
@@ -235,7 +239,7 @@ def test_git_history_check_reports_modified_committed_version_artifacts(
 def test_protocol_version_directories_cannot_be_cross_written(tmp_path: Path) -> None:
     assert protocol_schema_directory(tmp_path, protocol_version=3) == tmp_path / "v3"
 
-    with pytest.raises(RuntimeError, match="refusing to write protocol v6 into v2"):
+    with pytest.raises(RuntimeError, match="refusing to write protocol v7 into v2"):
         write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=2))
 
 
@@ -352,7 +356,7 @@ def test_command_schema_contains_every_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 35
+    assert len(mapping) == 37
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
 
@@ -492,7 +496,7 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 52
+    assert len(mapping) == 53
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
     for definition in cast(dict[str, dict[str, object]], schema["$defs"]).values():

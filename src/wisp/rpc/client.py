@@ -22,6 +22,7 @@ from wisp.events import (
     QueueMode,
     wisp_event_from_json,
 )
+from wisp.permissions import PermissionMode
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
@@ -39,6 +40,7 @@ from wisp.rpc.commands import (
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
+    GetPermissionsCommand,
     GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -53,6 +55,7 @@ from wisp.rpc.commands import (
     PromptCommand,
     RpcCommand,
     SelectSessionCommand,
+    SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
     ShutdownCommand,
@@ -144,6 +147,28 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("state")
         await self._transport.send(GetStateCommand(id=selected_id))
+        return selected_id
+
+    async def get_permissions(self, *, command_id: str | None = None) -> str:
+        """Request the effective and saved permission modes for this project."""
+
+        selected_id = command_id or self._command_id_factory("permissions")
+        await self._transport.send(GetPermissionsCommand(id=selected_id))
+        return selected_id
+
+    async def set_permissions(self, mode: PermissionMode, *, command_id: str | None = None) -> str:
+        """Save a project default and reset temporary tool approvals.
+
+        Args:
+            mode (PermissionMode): Explicit user-selected permission mode.
+            command_id (str | None): Optional identifier for matching the response.
+
+        Returns:
+            str: The submitted command identifier. The reported event confirms success.
+        """
+
+        selected_id = command_id or self._command_id_factory("permissions")
+        await self._transport.send(SetPermissionsCommand(id=selected_id, mode=mode))
         return selected_id
 
     async def get_commands(self, *, command_id: str | None = None) -> str:

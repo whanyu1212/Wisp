@@ -123,8 +123,47 @@ pub(super) fn load_mcp(
     ])
 }
 
+pub(super) fn permissions(
+    state: &mut UiState,
+    mode: Option<wisp_protocol::commands::PermissionMode>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.permissions.loading() || state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if mode.is_some() && (!state.can_select_model() || super::session_sync_pending(state)) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing permissions.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::Permissions);
+    let command = WispTypedClientRpcCommands::permissions(&id, mode)?;
+    state.permissions.start(id);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
 pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<UiEffect>> {
     match event {
+        BackendEvent::PermissionsReported {
+            command_id,
+            permissions,
+        } => {
+            state.permissions.report(command_id, permissions);
+            Some(Vec::new())
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } if matches!(command_type.as_str(), "get_permissions" | "set_permissions")
+            && state.permissions.finish(command_id, *ok, error.as_deref()) =>
+        {
+            Some(vec![UiEffect::RequestRender])
+        }
         BackendEvent::SkillCatalogReported {
             command_id,
             catalog,

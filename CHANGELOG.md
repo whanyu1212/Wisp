@@ -12,6 +12,10 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Rust TUI: match the composer background to the transcript and provide a four-choice permission
+  dialog. `/permissions` manages project defaults saved outside the repository; once/session
+  approvals remain temporary.
+
 ## 0.2.0rc1 — 2026-09-10
 
 Release candidate for the 0.2 minor line; not a new stable release. Textual remains the default TUI.
@@ -260,7 +264,16 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v37 — current
+## Schema v38 — current
+
+- Added `rpc.permissions` with effective mode, saved mode, and project path, plus `get_permissions`
+  and `set_permissions` commands.
+- Added the explicit `all_project` approval scope for saved project YOLO. Existing `all_session`
+  remains temporary.
+- Live JSONL-RPC now negotiates protocol v7 with event schema v38. Published v1–v6 bundles remain
+  immutable; durable sessions retain backward-compatible parsing.
+
+## Schema v37
 
 - Added `get_project_files`, returning non-persisted `rpc.project_files` snapshots with relative
   file/directory metadata, request correlation, a policy generation, and explicit truncation.
@@ -473,7 +486,7 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v37 remain readable.
+Events at schema v5 through v38 remain readable.
 
 ---
 

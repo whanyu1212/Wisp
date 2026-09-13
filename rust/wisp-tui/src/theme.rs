@@ -53,6 +53,10 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
+    pub fn is_monochrome(self) -> bool {
+        self.monochrome
+    }
+
     pub fn user_text(self) -> Style {
         self.base().bg(self.panel)
     }

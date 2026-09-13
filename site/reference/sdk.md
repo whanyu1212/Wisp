@@ -135,6 +135,8 @@ request. Completion and results arrive through `events()`.
 | `disconnect_provider` | `(provider: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |
 | `begin_device_code` | `(provider: str, *, command_id: str \| None = None)` | `RpcDeviceCodeReported`, zero or more `RpcDeviceCodeProgressReported`, terminal `RpcCommandFinished`, and refreshed `RpcConnectionCatalogReported` when available |
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
+| `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
+| `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
 | `get_project_files` | `(*, command_id: str \| None = None)` | `RpcProjectFilesReported` |
@@ -180,7 +182,11 @@ clients must display them without logging or persistence.
 | `trust` | `(request_id: str, *, trusted: bool, reason: str \| None = None, transient: bool = False, command_id: str \| None = None)` |
 | `approve` | `(call_id: str, *, approved: bool = True, reason: str \| None = None, scope: ApprovalScope \| None = None, command_id: str \| None = None)` |
 
-`ApprovalScope` is `"once" | "tool_session" | "all_session"`. Match `request_id` from
+`ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project"`.
+`all_project` saves YOLO for the current project; the other scopes remain temporary.
+`PermissionMode` is `"ask" | "yolo"`. `set_permissions` saves the default and clears temporary
+grants; it fails without changing permissions if an operation is running or saving fails.
+Saved defaults apply to future launches in the same canonical project directory. Match `request_id` from
 `TrustRequested` and `call_id` from `ToolApprovalRequested`. These methods are re-entrant control
 commands and may be submitted while a prompt is paused.
 

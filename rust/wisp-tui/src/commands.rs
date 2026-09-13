@@ -27,6 +27,7 @@ pub(crate) enum Command {
     Context,
     Skills,
     Mcp,
+    Permissions(Option<wisp_protocol::commands::PermissionMode>),
     AutoCompaction(bool),
     Compact(Option<String>),
     Quit,
@@ -47,6 +48,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "context" => "/context [auto on|off]",
         "skills" => "/skills",
         "mcp" => "/mcp",
+        "permissions" => "/permissions [ask|yolo]",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
@@ -122,6 +124,12 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         },
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
+        "permissions" => match tail.trim() {
+            "" => Command::Permissions(None),
+            "ask" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Ask)),
+            "yolo" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
+            _ => Command::Invalid(format!("Usage: {syntax}")),
+        },
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
         "context" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {

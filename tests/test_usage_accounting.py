@@ -15,7 +15,7 @@ from openai.types.responses import Response
 from openai.types.responses.response_usage import ResponseUsage
 from pydantic import ValidationError
 
-from wisp.events import MessageCompleted, TokenUsage, wisp_event_from_json
+from wisp.events import EVENT_SCHEMA_VERSION, MessageCompleted, TokenUsage, wisp_event_from_json
 from wisp.providers.anthropic import (
     _usage_from_anthropic_delta,
     _usage_from_anthropic_start,
@@ -204,7 +204,7 @@ def test_token_usage_round_trips_on_current_schema_events() -> None:
         usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
     )
 
-    assert event.schema_version == 37
+    assert event.schema_version == EVENT_SCHEMA_VERSION
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 

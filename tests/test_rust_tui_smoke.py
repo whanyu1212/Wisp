@@ -385,10 +385,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 6,
-    "event_schema_version": 37,
-    "min_protocol_version": 6,
-    "max_protocol_version": 6,
+    "protocol_version": 7,
+    "event_schema_version": 38,
+    "min_protocol_version": 7,
+    "max_protocol_version": 7,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -695,10 +695,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 6,
-    "event_schema_version": 37,
-    "min_protocol_version": 6,
-    "max_protocol_version": 6,
+    "protocol_version": 7,
+    "event_schema_version": 38,
+    "min_protocol_version": 7,
+    "max_protocol_version": 7,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1042,10 +1042,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 6,
-    "event_schema_version": 37,
-    "min_protocol_version": 6,
-    "max_protocol_version": 6,
+    "protocol_version": 7,
+    "event_schema_version": 38,
+    "min_protocol_version": 7,
+    "max_protocol_version": 7,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1434,8 +1434,8 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 6, "event_schema_version": 37,
-    "min_protocol_version": 6, "max_protocol_version": 6,
+    "protocol_version": 7, "event_schema_version": 38,
+    "min_protocol_version": 7, "max_protocol_version": 7,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1577,7 +1577,7 @@ for line in sys.stdin:
                 output.clear()
             elif (
                 phase == "help"
-                and b"/build" in output
+                and b"/permissions" in output
                 and b"/compact" in output
                 and b"Esc close" in output
             ):

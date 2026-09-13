@@ -91,6 +91,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=28,
         ),
         CommandDescriptor(
+            name="permissions",
+            title="Permissions",
+            description="View or save this project's permission mode",
+            category=CommandCategory.configuration,
+            arguments=(CommandArgument("mode", "Optional 'ask' or 'yolo' default"),),
+            accepts_arguments=True,
+            order=28,
+        ),
+        CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",

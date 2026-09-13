@@ -36,7 +36,7 @@ fn fixture(scenario: &str) -> LiveUi {
         arguments: fixture.tool_arguments.clone(),
         detail_source: tool_detail::ToolDetailSource::None,
     });
-    ui.state.transcript.observe_tool_result(ToolResultInput {
+    let result = ToolResultInput {
         call_id: "visual-tool".into(),
         name: fixture.tool_name,
         output_source_bytes: fixture.tool_output.len() as u64,
@@ -65,7 +65,8 @@ fn fixture(scenario: &str) -> LiveUi {
         stderr_truncated: false,
         stdout_dropped_bytes: 0,
         stderr_dropped_bytes: 0,
-    });
+    };
+    ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);
     ui.editor.insert_paste(&fixture.draft);
     if matches!(scenario, "new-turn" | "scrollback") {
@@ -96,7 +97,7 @@ fn fixture(scenario: &str) -> LiveUi {
             &mut ui.transcript_row_cache,
         );
     }
-    if scenario == "working" {
+    if matches!(scenario, "working" | "tool-running" | "tool-dim") {
         ui.state.view_status = ViewStatus::Running;
         ui.state.interaction_status = InteractionStatus::Running;
         ui.state.current_command = Some(reducer::ActiveCommand {
@@ -107,6 +108,44 @@ fn fixture(scenario: &str) -> LiveUi {
             .transcript
             .append_message_delta(2, "Checking the remaining edge cases…");
     }
+    if matches!(scenario, "tool-running" | "tool-dim") {
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("Check the build, lint, and tests.".into());
+        ui.state.transcript.complete_message(
+            1,
+            "I’m checking the project. The completed checks stay visible while the tests run."
+                .into(),
+        );
+        for (id, command, is_error) in [
+            ("build", "cargo build", false),
+            ("lint", "cargo clippy", true),
+        ] {
+            ui.state.transcript.observe_tool_call(ToolCallInput {
+                call_id: id.into(),
+                name: "bash".into(),
+                arguments: json!({"command": command}),
+                detail_source: tool_detail::ToolDetailSource::None,
+            });
+            let mut finished = result.clone();
+            finished.call_id = id.into();
+            finished.is_error = is_error;
+            finished.exit_code = Some(if is_error { 1 } else { 0 });
+            ui.state.transcript.observe_tool_result(finished);
+        }
+        ui.state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "tests".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test --workspace"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+        ui.state
+            .transcript
+            .observe_approval_resolved("tests", true, None);
+        ui.editor = PromptEditor::default();
+        ui.activity_frame = if scenario == "tool-dim" { 4 } else { 0 };
+    }
     if scenario == "approval" {
         ui.state.view_status = ViewStatus::WaitingForApproval;
         ui.state.pending_approval = Some(PendingApproval {
@@ -116,6 +155,14 @@ fn fixture(scenario: &str) -> LiveUi {
             detail_source: tool_detail::ToolDetailSource::None,
             safety: "command".into(),
         });
+    }
+    if scenario == "permissions" {
+        ui.state.permissions.snapshot = Some(Arc::new(wisp_protocol::events::PermissionState {
+            mode: wisp_protocol::commands::PermissionMode::Ask,
+            saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
+            project_path: Some("/projects/wisp".into()),
+        }));
+        ui.discovery_view = Some(DiscoveryView::permissions());
     }
     ui
 }
@@ -133,8 +180,8 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> ratatui::buffer::Buffer {
         &mut terminal,
         &ConnectionInfo {
             backend_version: "visual".into(),
-            protocol_version: 6,
-            event_schema_version: 37,
+            protocol_version: wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            event_schema_version: wisp_protocol::EVENT_SCHEMA_VERSION,
         },
     )
     .unwrap();
@@ -162,13 +209,21 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             let palette = ui.palette();
             let buffer = draw(&mut ui, 100, 30);
             let user = row_containing(&buffer, "Review the startup");
+            let label = row_containing(&buffer, "you");
+            assert_eq!(buffer[(3, label - 1)].symbol(), " ");
+            assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
+            assert_eq!(buffer[(97, label - 1)].bg, palette.panel);
+            assert_eq!(buffer[(3, label - 2)].bg, palette.background);
             assert_eq!(buffer[(2, user)].bg, palette.panel);
             assert_eq!(buffer[(97, user)].bg, palette.panel);
             assert_eq!(buffer[(1, user)].bg, palette.background);
             assert_eq!(buffer[(98, user)].bg, palette.background);
             assert_eq!(buffer[(3, user)].fg, palette.foreground);
             assert!(!buffer[(3, user)].modifier.contains(Modifier::BOLD));
-            assert_eq!(buffer[(3, user + 1)].bg, palette.background);
+            assert_eq!(buffer[(3, user + 1)].symbol(), " ");
+            assert_eq!(buffer[(2, user + 1)].bg, palette.panel);
+            assert_eq!(buffer[(97, user + 1)].bg, palette.panel);
+            assert_eq!(buffer[(3, user + 2)].bg, palette.background);
             let code = row_containing(&buffer, "let ready");
             for y in code..=code + 2 {
                 for x in 3..97 {
@@ -207,16 +262,20 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         let margin = if width >= 60 { 2 } else { 1 };
         assert_eq!(editor.area.x, margin + 3);
         assert_eq!(editor.area.right(), width - margin - 1);
-        assert_eq!(buffer[(margin, editor.area.y)].symbol(), "┃");
-        assert_eq!(buffer[(margin + 1, editor.area.y)].symbol(), ">");
+        assert_eq!(
+            buffer[(margin, editor.area.y)].symbol(),
+            if height >= 16 { "│" } else { " " }
+        );
+        assert_eq!(buffer[(margin + 1, editor.area.y)].symbol(), "›");
         assert_eq!(buffer[(editor.area.x, editor.area.y)].symbol(), "a");
         let bottom_padding = u16::from(height >= 16);
         assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
         if bottom_padding > 0 {
-            assert_eq!(buffer[(editor.area.x, editor.area.y - 1)].symbol(), " ");
+            assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
+            assert_eq!(buffer[(editor.area.x, editor.area.y - 1)].symbol(), "─");
             assert_eq!(
                 buffer[(editor.area.x, editor.area.y - 1)].bg,
-                ui.palette().surface
+                ui.palette().background
             );
         }
     }
@@ -232,7 +291,7 @@ fn transcript_padding_and_activity_stay_above_the_composer() {
         let mut ui = fixture("working");
         ui.mouse_enabled = true;
         let buffer = draw(&mut ui, width, height);
-        let activity = row_containing(&buffer, "working ⠋");
+        let activity = row_containing(&buffer, "wisp ⠋");
         let editor = ui
             .mouse_frame
             .as_ref()
@@ -253,11 +312,12 @@ fn transcript_padding_and_activity_stay_above_the_composer() {
         }
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
-        assert!(screen_text(&next).contains("working ⠙"));
+        assert!(screen_text(&next).contains("wisp ⠙"));
+        assert!(!screen_text(&next).contains("working ⠙"));
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
-        assert!(!screen_text(&draw(&mut ui, width, height)).contains("working ⠙"));
+        assert!(!screen_text(&draw(&mut ui, width, height)).contains("wisp ⠙"));
     }
 }
 
@@ -295,6 +355,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
         .append_message_delta(2, "The next review has started.");
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
+    assert!(streaming.contains("wisp ⠋"));
+    assert!(!streaming.contains("working ⠋"));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript
@@ -334,36 +396,62 @@ fn capture_conversation_screens() {
                 "conversation",
                 "tools",
                 "working",
+                "tool-running",
+                "tool-dim",
                 "approval",
+                "permissions",
                 "new-turn",
                 "scrollback",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
                 ui.no_color = no_color;
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                ui.draw(
-                    &mut terminal,
-                    &ConnectionInfo {
-                        backend_version: "visual".into(),
-                        protocol_version: 6,
-                        event_schema_version: 37,
-                    },
-                )
-                .unwrap();
-                let cells = terminal.backend().buffer().content.iter().map(|cell| json!({
+                let frames = if scenario == "tool-running"
+                    && variant == "dark"
+                    && width == 100
+                    && height == 30
+                {
+                    8
+                } else {
+                    1
+                };
+                for tick in 0..frames {
+                    if frames > 1 {
+                        ui.activity_frame = tick;
+                    }
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    ui.draw(
+                        &mut terminal,
+                        &ConnectionInfo {
+                            backend_version: "visual".into(),
+                            protocol_version: wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+                            event_schema_version: wisp_protocol::EVENT_SCHEMA_VERSION,
+                        },
+                    )
+                    .unwrap();
+                    let cells = terminal.backend().buffer().content.iter().map(|cell| json!({
                     "text": cell.symbol(), "fg": rgb(cell.fg), "bg": rgb(cell.bg),
-                    "bold": cell.modifier.contains(Modifier::BOLD), "italic": cell.modifier.contains(Modifier::ITALIC),
+                    "bold": cell.modifier.contains(Modifier::BOLD), "dim": cell.modifier.contains(Modifier::DIM), "italic": cell.modifier.contains(Modifier::ITALIC),
                     "underline": cell.modifier.contains(Modifier::UNDERLINED), "reverse": cell.modifier.contains(Modifier::REVERSED),
                     "strike": cell.modifier.contains(Modifier::CROSSED_OUT)
                 })).collect::<Vec<_>>();
-                let path = output.join(format!("rust-{scenario}-{variant}-{width}x{height}.json"));
-                fs::write(
-                    path,
-                    serde_json::to_vec(&json!({"width": width, "height": height, "cells": cells}))
+                    let suffix = if tick == 0 {
+                        String::new()
+                    } else {
+                        format!("-frame-{tick}")
+                    };
+                    let path = output.join(format!(
+                        "rust-{scenario}-{variant}-{width}x{height}{suffix}.json"
+                    ));
+                    fs::write(
+                        path,
+                        serde_json::to_vec(
+                            &json!({"width": width, "height": height, "cells": cells}),
+                        )
                         .unwrap(),
-                )
-                .unwrap();
+                    )
+                    .unwrap();
+                }
             }
         }
     }

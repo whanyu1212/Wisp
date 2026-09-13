@@ -112,6 +112,8 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "get_model_catalog",
     "get_connection_catalog",
     "get_state",
+    "get_permissions",
+    "set_permissions",
     "get_skills",
     "trust",
 }
@@ -138,6 +140,7 @@ class RpcCoordinator:
         session_state: _RpcSessionState,
         *,
         input_closed_handlers: tuple[Callable[[], None], ...] = (),
+        session_grants_reset: Callable[[], None] | None = None,
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
         max_queued_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
         input_closed_type: type[object] = _RpcInputClosed,
@@ -158,6 +161,7 @@ class RpcCoordinator:
         self.pending_prompt_queue_commands: deque[ParsedRpcCommand] = deque()
         self.input_closed = False
         self._input_closed_handlers = input_closed_handlers
+        self._session_grants_reset = session_grants_reset
         self._max_queued_commands = max_queued_commands
         self._max_queued_bytes = max_queued_bytes
         self._queued_command_bytes = 0
@@ -352,6 +356,17 @@ class RpcCoordinator:
                     self.session_state.name = getattr(completed, "session_name", None)
                 selected_session = getattr(completed, "selected_session", None)
                 if completed.ok and selected_session is not None:
+                    previous_session = self.session_state.session
+                    if (
+                        completed.command_type
+                        in {"select_session", "clone_session", "fork_session"}
+                        and (
+                            previous_session is None
+                            or previous_session.session_id != selected_session.session_id
+                        )
+                        and self._session_grants_reset is not None
+                    ):
+                        self._session_grants_reset()
                     self.session_state.session = selected_session
                 post_apply_events = getattr(completed, "post_apply_events", ())
                 if post_apply_events and self._completion_event_renderer is not None:
@@ -469,6 +484,8 @@ class RpcCoordinator:
         if result.running_command is not previous_running:
             self._prompt_queue_ready = False
         if result.reset_session:
+            if self._session_grants_reset is not None:
+                self._session_grants_reset()
             self._reset_session_state()
         elif result.selected_session is not None:
             self.session_state.session = result.selected_session
