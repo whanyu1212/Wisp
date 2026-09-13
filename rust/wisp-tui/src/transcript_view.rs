@@ -4240,6 +4240,50 @@ mod tests {
     }
 
     #[test]
+    fn headerless_table_detection_and_promotion_refresh_cached_literal_rows() {
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        for (chunk, expected) in [
+            ("| read | text |\n", "| read | text |"),
+            ("| write | file |\n", "read  │ text"),
+            ("| longer name | more |\n\nAfter", "read        │ text"),
+        ] {
+            transcript.append_message_delta(1, chunk);
+            viewport.set_geometry(&transcript, &mut cache, 40, 20);
+            let warm = viewport.visible_rows(&transcript, &mut cache);
+            let mut fresh_viewport = TranscriptViewport::default();
+            let mut fresh_cache = TranscriptRowCache::default();
+            fresh_viewport.set_geometry(&transcript, &mut fresh_cache, 40, 20);
+            assert_eq!(
+                warm,
+                fresh_viewport.visible_rows(&transcript, &mut fresh_cache)
+            );
+            assert!(
+                warm.iter()
+                    .any(|row| row.plain_text().trim_end() == expected)
+            );
+        }
+        cache.reset_work();
+        viewport.set_geometry(&transcript, &mut cache, 8, 20);
+        let narrow = viewport.visible_rows(&transcript, &mut cache);
+        let text = narrow
+            .iter()
+            .filter(|row| {
+                row.role == TranscriptRole::Assistant && row.kind == TranscriptRowKind::Content
+            })
+            .map(TranscriptRow::plain_text)
+            .collect::<String>();
+        assert_eq!(
+            text,
+            "read        │ textwrite       │ filelonger name │ moreAfter"
+        );
+        assert_eq!(cache.work().markdown_source_bytes_parsed, 0);
+    }
+
+    #[test]
     fn markdown_rows_style_content_and_neutralize_untrusted_terminal_text() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());

@@ -3,7 +3,10 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, BrokenLink, CodeBlockKind, Event, HeadingLevel, Options, Parser, RefDefs, Tag,
+    TagEnd,
+};
 use unicode_width::UnicodeWidthStr;
 
 use crate::syntax::{
@@ -18,6 +21,9 @@ const MAX_PRESENTATION_FRAGMENTS: usize = 4_096;
 const MAX_PRESENTATION_BLOCKS: usize = 2_048;
 const MAX_PRESENTATION_RETAINED_BYTES: usize = 1024 * 1024;
 const PRESENTATION_TRUNCATED: &str = "… Markdown presentation truncated …";
+const MARKDOWN_OPTIONS: Options = Options::ENABLE_STRIKETHROUGH
+    .union(Options::ENABLE_TABLES)
+    .union(Options::ENABLE_TASKLISTS);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum BlockStyle {
@@ -645,9 +651,7 @@ fn parse_blocks(
     base_offset: usize,
     initial_syntax_usage: SyntaxUsage,
 ) -> ParsedBlocks {
-    let options =
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    let parser = Parser::new_ext(source, options).into_offset_iter();
+    let mut parser = Parser::new_ext(source, MARKDOWN_OPTIONS).into_offset_iter();
     let mut blocks = Vec::new();
     let mut budget = ParseBudget::default();
     let mut syntax_budget = SyntaxBuildBudget::new(initial_syntax_usage);
@@ -655,7 +659,7 @@ fn parse_blocks(
     let mut depth = 0_usize;
     let mut block_start = None;
 
-    for (event, range) in parser {
+    while let Some((event, range)) = parser.next() {
         let starts_block = matches!(&event, Event::Start(tag) if is_block_tag(tag));
         let ends_block = matches!(&event, Event::End(tag) if is_block_end(*tag));
         if block_start.is_none() {
@@ -678,6 +682,7 @@ fn parse_blocks(
                     (base_offset + start)..(base_offset + range.end),
                     base_offset,
                     source,
+                    parser.reference_definitions(),
                     &mut syntax_budget,
                 ),
             );
@@ -697,6 +702,7 @@ fn parse_blocks(
                 (base_offset + start)..(base_offset + source.len()),
                 base_offset,
                 source,
+                parser.reference_definitions(),
                 &mut syntax_budget,
             ),
         );
@@ -710,6 +716,143 @@ fn parse_blocks(
         blocks,
         syntax_work: syntax_budget.work,
     }
+}
+
+/// Accept the complete pipe-enclosed rows some assistants emit without a header.
+/// Only inspect paragraphs: code blocks and literal inline-code examples keep
+/// their original meaning. Synthetic header bytes never enter source affinities.
+fn headerless_table_paragraph(
+    source: &str,
+    paragraph: Range<usize>,
+    references: &RefDefs<'_>,
+) -> Option<Vec<(Event<'static>, Range<usize>)>> {
+    let text = &source[paragraph.clone()];
+    let columns = pipe_row_columns(text.lines().next()?)?;
+    let mut table_len = 0;
+    let mut rows = 0;
+    for line in text.split_inclusive('\n') {
+        if pipe_row_columns(line) != Some(columns) {
+            break;
+        }
+        table_len += line.len();
+        rows += 1;
+    }
+    if rows < 2 {
+        return None;
+    }
+
+    // Let the existing GFM parser handle escaping and inline markup in cells.
+    // The empty synthetic header is discarded; every original row remains data.
+    let prefix = format!("|{}\n|{}\n", " |".repeat(columns), "---|".repeat(columns));
+    let table = format!("{prefix}{}", &text[..table_len]);
+    let mut events = Vec::new();
+    let mut in_header = false;
+    let mut resolve_reference = |link: BrokenLink<'_>| {
+        references.get(&link.reference).map(|definition| {
+            (
+                definition.dest.clone().into_static(),
+                definition
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "".into())
+                    .into_static(),
+            )
+        })
+    };
+    for (event, range) in Parser::new_with_broken_link_callback(
+        &table,
+        MARKDOWN_OPTIONS,
+        Some(&mut resolve_reference),
+    )
+    .into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::TableHead) => in_header = true,
+            Event::End(TagEnd::TableHead) => in_header = false,
+            _ if in_header => {}
+            _ => events.push((
+                event.into_static(),
+                (paragraph.start + range.start.saturating_sub(prefix.len()))
+                    ..(paragraph.start + range.end.saturating_sub(prefix.len())),
+            )),
+        }
+    }
+    if table_len < text.len() {
+        let remainder_start = paragraph.start + table_len;
+        events.push((Event::SoftBreak, remainder_start..remainder_start));
+        events.extend(
+            Parser::new_with_broken_link_callback(
+                &text[table_len..],
+                MARKDOWN_OPTIONS,
+                Some(&mut resolve_reference),
+            )
+            .into_offset_iter()
+            .map(|(event, range)| {
+                (
+                    event.into_static(),
+                    (remainder_start + range.start)..(remainder_start + range.end),
+                )
+            }),
+        );
+    }
+    Some(events)
+}
+
+fn pipe_row_columns(line: &str) -> Option<usize> {
+    // Do not reinterpret indented code or nested container continuation syntax.
+    if line.starts_with('\t') || line.bytes().take_while(|byte| *byte == b' ').count() > 3 {
+        return None;
+    }
+    let line = line.trim();
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return None;
+    }
+    let mut pipes = 0_usize;
+    let mut escaped = false;
+    let mut final_separator = false;
+    for byte in line.bytes() {
+        final_separator = byte == b'|' && !escaped;
+        if final_separator {
+            pipes += 1;
+        }
+        if byte == b'\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    (pipes >= 3 && final_separator).then_some(pipes.saturating_sub(1))
+}
+
+fn expand_headerless_tables<'a>(
+    events: &[(Event<'a>, Range<usize>)],
+    source: &str,
+    references: &RefDefs<'_>,
+) -> Option<Vec<(Event<'a>, Range<usize>)>> {
+    let mut expanded = None::<Vec<_>>;
+    let mut index = 0;
+    while index < events.len() {
+        let (event, range) = &events[index];
+        if matches!(event, Event::Start(Tag::Paragraph)) {
+            if let Some(replacement) = headerless_table_paragraph(source, range.clone(), references)
+            {
+                let end = events[index + 1..]
+                    .iter()
+                    .position(|(event, _)| matches!(event, Event::End(TagEnd::Paragraph)))
+                    .map(|relative| index + 1 + relative)?;
+                expanded
+                    .get_or_insert_with(|| events[..index].to_vec())
+                    .extend(replacement);
+                index = end + 1;
+                continue;
+            }
+        }
+        if let Some(expanded) = &mut expanded {
+            expanded.push(events[index].clone());
+        }
+        index += 1;
+    }
+    expanded
 }
 
 fn is_block_tag(tag: &Tag<'_>) -> bool {
@@ -1058,7 +1201,7 @@ impl BlockRenderer {
             Tag::Strong => self.style.strong = true,
             Tag::Strikethrough => self.style.struck = true,
             Tag::TableHead | Tag::TableRow => {
-                if matches!(tag, Tag::TableHead) && self.paragraph_inline {
+                if self.paragraph_inline {
                     self.paragraph_inline = false;
                 } else if self.line_has_content {
                     self.emit_break(source_offset);
@@ -1285,8 +1428,11 @@ fn render_block(
     source_range: Range<usize>,
     base_offset: usize,
     source: &str,
+    references: &RefDefs<'_>,
     syntax_budget: &mut SyntaxBuildBudget,
 ) -> MarkdownBlock {
+    let expanded = expand_headerless_tables(events, source, references);
+    let events = expanded.as_deref().unwrap_or(events);
     let usage_before = syntax_budget.usage;
     let attempted_source_before = syntax_budget.attempted_source_bytes;
     let attempted_fragments_before = syntax_budget.attempted_fragments;
@@ -1388,6 +1534,126 @@ mod tests {
         for span in spans {
             assert_eq!(span.affinity.output_offset as usize, output);
             output += span.text.len();
+        }
+    }
+
+    #[test]
+    fn headerless_tool_rows_preserve_data_and_following_prose() {
+        let source = "| read | Reads text files, optionally selecting a range of lines. |\n | write | Creates or overwrites text files, creating parent directories when needed. |\n | edit | Makes precise, exact-text replacements without rewriting the whole file. |\nAdditional tools come through MCP integrations.";
+        let build = IncrementalMarkdownState::default().build(source, 17, 0, true);
+        let text = build.document.plain_text();
+        let lines = text.lines().map(str::trim_end).collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "read  │ Reads text files, optionally selecting a range of lines.",
+                "write │ Creates or overwrites text files, creating parent directories when needed.",
+                "edit  │ Makes precise, exact-text replacements without rewriting the whole file.",
+                "Additional tools come through MCP integrations.",
+            ]
+        );
+        let read = build
+            .document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .find(|span| span.text == "read")
+            .unwrap();
+        assert!(!read.style.strong);
+        assert_eq!(read.affinity.source_offset, 19);
+        assert_eq!(read.affinity.source_end, 23);
+    }
+
+    #[test]
+    fn headerless_tables_keep_inline_markup_references_and_crlf_offsets() {
+        let source = "Before\r\n\r\n| [manual][ref] | **read** |\r\n| `a\\|b` | file |\r\nMore [help][ref].\r\n\r\n[ref]: https://example.test\r\n";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let text = build.document.plain_text();
+        assert!(text.contains("manual │ read"), "{text}");
+        assert!(text.contains("a|b    │ file"), "{text}");
+        assert!(text.contains("\nMore help."), "{text}");
+        assert!(!text.contains("https://"));
+        let spans = build
+            .document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .collect::<Vec<_>>();
+        let code = spans.iter().find(|span| span.text == "a|b").unwrap();
+        assert_eq!(code.style.inline, InlineStyle::Code);
+        assert_eq!(
+            &source[code.affinity.source_offset..code.affinity.source_end],
+            "`a\\|b`"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "read" && span.style.strong)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "help" && span.style.inline == InlineStyle::Link)
+        );
+    }
+
+    #[test]
+    fn headerless_detection_leaves_code_single_rows_and_ragged_rows_literal() {
+        for source in [
+            "| read | description |",
+            "| read | description |\n| write | extra | description |",
+            "| one |\n| two |",
+            "cat file | grep read\ncat file | grep write",
+            "`| read | description |`\n`| write | description |`",
+            "```text\n| read | description |\n| write | description |\n```",
+            "    | read | description |\n    | write | description |",
+            "> | read | description |\n> | write | description |",
+        ] {
+            let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+            assert!(
+                build.document.blocks.iter().all(|block| !block.has_table),
+                "{source}"
+            );
+            assert!(build.document.plain_text().contains('|'), "{source}");
+        }
+        assert_eq!(pipe_row_columns(r"| a\|b | c |"), Some(2));
+        assert_eq!(pipe_row_columns(r"| a\\|b | c |"), Some(3));
+        assert_eq!(pipe_row_columns(r"| a | c \|"), None);
+    }
+
+    #[test]
+    fn headerless_tables_stream_and_settle_like_a_fresh_document() {
+        let source = "| read | text |\n| longer name | **more** |\nFollowing prose\n\nDone.";
+        let mut state = IncrementalMarkdownState::default();
+        for (end, _) in source.char_indices().skip(1) {
+            state.build(&source[..end], 0, 0, false);
+        }
+        let streamed = state.build(source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        assert_eq!(streamed.document, fresh.document);
+        assert!(fresh.document.plain_text().contains("longer name │ more"));
+    }
+
+    #[test]
+    fn headerless_table_expansion_respects_presentation_budgets() {
+        let source = format!(
+            "| {} | b |\n{}",
+            "wide".repeat(128),
+            "| a | b |\n".repeat(2_000)
+        );
+        let build = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+        assert!(build.document.plain_text().contains(PRESENTATION_TRUNCATED));
+        assert!(build.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+        for block in &build.document.blocks {
+            assert!(block.spans.len() <= MAX_PRESENTATION_FRAGMENTS);
+            assert!(
+                block
+                    .spans
+                    .iter()
+                    .map(|span| span.text.len())
+                    .sum::<usize>()
+                    <= MAX_PRESENTATION_OUTPUT_BYTES
+            );
         }
     }
 

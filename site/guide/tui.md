@@ -72,6 +72,10 @@ aligned columns and bold headers. Wide table rows wrap with the transcript. Very
 blocks temporarily display as plain text and are formatted when the reply completes. User prompts
 and tool output retain their literal text.
 
+Replies that omit a table header are also supported: a paragraph beginning with at least two
+complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
+Single rows, mismatched columns, and pipe syntax inside code remain literal.
+
 Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
