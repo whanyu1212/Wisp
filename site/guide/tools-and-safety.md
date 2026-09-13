@@ -72,7 +72,8 @@ wisp trust forget [path]   # remove the decision so Wisp can prompt again
 ## MCP tools
 
 Wisp can connect to user-configured [Model Context Protocol](https://modelcontextprotocol.io/)
-servers over stdio. Add servers only to the user settings file at `~/.wisp/settings.json`:
+servers over stdio or Streamable HTTP. Add servers only to the user settings file at
+`~/.wisp/settings.json`:
 
 ```json
 {
@@ -83,16 +84,26 @@ servers over stdio. Add servers only to the user settings file at `~/.wisp/setti
       "env": {"READ_ONLY": "1"},
       "env_from": ["GITHUB_TOKEN"],
       "tool_safety": {"search_repositories": "read"}
+    },
+    "openai-developer-docs": {
+      "url": "https://developers.openai.com/mcp",
+      "tool_safety": {"search_openai_docs": "read", "fetch_openai_doc": "read"}
     }
   }
 }
 ```
 
-`env` contains literal user-owned values. `env_from` forwards only the named variables from Wisp's
-process environment; if one is missing, that server is skipped. Server processes otherwise receive
-only the MCP SDK's small safe environment baseline, run from the user's home directory rather than
-the active project, and have stderr suppressed. Commands, arguments, environment values, stderr, and
-transport errors are never included in MCP startup diagnostics.
+Configure exactly one transport per server: `command` starts a stdio process, while `url` connects
+directly over Streamable HTTP. Remote URLs require HTTPS except for loopback development endpoints
+and cannot contain credentials, query strings, or fragments. HTTP entries do not accept stdio-only
+`args`, `env`, or `env_from` fields. Configure the final endpoint URL: redirects are not followed.
+HTTP responses must be uncompressed; JSON bodies and streamed events have bounded sizes.
+
+For stdio servers, `env` contains literal user-owned values. `env_from` forwards only the named
+variables from Wisp's process environment; if one is missing, that server is skipped. Server
+processes otherwise receive only the MCP SDK's small safe environment baseline, run from the user's
+home directory rather than the active project, and have stderr suppressed. Commands, arguments,
+environment values, URLs, stderr, and transport errors are never included in MCP startup diagnostics.
 
 Discovered tools are named `mcp__<server>__<tool>`, with deterministic normalization and hashing when
 needed. They follow the same exposure flags as built-ins: use `--allow-tool <name>` or `--all-tools`,
@@ -117,6 +128,6 @@ and implementation of the configured servers. Wisp may revisit this limit when i
 starting every local server, rather than raising it without a lifecycle or lazy-start solution.
 :::
 
-Current MCP support covers stdio tool discovery and bounded text results. Resources, prompts, dynamic
-`tools/list_changed` updates, HTTP/SSE transports, OAuth, and interactive authentication are not yet
-supported.
+Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
+Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, custom HTTP authentication, OAuth, and
+interactive authentication are not yet supported.

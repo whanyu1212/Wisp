@@ -76,8 +76,8 @@ use prompt_history_view::{HistoryAction, PromptHistoryView};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use reducer::{
-    BackendEvent, CommandIdSource, CommandKind, PendingApproval, UiAction, UiEffect, UiState,
-    ViewStatus,
+    BackendEvent, CommandIdSource, CommandKind, InteractionStatus, PendingApproval, UiAction,
+    UiEffect, UiState, ViewStatus,
 };
 use session_picker::{SessionPicker, SessionPickerAction};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
@@ -133,6 +133,7 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_COMMAND_ID: &str = "rust-tui-shutdown";
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const ACTIVITY_INTERVAL: Duration = Duration::from_millis(125);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -516,6 +517,7 @@ struct LiveUi {
     ids: SequentialCommandIds,
     notice: Option<String>,
     render_pending: bool,
+    activity_frame: u8,
     rendered_decision_context: Option<RenderedDecisionContext>,
     activation_revision: u64,
     unsendable_response_context: Option<UnsendableResponseContext>,
@@ -556,6 +558,7 @@ impl Default for LiveUi {
             ids: SequentialCommandIds::default(),
             notice: None,
             render_pending: true,
+            activity_frame: 0,
             rendered_decision_context: None,
             activation_revision: 0,
             unsendable_response_context: None,
@@ -1362,6 +1365,7 @@ impl LiveUi {
                 self.browse_selected,
                 overlay.is_none() && self.browse_selected.is_none(),
                 completion_view.as_ref(),
+                self.activity_frame,
                 palette,
                 &self.bindings,
             );
@@ -1494,6 +1498,21 @@ impl LiveUi {
             self.render_pending = true;
         }
         Ok(())
+    }
+
+    fn activity_animation_active(&self) -> bool {
+        !self.state.configuration_active()
+            && (self.state.view_status == ViewStatus::Running
+                || self.state.interaction_status == InteractionStatus::Compacting)
+    }
+
+    fn advance_activity_animation(&mut self) -> bool {
+        if !self.activity_animation_active() {
+            return false;
+        }
+        self.activity_frame = self.activity_frame.wrapping_add(1);
+        self.render_pending = true;
+        true
     }
 
     fn current_decision_context(&self) -> Option<RenderedDecisionContext> {

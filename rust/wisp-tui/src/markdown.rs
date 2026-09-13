@@ -3,12 +3,19 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, BrokenLink, CodeBlockKind, Event, HeadingLevel, Options, Parser, RefDefs, Tag,
+    TagEnd,
+};
+use unicode_width::UnicodeWidthStr;
 
 use crate::syntax::{
     MAX_SYNTAX_FRAGMENTS_PER_BUILD, MAX_SYNTAX_SOURCE_BYTES_PER_BUILD, SyntaxClass,
     SyntaxHighlight, highlight_fence,
 };
+
+mod table_layout;
+pub(crate) use table_layout::layout_document;
 
 const REFERENCE_DEFINITION_MARKER: &str = "]:";
 const MAX_MUTABLE_SOURCE_BYTES: usize = 8 * 1024;
@@ -17,6 +24,9 @@ const MAX_PRESENTATION_FRAGMENTS: usize = 4_096;
 const MAX_PRESENTATION_BLOCKS: usize = 2_048;
 const MAX_PRESENTATION_RETAINED_BYTES: usize = 1024 * 1024;
 const PRESENTATION_TRUNCATED: &str = "… Markdown presentation truncated …";
+const MARKDOWN_OPTIONS: Options = Options::ENABLE_STRIKETHROUGH
+    .union(Options::ENABLE_TABLES)
+    .union(Options::ENABLE_TASKLISTS);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum BlockStyle {
@@ -65,12 +75,24 @@ pub struct TranscriptSpan {
 pub struct MarkdownBlock {
     pub source: Range<usize>,
     pub spans: Vec<TranscriptSpan>,
+    has_table: bool,
+    tables: Vec<MarkdownTable>,
     syntax_source_bytes: usize,
     syntax_fragments: usize,
     syntax_attempted_source_bytes: usize,
     syntax_attempted_fragments: usize,
     truncated: bool,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownTable {
+    spans: Range<usize>,
+    rows: Vec<Vec<Range<usize>>>,
+    alignments: Vec<Alignment>,
+    continuation_prefix: String,
+}
+
+impl Eq for MarkdownTable {}
 
 impl MarkdownBlock {
     #[cfg(test)]
@@ -94,6 +116,24 @@ impl MarkdownBlock {
                     .len()
                     .saturating_mul(std::mem::size_of::<TranscriptSpan>()),
             )
+            .saturating_add(
+                self.tables
+                    .iter()
+                    .map(|table| {
+                        std::mem::size_of::<MarkdownTable>()
+                            + table.continuation_prefix.len()
+                            + table.alignments.len() * std::mem::size_of::<Alignment>()
+                            + table
+                                .rows
+                                .iter()
+                                .map(|row| {
+                                    std::mem::size_of::<Vec<Range<usize>>>()
+                                        + row.len() * std::mem::size_of::<Range<usize>>()
+                                })
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -103,6 +143,9 @@ pub struct MarkdownDocument {
 }
 
 impl MarkdownDocument {
+    pub(crate) fn has_tables(&self) -> bool {
+        self.blocks.iter().any(|block| block.has_table)
+    }
     #[cfg(test)]
     pub fn plain_text(&self) -> String {
         self.blocks
@@ -219,7 +262,8 @@ impl IncrementalMarkdownState {
                 syntax_fragments: syntax_work.fragments,
             };
             if was_full_reparse_only
-                && syntax_presentation_changed(&self.mutable_syntax_presentations, &blocks)
+                && (syntax_presentation_changed(&self.mutable_syntax_presentations, &blocks)
+                    || (settled && blocks.iter().any(|block| block.has_table)))
             {
                 self.bump_presentation_epoch();
             }
@@ -276,7 +320,11 @@ impl IncrementalMarkdownState {
                 .source
                 .end
                 .saturating_sub(presentation_start);
-            if syntax_presentation_changed(&self.mutable_syntax_presentations, &parsed[..promote]) {
+            // A final table row can widen earlier columns in the same append that
+            // promotes the block. Rows cached while it was mutable must be rebuilt.
+            if syntax_presentation_changed(&self.mutable_syntax_presentations, &parsed[..promote])
+                || parsed[..promote].iter().any(|block| block.has_table)
+            {
                 self.bump_presentation_epoch();
             }
             self.stable_blocks.extend(parsed[..promote].iter().cloned());
@@ -364,6 +412,8 @@ fn mutable_checkpoint_end(source: &str, stable_start: usize) -> usize {
 fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
     MarkdownBlock {
         source: base_offset..(base_offset + source.len()),
+        has_table: false,
+        tables: Vec::new(),
         spans: if source.is_empty() {
             Vec::new()
         } else {
@@ -388,6 +438,8 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
 fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
     Arc::new(MarkdownBlock {
         source: source_offset..source_offset,
+        has_table: false,
+        tables: Vec::new(),
         spans: vec![TranscriptSpan {
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
@@ -636,8 +688,7 @@ fn parse_blocks(
     base_offset: usize,
     initial_syntax_usage: SyntaxUsage,
 ) -> ParsedBlocks {
-    let options = Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(source, options).into_offset_iter();
+    let mut parser = Parser::new_ext(source, MARKDOWN_OPTIONS).into_offset_iter();
     let mut blocks = Vec::new();
     let mut budget = ParseBudget::default();
     let mut syntax_budget = SyntaxBuildBudget::new(initial_syntax_usage);
@@ -645,7 +696,7 @@ fn parse_blocks(
     let mut depth = 0_usize;
     let mut block_start = None;
 
-    for (event, range) in parser {
+    while let Some((event, range)) = parser.next() {
         let starts_block = matches!(&event, Event::Start(tag) if is_block_tag(tag));
         let ends_block = matches!(&event, Event::End(tag) if is_block_end(*tag));
         if block_start.is_none() {
@@ -668,6 +719,7 @@ fn parse_blocks(
                     (base_offset + start)..(base_offset + range.end),
                     base_offset,
                     source,
+                    parser.reference_definitions(),
                     &mut syntax_budget,
                 ),
             );
@@ -687,6 +739,7 @@ fn parse_blocks(
                 (base_offset + start)..(base_offset + source.len()),
                 base_offset,
                 source,
+                parser.reference_definitions(),
                 &mut syntax_budget,
             ),
         );
@@ -702,6 +755,143 @@ fn parse_blocks(
     }
 }
 
+/// Accept the complete pipe-enclosed rows some assistants emit without a header.
+/// Only inspect paragraphs: code blocks and literal inline-code examples keep
+/// their original meaning. Synthetic header bytes never enter source affinities.
+fn headerless_table_paragraph(
+    source: &str,
+    paragraph: Range<usize>,
+    references: &RefDefs<'_>,
+) -> Option<Vec<(Event<'static>, Range<usize>)>> {
+    let text = &source[paragraph.clone()];
+    let columns = pipe_row_columns(text.lines().next()?)?;
+    let mut table_len = 0;
+    let mut rows = 0;
+    for line in text.split_inclusive('\n') {
+        if pipe_row_columns(line) != Some(columns) {
+            break;
+        }
+        table_len += line.len();
+        rows += 1;
+    }
+    if rows < 2 {
+        return None;
+    }
+
+    // Let the existing GFM parser handle escaping and inline markup in cells.
+    // The empty synthetic header is discarded; every original row remains data.
+    let prefix = format!("|{}\n|{}\n", " |".repeat(columns), "---|".repeat(columns));
+    let table = format!("{prefix}{}", &text[..table_len]);
+    let mut events = Vec::new();
+    let mut in_header = false;
+    let mut resolve_reference = |link: BrokenLink<'_>| {
+        references.get(&link.reference).map(|definition| {
+            (
+                definition.dest.clone().into_static(),
+                definition
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "".into())
+                    .into_static(),
+            )
+        })
+    };
+    for (event, range) in Parser::new_with_broken_link_callback(
+        &table,
+        MARKDOWN_OPTIONS,
+        Some(&mut resolve_reference),
+    )
+    .into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::TableHead) => in_header = true,
+            Event::End(TagEnd::TableHead) => in_header = false,
+            _ if in_header => {}
+            _ => events.push((
+                event.into_static(),
+                (paragraph.start + range.start.saturating_sub(prefix.len()))
+                    ..(paragraph.start + range.end.saturating_sub(prefix.len())),
+            )),
+        }
+    }
+    if table_len < text.len() {
+        let remainder_start = paragraph.start + table_len;
+        events.push((Event::SoftBreak, remainder_start..remainder_start));
+        events.extend(
+            Parser::new_with_broken_link_callback(
+                &text[table_len..],
+                MARKDOWN_OPTIONS,
+                Some(&mut resolve_reference),
+            )
+            .into_offset_iter()
+            .map(|(event, range)| {
+                (
+                    event.into_static(),
+                    (remainder_start + range.start)..(remainder_start + range.end),
+                )
+            }),
+        );
+    }
+    Some(events)
+}
+
+fn pipe_row_columns(line: &str) -> Option<usize> {
+    // Do not reinterpret indented code or nested container continuation syntax.
+    if line.starts_with('\t') || line.bytes().take_while(|byte| *byte == b' ').count() > 3 {
+        return None;
+    }
+    let line = line.trim();
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return None;
+    }
+    let mut pipes = 0_usize;
+    let mut escaped = false;
+    let mut final_separator = false;
+    for byte in line.bytes() {
+        final_separator = byte == b'|' && !escaped;
+        if final_separator {
+            pipes += 1;
+        }
+        if byte == b'\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    (pipes >= 3 && final_separator).then_some(pipes.saturating_sub(1))
+}
+
+fn expand_headerless_tables<'a>(
+    events: &[(Event<'a>, Range<usize>)],
+    source: &str,
+    references: &RefDefs<'_>,
+) -> Option<Vec<(Event<'a>, Range<usize>)>> {
+    let mut expanded = None::<Vec<_>>;
+    let mut index = 0;
+    while index < events.len() {
+        let (event, range) = &events[index];
+        if matches!(event, Event::Start(Tag::Paragraph)) {
+            if let Some(replacement) = headerless_table_paragraph(source, range.clone(), references)
+            {
+                let end = events[index + 1..]
+                    .iter()
+                    .position(|(event, _)| matches!(event, Event::End(TagEnd::Paragraph)))
+                    .map(|relative| index + 1 + relative)?;
+                expanded
+                    .get_or_insert_with(|| events[..index].to_vec())
+                    .extend(replacement);
+                index = end + 1;
+                continue;
+            }
+        }
+        if let Some(expanded) = &mut expanded {
+            expanded.push(events[index].clone());
+        }
+        index += 1;
+    }
+    expanded
+}
+
 fn is_block_tag(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
@@ -712,6 +902,10 @@ fn is_block_tag(tag: &Tag<'_>) -> bool {
             | Tag::HtmlBlock
             | Tag::List(_)
             | Tag::Item
+            | Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
     )
 }
 
@@ -725,12 +919,69 @@ fn is_block_end(tag: TagEnd) -> bool {
             | TagEnd::HtmlBlock
             | TagEnd::List(_)
             | TagEnd::Item
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::TableCell
     )
 }
 
 #[derive(Clone, Copy, Debug)]
 struct ListState {
     next: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TableState {
+    widths: Vec<usize>,
+    alignments: Vec<Alignment>,
+    column: usize,
+    cell_width: usize,
+    trailing_padding: usize,
+    header: bool,
+    cell_start: usize,
+    layout: MarkdownTable,
+}
+
+impl TableState {
+    fn new(alignments: &[Alignment], events: &[(Event<'_>, Range<usize>)]) -> Self {
+        let mut widths = vec![0_usize; alignments.len()];
+        let mut column = 0_usize;
+        let mut cell_width = 0_usize;
+        for (event, _) in events {
+            match event {
+                Event::End(TagEnd::Table) => break,
+                Event::Start(Tag::TableHead | Tag::TableRow) => column = 0,
+                Event::Start(Tag::TableCell) => cell_width = 0,
+                Event::Text(text) | Event::Code(text) | Event::InlineHtml(text) => {
+                    cell_width = cell_width.saturating_add(text.width());
+                }
+                Event::End(TagEnd::TableCell) => {
+                    if let Some(width) = widths.get_mut(column) {
+                        // Limit synthetic padding even for hostile, extremely wide cells.
+                        *width = (*width).max(cell_width.min(256));
+                    }
+                    column = column.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        Self {
+            widths,
+            alignments: alignments.to_vec(),
+            column: 0,
+            cell_width: 0,
+            trailing_padding: 0,
+            header: false,
+            cell_start: 0,
+            layout: MarkdownTable {
+                spans: 0..0,
+                rows: Vec::new(),
+                alignments: alignments.to_vec(),
+                continuation_prefix: String::new(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -750,6 +1001,8 @@ struct BlockRenderer {
     line_has_content: bool,
     paragraph_inline: bool,
     truncated: bool,
+    table: Option<TableState>,
+    tables: Vec<MarkdownTable>,
 }
 
 fn collect_code_text(events: &[(Event<'_>, Range<usize>)]) -> (String, Vec<CodeTextSegment>) {
@@ -842,10 +1095,30 @@ impl BlockRenderer {
         base: usize,
         source: &str,
         syntax_budget: &mut SyntaxBuildBudget,
-    ) -> Vec<TranscriptSpan> {
+    ) -> Self {
         let mut index = 0_usize;
         while index < events.len() {
+            if self.truncated {
+                break;
+            }
             let (event, range) = &events[index];
+            if let Event::Start(Tag::Table(alignments)) = event {
+                self.table = Some(TableState::new(alignments, &events[index + 1..]));
+            }
+            if matches!(event, Event::Start(Tag::TableCell)) {
+                if let Some(table) = &mut self.table {
+                    table.cell_width = events[index + 1..]
+                        .iter()
+                        .take_while(|(event, _)| !matches!(event, Event::End(TagEnd::TableCell)))
+                        .filter_map(|(event, _)| match event {
+                            Event::Text(text) | Event::Code(text) | Event::InlineHtml(text) => {
+                                Some(text.width())
+                            }
+                            _ => None,
+                        })
+                        .sum();
+                }
+            }
             if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = event {
                 if let Some(end_index) = events[index + 1..]
                     .iter()
@@ -883,7 +1156,23 @@ impl BlockRenderer {
             self.render_event(event, range, base);
             index += 1;
         }
-        self.spans
+        if let Some(mut table) = self.table.take() {
+            // Keep the retained complete rows structured when a later cell exhausts
+            // the presentation budget; leave the truncation marker outside the grid.
+            table.layout.rows.retain(|row| {
+                row.len() == table.alignments.len()
+                    && row.iter().all(|cell| cell.end <= self.spans.len())
+            });
+            if !table.layout.rows.is_empty() {
+                table.layout.spans.end = self
+                    .spans
+                    .iter()
+                    .position(|span| span.text == PRESENTATION_TRUNCATED)
+                    .unwrap_or(self.spans.len());
+                self.tables.push(table.layout);
+            }
+        }
+        self
     }
 
     fn render_event(&mut self, event: &Event<'_>, range: &Range<usize>, base: usize) {
@@ -891,7 +1180,10 @@ impl BlockRenderer {
         let source_end = base + range.end;
         match event {
             Event::Start(tag) => self.start_tag(tag, source_offset),
-            Event::End(tag) => self.end_tag(*tag),
+            Event::End(tag) => {
+                self.end_table_tag(*tag, source_end);
+                self.end_tag(*tag);
+            }
             Event::Text(text) => self.emit_source(text, source_offset, source_end, self.style),
             Event::Code(text) => {
                 let mut style = self.style;
@@ -912,7 +1204,7 @@ impl BlockRenderer {
             Event::TaskListMarker(checked) => {
                 let mut style = self.style;
                 style.inline = InlineStyle::ListMarker;
-                self.emit(if *checked { "[x] " } else { "[ ] " }, source_offset, style);
+                self.emit(if *checked { "☑ " } else { "☐ " }, source_offset, style);
             }
             _ => {}
         }
@@ -971,6 +1263,55 @@ impl BlockRenderer {
             Tag::Emphasis => self.style.emphasis = true,
             Tag::Strong => self.style.strong = true,
             Tag::Strikethrough => self.style.struck = true,
+            Tag::TableHead | Tag::TableRow => {
+                if self.paragraph_inline {
+                    self.paragraph_inline = false;
+                } else if self.line_has_content {
+                    self.emit_break(source_offset);
+                }
+                if let Some(table) = &mut self.table {
+                    if table.layout.rows.is_empty() {
+                        table.layout.spans.start = self.spans.len();
+                        table.layout.continuation_prefix = self
+                            .spans
+                            .iter()
+                            .rev()
+                            .take_while(|span| !span.text.contains('\n'))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .map(|span| {
+                                if span.style.inline == InlineStyle::QuoteMarker {
+                                    span.text.clone()
+                                } else {
+                                    " ".repeat(span.text.width())
+                                }
+                            })
+                            .collect();
+                    }
+                    table.layout.rows.push(Vec::new());
+                    table.column = 0;
+                    table.header = matches!(tag, Tag::TableHead);
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = &mut self.table {
+                    self.style.strong |= table.header;
+                    let width = table.widths.get(table.column).copied().unwrap_or(0);
+                    let padding = width.saturating_sub(table.cell_width);
+                    let leading = match table.alignments.get(table.column) {
+                        Some(Alignment::Right) => padding,
+                        Some(Alignment::Center) => padding / 2,
+                        _ => 0,
+                    };
+                    table.trailing_padding = padding - leading;
+                    // Emit padding separately so source text keeps its original affinity.
+                    self.emit(&" ".repeat(leading), source_offset, self.style);
+                    if let Some(table) = &mut self.table {
+                        table.cell_start = self.spans.len();
+                    }
+                }
+            }
             Tag::Link { .. } | Tag::Image { .. } => self.style.inline = InlineStyle::Link,
             Tag::BlockQuote(_) => {
                 self.quote_depth = self.quote_depth.saturating_add(1);
@@ -1014,6 +1355,46 @@ impl BlockRenderer {
             _ => {}
         }
         self.style = self.style_stack.pop().unwrap_or_default();
+    }
+
+    fn end_table_tag(&mut self, tag: TagEnd, source_offset: usize) {
+        let Some(table) = &mut self.table else {
+            return;
+        };
+        let marker_style = TranscriptSpanStyle {
+            inline: InlineStyle::ListMarker,
+            ..self.style
+        };
+        match tag {
+            TagEnd::TableCell => {
+                if let Some(row) = table.layout.rows.last_mut() {
+                    row.push(table.cell_start..self.spans.len());
+                }
+                let trailing = table.trailing_padding;
+                table.column = table.column.saturating_add(1);
+                let last = table.column >= table.widths.len();
+                self.emit(&" ".repeat(trailing), source_offset, self.style);
+                if !last {
+                    self.emit(" │ ", source_offset, marker_style);
+                }
+            }
+            TagEnd::TableHead => {
+                let widths = table.widths.clone();
+                self.emit_break(source_offset);
+                for (column, width) in widths.iter().enumerate() {
+                    if column > 0 {
+                        self.emit("─┼─", source_offset, marker_style);
+                    }
+                    self.emit(&"─".repeat(*width), source_offset, marker_style);
+                }
+            }
+            TagEnd::Table => {
+                let mut table = self.table.take().expect("table is active");
+                table.layout.spans.end = self.spans.len();
+                self.tables.push(table.layout);
+            }
+            _ => {}
+        }
     }
 
     fn emit_break(&mut self, source_offset: usize) {
@@ -1140,15 +1521,22 @@ fn render_block(
     source_range: Range<usize>,
     base_offset: usize,
     source: &str,
+    references: &RefDefs<'_>,
     syntax_budget: &mut SyntaxBuildBudget,
 ) -> MarkdownBlock {
+    let expanded = expand_headerless_tables(events, source, references);
+    let events = expanded.as_deref().unwrap_or(events);
     let usage_before = syntax_budget.usage;
     let attempted_source_before = syntax_budget.attempted_source_bytes;
     let attempted_fragments_before = syntax_budget.attempted_fragments;
-    let spans = BlockRenderer::default().render(events, base_offset, source, syntax_budget);
+    let rendered = BlockRenderer::default().render(events, base_offset, source, syntax_budget);
     MarkdownBlock {
         source: source_range,
-        spans,
+        has_table: events
+            .iter()
+            .any(|(event, _)| matches!(event, Event::Start(Tag::Table(_)))),
+        spans: rendered.spans,
+        tables: rendered.tables,
         syntax_source_bytes: syntax_budget
             .usage
             .source_bytes
@@ -1204,6 +1592,219 @@ mod tests {
                 .flat_map(|block| &block.spans)
                 .any(|span| span.style.inline == InlineStyle::Code)
         );
+    }
+
+    #[test]
+    fn tables_preserve_inline_styles_alignment_and_source_affinity() {
+        let source = "| Name | Count | State |\n| :--- | ---: | :---: |\n| **界** | `12` | *ok* |\n| a\\|b | 1 | |\n\nAfter";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        assert_eq!(
+            build.document.plain_text(),
+            "Name │ Count │ State\n─────┼───────┼──────\n界   │    12 │  ok  \na|b  │     1 │      \nAfter"
+        );
+        let spans = &build.document.blocks[0].spans;
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "Name" && span.style.strong)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "界" && span.style.strong)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "ok" && span.style.emphasis)
+        );
+        let code = spans.iter().find(|span| span.text == "12").unwrap();
+        assert_eq!(code.style.inline, InlineStyle::Code);
+        assert_eq!(
+            &source[code.affinity.source_offset..code.affinity.source_end],
+            "`12`"
+        );
+        let mut output = 0;
+        for span in spans {
+            assert_eq!(span.affinity.output_offset as usize, output);
+            output += span.text.len();
+        }
+    }
+
+    #[test]
+    fn headerless_tool_rows_preserve_data_and_following_prose() {
+        let source = "| read | Reads text files, optionally selecting a range of lines. |\n | write | Creates or overwrites text files, creating parent directories when needed. |\n | edit | Makes precise, exact-text replacements without rewriting the whole file. |\nAdditional tools come through MCP integrations.";
+        let build = IncrementalMarkdownState::default().build(source, 17, 0, true);
+        let text = build.document.plain_text();
+        let lines = text.lines().map(str::trim_end).collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "read  │ Reads text files, optionally selecting a range of lines.",
+                "write │ Creates or overwrites text files, creating parent directories when needed.",
+                "edit  │ Makes precise, exact-text replacements without rewriting the whole file.",
+                "Additional tools come through MCP integrations.",
+            ]
+        );
+        let read = build
+            .document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .find(|span| span.text == "read")
+            .unwrap();
+        assert!(!read.style.strong);
+        assert_eq!(read.affinity.source_offset, 19);
+        assert_eq!(read.affinity.source_end, 23);
+    }
+
+    #[test]
+    fn headerless_tables_keep_inline_markup_references_and_crlf_offsets() {
+        let source = "Before\r\n\r\n| [manual][ref] | **read** |\r\n| `a\\|b` | file |\r\nMore [help][ref].\r\n\r\n[ref]: https://example.test\r\n";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let text = build.document.plain_text();
+        assert!(text.contains("manual │ read"), "{text}");
+        assert!(text.contains("a|b    │ file"), "{text}");
+        assert!(text.contains("\nMore help."), "{text}");
+        assert!(!text.contains("https://"));
+        let spans = build
+            .document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .collect::<Vec<_>>();
+        let code = spans.iter().find(|span| span.text == "a|b").unwrap();
+        assert_eq!(code.style.inline, InlineStyle::Code);
+        assert_eq!(
+            &source[code.affinity.source_offset..code.affinity.source_end],
+            "`a\\|b`"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "read" && span.style.strong)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "help" && span.style.inline == InlineStyle::Link)
+        );
+    }
+
+    #[test]
+    fn headerless_detection_leaves_code_single_rows_and_ragged_rows_literal() {
+        for source in [
+            "| read | description |",
+            "| read | description |\n| write | extra | description |",
+            "| one |\n| two |",
+            "cat file | grep read\ncat file | grep write",
+            "`| read | description |`\n`| write | description |`",
+            "```text\n| read | description |\n| write | description |\n```",
+            "    | read | description |\n    | write | description |",
+            "> | read | description |\n> | write | description |",
+        ] {
+            let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+            assert!(
+                build.document.blocks.iter().all(|block| !block.has_table),
+                "{source}"
+            );
+            assert!(build.document.plain_text().contains('|'), "{source}");
+        }
+        assert_eq!(pipe_row_columns(r"| a\|b | c |"), Some(2));
+        assert_eq!(pipe_row_columns(r"| a\\|b | c |"), Some(3));
+        assert_eq!(pipe_row_columns(r"| a | c \|"), None);
+    }
+
+    #[test]
+    fn headerless_tables_stream_and_settle_like_a_fresh_document() {
+        let source = "| read | text |\n| longer name | **more** |\nFollowing prose\n\nDone.";
+        let mut state = IncrementalMarkdownState::default();
+        for (end, _) in source.char_indices().skip(1) {
+            state.build(&source[..end], 0, 0, false);
+        }
+        let streamed = state.build(source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        assert_eq!(streamed.document, fresh.document);
+        assert!(fresh.document.plain_text().contains("longer name │ more"));
+    }
+
+    #[test]
+    fn headerless_table_expansion_respects_presentation_budgets() {
+        let source = format!(
+            "| {} | b |\n{}",
+            "wide".repeat(128),
+            "| a | b |\n".repeat(2_000)
+        );
+        let build = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+        assert!(build.document.plain_text().contains(PRESENTATION_TRUNCATED));
+        assert!(build.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+        for block in &build.document.blocks {
+            assert!(block.spans.len() <= MAX_PRESENTATION_FRAGMENTS);
+            assert!(
+                block
+                    .spans
+                    .iter()
+                    .map(|span| span.text.len())
+                    .sum::<usize>()
+                    <= MAX_PRESENTATION_OUTPUT_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn tables_and_task_lists_stream_to_the_same_completed_document() {
+        let source = "> | Item | Done |\n> | --- | --- |\n> | longer | yes |\n\n- [x] **Shipped**\n- [ ] Pending\n";
+        let mut state = IncrementalMarkdownState::default();
+        for (end, _) in source.char_indices().skip(1) {
+            state.build(&source[..end], 0, 0, false);
+        }
+        let streamed = state.build(source, 0, 0, true);
+        let fresh = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        assert_eq!(streamed.document, fresh.document);
+        let text = fresh.document.plain_text();
+        assert!(text.contains("│ Item   │ Done"), "{text}");
+        assert!(text.contains("│ longer │ yes"), "{text}");
+        assert!(text.contains("• ☑ Shipped\n• ☐ Pending"), "{text}");
+        assert!(!text.contains("[x]"));
+    }
+
+    #[test]
+    fn table_padding_respects_presentation_budgets() {
+        let mut source = format!("| {} | right |\n| --- | ---: |\n", "wide".repeat(128));
+        for _ in 0..2_000 {
+            source.push_str("| a | b |\n");
+        }
+        let build = IncrementalMarkdownState::default().build(&source, 0, 0, true);
+        assert!(build.document.plain_text().contains(PRESENTATION_TRUNCATED));
+        assert!(build.document.retained_bytes() <= MAX_PRESENTATION_RETAINED_BYTES);
+        for block in &build.document.blocks {
+            assert!(block.spans.len() <= MAX_PRESENTATION_FRAGMENTS);
+            assert!(
+                block
+                    .spans
+                    .iter()
+                    .map(|span| span.text.len())
+                    .sum::<usize>()
+                    <= MAX_PRESENTATION_OUTPUT_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn tables_inside_quotes_and_lists_keep_following_paragraphs_separate() {
+        for (source, expected) in [
+            (
+                "> | A | B |\n> | --- | --- |\n> | x | y |\n>\n> After",
+                "│ A │ B\n│ ──┼──\n│ x │ y\n│ After",
+            ),
+            (
+                "- | A | B |\n  | --- | --- |\n  | x | y |\n\n  After",
+                "• A │ B\n──┼──\nx │ y\nAfter",
+            ),
+        ] {
+            let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+            assert_eq!(build.document.plain_text(), expected);
+        }
     }
 
     #[test]
@@ -1611,6 +2212,8 @@ mod tests {
         ) -> Arc<MarkdownBlock> {
             Arc::new(MarkdownBlock {
                 source: start..start + 1,
+                has_table: false,
+                tables: Vec::new(),
                 spans: (0..fragments)
                     .map(|_| TranscriptSpan {
                         text: "x".repeat(fragment_bytes),

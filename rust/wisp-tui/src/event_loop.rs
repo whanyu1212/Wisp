@@ -1,9 +1,9 @@
 //! Bounded FIFO turns: transport outcomes, eight events, one input, one due paint.
 
 use crate::{
-    BackendEvent, ConnectionInfo, Error, FRAME_INTERVAL, Input, LiveUi, LoopControl, OverlayKind,
-    QueuedEvent, ReaderTermination, RenderedDecisionContext, UiAction, WriterMessage, is_ctrl_c,
-    is_escape, mouse, printable_char, receive_reader_outcome,
+    ACTIVITY_INTERVAL, BackendEvent, ConnectionInfo, Error, FRAME_INTERVAL, Input, LiveUi,
+    LoopControl, OverlayKind, QueuedEvent, ReaderTermination, RenderedDecisionContext, UiAction,
+    WriterMessage, is_ctrl_c, is_escape, mouse, printable_char, receive_reader_outcome,
 };
 use ratatui::{Terminal, backend::Backend};
 use tokio::{
@@ -285,6 +285,7 @@ async fn run_with_interrupts<B: Backend>(
     let mut eof = false;
     let mut events_open = true;
     let mut next_paint = Instant::now();
+    let mut next_activity = Instant::now() + ACTIVITY_INTERVAL;
     loop {
         poll_outcomes(&mut sources, &mut eof)?;
         let mut progressed = false;
@@ -363,11 +364,16 @@ async fn run_with_interrupts<B: Backend>(
                 return Ok(Exit::User);
             }
         }
-        if Instant::now() >= next_paint {
+        let now = Instant::now();
+        if now >= next_activity {
+            ui.advance_activity_animation();
+            next_activity = now + ACTIVITY_INTERVAL;
+        }
+        if now >= next_paint {
             if ui.render_pending {
                 ui.draw(terminal, connection)?;
             }
-            next_paint = Instant::now() + FRAME_INTERVAL;
+            next_paint = now + FRAME_INTERVAL;
         }
         if eof && sources.ready_event.is_none() && sources.events.is_empty() {
             return Ok(Exit::Eof);
@@ -401,7 +407,8 @@ async fn run_with_interrupts<B: Backend>(
             event = sources.events.recv(), if events_open => {
                 match event { Some(event) => *sources.ready_event = Some(event), None => events_open = false }
             }
-            _ = tokio::time::sleep_until(next_paint) => {}
+            _ = tokio::time::sleep_until(next_paint), if ui.render_pending => {}
+            _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() => {}
         }
     }
 }

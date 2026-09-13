@@ -371,7 +371,10 @@ def test_rust_tui_renders_bounded_tool_and_process_cards(tmp_path: Path) -> None
 import json
 import sys
 
-from wisp.events import RpcCommandFinished, RpcMessagesReported, ToolCallRequested, ToolResultReady
+from wisp.events import (
+    RpcCommandFinished, RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
+    RpcMessagesReported, ToolCallRequested, ToolResultReady,
+)
 
 
 def emit(event):
@@ -399,6 +402,13 @@ for line in sys.stdin:
     command_id = command["id"]
     if command_type == "get_session_stats":
         report_stats(command)
+    elif command_type == "get_connection_catalog":
+        emit(RpcConnectionCatalogReported(
+            command_id=command_id, catalog=RpcConnectionCatalogSnapshot(),
+        ))
+        emit(RpcCommandFinished(
+            command_id=command_id, command_type=command_type, ok=True,
+        ))
     elif command_type == "get_skills":
         report_skills(command)
     elif command_type == "get_messages":
@@ -512,6 +522,11 @@ for line in sys.stdin:
     status: int | None = None
     prompt_sent = False
     browse_sent = False
+    startup_redraw_offset: int | None = None
+    cards_redraw_offset: int | None = None
+    process_expand_offset: int | None = None
+    edit_select_offset: int | None = None
+    detail_requested = False
     detail_seen = False
     detail_resize_output_offset: int | None = None
     resized_detail_at: float | None = None
@@ -526,7 +541,15 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not prompt_sent and b"Type a prompt or / for commands." in output:
+            if startup_redraw_offset is None and b"3.0k" in output:
+                startup_redraw_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
+                continue
+            if (
+                not prompt_sent
+                and startup_redraw_offset is not None
+                and b"Type a prompt or / for commands." in output[startup_redraw_offset:]
+            ):
                 os.write(terminal_fd, b"tools\r")
                 prompt_sent = True
             cards_visible = all(
@@ -537,16 +560,36 @@ for line in sys.stdin:
                     b"demo.txt",
                 )
             )
+            if cards_visible and cards_redraw_offset is None:
+                cards_redraw_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                continue
             if (
-                cards_visible
+                cards_redraw_offset is not None
                 and not browse_sent
-                and output.rfind(b"idle") > output.rfind(b"working")
+                and b"idle" in output[cards_redraw_offset:]
+                and b"completed prompt did not report" in output[cards_redraw_offset:]
             ):
-                # F6 selects the last card (edit), BackTab+Right expands the
-                # process card so sanitized stdout is painted, Tab returns to
-                # edit, and Enter opens retained detail.
-                os.write(terminal_fd, b"\x1b[17~\x1b[Z\x1b[C\t\r")
+                # This stub has no persisted session. Its metadata warning marks
+                # post-prompt hydration as settled, so it cannot invalidate keys
+                # sent to inspect the live cards. Observe each changed selection.
+                process_expand_offset = len(output)
+                os.write(terminal_fd, b"\x1b[17~\x1b[Z\x1b[C")
                 browse_sent = True
+            if (
+                process_expand_offset is not None
+                and edit_select_offset is None
+                and b"safe\xef\xbf\xbd[2J" in output[process_expand_offset:]
+            ):
+                edit_select_offset = len(output)
+                os.write(terminal_fd, b"\t")
+            if (
+                edit_select_offset is not None
+                and not detail_requested
+                and b"demo.txt" in output[edit_select_offset:]
+            ):
+                os.write(terminal_fd, b"\r")
+                detail_requested = True
             if (
                 browse_sent
                 and not detail_seen
@@ -947,6 +990,7 @@ def test_rust_tui_session_workflows_over_pty(tmp_path: Path) -> None:
         + """
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1011,6 +1055,8 @@ for line in sys.stdin:
         log.write(json.dumps(command, sort_keys=True) + "\\n")
     command_type = command["type"]
     if command_type == "get_session_stats":
+        # Keep the initial welcome visible long enough to expose premature input.
+        time.sleep(0.1)
         report_stats(command, current_session)
     elif command_type == "get_connection_catalog":
         emit(RpcConnectionCatalogReported(
@@ -1167,6 +1213,7 @@ for line in sys.stdin:
     status: int | None = None
     phase = "startup"
     phase_started = time.monotonic()
+    context_redraw_offset: int | None = None
     deadline = time.monotonic() + 25
     try:
         while time.monotonic() < deadline:
@@ -1186,8 +1233,13 @@ for line in sys.stdin:
                     except json.JSONDecodeError:
                         continue
             command_types = [command["type"] for command in commands]
+            if context_redraw_offset is None and b"3.0k" in output:
+                context_redraw_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 111, 0, 0))
+                continue
             if (
                 phase == "startup"
+                and context_redraw_offset is not None
                 and command_types[:7]
                 == [
                     "get_messages",
@@ -1198,7 +1250,9 @@ for line in sys.stdin:
                     "get_skills",
                     "get_queue_state",
                 ]
-                and b"Type a prompt" in output
+                # A fresh welcome after the context result excludes the earlier
+                # editable frame while metadata hydration was still pending.
+                and b"Type a prompt" in output[context_redraw_offset:]
             ):
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"

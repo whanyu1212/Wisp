@@ -825,3 +825,57 @@ async fn input_waits_for_a_reserved_event_that_has_not_been_published() {
     );
     publisher.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+    let (events_tx, mut events) = mpsc::channel(16);
+    let (inputs_tx, mut inputs) = mpsc::channel(16);
+    let (_reader_tx, reader_rx) = oneshot::channel();
+    let (_writer_tx, writer_rx) = oneshot::channel();
+    let mut reader = Some(reader_rx);
+    let mut writer_outcome = Some(writer_rx);
+    let mut ready_event = None;
+    let stop = tokio::spawn(async move {
+        tokio::time::sleep(ACTIVITY_INTERVAL * 3).await;
+        inputs_tx
+            .send(Input::Error(std::io::Error::other("test stop")))
+            .await
+            .unwrap();
+    });
+
+    let result = run(
+        &mut ui,
+        &mut terminal,
+        &connection(),
+        Sources {
+            events: &mut events,
+            ready_event: &mut ready_event,
+            inputs: &mut inputs,
+            reader: &mut reader,
+            writer: &mut writer_outcome,
+        },
+        &writer,
+        8192,
+    )
+    .await;
+    drop(events_tx);
+    stop.await.unwrap();
+
+    assert!(matches!(result, Err(Error::Io(_))));
+    assert!(
+        ui.activity_frame >= 2,
+        "silent activity timer did not advance"
+    );
+    assert!(terminal.backend().to_string().contains("working"));
+
+    ui.state.view_status = ViewStatus::Idle;
+    ui.state.interaction_status = InteractionStatus::Idle;
+    ui.render_pending = false;
+    let stopped_frame = ui.activity_frame;
+    assert!(!ui.advance_activity_animation());
+    assert_eq!(ui.activity_frame, stopped_frame);
+    assert!(!ui.render_pending);
+}

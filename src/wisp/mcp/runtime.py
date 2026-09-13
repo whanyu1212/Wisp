@@ -1,4 +1,4 @@
-"""Runtime-owned MCP stdio connections and tool discovery."""
+"""Runtime-owned MCP connections and tool discovery."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
 from wisp.mcp.config import McpServerConfig
+from wisp.mcp.http_transport import bounded_http_client
 from wisp.mcp.tool import adapt_mcp_tool
 from wisp.mcp.transport import bounded_stdio_client
 from wisp.runtime.api import ExtensionAPI
@@ -147,7 +148,7 @@ class McpRuntime:
         return self._registered_tool_names.get(server_name, ())
 
     def is_connected(self, server_name: str) -> bool:
-        """Return whether one registered server's stdio transport remains live."""
+        """Return whether one registered server's transport remains live."""
 
         return bool(self.tool_names_for(server_name)) and (
             server_name not in self._disconnected_server_names
@@ -213,29 +214,31 @@ class McpRuntime:
             return
 
         release = anyio.Event()
+        reported = False
         stage: Literal["connect", "discover"] = "connect"
         try:
             async with AsyncExitStack() as stack:
-                errlog = stack.enter_context(Path(os.devnull).open("w", encoding="utf-8"))
-                parameters = StdioServerParameters(
-                    command=server.command,
-                    args=list(server.args),
-                    env=environment,
-                    cwd=_safe_server_cwd(),
-                )
-                async with asyncio.timeout(MCP_STARTUP_TIMEOUT_SECONDS):
-                    client = await stack.enter_async_context(
-                        Client(
-                            bounded_stdio_client(
-                                parameters,
-                                errlog=errlog,
-                                on_disconnect=lambda: self._disconnected_server_names.add(
-                                    server.name
-                                ),
-                            ),
-                            cache=None,
-                        )
+                if server.url is not None:
+                    transport = bounded_http_client(
+                        server.url,
+                        on_disconnect=lambda: self._disconnected_server_names.add(server.name),
                     )
+                else:
+                    assert server.command is not None
+                    errlog = stack.enter_context(Path(os.devnull).open("w", encoding="utf-8"))
+                    parameters = StdioServerParameters(
+                        command=server.command,
+                        args=list(server.args),
+                        env=environment,
+                        cwd=_safe_server_cwd(),
+                    )
+                    transport = bounded_stdio_client(
+                        parameters,
+                        errlog=errlog,
+                        on_disconnect=lambda: self._disconnected_server_names.add(server.name),
+                    )
+                async with asyncio.timeout(MCP_STARTUP_TIMEOUT_SECONDS):
+                    client = await stack.enter_async_context(Client(transport, cache=None))
                     stage = "discover"
                     definitions, definition_bytes = await _discover_tools(client)
                 await send.send(
@@ -247,17 +250,26 @@ class McpRuntime:
                         release=release,
                     )
                 )
+                reported = True
                 await send.aclose()
                 await release.wait()
-        except TimeoutError:
-            await send.send(_FailedServer(McpStartupDiagnostic(server.name, "timeout")))
-            await send.aclose()
-        except _DiscoveryRejected as exc:
-            await send.send(_FailedServer(McpStartupDiagnostic(server.name, exc.code)))
-            await send.aclose()
-        except Exception:  # noqa: BLE001 - transport and server details are untrusted
-            code: McpDiagnosticCode = "unavailable" if stage == "connect" else "invalid-discovery"
-            await send.send(_FailedServer(McpStartupDiagnostic(server.name, code)))
+        except Exception as exc:  # noqa: BLE001 - transport and server details are untrusted
+            if reported:
+                # A failed live connection is isolated. Explicit shutdown still reports
+                # cleanup failures through the runtime's redacted close error.
+                if release.is_set():
+                    self._close_error = exc
+            else:
+                code: McpDiagnosticCode
+                if isinstance(exc, TimeoutError):
+                    code = "timeout"
+                elif isinstance(exc, _DiscoveryRejected):
+                    code = exc.code
+                else:
+                    code = "unavailable" if stage == "connect" else "invalid-discovery"
+                await send.send(_FailedServer(McpStartupDiagnostic(server.name, code)))
+        finally:
+            self._disconnected_server_names.add(server.name)
             await send.aclose()
 
     def _register_results(

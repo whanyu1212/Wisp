@@ -175,6 +175,7 @@ class SessionRunSnapshot:
     entry_count: int
     active_leaf_id: str | None
     replay: SessionReplay
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,6 +771,7 @@ class JsonlSession:
                     entry_count=len(entries),
                     active_leaf_id=replay.active_leaf_id,
                     replay=replay,
+                    name=_session_name_from_entries(entries),
                 )
 
     def read_entry_snapshot(self) -> tuple[SessionEntry, ...]:

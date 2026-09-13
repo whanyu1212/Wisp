@@ -487,6 +487,15 @@ def test_mcp_settings_json_round_trip_uses_name_keyed_servers() -> None:
     assert schema["properties"]["mcp_servers"]["anyOf"][0]["type"] == "object"
 
 
+def test_mcp_http_settings_round_trip_preserves_transport() -> None:
+    settings = WispSettings.model_validate(
+        {"mcp_servers": {"docs": {"url": "https://example.com/mcp"}}}
+    )
+    serialized = settings.model_dump_json()
+    assert "command" not in json.loads(serialized)["mcp_servers"]["docs"]
+    assert WispSettings.model_validate_json(serialized) == settings
+
+
 def test_invalid_project_mcp_settings_do_not_discard_other_project_settings(
     tmp_path: Path,
     capsys: CaptureFixture[str],
