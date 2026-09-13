@@ -367,7 +367,9 @@ fn run_sample(
         .iter()
         .any(|row| row.anchor.entry_id == stream_entry);
     let rendered_stream = terminal.backend().to_string();
-    let screen_rendered = rendered_stream.contains("WISP")
+    let screen_rendered = (rendered_stream.contains("idle")
+        || rendered_stream.contains("working")
+        || rendered_stream.contains("ctx"))
         && rendered_stream.contains(&stream_marker(config.stream_updates - 1));
 
     let detail = ui
