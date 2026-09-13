@@ -13,12 +13,12 @@ use crate::transcript_view::{
     TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 #[cfg(test)]
 use ratatui::style::Color;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::QueueKind;
@@ -44,7 +44,7 @@ const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
 const COMPOSER_PREFIX: &str = "> ";
-const TRANSCRIPT_GUTTER: u16 = 1;
+const CONTENT_PADDING: u16 = 1;
 const ACTIVITY_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +74,7 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
                 .projection()
                 .line_count()
                 .saturating_add(queue_rows)
-                .saturating_add(1),
+                .saturating_add(if area.height >= 16 { 2 } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
@@ -87,6 +87,20 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
     } else {
         2
     }
+}
+
+fn conversation_surface(area: Rect) -> Rect {
+    area.inner(Margin {
+        horizontal: if area.width >= 60 { 2 } else { 1 },
+        vertical: 0,
+    })
+}
+
+fn content_area(area: Rect) -> Rect {
+    area.inner(Margin {
+        horizontal: CONTENT_PADDING,
+        vertical: 0,
+    })
 }
 
 fn decision_pending(state: &UiState) -> bool {
@@ -126,6 +140,7 @@ fn render_parked_decision(frame: &mut Frame<'_>, area: Rect, state: &UiState, pa
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
+                .style(palette.composer())
                 .border_style(Style::default().fg(palette.warning)),
         ),
         area,
@@ -238,15 +253,25 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
+    let area = conversation_surface(area);
+
     if decision_pending(state) && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(1)])
             .split(area);
-        render_composer(frame, chunks[0], state, editor, composer_focused, palette);
+        render_composer(
+            frame,
+            chunks[0],
+            state,
+            editor,
+            composer_focused,
+            false,
+            palette,
+        );
         render_footer(
             frame,
-            chunks[1],
+            content_area(chunks[1]),
             state,
             viewport,
             notice,
@@ -286,10 +311,18 @@ pub fn render_interactive(
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
-    let editor = render_composer(frame, chunks[2], state, editor, composer_focused, palette);
+    let editor = render_composer(
+        frame,
+        chunks[2],
+        state,
+        editor,
+        composer_focused,
+        area.height >= 16,
+        palette,
+    );
     render_footer(
         frame,
-        chunks[3],
+        content_area(chunks[3]),
         state,
         viewport,
         notice,
@@ -488,7 +521,8 @@ fn render_transcript(
         width: area.width,
         height: area.height.saturating_sub(parked.height),
     });
-    let content_width = usize::from(conversation.width.saturating_sub(TRANSCRIPT_GUTTER)).max(1);
+    let content = content_area(conversation);
+    let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(conversation.height).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut sticky = sticky_user_rows(state, viewport, row_cache, content_width);
@@ -500,6 +534,13 @@ fn render_transcript(
     // Reserve a row for the active assistant's identity and one for its tail.
     // A compact user projection may otherwise consume the whole viewport.
     sticky.truncate(visible_lines.saturating_sub(2));
+    if !sticky.is_empty() && visible_lines >= sticky.len() + 3 {
+        let mut spacer = sticky.last().expect("nonempty user projection").clone();
+        spacer.kind = TranscriptRowKind::Spacer;
+        spacer.anchor.position = RowPosition::Spacer;
+        spacer.spans.clear();
+        sticky.push(spacer);
+    }
     let mut budget = visible_lines.saturating_sub(sticky.len());
     if rows.len() > budget {
         rows.drain(..rows.len() - budget);
@@ -545,83 +586,108 @@ fn render_transcript(
             })
             .map(|row| row.anchor)
     });
-    let lines = if rows.is_empty() {
-        empty_transcript_lines(
+    if rows.is_empty() {
+        let lines = empty_transcript_lines(
             state,
             connection,
             palette,
             visible_lines,
             content_width,
             bindings,
-        )
+        );
+        frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
-        rows.into_iter()
-            .map(|row| {
-                let selected = selected_row == Some(row.anchor);
-                let mut style = match row.tone {
-                    TranscriptRowTone::Default => Style::default(),
-                    TranscriptRowTone::User => Style::default()
-                        .fg(palette.success)
-                        .add_modifier(Modifier::BOLD),
-                    TranscriptRowTone::Assistant if row.kind == TranscriptRowKind::Header => {
-                        Style::default()
-                            .fg(palette.primary)
-                            .add_modifier(Modifier::BOLD)
-                    }
-                    TranscriptRowTone::Assistant => Style::default().fg(palette.foreground),
-                    TranscriptRowTone::Muted => Style::default().fg(palette.muted),
-                    TranscriptRowTone::Pending => Style::default()
-                        .fg(palette.primary)
-                        .add_modifier(Modifier::BOLD),
-                    TranscriptRowTone::Success => Style::default()
-                        .fg(palette.success)
-                        .add_modifier(Modifier::BOLD),
-                    TranscriptRowTone::Warning => Style::default()
-                        .fg(palette.warning)
-                        .add_modifier(Modifier::BOLD),
-                    TranscriptRowTone::Error => Style::default()
-                        .fg(palette.error)
-                        .add_modifier(Modifier::BOLD),
-                };
-                if selected {
-                    style = style.patch(palette.selection());
-                }
-                if row.spans.len() == 1 {
-                    let span = row.spans.into_iter().next().expect("one span exists");
-                    Line::styled(span.text, markdown_span_style(style, span.style, palette))
-                } else {
-                    let spans = if row.spans.is_empty() {
-                        vec![Span::styled(String::new(), style)]
-                    } else {
-                        row.spans
-                            .into_iter()
-                            .map(|span| {
-                                Span::styled(
-                                    span.text,
-                                    markdown_span_style(style, span.style, palette),
-                                )
-                            })
-                            .collect()
-                    };
-                    Line::from(spans)
-                }
-            })
-            .collect()
-    };
-    let gutter = Span::raw(" ".repeat(usize::from(TRANSCRIPT_GUTTER)));
-    let padded = lines
-        .into_iter()
-        .map(|line| {
-            let style = line.style;
-            let mut spans = vec![gutter.clone()];
-            spans.extend(line.spans);
-            Line::from(spans).style(style)
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(Text::from(padded)), conversation);
+        for (offset, row) in rows.into_iter().enumerate() {
+            let area = Rect::new(
+                conversation.x,
+                conversation.y + offset as u16,
+                conversation.width,
+                1,
+            );
+            render_transcript_row(frame, area, row, selected_row, palette);
+        }
+    }
     if let Some(parked) = parked_area {
         render_parked_decision(frame, parked, state, palette);
     }
+}
+
+fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
+    let color = match tone {
+        TranscriptRowTone::Pending => palette.primary,
+        TranscriptRowTone::Success => palette.success,
+        TranscriptRowTone::Warning => palette.warning,
+        TranscriptRowTone::Error => palette.error,
+        _ => palette.muted,
+    };
+    Style::default().fg(color)
+}
+
+fn render_transcript_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    row: TranscriptRow,
+    selected_row: Option<RowAnchor>,
+    palette: Palette,
+) {
+    let selected = selected_row == Some(row.anchor);
+    let user = row.role == TranscriptRole::User && row.kind != TranscriptRowKind::Spacer;
+    let code = row
+        .spans
+        .iter()
+        .any(|span| span.style.block == BlockStyle::Code);
+    let mut base = if user {
+        palette.user_text()
+    } else {
+        palette.base()
+    };
+    if selected {
+        base = base.patch(palette.selection());
+    }
+    frame.render_widget(Block::default().style(base), area);
+    let content = content_area(area);
+    if code && !selected {
+        frame.render_widget(Block::default().style(palette.composer()), content);
+    }
+    let style = match row.kind {
+        TranscriptRowKind::Header
+            if matches!(row.role, TranscriptRole::User | TranscriptRole::Assistant) =>
+        {
+            base.patch(palette.speaker_label())
+        }
+        TranscriptRowKind::CardAction
+        | TranscriptRowKind::CardGroup
+        | TranscriptRowKind::Thought => base.fg(palette.muted),
+        _ if user => base,
+        _ if matches!(
+            row.tone,
+            TranscriptRowTone::Pending
+                | TranscriptRowTone::Success
+                | TranscriptRowTone::Warning
+                | TranscriptRowTone::Error
+        ) =>
+        {
+            base.patch(tone_style(row.tone, palette))
+        }
+        _ if row.tone == TranscriptRowTone::Muted => base.fg(palette.muted),
+        _ => base,
+    };
+    let spans = row
+        .spans
+        .into_iter()
+        .map(|span| {
+            let mut semantic = markdown_span_style(style, span.style, palette);
+            if span.style.inline == InlineStyle::ToolStatus {
+                semantic = semantic.patch(tone_style(row.tone, palette));
+            }
+            // Selection is the last style layer, including syntax and inline-code backgrounds.
+            if selected {
+                semantic = semantic.patch(palette.selection());
+            }
+            Span::styled(span.text, semantic)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
 
 fn selected_detail<'a>(
@@ -762,6 +828,9 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         InlineStyle::Link => style.fg(palette.primary).add_modifier(Modifier::UNDERLINED),
         InlineStyle::QuoteMarker => style.fg(palette.muted),
         InlineStyle::ListMarker => style.fg(palette.primary),
+        InlineStyle::TableBorder => style.fg(palette.muted),
+        InlineStyle::ToolName => style.patch(palette.tool_name()),
+        InlineStyle::ToolStatus => style,
     };
     style = match semantic.syntax {
         SyntaxClass::Plain => style,
@@ -793,6 +862,7 @@ fn render_composer(
     state: &UiState,
     editor: &PromptEditor,
     focused: bool,
+    padded: bool,
     palette: Palette,
 ) -> Option<mouse::Editor> {
     let queued_total = state
@@ -803,7 +873,7 @@ fn render_composer(
             Style::default().fg(palette.warning)
         }
         ViewStatus::Error => Style::default().fg(palette.error),
-        _ => palette.border(),
+        _ => Style::default().fg(palette.accent),
     };
     let full_box = inner_composer_shows_decision(area, state);
     let block = if full_box {
@@ -818,10 +888,21 @@ fn render_composer(
             .border_style(border_style)
     } else {
         Block::default()
-            .borders(Borders::TOP)
+            .borders(Borders::LEFT)
+            .border_type(BorderType::Thick)
             .border_style(border_style)
-    };
-    let inner = block.inner(area);
+    }
+    .style(palette.composer());
+    let mut inner = block.inner(area);
+    if !full_box {
+        inner.width = inner.width.saturating_sub(CONTENT_PADDING);
+        if editable(state) && padded && inner.height >= 3 {
+            inner = inner.inner(Margin {
+                horizontal: 0,
+                vertical: 1,
+            });
+        }
+    }
     if editable(state) {
         frame.render_widget(block, area);
         let preview_rows = if state.active_prompt_editable() {
@@ -1251,7 +1332,12 @@ fn empty_transcript_lines(
             ("Browse commands", "/"),
             ("Mention a project file", "@"),
         ]);
-        let full_height = panel.len().saturating_add(1).saturating_add(actions.len());
+        let mut full_height = panel.len().saturating_add(1).saturating_add(actions.len());
+        if height + 1 == full_height {
+            // Give the new composer padding its row without hiding connection guidance.
+            panel.remove(EMPTY_TRANSCRIPT_WORDMARK.len());
+            full_height -= 1;
+        }
         if height >= full_height {
             panel.push(Line::default());
             panel.extend(
@@ -1345,10 +1431,12 @@ fn render_footer(
     bindings: &Bindings,
 ) {
     let width = usize::from(area.width);
+    // Keep the established status priorities when outer presentation margins grow.
+    let terminal_width = usize::from(frame.area().width);
     let notice = notice.or(state.context.compaction_notice.as_deref());
     let status_budget = if notice.is_some() {
-        if width >= 80 {
-            (width / 2).max(24)
+        if terminal_width >= 80 {
+            (terminal_width / 2).max(24)
         } else if !state.configuration_active()
             && (state.view_status == ViewStatus::Running
                 || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
@@ -1358,7 +1446,7 @@ fn render_footer(
             0
         }
     } else {
-        (width / 2).max(19)
+        (terminal_width / 2).max(19)
     };
     let leading = footer_leading_parts(state, activity_frame);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
@@ -1388,18 +1476,37 @@ fn render_footer(
             Style::default().fg(palette.muted),
         ),
     };
-    let line = if rest.is_empty() {
-        Line::from(Span::styled(
+    let label = status_label(state, activity_frame);
+    let mut spans = Vec::new();
+    if let Some(tail) = status_line.strip_prefix(&label) {
+        let active = matches!(
+            state.view_status,
+            ViewStatus::Running
+                | ViewStatus::WaitingForApproval
+                | ViewStatus::WaitingForTrust
+                | ViewStatus::Error
+        ) || state.interaction_status == crate::reducer::InteractionStatus::Compacting;
+        let color = match state.view_status {
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => palette.warning,
+            ViewStatus::Error => palette.error,
+            _ if active => palette.primary,
+            _ => palette.muted,
+        };
+        spans.push(Span::styled(label, Style::default().fg(color)));
+        spans.push(Span::styled(
+            tail.to_owned(),
+            Style::default().fg(palette.muted),
+        ));
+    } else {
+        spans.push(Span::styled(
             status_line,
             Style::default().fg(palette.muted),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled(status_line, Style::default().fg(palette.muted)),
-            Span::raw("  "),
-            Span::styled(rest, rest_style),
-        ])
-    };
+        ));
+    }
+    if !rest.is_empty() {
+        spans.extend([Span::raw("  "), Span::styled(rest, rest_style)]);
+    }
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -1806,7 +1913,7 @@ mod tests {
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
         assert!(rendered.contains("/ commands"));
-        assert!(rendered.contains("Ctrl+G help"));
+        // Narrow footers drop optional hints; help remains available on Ctrl+G.
         assert!(!rendered.contains("rpc v"));
         assert!(!rendered.contains("events v"));
         assert!(!rendered.contains("backend "));
@@ -2103,7 +2210,7 @@ mod tests {
                     Some("Prompt history is empty"),
                 );
                 assert!(rendered.contains(label), "{rendered}");
-                assert!(rendered.contains("Prompt history"), "{rendered}");
+                assert!(rendered.contains("Prompt hist"), "{rendered}");
             }
         }
     }
@@ -2558,7 +2665,11 @@ mod tests {
         );
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
-        assert_eq!(pending_fg, Palette::default().primary);
+        assert_eq!(pending_fg, Palette::default().accent);
+        assert_eq!(
+            style_at_text(pending.backend(), "•").unwrap().0,
+            Palette::default().primary
+        );
         assert!(pending_modifiers.contains(Modifier::BOLD));
 
         state
@@ -2572,7 +2683,15 @@ mod tests {
         assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, _, success_modifiers) =
             style_at_text(complete.backend(), "Read  README.md").unwrap();
-        assert_eq!(success_fg, Palette::default().success);
+        assert_eq!(success_fg, Palette::default().accent);
+        assert_eq!(
+            style_at_text(complete.backend(), "•").unwrap().0,
+            Palette::default().success
+        );
+        assert_eq!(
+            style_at_text(complete.backend(), "README.md").unwrap().0,
+            Palette::default().muted
+        );
         assert!(success_modifiers.contains(Modifier::BOLD));
     }
 
@@ -2682,6 +2801,55 @@ mod tests {
         let (deleted_fg, _, _) = style_at_text(terminal.backend(), "- old�[2J").unwrap();
         assert_eq!(added_fg, Palette::default().addition);
         assert_eq!(deleted_fg, Palette::default().deletion);
+    }
+
+    #[test]
+    fn selection_overrides_syntax_and_inline_backgrounds_without_losing_modifiers() {
+        for no_color in [false, true] {
+            let palette = crate::theme::default_theme().palette(no_color);
+            let mut terminal = Terminal::new(TestBackend::new(30, 2)).unwrap();
+            let anchor = RowAnchor {
+                entry_id: TranscriptEntryId::from_raw(1),
+                position: RowPosition::Content(0),
+            };
+            let row = TranscriptRow {
+                anchor,
+                role: TranscriptRole::Tool,
+                kind: TranscriptRowKind::CardDetail,
+                tone: TranscriptRowTone::Default,
+                spans: vec![crate::markdown::TranscriptSpan {
+                    text: "selected code".into(),
+                    affinity: crate::markdown::SourceAffinity::default(),
+                    style: TranscriptSpanStyle {
+                        block: BlockStyle::Code,
+                        inline: InlineStyle::Code,
+                        syntax: SyntaxClass::Keyword,
+                        emphasis: true,
+                        ..TranscriptSpanStyle::default()
+                    },
+                }],
+            };
+            terminal
+                .draw(|frame| {
+                    render_transcript_row(
+                        frame,
+                        Rect::new(0, 0, 30, 1),
+                        row.clone(),
+                        Some(anchor),
+                        palette,
+                    )
+                })
+                .unwrap();
+            let cell = &terminal.backend().buffer()[(1, 0)];
+            assert!(cell.modifier.contains(Modifier::BOLD | Modifier::ITALIC));
+            if no_color {
+                assert!(cell.modifier.contains(Modifier::REVERSED));
+            } else {
+                assert_eq!(cell.fg, palette.background);
+                assert_eq!(cell.bg, palette.primary);
+                assert_eq!(terminal.backend().buffer()[(29, 0)].bg, palette.primary);
+            }
+        }
     }
 
     #[test]

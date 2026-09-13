@@ -828,10 +828,14 @@ for line in sys.stdin:
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"steer-via-enter\r")
                 phase = "steer sent"
+            elif phase == "steer sent" and "steer" in command_types:
+                # Queue previews can reuse cells from the submitted draft. Request
+                # a complete frame before checking text in differential PTY output.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                phase = "steer frame"
             elif (
-                phase == "steer sent"
-                and "steer" in command_types
-                and b"steer: steer-via-enter" in output[phase_output_offset:]
+                phase == "steer frame" and b"steer: steer-via-enter" in output[phase_output_offset:]
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"follow-up-via-alt-enter")

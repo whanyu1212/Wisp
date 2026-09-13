@@ -59,7 +59,10 @@ wisp --mode tui --tui-renderer rust
 WISP_TUI_RENDERER=rust wisp
 ```
 
-The transcript is an unboxed document. The composer is a `>` prompt under a single rule. The footer
+The conversation uses the terminal width with modest side margins. User turns have a subtle
+background; assistant prose and collapsed tool rows stay open on the transcript background.
+The composer is a filled writing surface with an accent rail and a `>` prompt. Its vertical padding
+collapses on short terminals. The footer
 holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, the selected session
 when one is persisted, and the keys for the current workflow. Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
 shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
@@ -67,12 +70,12 @@ and points at `/resume`, `/connect`, and `@` when there is room. It collapses to
 short or narrow terminals.
 
 Assistant replies render Markdown during streaming and when loading session history: headings,
-emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting, and tables with
+emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
+backgrounds, and tables with
 aligned columns, borders, and bold headers. Descriptions wrap at word boundaries inside their cells;
 very narrow layouts stack cells within each row. Ordinary prose also wraps at word boundaries.
 Very large unfinished blocks temporarily display as plain text and are formatted when the reply
-completes. User prompts
-and tool output retain their literal text.
+completes. User prompts and tool output retain their literal text.
 
 Replies that omit a table header are also supported: a paragraph beginning with at least two
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.

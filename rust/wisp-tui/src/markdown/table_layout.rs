@@ -222,7 +222,7 @@ fn marker(output: &mut BlockRenderer, text: &str, source: usize) {
         text,
         source,
         TranscriptSpanStyle {
-            inline: InlineStyle::ListMarker,
+            inline: InlineStyle::TableBorder,
             ..TranscriptSpanStyle::default()
         },
     );

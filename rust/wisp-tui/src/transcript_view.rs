@@ -271,6 +271,7 @@ struct ProjectedRow {
 #[derive(Debug)]
 struct CardProjection {
     action: String,
+    action_label_end: usize,
     detail: String,
     detail_base: usize,
     omission: Option<String>,
@@ -1065,6 +1066,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
+                    projection.action_label_end,
                     next,
                 ))
             }
@@ -1094,6 +1096,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardDetail,
                     TranscriptRowTone::Default,
+                    0,
                     next,
                 ))
             }
@@ -1120,6 +1123,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardOmission,
                     TranscriptRowTone::Warning,
+                    0,
                     next,
                 ))
             }
@@ -1139,6 +1143,7 @@ impl TranscriptRowCache {
         width: usize,
         kind: TranscriptRowKind,
         tone: TranscriptRowTone,
+        label_end: usize,
         after_section: Option<RowAnchor>,
     ) -> ProjectedRow {
         let relative_start = absolute_start.saturating_sub(base_offset).min(source.len());
@@ -1157,6 +1162,7 @@ impl TranscriptRowCache {
         }
 
         let mut text = String::new();
+        let mut action_spans: Vec<TranscriptSpan> = Vec::new();
         let mut column = 0_usize;
         let mut next_offset = None;
         let mut preserve_terminal_break = false;
@@ -1174,6 +1180,35 @@ impl TranscriptRowCache {
             if !text.is_empty() && column.saturating_add(grapheme_width) > width {
                 next_offset = Some(relative);
                 break;
+            }
+            if kind == TranscriptRowKind::CardAction {
+                let inline = if relative < "• ".len() {
+                    crate::markdown::InlineStyle::ToolStatus
+                } else if relative < label_end {
+                    crate::markdown::InlineStyle::ToolName
+                } else {
+                    crate::markdown::InlineStyle::Normal
+                };
+                if let Some(last) = action_spans
+                    .last_mut()
+                    .filter(|last| last.style.inline == inline)
+                {
+                    last.text.push_str(&safe);
+                    last.affinity.source_end = relative + grapheme.len();
+                } else {
+                    action_spans.push(TranscriptSpan {
+                        text: safe.clone(),
+                        style: TranscriptSpanStyle {
+                            inline,
+                            ..TranscriptSpanStyle::default()
+                        },
+                        affinity: SourceAffinity {
+                            source_offset: relative,
+                            source_end: relative + grapheme.len(),
+                            output_offset: 0,
+                        },
+                    });
+                }
             }
             text.push_str(&safe);
             column = column.saturating_add(grapheme_width);
@@ -1209,6 +1244,9 @@ impl TranscriptRowCache {
             span.affinity.source_end = base_offset.saturating_add(consumed_end);
         }
         row.tone = tone;
+        if !action_spans.is_empty() {
+            row.spans = action_spans;
+        }
         ProjectedRow { row, next }
     }
 
@@ -1484,6 +1522,15 @@ impl TranscriptRowCache {
                     let absolute_offset =
                         block_start + span_start + relative_start + relative_offset;
                     if is_line_break(grapheme) {
+                        // An empty fenced-code line still owns a painted code surface.
+                        if spans.is_empty() && span.style.block == crate::markdown::BlockStyle::Code
+                        {
+                            spans.push(TranscriptSpan {
+                                text: String::new(),
+                                style: span.style,
+                                affinity: span.affinity,
+                            });
+                        }
                         cursor = absolute_offset + grapheme.len();
                         next_offset = Some(cursor);
                         ended_with_break = true;
@@ -1492,7 +1539,11 @@ impl TranscriptRowCache {
                     let safe = sanitize_grapheme(grapheme, column);
                     let grapheme_width = UnicodeWidthStr::width(safe.as_str());
                     let space = span.style.block != crate::markdown::BlockStyle::Code
-                        && span.style.inline != crate::markdown::InlineStyle::ListMarker
+                        && !matches!(
+                            span.style.inline,
+                            crate::markdown::InlineStyle::ListMarker
+                                | crate::markdown::InlineStyle::TableBorder
+                        )
                         && grapheme.chars().all(char::is_whitespace);
                     if space && column > 0 {
                         if previous_space {
@@ -1921,6 +1972,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 return Some(CardProjection {
                     action: format!("• {}", card.action()),
+                    action_label_end: "• ".len() + card.action_label().len(),
                     detail: structured_card_preview(detail),
                     detail_base: 0,
                     omission: None,
@@ -1950,6 +2002,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
             Some(CardProjection {
                 action: format!("• {}", card.action()),
+                action_label_end: "• ".len() + card.action_label().len(),
                 detail,
                 detail_base: if tail_preview {
                     usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
@@ -1969,6 +2022,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let omission = card_omission(omitted, card.backend_truncated, true);
             Some(CardProjection {
                 action: format!("• {}", card.action()),
+                action_label_end: "• ".len() + card.action_label().len(),
                 detail: preview.text,
                 detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
                 omission,
@@ -2828,6 +2882,60 @@ fn terminal_control_character(character: char) -> bool {
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    #[test]
+    fn styled_tool_actions_preserve_source_ranges_across_unicode_and_tab_wrapping() {
+        let mut transcript = Transcript::default();
+        let id = transcript.append_prompt("fixture".into());
+        let entry = transcript.entry(id).unwrap();
+        let source = "• Read  界\tpath";
+        for width in [8, 11] {
+            let mut cache = TranscriptRowCache::default();
+            let mut offset = 0;
+            let mut covered = 0;
+            loop {
+                let projected = cache.build_card_text_row(
+                    entry,
+                    RowAnchor {
+                        entry_id: id,
+                        position: RowPosition::Card(CardPosition {
+                            section: CardSection::Action,
+                            absolute_byte_offset: offset,
+                        }),
+                    },
+                    CardSection::Action,
+                    source,
+                    0,
+                    offset,
+                    width,
+                    TranscriptRowKind::CardAction,
+                    TranscriptRowTone::Success,
+                    "• Read".len(),
+                    None,
+                );
+                for span in &projected.row.spans {
+                    assert_eq!(span.affinity.source_offset, covered);
+                    assert!(span.affinity.source_end > span.affinity.source_offset);
+                    covered = span.affinity.source_end;
+                    if span.style.inline == crate::markdown::InlineStyle::ToolName {
+                        assert_eq!(
+                            &source[span.affinity.source_offset..span.affinity.source_end],
+                            span.text
+                        );
+                    }
+                }
+                let Some(RowAnchor {
+                    position: RowPosition::Card(next),
+                    ..
+                }) = projected.next
+                else {
+                    break;
+                };
+                offset = next.absolute_byte_offset;
+            }
+            assert_eq!(covered, source.len());
+        }
+    }
 
     fn numbered_lines(prefix: &str, count: usize) -> String {
         let mut content = String::new();

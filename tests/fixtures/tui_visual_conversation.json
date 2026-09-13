@@ -1,0 +1,8 @@
+{
+  "prompt": "Review the startup flow and explain the changes.",
+  "reply": "## Startup review\n\nThe startup path is **ready**. Configuration loads before the first prompt.\n\n```rust\nlet ready = config.is_valid();\n\nstart_session(ready);\n```\n\n| Area | Result |\n| --- | --- |\n| Startup | Configuration is ready before input. |\n| MCP | Tools connect through the shared runtime. |\n\n> Existing sessions keep their history.\n\n- [x] Startup checked\n- [x] Tests passed",
+  "tool_name": "bash",
+  "tool_arguments": {"command": "cargo test -p wisp-tui"},
+  "tool_output": "running 12 tests\n12 passed; 0 failed",
+  "draft": "Explain the remaining edge cases."
+}

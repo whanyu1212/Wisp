@@ -53,6 +53,26 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
+    pub fn user_text(self) -> Style {
+        self.base().bg(self.panel)
+    }
+
+    pub fn speaker_label(self) -> Style {
+        Style::default()
+            .fg(self.primary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn tool_name(self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn composer(self) -> Style {
+        self.base().bg(self.surface)
+    }
+
     pub fn base(self) -> Style {
         Style::default().fg(self.foreground).bg(self.background)
     }

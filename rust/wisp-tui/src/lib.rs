@@ -49,6 +49,8 @@ pub mod transcript_benchmark;
 mod transcript_view;
 mod transport;
 mod ui;
+#[cfg(test)]
+mod visual_tests;
 
 use bytes::Bytes;
 use clap::Parser;
