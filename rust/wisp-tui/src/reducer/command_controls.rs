@@ -21,6 +21,7 @@ impl UiState {
         self.mode_change.is_some()
             || self.model_configuration_active()
             || self.context.configuring()
+            || self.permissions.loading()
     }
 
     pub(crate) fn command_catalog_loading(&self) -> bool {

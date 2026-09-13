@@ -1397,9 +1397,16 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            let Some((kind, area)) = overlay.zip(ui::overlay_area(frame.area())) else {
+            let Some((kind, mut area)) = overlay.zip(ui::overlay_area(frame.area())) else {
                 return;
             };
+            if kind == OverlayKind::Discovery
+                && matches!(self.discovery_view, Some(DiscoveryView::Permissions { .. }))
+            {
+                let height = area.height.min(11);
+                area.y += (area.height - height) / 2;
+                area.height = height;
+            }
             ui::clear_overlay(frame, area, palette);
             painted.popup = Some(area);
             painted.rows = match kind {
@@ -2073,6 +2080,14 @@ impl LiveUi {
                 self.editor.clear();
                 self.render_pending = true;
                 self.dispatch(UiAction::LoadContext, writer, limit).await
+            }
+            Command::Permissions(mode) => {
+                self.discovery_view = Some(DiscoveryView::permissions());
+                self.editor.clear();
+                self.notice = None;
+                self.render_pending = true;
+                self.dispatch(UiAction::Permissions(mode), writer, limit)
+                    .await
             }
             Command::Skills | Command::Mcp => {
                 let (view, action) = if matches!(command, Command::Skills) {
@@ -2933,8 +2948,11 @@ impl LiveUi {
                     OverlayKind::Model
                     | OverlayKind::Theme
                     | OverlayKind::Session
-                    | OverlayKind::PromptHistory
-                    | OverlayKind::Discovery => key.code == KeyCode::Enter,
+                    | OverlayKind::PromptHistory => key.code == KeyCode::Enter,
+                    OverlayKind::Discovery => self
+                        .discovery_view
+                        .as_ref()
+                        .is_some_and(|view| view.key_activates(*key)),
                     _ => false,
                 };
                 if activates && self.rendered_overlay != Some(kind) {
@@ -3157,7 +3175,7 @@ impl LiveUi {
                     None if key_can_edit(key) => {
                         if !self.unsendable_current_response() {
                             self.notice = Some(
-                                "Approve with y once, t tool, a all, or deny with n/Esc.".into(),
+                                "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into(),
                             );
                         }
                         self.render_pending = true;
@@ -3369,16 +3387,16 @@ fn printable_char(key: KeyEvent) -> Option<char> {
 fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option<UiAction> {
     let pending = pending?;
     let approved = match printable_char(key)?.to_ascii_lowercase() {
-        'y' => true,
-        't' => true,
-        'a' => true,
-        'n' => false,
+        '1' | 'y' => true,
+        '2' | 't' => true,
+        '3' | 'a' => true,
+        '4' | 'n' => false,
         _ => return None,
     };
     let scope = match printable_char(key)?.to_ascii_lowercase() {
-        't' => Some(ApprovalScope::ToolSession),
-        'a' => Some(ApprovalScope::AllSession),
-        'y' => Some(ApprovalScope::Once),
+        '2' | 't' => Some(ApprovalScope::ToolSession),
+        '3' | 'a' => Some(ApprovalScope::AllProject),
+        '1' | 'y' => Some(ApprovalScope::Once),
         _ => None,
     };
     Some(UiAction::ApprovalDecision {
@@ -3955,10 +3973,10 @@ mod tests {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": 6,
-            "event_schema_version": 37,
-            "min_protocol_version": 6,
-            "max_protocol_version": 6,
+            "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
+            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
+            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })
@@ -4257,7 +4275,7 @@ mod tests {
     fn shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -4269,7 +4287,7 @@ mod tests {
     fn shutdown_started_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.started",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown"
@@ -4279,7 +4297,7 @@ mod tests {
     fn failed_shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -4357,7 +4375,7 @@ mod tests {
         ));
         let event = json!({
             "type": "tool.result",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-large",
             "name": "bash",
@@ -5558,7 +5576,7 @@ mod tests {
             .send(QueuedEvent {
                 event: BackendEvent::from_live(&parsed_event(json!({
                     "type": "message.delta",
-                    "schema_version": 37,
+                    "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",
@@ -7668,7 +7686,7 @@ mod tests {
             .dispatch(
                 UiAction::BackendEvent(projected_event(json!({
                     "type": "message.delta",
-                    "schema_version": 37,
+                    "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pytest import CaptureFixture, MonkeyPatch
 
 from wisp.config import WispConfig
+from wisp.permissions import permissions_directory
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
     WispSettings,
@@ -689,7 +690,13 @@ def test_from_env_user_settings_can_disable_protected_paths(
 
     auth_pattern = config.auth_path.resolve().as_posix()
     settings_pattern = user_settings_path(home_dir=home).resolve().as_posix()
-    assert config.protected_paths == (auth_pattern, settings_pattern)
+    permissions_pattern = permissions_directory().resolve().as_posix()
+    assert config.protected_paths == (
+        auth_pattern,
+        settings_pattern,
+        permissions_pattern,
+        f"{permissions_pattern}/**",
+    )
 
 
 def test_from_env_project_settings_cannot_disable_protected_paths(

@@ -29,6 +29,7 @@ from wisp.events import (
     ToolResultReady,
     TrustRequested,
 )
+from wisp.permissions import PermissionMode
 from wisp.rpc.commands import ApprovalScope
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.input_types import SubmissionId, new_submission_id
@@ -558,6 +559,16 @@ class TraceController:
     async def get_mcp_status(self, *, command_id: str | None = None) -> str:
         cid = command_id or self._next_id("get_mcp_status")
         self.commands.append({"type": "get_mcp_status", "id": cid})
+        return cid
+
+    async def get_permissions(self, *, command_id: str | None = None) -> str:
+        cid = command_id or self._next_id("get_permissions")
+        self.commands.append({"type": "get_permissions", "id": cid})
+        return cid
+
+    async def set_permissions(self, mode: PermissionMode, *, command_id: str | None = None) -> str:
+        cid = command_id or self._next_id("set_permissions")
+        self.commands.append({"type": "set_permissions", "id": cid, "mode": mode})
         return cid
 
     async def get_messages(

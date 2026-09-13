@@ -43,6 +43,7 @@ HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (3, "3421192b01974081b8fc52537aa23a8fd44ece09b11be8ae4c791dc7d1a82c7c"),
     (4, "fc80ee4beaaad41c6534130bab3c277c0109b3831d34c4ad623d0417d92eed02"),
     (5, "37dc90b7fe06005444def1710af98be7b6b8fddb4231ff161dc119365fdcafc2"),
+    (6, "98be3f2fac077427b65884fb9be56057909888f5938d39f227c8894fd3ebe562"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -408,6 +409,8 @@ def _rust_type_projection(schema: JsonObject) -> JsonObject:
 _FIXTURE_TIMESTAMP = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "approval": {"call_id": "call-1", "approved": True},
+    "get_permissions": {},
+    "set_permissions": {"mode": "ask"},
     "cancel": {"target_id": "command-1"},
     "clear_queue": {},
     "clone_session": {},
@@ -633,6 +636,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "session.saved": {"session_id": "session-1", "path": Path("fixture.jsonl")},
     "session.stats": {"command_id": "command-1", "stats": _SESSION_STATS},
     "skill.catalog.updated": {"catalog": {}},

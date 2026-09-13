@@ -131,3 +131,13 @@ starting every local server, rather than raising it without a lifecycle or lazy-
 Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
 Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, custom HTTP authentication, OAuth, and
 interactive authentication are not yet supported.
+
+## Saved project permissions
+
+The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,
+and deny. `/permissions` shows the current default; `/permissions ask` or `/permissions yolo`
+changes it. Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
+canonical project directory, and survive restarts. Changing the default clears temporary grants.
+One-time and session grants are not saved, and starting or switching sessions expires session
+grants. YOLO allows mutating and command tools without approval; protected paths, project trust,
+and tool availability still apply. `--yes` alone remains a temporary startup choice.

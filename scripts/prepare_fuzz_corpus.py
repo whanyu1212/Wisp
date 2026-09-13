@@ -25,7 +25,7 @@ def prepare_corpus(output: Path, *, root: Path = ROOT) -> None:
     ):
         destination = output / family
         destination.mkdir()
-        document = json.loads((root / "schemas/live-rpc/v6" / schema).read_text())
+        document = json.loads((root / "schemas/live-rpc/v7" / schema).read_text())
         fixtures = document["x-wisp-conformance-fixtures"]
         if not fixtures:
             raise ValueError(f"No canonical fixtures in {schema}")

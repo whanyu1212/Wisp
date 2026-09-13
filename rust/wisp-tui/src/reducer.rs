@@ -651,6 +651,7 @@ pub struct UiState {
     pub(crate) context: context::ContextState,
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
+    pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -714,6 +715,7 @@ impl UiState {
             context: context::ContextState::default(),
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
+            permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
@@ -847,6 +849,7 @@ pub enum CommandKind {
     GetSessionStats,
     GetSkills,
     GetMcpStatus,
+    Permissions,
     GetProjectFiles,
     GetSessions,
     NewSession,
@@ -883,6 +886,7 @@ impl CommandKind {
             Self::GetSessionStats => "get_session_stats",
             Self::GetSkills => "get_skills",
             Self::GetMcpStatus => "get_mcp_status",
+            Self::Permissions => "permissions",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
             Self::NewSession => "new_session",
@@ -929,6 +933,10 @@ pub enum BackendEvent {
         catalog: discovery::SkillReport,
     },
     SkillCatalogUpdated(discovery::SkillReport),
+    PermissionsReported {
+        command_id: String,
+        permissions: Result<std::sync::Arc<wisp_protocol::events::PermissionState>, String>,
+    },
     McpStatusReported {
         command_id: String,
         status: discovery::McpReport,
@@ -1071,6 +1079,7 @@ pub enum UiAction {
     },
     LoadSkills,
     LoadMcpStatus,
+    Permissions(Option<wisp_protocol::commands::PermissionMode>),
     SetProjectFilesOpen(bool),
     LoadContext,
     ConfigureAutoCompaction(bool),
@@ -1235,6 +1244,7 @@ pub fn reduce(
     let mut effects = match action {
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
+        UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
@@ -1330,6 +1340,7 @@ pub fn reduce(
             state.context.close();
             state.skills.close();
             state.mcp.close();
+            state.permissions.close();
             state.project_files.close();
             state.model_operation = None;
             state.mode_change = None;
@@ -4062,6 +4073,7 @@ fn handle_backend_event(
         | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)
         | BackendEvent::McpStatusReported { .. }
+        | BackendEvent::PermissionsReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
         | BackendEvent::CompactionStarted(_)
@@ -4616,7 +4628,7 @@ mod tests {
     fn live_event_projection_uses_validated_wire_fields() {
         let value = serde_json::json!({
             "type": "message.delta",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "turn": 1,
             "role": "assistant",
@@ -4662,7 +4674,7 @@ mod tests {
         ));
         let live = wisp_protocol::events::deserialize(serde_json::json!({
             "type": "rpc.device_code.progress",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-01T00:00:00Z",
             "command_id": "device-1",
             "provider": "openai-codex",
@@ -5175,7 +5187,7 @@ mod tests {
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-7",
             "name": "bash",
@@ -5513,7 +5525,7 @@ mod tests {
     fn live_trust_request_projection_preserves_request_identity() {
         let value = serde_json::json!({
             "type": "trust.requested",
-            "schema_version": 37,
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "request_id": "trust-7",
             "project_path": "/workspace"

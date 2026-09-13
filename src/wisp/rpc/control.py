@@ -6,6 +6,8 @@ from collections.abc import Callable
 from functools import partial
 from typing import Protocol, assert_never
 
+from wisp.events import PermissionState
+from wisp.permissions import PermissionMode
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
@@ -20,6 +22,10 @@ type _RpcControlCommand = CancelCommand | ApprovalCommand | TrustCommand | Shutd
 
 
 class RpcApprovalResolver(Protocol):
+    def permissions_snapshot(self) -> PermissionState: ...
+
+    def set_permissions(self, mode: PermissionMode) -> None: ...
+
     def has_pending_approval(self, *, call_id: str) -> bool: ...
 
     def resolve_approval(

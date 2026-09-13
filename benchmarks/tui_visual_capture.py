@@ -36,6 +36,7 @@ class Cell(BaseModel):
     fg: str
     bg: str
     bold: bool
+    dim: bool = False
     italic: bool
     underline: bool
     reverse: bool
@@ -79,6 +80,7 @@ def export_rust(path: Path) -> None:
                     color=cell.fg,
                     bgcolor=cell.bg,
                     bold=cell.bold,
+                    dim=cell.dim,
                     italic=cell.italic,
                     underline=cell.underline,
                     reverse=cell.reverse,

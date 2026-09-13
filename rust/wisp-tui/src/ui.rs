@@ -6,19 +6,18 @@ use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
+use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
-use crate::transcript::{TranscriptEntryId, TranscriptRole};
+use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
     RowAnchor, RowPosition, TranscriptRow, TranscriptRowCache, TranscriptRowKind,
     TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-#[cfg(test)]
-use ratatui::style::Color;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::QueueKind;
@@ -43,7 +42,7 @@ const STICKY_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
-const COMPOSER_PREFIX: &str = "> ";
+const COMPOSER_PREFIX: &str = "› ";
 const CONTENT_PADDING: u16 = 1;
 const ACTIVITY_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
@@ -115,6 +114,9 @@ fn inner_composer_shows_decision(area: Rect, state: &UiState) -> bool {
 }
 
 fn parked_decision_area(state: &UiState, area: Rect) -> Option<Rect> {
+    if state.view_status == ViewStatus::WaitingForApproval {
+        return None;
+    }
     if !decision_pending(state)
         || area.height < PARKED_DECISION_HEIGHT + PARKED_CONVERSATION_MIN_HEIGHT
     {
@@ -255,6 +257,11 @@ pub fn render_interactive(
 
     let area = conversation_surface(area);
 
+    if state.view_status == ViewStatus::WaitingForApproval && area.height < 11 {
+        render_permission_gate(frame, area, state, notice, palette);
+        return mouse::Conversation::default();
+    }
+
     if decision_pending(state) && area.height < 11 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -329,6 +336,10 @@ pub fn render_interactive(
         palette,
         bindings,
     );
+    if state.view_status == ViewStatus::WaitingForApproval {
+        render_permission_gate(frame, area, state, notice, palette);
+        return mouse::Conversation::default();
+    }
     mouse::Conversation {
         transcript: Rect {
             width: frame.area().right().saturating_sub(chunks[0].x),
@@ -470,16 +481,20 @@ fn clipped_tail_assistant_header(
     rows: &[TranscriptRow],
     row_cache: &mut TranscriptRowCache,
     width: usize,
+    active_reply: Option<TranscriptEntryId>,
 ) -> Option<TranscriptRow> {
-    let assistant = state.transcript.entries().last()?;
+    let assistant = active_reply
+        .and_then(|id| state.transcript.entry(id))
+        .or_else(|| state.transcript.entries().last())?;
     if assistant.role != TranscriptRole::Assistant
-        || !rows.iter().any(|row| {
-            row.anchor.entry_id == assistant.id
-                && !matches!(
-                    row.kind,
-                    TranscriptRowKind::Header | TranscriptRowKind::Spacer
-                )
-        })
+        || (active_reply.is_none()
+            && !rows.iter().any(|row| {
+                row.anchor.entry_id == assistant.id
+                    && !matches!(
+                        row.kind,
+                        TranscriptRowKind::Header | TranscriptRowKind::Spacer
+                    )
+            }))
         || rows
             .iter()
             .any(|row| row.anchor.entry_id == assistant.id && row.kind == TranscriptRowKind::Header)
@@ -515,10 +530,21 @@ fn render_transcript(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
     );
-    let area = area.inner(Margin {
+    let mut area = area.inner(Margin {
         horizontal: 0,
         vertical: padding,
     });
+    // Keep the outer transcript gutter while adding a highlighted row above "you".
+    let user_top_padding = padding > 0
+        && state
+            .transcript
+            .entries()
+            .iter()
+            .any(|entry| entry.role == TranscriptRole::User);
+    if user_top_padding {
+        area.y += 1;
+        area.height = area.height.saturating_sub(1);
+    }
     let parked_area = parked_decision_area(state, area);
     let conversation = parked_area.map_or(area, |parked| Rect {
         x: area.x,
@@ -526,7 +552,11 @@ fn render_transcript(
         width: area.width,
         height: area.height.saturating_sub(parked.height),
     });
-    let activity = activity_label(state, activity_frame);
+    let active_reply = active_reply(state);
+    let activity = active_reply
+        .is_none()
+        .then(|| activity_label(state, activity_frame))
+        .flatten();
     let activity_height = if activity.is_some() {
         conversation
             .height
@@ -564,7 +594,9 @@ fn render_transcript(
         rows.drain(..rows.len() - budget);
     }
     let assistant_header = (viewport.follows_tail() && budget >= 2)
-        .then(|| clipped_tail_assistant_header(state, &rows, row_cache, content_width))
+        .then(|| {
+            clipped_tail_assistant_header(state, &rows, row_cache, content_width, active_reply)
+        })
         .flatten();
     if assistant_header.is_some() {
         budget = budget.saturating_sub(1);
@@ -617,14 +649,31 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
-        for (offset, row) in rows.into_iter().enumerate() {
+        for (offset, mut row) in rows.into_iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
                 conversation.y + offset as u16,
                 conversation.width,
                 1,
             );
-            render_transcript_row(frame, area, row, selected_row, palette);
+            if offset == 0 && user_top_padding && row.role == TranscriptRole::User {
+                frame.render_widget(
+                    Block::default().style(palette.user_text()),
+                    Rect::new(area.x, area.y - 1, area.width, 1),
+                );
+            }
+            if Some(row.anchor.entry_id) == active_reply && row.kind == TranscriptRowKind::Header {
+                if let Some(label) = row.spans.first_mut() {
+                    label.text.push(' ');
+                    label.text.push_str(
+                        ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()],
+                    );
+                }
+            }
+            let pulse = (state.view_status == ViewStatus::Running
+                && row_tool_in_progress(state, &row))
+            .then_some(activity_frame);
+            render_transcript_row(frame, area, row, selected_row, palette, pulse);
         }
     }
     if let Some(label) = activity.filter(|_| activity_height > 0) {
@@ -640,6 +689,56 @@ fn render_transcript(
     }
     if let Some(parked) = parked_area {
         render_parked_decision(frame, parked, state, palette);
+    }
+}
+
+fn active_reply(state: &UiState) -> Option<TranscriptEntryId> {
+    if state.configuration_active()
+        || state.view_status != ViewStatus::Running
+        || state.interaction_status == crate::reducer::InteractionStatus::Compacting
+    {
+        return None;
+    }
+    state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .take_while(|entry| entry.role != TranscriptRole::User)
+        .find(|entry| entry.role == TranscriptRole::Assistant && !entry.content.is_empty())
+        .map(|entry| entry.id)
+}
+
+fn tool_in_progress(entry: &TranscriptEntry) -> bool {
+    entry
+        .tool_card()
+        .is_some_and(|card| matches!(card.status, ToolStatus::Requested | ToolStatus::Running))
+        || entry.process_card().is_some_and(|card| {
+            matches!(
+                card.display_state,
+                ProcessDisplayState::Running
+                    | ProcessDisplayState::Polling
+                    | ProcessDisplayState::Cancelling
+            )
+        })
+}
+
+fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
+    match row.kind {
+        TranscriptRowKind::CardAction => state
+            .transcript
+            .entry(row.anchor.entry_id)
+            .is_some_and(tool_in_progress),
+        TranscriptRowKind::CardGroup => {
+            crate::transcript_view::explore_run(&state.transcript, row.anchor.entry_id).is_some_and(
+                |(_, members)| {
+                    members
+                        .iter()
+                        .any(|id| state.transcript.entry(*id).is_some_and(tool_in_progress))
+                },
+            )
+        }
+        _ => false,
     }
 }
 
@@ -704,9 +803,12 @@ fn render_transcript_row(
     row: TranscriptRow,
     selected_row: Option<RowAnchor>,
     palette: Palette,
+    pulse: Option<u8>,
 ) {
     let selected = selected_row == Some(row.anchor);
-    let user = row.role == TranscriptRole::User && row.kind != TranscriptRowKind::Spacer;
+    // The trailing spacer belongs to the user panel, giving the message a
+    // padded bottom edge in both the pinned turn and scrollback.
+    let user = row.role == TranscriptRole::User;
     let code = row
         .spans
         .iter()
@@ -747,7 +849,9 @@ fn render_transcript_row(
         _ if row.tone == TranscriptRowTone::Muted => base.fg(palette.muted),
         _ => base,
     };
-    let spans = row
+    let marker_style =
+        |style: Style| pulse.map_or(style, |frame| tool_pulse_style(style, palette, frame));
+    let mut spans = row
         .spans
         .into_iter()
         .map(|span| {
@@ -759,10 +863,47 @@ fn render_transcript_row(
             if selected {
                 semantic = semantic.patch(palette.selection());
             }
+            // Pulse within the selected colors so keyboard focus cannot hide activity.
+            if span.style.inline == InlineStyle::ToolStatus {
+                semantic = marker_style(semantic);
+            }
             Span::styled(span.text, semantic)
         })
         .collect::<Vec<_>>();
+    if row.kind == TranscriptRowKind::CardGroup {
+        let mut marker = base.patch(tone_style(row.tone, palette));
+        if selected {
+            marker = marker.patch(palette.selection());
+        }
+        spans.insert(0, Span::styled("• ", marker_style(marker)));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
+}
+
+fn tool_pulse_style(style: Style, palette: Palette, frame: u8) -> Style {
+    // Eight 125 ms frames give a gentle one-second brightness cycle. The dot
+    // never disappears, and completed cards never enter this animation path.
+    const STRENGTH: [u16; 8] = [100, 91, 70, 49, 40, 49, 70, 91];
+    let strength = STRENGTH[usize::from(frame) % STRENGTH.len()];
+    if palette.is_monochrome() {
+        return if strength < 70 {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        };
+    }
+    let background = style.bg.unwrap_or(palette.background);
+    match (style.fg, background) {
+        (Some(Color::Rgb(r, g, b)), Color::Rgb(br, bg, bb)) => {
+            let blend = |foreground: u8, background: u8| {
+                ((u16::from(foreground) * strength + u16::from(background) * (100 - strength))
+                    / 100) as u8
+            };
+            style.fg(Color::Rgb(blend(r, br), blend(g, bg), blend(b, bb)))
+        }
+        _ if strength < 70 => style.add_modifier(Modifier::DIM),
+        _ => style,
+    }
 }
 
 fn selected_detail<'a>(
@@ -948,9 +1089,10 @@ fn render_composer(
             Style::default().fg(palette.warning)
         }
         ViewStatus::Error => Style::default().fg(palette.error),
-        _ => Style::default().fg(palette.accent),
+        _ => palette.border(),
     };
     let full_box = inner_composer_shows_decision(area, state);
+    let framed_input = editable(state) && padded && area.height >= 3;
     let block = if full_box {
         let title = match state.view_status {
             ViewStatus::WaitingForApproval => " approval required ",
@@ -961,23 +1103,16 @@ fn render_composer(
             .title(title)
             .borders(Borders::ALL)
             .border_style(border_style)
-    } else {
+    } else if framed_input {
         Block::default()
-            .borders(Borders::LEFT)
-            .border_type(BorderType::Thick)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(border_style)
+    } else {
+        Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
-    .style(palette.composer());
-    let mut inner = block.inner(area);
-    if !full_box {
-        inner.width = inner.width.saturating_sub(CONTENT_PADDING);
-        if editable(state) && padded && inner.height >= 3 {
-            inner = inner.inner(Margin {
-                horizontal: 0,
-                vertical: 1,
-            });
-        }
-    }
+    .style(palette.base());
+    let inner = block.inner(area);
     if editable(state) {
         frame.render_widget(block, area);
         let preview_rows = if state.active_prompt_editable() {
@@ -1014,7 +1149,7 @@ fn render_composer(
         };
         if prefix_area.width > 0 && prefix_area.y < inner.bottom() {
             frame.render_widget(
-                Paragraph::new(COMPOSER_PREFIX).style(Style::default().fg(palette.muted)),
+                Paragraph::new(COMPOSER_PREFIX).style(Style::default().fg(palette.primary)),
                 prefix_area,
             );
         }
@@ -1044,7 +1179,24 @@ fn render_composer(
             cursor_visible_row,
         );
         let cursor_horizontal_scroll = display_text.cursor_horizontal_scroll;
-        frame.render_widget(Paragraph::new(display_text.text), editor_area);
+        if editor.text().is_empty() {
+            let placeholder = if state.active_prompt_editable() {
+                let hint = "Steer Wisp, or queue a follow-up…";
+                if hint.width() <= usize::from(editor_area.width) {
+                    hint
+                } else {
+                    "Steer Wisp…"
+                }
+            } else {
+                "Ask Wisp anything…"
+            };
+            frame.render_widget(
+                Paragraph::new(placeholder).style(Style::default().fg(palette.muted)),
+                editor_area,
+            );
+        } else {
+            frame.render_widget(Paragraph::new(display_text.text), editor_area);
+        }
         let cursor_x = editor_area.x.saturating_add(
             u16::try_from(column.saturating_sub(cursor_horizontal_scroll)).unwrap_or(u16::MAX),
         );
@@ -1071,9 +1223,7 @@ fn render_composer(
         } else {
             vec![Line::from(decision_row(
                 match state.view_status {
-                    ViewStatus::WaitingForApproval => {
-                        "Approve the parked request, or n/Esc to deny."
-                    }
+                    ViewStatus::WaitingForApproval => "Waiting for permission…",
                     ViewStatus::WaitingForTrust => "Trust the parked project, or n/Esc to deny.",
                     _ => unreachable!("decision rows require a decision view"),
                 },
@@ -1455,7 +1605,7 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
         vec![
             "y once".into(),
             "t tool".into(),
-            "a all".into(),
+            "a YOLO".into(),
             "n deny".into(),
             "Ctrl+G help".into(),
         ]
@@ -1546,7 +1696,17 @@ fn render_footer(
             Style::default().fg(palette.warning),
         ),
         None => (
-            footer_hints(state, bindings, remaining),
+            // Keep common shortcuts quiet and leave breathing room between
+            // the action hints and right-aligned session status.
+            footer_hints(
+                state,
+                bindings,
+                if terminal_width < 120 {
+                    remaining.min(56)
+                } else {
+                    remaining
+                },
+            ),
             Style::default().fg(palette.muted),
         ),
     };
@@ -1577,11 +1737,21 @@ fn render_footer(
             Style::default().fg(palette.muted),
         ));
     }
-    if !rest.is_empty() {
-        spans.extend([Span::raw("  "), Span::styled(rest, rest_style)]);
-    }
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(
+        Paragraph::new(rest).style(rest_style),
+        Rect {
+            width: remaining as u16,
+            ..area
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        Rect {
+            x: area.right().saturating_sub(status_width as u16),
+            width: status_width as u16,
+            ..area
+        },
+    );
 }
 
 fn editable(state: &UiState) -> bool {
@@ -1596,16 +1766,88 @@ fn decision_detail_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
     }
 }
 
+fn render_permission_gate(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    notice: Option<&str>,
+    palette: Palette,
+) {
+    let width = area.width.min(80);
+    let height = area.height.min(11);
+    let area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(palette.border())
+        .style(palette.base())
+        .title(" Permission required ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = usize::from(inner.width);
+    let mut lines = approval_composer_lines(state, width);
+    for line in lines.iter_mut().skip(2) {
+        let text = line.to_string();
+        *line = Line::from(vec![
+            Span::styled(
+                text[..1].to_string(),
+                Style::default()
+                    .fg(palette.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(text[1..].to_string()),
+        ]);
+    }
+    if let Some(notice) = notice.filter(|notice| {
+        notice.contains("Skipped approval response") || notice.contains("again exits")
+    }) {
+        frame.render_widget(
+            Paragraph::new(lines[..2].to_vec()),
+            Rect { height: 2, ..inner },
+        );
+        frame.render_widget(
+            Paragraph::new(sanitize_for_terminal(notice))
+                .style(Style::default().fg(palette.warning))
+                .wrap(Wrap { trim: false }),
+            Rect {
+                y: inner.y + 2,
+                height: inner.height.saturating_sub(2),
+                ..inner
+            },
+        );
+        return;
+    }
+    if inner.height >= 8 {
+        lines.insert(2, Line::default());
+        lines.push(Line::styled(
+            decision_row(
+                "YOLO is saved for this project. Change with /permissions.",
+                width,
+            ),
+            Style::default().fg(palette.muted),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
     let Some(pending) = state.pending_approval.as_ref() else {
         return vec![
-            Line::from(decision_row("[y once/t tool/a all/N]", width)),
-            Line::default(),
+            Line::from(decision_row("Tool details unavailable", width)),
             Line::from(decision_row("args: unavailable", width)),
+            Line::from("1 Allow once"),
+            Line::from(decision_row("2 Allow tool this session", width)),
+            Line::from("3 YOLO (saved)"),
+            Line::from("4 Deny"),
         ];
     };
     vec![
-        Line::from(decision_row("[y once/t tool/a all/N]", width)),
         Line::from(decision_row(
             &format!(
                 "tool: {} ({})",
@@ -1618,6 +1860,26 @@ fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> 
             &format!("args: {}", bounded_json_preview(&pending.arguments)),
             width,
         )),
+        Line::from("1 Allow once"),
+        Line::from(decision_row(
+            &if format!(
+                "2 Allow {} for this session",
+                bounded_decision_preview(&pending.name)
+            )
+            .width()
+                <= width
+            {
+                format!(
+                    "2 Allow {} for this session",
+                    bounded_decision_preview(&pending.name)
+                )
+            } else {
+                "2 Allow tool this session".into()
+            },
+            width,
+        )),
+        Line::from("3 YOLO (saved)"),
+        Line::from("4 Deny"),
     ]
 }
 
@@ -2372,11 +2634,14 @@ mod tests {
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approval"));
-        assert!(approval.contains("Approve the parked request"));
+        assert!(approval.contains("Permission required"));
         assert!(approval.contains("tool: shell (ask)"));
         assert!(approval.contains("args:"));
         assert!(approval.contains("rm -rf /tmp/example"));
-        assert!(approval.contains("[y once/t tool/a all/N]"));
+        assert!(approval.contains("1 Allow once"));
+        assert!(approval.contains("2 Allow shell for this session"));
+        assert!(approval.contains("3 YOLO (saved)"));
+        assert!(approval.contains("4 Deny"));
         assert!(approval.contains("y once"));
 
         state.pending_approval = Some(PendingApproval {
@@ -2406,7 +2671,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(bounded.contains('…'));
-        assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 100);
+        assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 180);
 
         state.pending_approval = Some(PendingApproval {
             call_id: "call-4".into(),
@@ -2416,11 +2681,11 @@ mod tests {
             safety: "command".into(),
         });
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
-        assert!(narrow.contains("[y once/t tool/a all/N]"));
+        assert!(narrow.contains("3 YOLO (saved)"));
         assert!(narrow.contains("args:"));
         assert!(narrow.contains("rm -rf"));
         let minimum_approval = render_to_string(30, 8, &state, &PromptEditor::default());
-        assert!(minimum_approval.contains("[y once/t tool/a all/N]"));
+        assert!(minimum_approval.contains("3 YOLO (saved)"));
         assert!(minimum_approval.contains("args:"));
         assert!(minimum_approval.contains("rm -rf"));
         for height in 8..=10 {
@@ -2435,7 +2700,7 @@ mod tests {
             );
             assert!(compact_notice.contains("Esc/Ctrl-C"));
             assert!(compact_notice.contains("again exits"));
-            assert!(compact_notice.contains("[y once/t tool/a all/N]"));
+            assert!(!compact_notice.contains("3 YOLO (saved)"));
             assert!(compact_notice.contains("tool:"));
             assert!(compact_notice.contains("args:"));
         }
@@ -2532,7 +2797,7 @@ mod tests {
     }
 
     #[test]
-    fn parked_decision_layout_keeps_transcript_context_at_the_cutoff() {
+    fn permission_gate_keeps_tool_context_and_all_choices_at_short_sizes() {
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
@@ -2547,16 +2812,16 @@ mod tests {
             .append_prompt("context-for-approval".into());
 
         let compact = render_to_string(80, 11, &state, &PromptEditor::default());
-        assert!(compact.contains("context-for-approval"));
-        assert!(compact.contains("[y once/t tool/a all/N]"));
+        assert!(compact.contains("Permission required"));
+        assert!(compact.contains("3 YOLO (saved)"));
         assert!(compact.contains("args:"));
         assert!(compact.contains("rm -rf /tmp/example"));
         assert!(!compact.contains("Approve the parked request"));
 
         let parked = render_to_string(80, 12, &state, &PromptEditor::default());
-        assert!(parked.contains("you"));
-        assert!(parked.contains("Approve the parked request"));
-        assert!(parked.contains("[y once/t tool/a all/N]"));
+        assert!(parked.contains("Permission required"));
+        assert!(parked.contains("4 Deny"));
+        assert!(parked.contains("3 YOLO (saved)"));
         assert!(parked.contains("args:"));
     }
 
@@ -2906,6 +3171,7 @@ mod tests {
                         row.clone(),
                         Some(anchor),
                         palette,
+                        None,
                     )
                 })
                 .unwrap();
@@ -2988,7 +3254,7 @@ mod tests {
         for chunk in chunks {
             let event = wisp_protocol::events::deserialize(json!({
                 "type": "message.delta", "turn": 1, "delta": chunk,
-                "schema_version": 37, "timestamp": "2026-09-13T00:00:00Z",
+                "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "timestamp": "2026-09-13T00:00:00Z",
                 "role": "assistant", "content_index": 0,
                 "content_kind": "text"
             }))
@@ -3026,7 +3292,7 @@ mod tests {
 
         let completed = wisp_protocol::events::deserialize(json!({
             "type": "message.completed", "turn": 1, "content": source,
-            "schema_version": 37, "timestamp": "2026-09-13T00:00:00Z",
+            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "timestamp": "2026-09-13T00:00:00Z",
             "role": "assistant", "tool_calls": [], "usage": null,
             "finish_reason": "stop", "response_id": null, "cost": null,
             "context_observation": null
@@ -3248,5 +3514,160 @@ mod tests {
             .complete_message(1, format!("{}TAIL", "wrapped output ".repeat(80)));
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
+    }
+    #[test]
+    fn only_active_tool_markers_pulse_and_terminal_results_stay_steady() {
+        use crate::tool_cards::ToolCallInput;
+        let draw = |state: &UiState, tick, palette, selected| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            terminal
+                .draw(|frame| {
+                    render_interactive(
+                        frame,
+                        state,
+                        &mut viewport,
+                        &mut cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                        selected,
+                        true,
+                        None,
+                        tick,
+                        palette,
+                        &Bindings::default(),
+                    );
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        for palette in [Palette::default(), crate::theme::themes()[0].palette(true)] {
+            for tool in ["bash", "read"] {
+                for outcome in ["success", "error", "denied", "cancelled"] {
+                    let mut state = UiState::new("fake".into(), None, None);
+                    state.view_status = ViewStatus::Running;
+                    state.interaction_status = crate::reducer::InteractionStatus::Running;
+                    state.transcript.append_prompt("run a check".into());
+                    if tool == "read" {
+                        state.transcript.observe_tool_call(ToolCallInput {
+                            call_id: "earlier".into(),
+                            name: "read".into(),
+                            arguments: json!({"path": "earlier.txt"}),
+                            detail_source: crate::tool_detail::ToolDetailSource::None,
+                        });
+                        state
+                            .transcript
+                            .observe_tool_result(tool_result("earlier", "finished"));
+                    }
+                    let call = ToolCallInput {
+                        call_id: "pulse".into(),
+                        name: tool.into(),
+                        arguments: json!({"command": "cargo test"}),
+                        detail_source: crate::tool_detail::ToolDetailSource::None,
+                    };
+                    state.transcript.observe_tool_call(call.clone());
+                    assert_ne!(
+                        draw(&state, 0, palette, None),
+                        draw(&state, 4, palette, None)
+                    );
+                    state.transcript.observe_approval_requested(call);
+                    assert_eq!(
+                        draw(&state, 0, palette, None),
+                        draw(&state, 4, palette, None)
+                    );
+                    if outcome == "denied" {
+                        state
+                            .transcript
+                            .observe_approval_resolved("pulse", false, None);
+                    } else {
+                        state
+                            .transcript
+                            .observe_approval_resolved("pulse", true, None);
+                        let bright = draw(&state, 0, palette, None);
+                        let dim = draw(&state, 4, palette, None);
+                        assert_ne!(bright, dim);
+                        let selected = state
+                            .transcript
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.tool_card().is_some())
+                            .map(|entry| entry.id);
+                        assert_ne!(
+                            draw(&state, 0, palette, selected),
+                            draw(&state, 4, palette, selected)
+                        );
+                        if palette.is_monochrome() {
+                            let dot = dim
+                                .content
+                                .iter()
+                                .find(|cell| cell.symbol() == "•")
+                                .unwrap();
+                            assert!(dot.modifier.contains(Modifier::DIM));
+                        }
+                        for (a, b) in bright.content.iter().zip(&dim.content) {
+                            assert_eq!(a.symbol(), b.symbol());
+                            if a != b {
+                                assert!(matches!(a.symbol(), "•" | " "));
+                            }
+                        }
+                        let mut result = tool_result("pulse", "finished");
+                        result.is_error = outcome == "error";
+                        if outcome == "cancelled" {
+                            result.process_state = Some("cancelled".into());
+                        }
+                        state.transcript.observe_tool_result(result);
+                    }
+                    assert_eq!(
+                        draw(&state, 0, palette, None),
+                        draw(&state, 4, palette, None),
+                        "{outcome}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reply_spinner_survives_tool_calls_and_stops_with_the_turn() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = crate::reducer::InteractionStatus::Running;
+        state.transcript.append_prompt("check this".into());
+        let waiting = render_to_string_with_activity(80, 18, &state, 0);
+        assert!(waiting.contains("working ⠋"));
+        state
+            .transcript
+            .append_message_delta(1, "I will check that.");
+        state
+            .transcript
+            .complete_message(1, "I will check that.".into());
+        for index in 0..20 {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: format!("tool-{index}"),
+                    name: "bash".into(),
+                    arguments: json!({"command": format!("check {index}")}),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                });
+        }
+        for (width, height) in [(80, 18), (30, 8)] {
+            let running = render_to_string_with_activity(width, height, &state, 1);
+            assert!(running.contains("wisp ⠙"), "{running}");
+            assert!(!running.contains("working ⠙"));
+        }
+        for status in [
+            ViewStatus::Idle,
+            ViewStatus::Error,
+            ViewStatus::WaitingForApproval,
+            ViewStatus::WaitingForTrust,
+        ] {
+            state.view_status = status;
+            state.interaction_status = crate::reducer::InteractionStatus::Idle;
+            let done = render_to_string_with_activity(80, 18, &state, 1);
+            assert!(!done.contains("⠙"), "{done}");
+        }
     }
 }

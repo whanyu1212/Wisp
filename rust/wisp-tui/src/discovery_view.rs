@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -28,6 +28,7 @@ pub(crate) enum DiscoveryAction {
 pub(crate) enum DiscoveryView {
     Skills(SkillsView),
     Mcp(ReportView),
+    Permissions { painted: bool },
 }
 
 impl DiscoveryView {
@@ -35,7 +36,7 @@ impl DiscoveryView {
     pub fn rendered_selection(&self) -> Option<&str> {
         match self {
             Self::Skills(view) => view.rendered.as_deref(),
-            Self::Mcp(_) => None,
+            Self::Mcp(_) | Self::Permissions { .. } => None,
         }
     }
 
@@ -49,7 +50,20 @@ impl DiscoveryView {
         Self::Mcp(ReportView::default())
     }
 
+    pub fn permissions() -> Self {
+        Self::Permissions { painted: false }
+    }
+
+    pub fn key_activates(&self, key: KeyEvent) -> bool {
+        key.code == KeyCode::Enter
+            || (matches!(self, Self::Permissions { .. })
+                && matches!(key.code, KeyCode::Char('1' | '2')))
+    }
+
     pub fn invalidate_selection(&mut self) {
+        if let Self::Permissions { painted } = self {
+            *painted = false;
+        }
         if let Self::Skills(view) = self {
             view.rendered = None;
         }
@@ -95,9 +109,23 @@ impl DiscoveryView {
             return DiscoveryAction::Refresh(match self {
                 Self::Skills(_) => UiAction::LoadSkills,
                 Self::Mcp(_) => UiAction::LoadMcpStatus,
+                Self::Permissions { .. } => UiAction::Permissions(None),
             });
         }
         match self {
+            Self::Permissions { painted } => {
+                if !*painted || state.permissions.loading() || state.permissions.snapshot.is_none()
+                {
+                    return DiscoveryAction::None;
+                }
+                let mode = match key.code {
+                    KeyCode::Char('1') => wisp_protocol::commands::PermissionMode::Ask,
+                    KeyCode::Char('2') => wisp_protocol::commands::PermissionMode::Yolo,
+                    _ => return DiscoveryAction::None,
+                };
+                *painted = false;
+                DiscoveryAction::Refresh(UiAction::Permissions(Some(mode)))
+            }
             Self::Skills(view) => view.handle_key(key.code, state.skills.snapshot.as_deref()),
             Self::Mcp(view) => {
                 view.scroll(key.code);
@@ -115,6 +143,59 @@ impl DiscoveryView {
         palette: Palette,
     ) -> Rows {
         match self {
+            Self::Permissions { painted } => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .style(palette.base())
+                    .border_style(palette.border())
+                    .title(" Project permissions ")
+                    .title_bottom(" Esc close ");
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                let mode = state
+                    .permissions
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.mode);
+                let current = match mode {
+                    Some(wisp_protocol::commands::PermissionMode::Yolo) => "Current: YOLO",
+                    Some(wisp_protocol::commands::PermissionMode::Ask) => {
+                        "Current: Ask before changes"
+                    }
+                    None => "Loading permissions…",
+                };
+                let mut lines = vec![
+                    current.to_string(),
+                    "1  Ask before changes".into(),
+                    "2  YOLO — allow tools".into(),
+                    "Saved for this project.".into(),
+                    "Changing mode clears temporary grants.".into(),
+                ];
+                if let Some(error) = &state.permissions.error {
+                    lines.push(format!("Error: {error}"));
+                } else if state.permissions.loading() {
+                    lines.push("Updating permissions…".into());
+                } else if let Some(snapshot) = &state.permissions.snapshot {
+                    if snapshot.saved_mode != Some(snapshot.mode) {
+                        lines.push("Current mode is not saved; choose 1 or 2 to save it.".into());
+                    }
+                    if let Some(project) = &snapshot.project_path {
+                        lines.push(format!("Project: {project}"));
+                    }
+                }
+                frame.render_widget(
+                    Paragraph::new(
+                        lines
+                            .into_iter()
+                            .map(|line| Line::from(terminal_row(&line, usize::from(inner.width))))
+                            .collect::<Vec<_>>(),
+                    ),
+                    inner,
+                );
+                *painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
+                Rows::default()
+            }
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
                 let block = Block::default()

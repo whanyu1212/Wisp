@@ -86,6 +86,16 @@ impl BackendEvent {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
+            "rpc.permissions" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let permissions = discovery_report(&value["permissions"], || {
+                    serde_json::from_value(value["permissions"].clone()).ok()
+                });
+                return Ok(Self::PermissionsReported {
+                    command_id,
+                    permissions,
+                });
+            }
             "rpc.project_files" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let snapshot = discovery_report(&value, || event.project_files(&command_id))
@@ -303,6 +313,7 @@ impl BackendEvent {
             | "rpc.skills"
             | "skill.catalog.updated"
             | "rpc.mcp"
+            | "rpc.permissions"
             | "rpc.commands"
             | "rpc.state"
             | "session.stats"

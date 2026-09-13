@@ -9,7 +9,7 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.coding import CodingSession
-from wisp.events import WispEvent
+from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
     ApprovalCommand,
     BeginDeviceCodeCommand,
@@ -26,6 +26,7 @@ from wisp.rpc.commands import (
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
+    GetPermissionsCommand,
     GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -40,6 +41,7 @@ from wisp.rpc.commands import (
     PopQueueCommand,
     PromptCommand,
     SelectSessionCommand,
+    SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
     ShutdownCommand,
@@ -208,6 +210,8 @@ class RpcCommandExecutor:
         if isinstance(known, GetStateCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_state(known, running_command)
+        if isinstance(known, (GetPermissionsCommand, SetPermissionsCommand)):
+            return self._dispatch_permissions(known, running_command)
         if isinstance(known, GetCommandsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_commands(known, running_command)
@@ -543,6 +547,30 @@ class RpcCommandExecutor:
             pending_prompt_queue_commands=tuple(self.coordinator.pending_prompt_queue_commands),
             write_event=self.write_event,
         )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_permissions(
+        self,
+        command: GetPermissionsCommand | SetPermissionsCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        lifecycle = RpcCommandLifecycle.for_command(command, write_event=self.write_event)
+        if isinstance(command, SetPermissionsCommand):
+            if running_command is not None:
+                lifecycle.fail("Change permissions after the current operation finishes")
+                return _RpcDispatchResult(running_command=running_command)
+            try:
+                self.approval_policy.set_permissions(command.mode)
+            except OSError:
+                lifecycle.fail("Could not save project permissions; the current mode is unchanged")
+                return _RpcDispatchResult(running_command=running_command)
+        self.write_event(
+            RpcPermissionsReported(
+                command_id=lifecycle.command_id,
+                permissions=self.approval_policy.permissions_snapshot(),
+            )
+        )
+        lifecycle.finish()
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_commands(

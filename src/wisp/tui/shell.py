@@ -53,6 +53,7 @@ from wisp.events import (
     RpcMessagesReported,
     RpcModelCatalogReported,
     RpcModelCatalogSnapshot,
+    RpcPermissionsReported,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSkillCatalogSnapshot,
@@ -64,6 +65,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
+from wisp.permissions import PermissionMode
 from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_model_selection
 from wisp.tui.auth_commands import AuthCommands
@@ -232,6 +234,12 @@ class TuiController(Protocol):
         auto_compaction_enabled: bool | None = None,
         mode: AgentMode | None = None,
         command_id: str | None = None,
+    ) -> str: ...
+
+    async def get_permissions(self, *, command_id: str | None = None) -> str: ...
+
+    async def set_permissions(
+        self, mode: PermissionMode, *, command_id: str | None = None
     ) -> str: ...
 
     def events(self) -> AsyncIterator[KnownWispEvent]: ...
@@ -1604,6 +1612,19 @@ class TuiShell:
             except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
                 self.renderer.send_failed("MCP status", exc)
             return False
+        if command.name is TuiSlashCommandName.permissions:
+            if len(command.args) > 1 or (command.args and command.args[0] not in {"ask", "yolo"}):
+                self.renderer.command_error("Usage: /permissions [ask|yolo]")
+                return False
+            try:
+                if not command.args:
+                    await self.controller.get_permissions()
+                else:
+                    mode: PermissionMode = "yolo" if command.args[0] == "yolo" else "ask"
+                    await self.controller.set_permissions(mode)
+            except Exception as exc:  # noqa: BLE001 - show transport failures
+                self.renderer.send_failed("permissions", exc)
+            return False
         if self._update_cancel_scope is not None:
             if command.name is TuiSlashCommandName.update:
                 self._start_update(command.args)
@@ -2330,8 +2351,10 @@ class TuiShell:
             return False
         normalized = answer.strip().lower()
         selected_scope: ApprovalScope = scope or (
-            "all_session"
-            if normalized in {"a", "all", "yolo"}
+            "all_project"
+            if normalized == "yolo"
+            else "all_session"
+            if normalized in {"a", "all"}
             else "tool_session"
             if normalized in {"t", "tool"}
             else "once"
@@ -2583,6 +2606,15 @@ class TuiShell:
             return False
         if isinstance(event, RpcMcpStatusReported):
             self.renderer.notice(mcp_status_text(event.status))
+            return False
+        if isinstance(event, RpcPermissionsReported):
+            state = event.permissions
+            saved = state.saved_mode or "ask (default)"
+            self.renderer.notice(
+                f"Permissions: {state.mode}. Saved for this project: {saved}. "
+                "Use /permissions ask or /permissions yolo. "
+                "Changing the mode clears temporary grants."
+            )
             return False
         context_updated = self.view.update_context_from_event(event)
         if context_updated:

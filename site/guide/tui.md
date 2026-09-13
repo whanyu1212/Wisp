@@ -60,12 +60,13 @@ WISP_TUI_RENDERER=rust wisp
 ```
 
 The conversation uses the terminal width with modest side margins. User turns have a subtle
-background; assistant prose and collapsed tool rows stay open on the transcript background.
+background with padding above the speaker label and below the message; assistant prose and collapsed tool rows stay open on the transcript background.
 The transcript has space at the top and above the composer, collapsing on short terminals.
-The composer is a filled writing surface with an accent rail and a `>` prompt. Its vertical padding
-collapses on short terminals. The footer
-holds status (`idle`, `working`, `approval`, `trust`), mode, model, context, the selected session
-when one is persisted, and the keys for the current workflow. Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
+The composer shares the transcript background, with a thin rounded frame, a `›` prompt, and a hint when
+empty. The frame collapses on short terminals to preserve editing space. The footer separates
+the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
+mode, model, context, and the selected session on the right, as space permits.
+Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
 shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
 and points at `/resume`, `/connect`, and `@` when there is room. It collapses to compact copy on
 short or narrow terminals.
@@ -88,15 +89,21 @@ Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
-A spinner below the visible transcript animates while Wisp is working or compacting, including
-when no output is arriving. The footer keeps a static status label. A scrollbar on the right shows
+Before reply text arrives, a working row animates below the transcript. Once text starts streaming,
+the row disappears and a small spinner sits beside the active `wisp` label until the turn finishes,
+fails, or is cancelled. The label stays visible at the live tail during intervening tool calls.
+Compaction keeps its separate activity row. Active tool markers pulse gently in brightness;
+completed, failed, denied, cancelled, and approval-waiting calls stay steady. In monochrome mode,
+active markers alternate normal and dim intensity. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard
 scrolling and opt-in wheel/trackpad scrolling update it.
-A pending tool approval or project-trust request parks as a compact card
-at the bottom of that pane (`y`/`t`/`a`/`n` or trust `y`/`n`); the composer stays a short waiting
+A pending tool approval opens a rounded dialog with four choices: `1` allow once, `2` allow
+that tool for this session, `3` YOLO for this project, or `4` deny. The `y`/`t`/`a`/`n`
+aliases also work. Project trust remains a compact card at the bottom of the pane
+with `y`/`n` choices; the composer stays a short waiting
 strip instead of a five-row args panel.
 
-The Rust TUI negotiates and validates live RPC v6/event schema v37, supports prompts, approvals,
+The Rust TUI negotiates and validates live RPC v7/event schema v38, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
 `/resume` opens a picker for up to 50 persisted sessions (or accepts
@@ -325,7 +332,14 @@ under [#469](https://github.com/whanyu1212/Wisp/issues/469).
 Unlike print mode, **the Textual TUI exposes the full tool registry by default** — otherwise it would
 be a chatbot that can't read files or run commands. Mutating and command tools still pause for
 approval: approve once, allow that tool for the session, YOLO all mutating/command tools for the
-process (never persisted), or deny.
+process, or deny. In the Rust TUI, YOLO is instead an explicit saved project choice.
+
+Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
+`/permissions yolo` in either TUI. Saved defaults apply to subsequent launches in the same canonical
+project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
+Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
+switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
+is not saved. These choices do not change project trust or protected paths.
 
 ## Steering and follow-ups
 

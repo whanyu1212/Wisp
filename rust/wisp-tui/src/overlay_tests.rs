@@ -401,7 +401,7 @@ async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
                 assert!(text(terminal.backend().buffer()).contains(if trust {
                     "trust required"
                 } else {
-                    "approval required"
+                    "Permission required"
                 }));
                 ui.handle_input(key(KeyCode::Char('y')), &writer, 8192)
                     .await

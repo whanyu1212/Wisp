@@ -47,6 +47,130 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
+    use wisp_protocol::{commands::PermissionMode, events::PermissionState};
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let request = frame(&mut receiver);
+    assert_eq!(request["type"], "get_permissions");
+    ui.handle_input(key(KeyCode::Char('2')), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    let id = request["id"].as_str().unwrap().to_string();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::PermissionsReported {
+            command_id: id.clone(),
+            permissions: Ok(Arc::new(PermissionState {
+                mode: PermissionMode::Ask,
+                saved_mode: None,
+                project_path: Some("/project".into()),
+            })),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: id,
+            command_type: "get_permissions".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.handle_input(key(KeyCode::Char('2')), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    let painted = draw(&mut ui, 80, 24);
+    assert!(painted.contains("Project permissions"));
+    assert!(painted.contains("1  Ask before changes"));
+    assert!(painted.contains("2  YOLO"));
+    ui.handle_input(key(KeyCode::Char('2')), &writer, 8192)
+        .await
+        .unwrap();
+    let change = frame(&mut receiver);
+    assert_eq!(change["type"], "set_permissions");
+    assert_eq!(change["mode"], "yolo");
+    assert_eq!(
+        ui.state.permissions.snapshot.as_ref().unwrap().mode,
+        PermissionMode::Ask
+    );
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: change["id"].as_str().unwrap().into(),
+            command_type: "set_permissions".into(),
+            ok: false,
+            error: Some("Could not save".into()),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ui.state.permissions.snapshot.as_ref().unwrap().mode,
+        PermissionMode::Ask
+    );
+    assert!(draw(&mut ui, 80, 24).contains("Could not save"));
+}
+
+#[tokio::test]
+async fn permission_gate_keys_send_only_the_displayed_scopes() {
+    for (choice, approved, scope) in [
+        ('1', true, None),
+        ('2', true, Some("tool_session")),
+        ('3', true, Some("all_project")),
+        ('4', false, None),
+    ] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = ui("", true);
+        ui.state.view_status = ViewStatus::WaitingForApproval;
+        ui.state.pending_approval = Some(PendingApproval {
+            call_id: "call".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"echo hi"}),
+            safety: "command".into(),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+        if approved {
+            ui.handle_input(key(KeyCode::Char(choice)), &writer, 8192)
+                .await
+                .unwrap();
+            assert!(receiver.try_recv().is_err());
+        }
+        let painted = draw(&mut ui, 30, 8);
+        for label in [
+            "1 Allow once",
+            "2 Allow tool this session",
+            "3 YOLO (saved)",
+            "4 Deny",
+        ] {
+            assert!(painted.contains(label), "{painted}");
+        }
+        ui.handle_input(key(KeyCode::Char(choice)), &writer, 8192)
+            .await
+            .unwrap();
+        let response = frame(&mut receiver);
+        assert_eq!(response["type"], "approval");
+        assert_eq!(response["approved"], approved);
+        assert_eq!(
+            response.get("scope").and_then(serde_json::Value::as_str),
+            scope
+        );
+    }
+}
+
+#[tokio::test]
 async fn skill_browser_inserts_without_submitting_and_catalog_changes_require_a_redraw() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("/skills", true);

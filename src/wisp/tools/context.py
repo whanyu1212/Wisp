@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wisp.permissions import permissions_directory
 from wisp.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 
 if TYPE_CHECKING:
@@ -58,6 +59,8 @@ class ToolContext:
         required = (
             config.auth_path.expanduser().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
+            permissions_directory().resolve(strict=False).as_posix(),
+            f"{permissions_directory().resolve(strict=False).as_posix()}/**",
             *(
                 (config.openai_compatible.ca_bundle.expanduser().resolve(strict=False).as_posix(),)
                 if config.openai_compatible is not None

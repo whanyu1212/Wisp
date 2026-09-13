@@ -24,6 +24,7 @@ from wisp.rpc.commands import (
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
+    GetPermissionsCommand,
     GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -38,6 +39,7 @@ from wisp.rpc.commands import (
     PromptCommand,
     RpcCommand,
     SelectSessionCommand,
+    SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
     ShutdownCommand,
@@ -48,6 +50,8 @@ from wisp.rpc.commands import (
 )
 
 __all__ = [
+    "GetPermissionsCommand",
+    "SetPermissionsCommand",
     "ApprovalCommand",
     "ApprovalScope",
     "BeginDeviceCodeCommand",
