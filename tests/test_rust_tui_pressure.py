@@ -413,6 +413,16 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
         )
         tui.send(b"\r")
         tui.wait_for(b"API key:", failure="hostile API-key title did not render")
+        connection_output = bytes(tui.output)
+        for injected in (
+            b"\x1b]0;WISP-INJECTED-TITLE\x07",
+            b"\x1b]52;c;V0lTUA==\x07",
+            b"\x1b[77;77H",
+            b"\x1b[5n",
+            b"\x1b[c",
+            b"\x1bP$qm\x1b\\",
+        ):
+            assert injected not in connection_output
         tui.output.clear()
         tui.send(b"\x03")
         tui.wait_for(
@@ -427,17 +437,15 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
         )
         tui.wait_for(b"visible-safe-tail", failure="safe payload text did not remain visible")
 
-        output = bytes(tui.output)
+        prompt_output = bytes(tui.output)
         for injected in (
-            b"\x1b]0;WISP-INJECTED-TITLE\x07",
-            b"\x1b]52;c;V0lTUA==\x07",
             b"\x1b]8;;https://WISP-INJECTED-LINK.invalid\x07",
             b"\x1b[77;77H",
             b"\x1b[5n",
             b"\x1b[c",
             b"\x1bP$qm\x1b\\",
         ):
-            assert injected not in output
+            assert injected not in prompt_output
 
         tui.send(b"\x03")
         assert tui.wait_for_exit(failure="Rust TUI did not exit after hostile payloads") == 0
