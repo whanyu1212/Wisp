@@ -11,7 +11,7 @@ from pathlib import Path
 from wisp.providers.base import ToolSpec
 from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import is_protected_path
+from wisp.tools.files.paths import is_protected_path
 
 from .text_budget import truncate_text
 

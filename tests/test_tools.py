@@ -17,11 +17,6 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.tools import file_ops as file_ops_module
-from wisp.tools import process as process_tools_module
-from wisp.tools import process_manager as process_manager_module
-from wisp.tools import search as search_tools_module
-from wisp.tools import shell as shell_tools_module
 from wisp.tools.builtin import (
     BashTool,
     EditTool,
@@ -33,7 +28,12 @@ from wisp.tools.builtin import (
     WriteTool,
 )
 from wisp.tools.context import ToolContext
+from wisp.tools.files import operations as file_ops_module
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.search import tools as search_tools_module
+from wisp.tools.shell import process as process_tools_module
+from wisp.tools.shell import supervisor as process_manager_module
+from wisp.tools.shell import tool as shell_tools_module
 from wisp.tools.truncation import truncate_text_tail
 
 pytestmark = pytest.mark.process
@@ -539,7 +539,7 @@ def test_write_tool_skips_snapshot_for_non_utf8_prior_file(tmp_path: Path) -> No
 def test_write_tool_skips_snapshot_for_oversize_prior_file(tmp_path: Path) -> None:
     # A prior file too large to diff (past the snapshot cap) is dropped rather than
     # shipped over the wire; the write still succeeds.
-    from wisp.tools.file_ops import _WRITE_SNAPSHOT_MAX_CHARS
+    from wisp.tools.files.operations import _WRITE_SNAPSHOT_MAX_CHARS
 
     context = ToolContext(cwd=tmp_path)
     (tmp_path / "big.txt").write_text("x" * (_WRITE_SNAPSHOT_MAX_CHARS + 1), encoding="utf-8")

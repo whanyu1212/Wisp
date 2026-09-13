@@ -57,7 +57,7 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
-fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
+fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let ceiling = area.height.saturating_sub(3).clamp(2, MAX_COMPOSER_HEIGHT);
     if editable(state) {
         let queue_rows = if state.active_prompt_editable() {
@@ -69,9 +69,8 @@ fn composer_height(area: Rect, state: &UiState, editor: &PromptEditor) -> u16 {
             0
         };
         u16::try_from(
-            editor
-                .projection()
-                .line_count()
+            layout
+                .map_or(1, |layout| layout.rows.len())
                 .saturating_add(queue_rows)
                 .saturating_add(if area.height >= 16 { 2 } else { 0 }),
         )
@@ -150,15 +149,23 @@ fn render_parked_decision(frame: &mut Frame<'_>, area: Rect, state: &UiState, pa
 }
 
 /// Anchor suggestions above the composer without changing transcript geometry.
-pub(crate) fn file_picker_area(area: Rect, state: &UiState, editor: &PromptEditor) -> Option<Rect> {
+pub(crate) fn file_picker_area(
+    area: Rect,
+    state: &UiState,
+    editor: &PromptEditor,
+    layout_cache: &mut ComposerLayoutCache,
+) -> Option<Rect> {
     if !decision_context_visible(area) {
         return None;
     }
     // At short sizes a tall draft leaves no free strip. Cover the upper rows rather
     // than hide all choices or change the transcript's layout to make room.
+    let composer = conversation_surface(area);
+    let editor_width = composer_editor_width(composer.width);
+    let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(area, state, editor) + 1)
+        .saturating_sub(composer_height(composer, state, layout) + 1)
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -210,11 +217,13 @@ pub fn render(
     connection: &ConnectionInfo,
     notice: Option<&str>,
 ) {
+    let mut composer_layout_cache = ComposerLayoutCache::default();
     render_interactive(
         frame,
         state,
         viewport,
         row_cache,
+        &mut composer_layout_cache,
         editor,
         connection,
         notice,
@@ -233,6 +242,7 @@ pub fn render_interactive(
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
+    composer_layout_cache: &mut ComposerLayoutCache,
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
@@ -271,7 +281,7 @@ pub fn render_interactive(
             frame,
             chunks[0],
             state,
-            editor,
+            None,
             composer_focused,
             false,
             palette,
@@ -288,7 +298,10 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
-    let composer_height = composer_height(area, state, editor);
+    let editor_width = composer_editor_width(area.width);
+    let composer_layout =
+        editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
+    let composer_height = composer_height(area, state, composer_layout);
     let completion_height = completion.map_or(0, |view| {
         (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 3))
     });
@@ -322,7 +335,7 @@ pub fn render_interactive(
         frame,
         chunks[2],
         state,
-        editor,
+        composer_layout,
         composer_focused,
         area.height >= 16,
         palette,
@@ -649,7 +662,7 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
-        for (offset, mut row) in rows.into_iter().enumerate() {
+        for (offset, row) in rows.into_iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
                 conversation.y + offset as u16,
@@ -661,14 +674,6 @@ fn render_transcript(
                     Block::default().style(palette.user_text()),
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
-            }
-            if Some(row.anchor.entry_id) == active_reply && row.kind == TranscriptRowKind::Header {
-                if let Some(label) = row.spans.first_mut() {
-                    label.text.push(' ');
-                    label.text.push_str(
-                        ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()],
-                    );
-                }
             }
             let pulse = (state.view_status == ViewStatus::Running
                 && row_tool_in_progress(state, &row))
@@ -1076,7 +1081,7 @@ fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
-    editor: &PromptEditor,
+    layout: Option<&ComposerLayout>,
     focused: bool,
     padded: bool,
     palette: Palette,
@@ -1163,23 +1168,17 @@ fn render_composer(
                 .height
                 .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
         };
-        let projection = editor.projection();
-        let row = projection.cursor_row();
-        let column = projection.cursor_column();
-        let vertical_scroll = row.saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
-        let horizontal_scroll =
-            column.saturating_sub(usize::from(editor_area.width.saturating_sub(1)));
-        let cursor_visible_row = row.saturating_sub(vertical_scroll);
-        let display_text = composer_visible_text(
-            &projection,
-            vertical_scroll,
-            horizontal_scroll,
-            usize::from(editor_area.width),
-            usize::from(editor_area.height),
-            cursor_visible_row,
-        );
-        let cursor_horizontal_scroll = display_text.cursor_horizontal_scroll;
-        if editor.text().is_empty() {
+        let layout = layout.expect("editable composer requires a visual layout");
+        let vertical_scroll = layout
+            .cursor_row
+            .saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
+        let visible_rows = layout
+            .rows
+            .iter()
+            .skip(vertical_scroll)
+            .take(usize::from(editor_area.height))
+            .collect::<Vec<_>>();
+        if layout.is_empty {
             let placeholder = if state.active_prompt_editable() {
                 let hint = "Steer Wisp, or queue a follow-up…";
                 if hint.width() <= usize::from(editor_area.width) {
@@ -1195,22 +1194,36 @@ fn render_composer(
                 editor_area,
             );
         } else {
-            frame.render_widget(Paragraph::new(display_text.text), editor_area);
+            frame.render_widget(
+                Paragraph::new(
+                    visible_rows
+                        .iter()
+                        .map(|row| row.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                editor_area,
+            );
         }
-        let cursor_x = editor_area.x.saturating_add(
-            u16::try_from(column.saturating_sub(cursor_horizontal_scroll)).unwrap_or(u16::MAX),
+        let cursor_x = editor_area
+            .x
+            .saturating_add(u16::try_from(layout.cursor_column).unwrap_or(u16::MAX));
+        let cursor_y = editor_area.y.saturating_add(
+            u16::try_from(layout.cursor_row.saturating_sub(vertical_scroll)).unwrap_or(u16::MAX),
         );
-        let cursor_y = editor_area
-            .y
-            .saturating_add(u16::try_from(row.saturating_sub(vertical_scroll)).unwrap_or(u16::MAX));
         if focused && cursor_x < editor_area.right() && cursor_y < editor_area.bottom() {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
         return Some(mouse::Editor {
             area: editor_area,
-            revision: editor.revision(),
-            first_line: vertical_scroll,
-            column_starts: display_text.column_starts,
+            revision: layout.revision,
+            rows: visible_rows
+                .into_iter()
+                .map(|row| mouse::EditorRow {
+                    logical_row: row.logical_row,
+                    column_start: row.column_start,
+                })
+                .collect(),
         });
     }
 
@@ -1296,47 +1309,199 @@ fn bounded_queue_preview(content: &str, width: usize) -> String {
     preview
 }
 
-struct ComposerVisibleText {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComposerVisualRow {
+    logical_row: usize,
+    column_start: usize,
     text: String,
-    cursor_horizontal_scroll: usize,
-    column_starts: Vec<usize>,
 }
 
-fn composer_visible_text(
-    projection: &PromptProjection<'_>,
-    vertical_scroll: usize,
-    horizontal_scroll: usize,
+struct ComposerLayout {
+    revision: u64,
+    is_empty: bool,
+    rows: Vec<ComposerVisualRow>,
+    cursor_row: usize,
+    cursor_column: usize,
+}
+
+/// Reuse the expensive Unicode-aware draft layout until its inputs change.
+#[derive(Default)]
+pub(crate) struct ComposerLayoutCache {
+    revision: Option<u64>,
     width: usize,
-    height: usize,
-    cursor_visible_row: usize,
-) -> ComposerVisibleText {
-    let source_text = projection.text();
-    let mut visible = String::new();
-    let visible_width = width.max(1);
-    let visible_height = height.max(1);
-    let mut cursor_horizontal_scroll = horizontal_scroll;
-    let mut column_starts = Vec::new();
-    for (index, line) in source_text
+    layout: Option<ComposerLayout>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+impl ComposerLayoutCache {
+    fn layout(&mut self, editor: &PromptEditor, width: usize) -> &ComposerLayout {
+        let width = width.max(1);
+        if self.revision != Some(editor.revision()) || self.width != width {
+            self.layout = Some(composer_layout(editor, width));
+            self.revision = Some(editor.revision());
+            self.width = width;
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
+            }
+        }
+        self.layout.as_ref().expect("composer layout was cached")
+    }
+
+    #[cfg(test)]
+    fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+}
+
+fn composer_editor_width(area_width: u16) -> usize {
+    usize::from(area_width.saturating_sub(2))
+        .saturating_sub(COMPOSER_PREFIX.width())
+        .max(1)
+}
+
+#[cfg(test)]
+fn composer_visual_row_count(projection: &PromptProjection<'_>, width: usize) -> usize {
+    let width = width.max(1);
+    projection
+        .text()
         .split('\n')
-        .skip(vertical_scroll)
-        .take(visible_height)
-        .enumerate()
-    {
-        if index > 0 {
-            visible.push('\n');
+        .map(|line| visual_row_count(line, width))
+        .sum::<usize>()
+        .saturating_add(usize::from(cursor_needs_continuation_row(
+            projection, width,
+        )))
+}
+
+#[cfg(test)]
+fn visual_row_count(line: &str, width: usize) -> usize {
+    visual_row_metrics(line, width).0
+}
+
+fn visual_row_metrics(line: &str, width: usize) -> (usize, usize, usize) {
+    let mut rows = 1_usize;
+    let mut used = 0_usize;
+    let mut source_column = 0_usize;
+    for grapheme in line.graphemes(true) {
+        let mut remaining = source_grapheme_display_width(grapheme, source_column);
+        if grapheme == "\t" {
+            while remaining > 0 {
+                if used == width {
+                    rows += 1;
+                    used = 0;
+                }
+                let take = remaining.min(width - used);
+                used += take;
+                source_column += take;
+                remaining -= take;
+            }
+        } else {
+            if used > 0 && used.saturating_add(remaining) > width {
+                rows += 1;
+                used = 0;
+            }
+            used = used.saturating_add(remaining);
+            source_column = source_column.saturating_add(remaining);
         }
-        let window = source_display_column_window(line, horizontal_scroll, visible_width);
-        if index == cursor_visible_row {
-            cursor_horizontal_scroll = window.effective_start;
+    }
+    (rows, used, source_column)
+}
+
+fn cursor_needs_continuation_row(projection: &PromptProjection<'_>, width: usize) -> bool {
+    let Some(line) = projection.text().split('\n').nth(projection.cursor_row()) else {
+        return false;
+    };
+    let (_, final_row_width, line_width) = visual_row_metrics(line, width);
+    projection.cursor_column() == line_width && final_row_width == width
+}
+
+fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
+    let width = width.max(1);
+    let projection = editor.projection();
+    let mut rows = Vec::new();
+    let mut cursor_row = 0_usize;
+    let mut cursor_column = 0_usize;
+    for (logical_row, line) in projection.text().split('\n').enumerate() {
+        let first_row = rows.len();
+        append_composer_visual_rows(&mut rows, logical_row, line, width);
+        if logical_row != projection.cursor_row() {
+            continue;
         }
-        column_starts.push(window.effective_start);
-        visible.push_str(&window.text);
+        if cursor_needs_continuation_row(&projection, width) {
+            rows.push(ComposerVisualRow {
+                logical_row,
+                column_start: projection.cursor_column(),
+                text: String::new(),
+            });
+        }
+        let relative = rows[first_row..]
+            .iter()
+            .rposition(|row| row.column_start <= projection.cursor_column())
+            .unwrap_or(0);
+        cursor_row = first_row + relative;
+        cursor_column = projection
+            .cursor_column()
+            .saturating_sub(rows[cursor_row].column_start);
     }
-    ComposerVisibleText {
-        text: visible,
-        cursor_horizontal_scroll,
-        column_starts,
+    ComposerLayout {
+        revision: editor.revision(),
+        is_empty: editor.text().is_empty(),
+        rows,
+        cursor_row,
+        cursor_column,
     }
+}
+
+fn append_composer_visual_rows(
+    rows: &mut Vec<ComposerVisualRow>,
+    logical_row: usize,
+    line: &str,
+    width: usize,
+) {
+    let mut column_start = 0_usize;
+    let mut source_column = 0_usize;
+    let mut used = 0_usize;
+    let mut text = String::new();
+    for grapheme in line.graphemes(true) {
+        let mut remaining = source_grapheme_display_width(grapheme, source_column);
+        if grapheme == "\t" {
+            while remaining > 0 {
+                if used == width {
+                    rows.push(ComposerVisualRow {
+                        logical_row,
+                        column_start,
+                        text: std::mem::take(&mut text),
+                    });
+                    column_start = source_column;
+                    used = 0;
+                }
+                let take = remaining.min(width - used);
+                text.extend(std::iter::repeat_n(' ', take));
+                used += take;
+                source_column += take;
+                remaining -= take;
+            }
+            continue;
+        }
+        if used > 0 && used.saturating_add(remaining) > width {
+            rows.push(ComposerVisualRow {
+                logical_row,
+                column_start,
+                text: std::mem::take(&mut text),
+            });
+            column_start = source_column;
+            used = 0;
+        }
+        text.push_str(grapheme);
+        used = used.saturating_add(remaining);
+        source_column = source_column.saturating_add(remaining);
+    }
+    rows.push(ComposerVisualRow {
+        logical_row,
+        column_start,
+        text,
+    });
 }
 
 pub(crate) struct SourceDisplayColumnWindow {
@@ -2155,6 +2320,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -2162,6 +2328,7 @@ mod tests {
                     state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     editor,
                     &connection(),
                     notice,
@@ -2187,6 +2354,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -2194,6 +2362,7 @@ mod tests {
                     state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -2853,6 +3022,57 @@ mod tests {
     }
 
     #[test]
+    fn composer_layout_wraps_tabs_wide_text_and_a_full_cursor_row() {
+        for (prompt, width, expected) in [
+            ("ab界c", 4, vec!["ab界", "c"]),
+            ("abc\tz", 4, vec!["abc ", "z"]),
+            ("abc界xyz", 4, vec!["abc", "界xy", "z"]),
+            ("abcd", 4, vec!["abcd", ""]),
+        ] {
+            let mut editor = PromptEditor::default();
+            editor.restore_prompt(prompt);
+            let projection = editor.projection();
+            let layout = composer_layout(&editor, width);
+            assert_eq!(
+                layout
+                    .rows
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                composer_visual_row_count(&projection, width),
+                layout.rows.len()
+            );
+            assert_eq!(layout.cursor_row, layout.rows.len() - 1);
+            assert!(layout.cursor_column < width);
+            assert_eq!(editor.text(), prompt);
+        }
+    }
+
+    #[test]
+    fn composer_layout_cache_reuses_large_unfolded_drafts_until_inputs_change() {
+        let mut editor = PromptEditor::default();
+        editor.replace_range(0..0, &"x".repeat(70_000));
+        let mut cache = ComposerLayoutCache::default();
+
+        assert!(cache.layout(&editor, 40).rows.len() > 1_000);
+        assert_eq!(cache.rebuilds(), 1);
+        assert!(cache.layout(&editor, 40).rows.len() > 1_000);
+        assert_eq!(cache.rebuilds(), 1);
+
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Left,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        cache.layout(&editor, 40);
+        assert_eq!(cache.rebuilds(), 2);
+        cache.layout(&editor, 39);
+        assert_eq!(cache.rebuilds(), 3);
+    }
+
+    #[test]
     fn composer_window_aligns_start_to_wide_grapheme_boundary() {
         let line = format!("{}TAIL", "🙂".repeat(35_000));
         let width = 38;
@@ -3061,6 +3281,7 @@ mod tests {
         let mut browse_terminal = Terminal::new(backend).unwrap();
         let mut browse_viewport = TranscriptViewport::default();
         let mut browse_cache = TranscriptRowCache::default();
+        let mut browse_composer_cache = ComposerLayoutCache::default();
         browse_terminal
             .draw(|frame| {
                 render_interactive(
@@ -3068,6 +3289,7 @@ mod tests {
                     &state,
                     &mut browse_viewport,
                     &mut browse_cache,
+                    &mut browse_composer_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -3105,6 +3327,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut row_cache = TranscriptRowCache::default();
+        let mut composer_layout_cache = ComposerLayoutCache::default();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -3112,6 +3335,7 @@ mod tests {
                     &state,
                     &mut viewport,
                     &mut row_cache,
+                    &mut composer_layout_cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -3522,6 +3746,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             let mut viewport = TranscriptViewport::default();
             let mut cache = TranscriptRowCache::default();
+            let mut composer_layout_cache = ComposerLayoutCache::default();
             terminal
                 .draw(|frame| {
                     render_interactive(
@@ -3529,6 +3754,7 @@ mod tests {
                         state,
                         &mut viewport,
                         &mut cache,
+                        &mut composer_layout_cache,
                         &PromptEditor::default(),
                         &connection(),
                         None,
@@ -3630,7 +3856,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_spinner_survives_tool_calls_and_stops_with_the_turn() {
+    fn working_spinner_stops_when_reply_streaming_starts() {
         let mut state = UiState::new("fake".into(), None, None);
         state.view_status = ViewStatus::Running;
         state.interaction_status = crate::reducer::InteractionStatus::Running;
@@ -3655,8 +3881,9 @@ mod tests {
         }
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
-            assert!(running.contains("wisp ⠙"), "{running}");
-            assert!(!running.contains("working ⠙"));
+            assert!(running.contains("wisp"), "{running}");
+            assert!(!running.contains("working ⠙"), "{running}");
+            assert!(!running.contains('⠙'), "{running}");
         }
         for status in [
             ViewStatus::Idle,

@@ -20,10 +20,10 @@ from pathspec import GitIgnoreSpec
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import display_tool_path, is_protected_path
-from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tools.files.paths import display_tool_path, is_protected_path
+from wisp.tools.files.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
-from wisp.tools.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
+from wisp.tools.shell.supervisor import ProcessSupervisor
 from wisp.tools.truncation import truncate_text
 
 # The TUI file picker imports this curated pruning set to keep indexing bounded.

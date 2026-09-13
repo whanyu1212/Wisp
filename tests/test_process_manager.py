@@ -11,7 +11,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-import wisp.tools.process_manager as process_manager_module
+import wisp.tools.shell.supervisor as process_manager_module
 from wisp.tools.process import ProcessResult
 from wisp.tools.process_manager import (
     ProcessSupervisor,

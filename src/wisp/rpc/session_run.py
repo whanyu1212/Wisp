@@ -47,7 +47,7 @@ from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import resolve_session_tree
 from wisp.tools.context import ToolContext
-from wisp.tools.file_ops import CreateOnlyWriteReceipt
+from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]

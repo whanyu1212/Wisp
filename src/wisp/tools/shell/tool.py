@@ -12,9 +12,9 @@ import anyio
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.process import _format_process_output_bounded, _run_shell
-from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
+from wisp.tools.shell.process import _format_process_output_bounded, _run_shell
+from wisp.tools.shell.supervisor import ProcessSupervisor, ProcessUpdate
 from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()

@@ -108,7 +108,7 @@ use transcript_view::{
     RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
     explore_run,
 };
-use ui::ConnectionInfo;
+use ui::{ComposerLayoutCache, ConnectionInfo};
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
 #[cfg(test)]
 use wisp_protocol::events::WispCurrentLiveEventOutput;
@@ -514,6 +514,7 @@ struct LiveUi {
     detail_view: DetailView,
     browse_selected: Option<TranscriptEntryId>,
     editor: PromptEditor,
+    composer_layout_cache: ComposerLayoutCache,
     prompt_history: PromptHistory,
     prompt_history_view: Option<PromptHistoryView>,
     ids: SequentialCommandIds,
@@ -555,6 +556,7 @@ impl Default for LiveUi {
             detail_view: DetailView::default(),
             browse_selected: None,
             editor: PromptEditor::default(),
+            composer_layout_cache: ComposerLayoutCache::default(),
             prompt_history: PromptHistory::default(),
             prompt_history_view: None,
             ids: SequentialCommandIds::default(),
@@ -1361,6 +1363,7 @@ impl LiveUi {
                 &self.state,
                 &mut self.transcript_viewport,
                 &mut self.transcript_row_cache,
+                &mut self.composer_layout_cache,
                 &self.editor,
                 connection,
                 self.notice.as_deref(),
@@ -1390,7 +1393,12 @@ impl LiveUi {
                 && self.browse_selected.is_none()
                 && self.file_picker.is_open()
             {
-                if let Some(area) = ui::file_picker_area(frame.area(), &self.state, &self.editor) {
+                if let Some(area) = ui::file_picker_area(
+                    frame.area(),
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                ) {
                     painted.popup = Some(area);
                     painted.rows =
                         self.file_picker

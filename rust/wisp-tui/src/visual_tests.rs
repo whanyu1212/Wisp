@@ -286,12 +286,38 @@ fn screen_text(buffer: &ratatui::buffer::Buffer) -> String {
 }
 
 #[test]
-fn transcript_padding_and_activity_stay_above_the_composer() {
+fn composer_soft_wraps_long_logical_lines_without_changing_the_prompt() {
+    let mut ui = fixture("conversation");
+    ui.mouse_enabled = true;
+    let prompt = format!("{}TAIL", "x".repeat(100));
+    ui.editor.restore_prompt(&prompt);
+
+    let buffer = draw(&mut ui, 80, 24);
+    let editor = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap();
+    assert!(editor.area.height >= 2);
+    assert!(editor.rows.len() >= 2);
+    assert_eq!(editor.rows[0].logical_row, 0);
+    assert_eq!(editor.rows[1].logical_row, 0);
+    assert!(editor.rows[1].column_start > 0);
+    assert!(row_containing(&buffer, "TAIL") > editor.area.y);
+    assert_eq!(ui.editor.text(), prompt);
+    assert_eq!(ui.editor.line_count(), 1);
+}
+
+#[test]
+fn streamed_reply_stops_activity_without_changing_transcript_padding() {
     for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
         let mut ui = fixture("working");
         ui.mouse_enabled = true;
         let buffer = draw(&mut ui, width, height);
-        let activity = row_containing(&buffer, "wisp ⠋");
+        let reply = row_containing(&buffer, "wisp");
         let editor = ui
             .mouse_frame
             .as_ref()
@@ -301,7 +327,7 @@ fn transcript_padding_and_activity_stay_above_the_composer() {
             .as_ref()
             .unwrap();
         let composer_top = editor.area.y - u16::from(height >= 16);
-        assert!(activity < composer_top);
+        assert!(reply < composer_top);
         assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
         if height >= 16 {
             for x in 0..width {
@@ -312,8 +338,9 @@ fn transcript_padding_and_activity_stay_above_the_composer() {
         }
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
-        assert!(screen_text(&next).contains("wisp ⠙"));
+        assert!(screen_text(&next).contains("wisp"));
         assert!(!screen_text(&next).contains("working ⠙"));
+        assert!(!screen_text(&next).contains('⠙'));
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
@@ -355,8 +382,9 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
         .append_message_delta(2, "The next review has started.");
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
-    assert!(streaming.contains("wisp ⠋"));
+    assert!(streaming.contains("wisp"));
     assert!(!streaming.contains("working ⠋"));
+    assert!(!streaming.contains('⠋'));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript

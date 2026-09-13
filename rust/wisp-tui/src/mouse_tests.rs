@@ -76,9 +76,9 @@ fn command(receiver: &mut mpsc::Receiver<WriterMessage>) -> Value {
 }
 
 #[test]
-fn capture_requires_explicit_opt_in_and_filters_non_navigation_reports() {
+fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
+    assert!(mouse::enabled(None));
     for value in [
-        None,
         Some(""),
         Some("0"),
         Some("false"),
@@ -213,13 +213,37 @@ async fn composer_clicks_respect_unicode_tabs_scroll_and_source_revisions() {
         .as_ref()
         .unwrap();
     let area = mapping.area;
-    let line = mapping.first_line;
-    let column = mapping.column_starts[0];
+    let line = mapping.rows[0].logical_row;
+    let column = mapping.rows[0].column_start;
     ui.handle_input(click(area.x, area.y), &writer, 8192)
         .await
         .unwrap();
     assert_eq!(ui.editor.cursor_row(), line);
     assert_eq!(ui.editor.cursor_column(), column);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn clicking_a_soft_wrapped_row_maps_back_to_the_logical_line() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui(&"x".repeat(100));
+    draw(&mut ui, 80, 24);
+    let mapping = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap();
+    let area = mapping.area;
+    let second = mapping.rows[1];
+
+    ui.handle_input(click(area.x + 2, area.y + 1), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.cursor_row(), 0);
+    assert_eq!(ui.editor.cursor_column(), second.column_start + 2);
     assert!(receiver.try_recv().is_err());
 }
 
@@ -337,6 +361,40 @@ async fn wheel_preserves_editor_focus_and_reading_position_during_streaming() {
     .unwrap();
     assert_ne!(ui.transcript_viewport, before);
     assert_eq!(ui.editor, editor);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn wheel_reaches_history_hidden_behind_the_pinned_current_turn() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state.transcript.append_prompt("OLDER-PROMPT".into());
+    ui.state
+        .transcript
+        .complete_message(1, "OLDER-REPLY".into());
+    ui.state.transcript.append_prompt("CURRENT-PROMPT".into());
+    let live = draw(&mut ui, 80, 24);
+    let live_text = (0..live.area.height)
+        .map(|row| row_text(&live, row))
+        .collect::<String>();
+    assert!(live_text.contains("CURRENT-PROMPT"), "{live_text}");
+    assert!(!live_text.contains("OLDER-PROMPT"), "{live_text}");
+
+    let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+    ui.handle_input(
+        Input::Mouse(event(MouseEventKind::ScrollUp, area.x + 2, area.y + 2)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.transcript_viewport.follows_tail());
+
+    let history = draw(&mut ui, 80, 24);
+    let history_text = (0..history.area.height)
+        .map(|row| row_text(&history, row))
+        .collect::<String>();
+    assert!(history_text.contains("OLDER-REPLY"), "{history_text}");
     assert!(receiver.try_recv().is_err());
 }
 
