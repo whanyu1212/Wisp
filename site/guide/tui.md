@@ -65,6 +65,13 @@ when one is persisted, and the keys for the current workflow. Live RPC and event
 shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
 and points at `/resume`, `/connect`, and `@` when there is room. It collapses to compact copy on
 short or narrow terminals.
+
+Assistant replies render Markdown during streaming and when loading session history: headings,
+emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting, and tables with
+aligned columns and bold headers. Wide table rows wrap with the transcript. Very large unfinished
+blocks temporarily display as plain text and are formatted when the reply completes. User prompts
+and tool output retain their literal text.
+
 Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
 `read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
 `thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained

@@ -4176,6 +4176,70 @@ mod tests {
     }
 
     #[test]
+    fn widening_and_promoting_a_table_invalidates_cached_rows() {
+        let mut transcript = Transcript::default();
+        let (_, assistant) = transcript.append_exchange("prompt".into());
+        transcript.start_message(1);
+        transcript.append_message_delta(1, "| A | B |\n| --- | --- |\n| x | y |\n");
+        let anchor = RowAnchor {
+            entry_id: assistant,
+            position: RowPosition::Markdown(MarkdownPosition {
+                source_offset: 0,
+                output_offset: 0,
+            }),
+        };
+        let mut cache = TranscriptRowCache::default();
+        assert_eq!(
+            cache
+                .row_at(&transcript, anchor, 80)
+                .unwrap()
+                .row
+                .plain_text(),
+            "A │ B"
+        );
+        transcript.append_message_delta(1, "| longer name | z |\n\nAfter");
+        let warm = cache.row_at(&transcript, anchor, 80).unwrap().row;
+        let fresh = TranscriptRowCache::default()
+            .row_at(&transcript, anchor, 80)
+            .unwrap()
+            .row;
+        assert_eq!(warm, fresh);
+        assert_eq!(warm.plain_text(), "A           │ B");
+    }
+
+    #[test]
+    fn narrow_tables_wrap_without_losing_cells_or_reparsing_on_resize() {
+        let source = "| Name | Count |\n| --- | ---: |\n| 界界界 | 12345 |";
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.complete_message(1, source.into());
+        let expected = "Name   │ Count───────┼──────界界界 │ 12345";
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        for width in [80, 8, 12, 80] {
+            viewport.set_geometry(&transcript, &mut cache, width, 40);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let content = rows
+                .iter()
+                .filter(|row| {
+                    row.role == TranscriptRole::Assistant && row.kind == TranscriptRowKind::Content
+                })
+                .map(TranscriptRow::plain_text)
+                .collect::<Vec<_>>();
+            assert!(
+                content
+                    .iter()
+                    .all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= width)
+            );
+            assert_eq!(content.concat(), expected);
+            if width != 80 {
+                assert_eq!(cache.work().markdown_source_bytes_parsed, 0);
+            }
+            cache.reset_work();
+        }
+    }
+
+    #[test]
     fn markdown_rows_style_content_and_neutralize_untrusted_terminal_text() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());

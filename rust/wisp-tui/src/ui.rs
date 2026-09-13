@@ -2512,6 +2512,117 @@ mod tests {
     }
 
     #[test]
+    fn streamed_and_historical_assistant_events_render_markdown() {
+        let chunks = [
+            "## Result\n\nUse **bold** and `code`.\n\n",
+            "| Item | Count |\n| --- | ---: |\n",
+            "| short | 1 |\n",
+            "| longer name | 12 |\n\n",
+            "- [x] Done\n- [ ] Pending\n",
+        ];
+        let source = chunks.concat();
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_exchange("show result".into());
+        let mut ids = TestIds::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        for chunk in chunks {
+            let event = wisp_protocol::events::deserialize(json!({
+                "type": "message.delta", "turn": 1, "delta": chunk,
+                "schema_version": 37, "timestamp": "2026-09-13T00:00:00Z",
+                "role": "assistant", "content_index": 0,
+                "content_kind": "text"
+            }))
+            .unwrap();
+            reduce(
+                &mut state,
+                crate::reducer::UiAction::BackendEvent(BackendEvent::from_live(&event).unwrap()),
+                &mut ids,
+            )
+            .unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut viewport,
+                        &mut cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    )
+                })
+                .unwrap();
+        }
+        let streamed = terminal.backend().to_string();
+        assert!(streamed.contains("Use bold and code."));
+        assert!(streamed.contains("Item        │ Count"));
+        assert!(streamed.contains("longer name │    12"));
+        assert!(streamed.contains("☑ Done"));
+        assert!(streamed.contains("☐ Pending"));
+        let (_, _, heading) = style_at_text(terminal.backend(), "Result").unwrap();
+        let (_, _, bold) = style_at_text(terminal.backend(), "bold").unwrap();
+        assert!(heading.contains(Modifier::BOLD));
+        assert!(bold.contains(Modifier::BOLD));
+
+        let completed = wisp_protocol::events::deserialize(json!({
+            "type": "message.completed", "turn": 1, "content": source,
+            "schema_version": 37, "timestamp": "2026-09-13T00:00:00Z",
+            "role": "assistant", "tool_calls": [], "usage": null,
+            "finish_reason": "stop", "response_id": null, "cost": null,
+            "context_observation": null
+        }))
+        .unwrap();
+        reduce(
+            &mut state,
+            crate::reducer::UiAction::BackendEvent(BackendEvent::from_live(&completed).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().to_string(),
+            render_to_string(80, 32, &state, &PromptEditor::default())
+        );
+
+        let history = BackendEvent::from_projection_value(&json!({
+            "type": "rpc.messages", "command_id": "history-1",
+            "session_id": null, "session_path": null, "active_leaf_id": null,
+            "truncated": false, "next_before_entry_id": null, "next_after_entry_id": null,
+            "messages": [{
+                "entry_id": "answer", "role": "assistant", "content": source,
+                "content_truncated": false, "tool_calls": []
+            }]
+        }))
+        .unwrap();
+        let BackendEvent::MessagesReported { messages, .. } = history else {
+            panic!("history event expected");
+        };
+        state.transcript = messages.transcript;
+        for width in [80, 38] {
+            let rendered = render_to_string(width, 32, &state, &PromptEditor::default());
+            assert!(rendered.contains("Use bold and code."));
+            assert!(rendered.contains("longer name │    12"));
+            assert!(rendered.contains("☑ Done"));
+            assert!(!rendered.contains("**bold**"));
+            assert!(!rendered.contains("| --- |"));
+        }
+    }
+
+    #[test]
     fn closed_fence_syntax_styles_reach_terminal_cells() {
         let mut state = UiState::unconfigured();
         state.transcript.append_exchange("show code".into());
