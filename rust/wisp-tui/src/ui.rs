@@ -2216,6 +2216,10 @@ mod tests {
         ActiveCommand, ActiveCommandType, AgentMode, BackendEvent, CommandIdSource, CommandKind,
         InteractionStatus, PendingApproval, SessionIdentity, reduce,
     };
+    use proptest::{
+        prelude::*,
+        test_runner::{Config, RngAlgorithm, TestRng, TestRunner},
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
@@ -2948,6 +2952,54 @@ mod tests {
             sanitize_for_terminal("alpha\r\nbeta\rgamma"),
             "alpha\nbeta\ngamma"
         );
+    }
+
+    #[test]
+    fn terminal_sanitizer_neutralizes_generated_controls_and_bidi_overrides() {
+        let config = Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &[0x48; 32]);
+        let mut runner = TestRunner::new_with_rng(config, rng);
+        let strategy = proptest::collection::vec(any::<char>(), 0..512)
+            .prop_map(|characters| characters.into_iter().collect::<String>());
+
+        runner
+            .run(&strategy, |source| {
+                let sanitized = sanitize_for_terminal(&source);
+                let terminal_safe = sanitized.chars().all(|character| {
+                    character == '\n'
+                        || (!character.is_control() && !crate::is_bidi_control(character))
+                });
+                prop_assert!(terminal_safe);
+                prop_assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn terminal_sanitizer_neutralizes_named_escape_families() {
+        let source = concat!(
+            "safe",
+            "\u{1b}[2J",
+            "\u{1b}]0;owned\u{7}",
+            "\u{1b}]8;;https://example.invalid\u{7}link\u{1b}]8;;\u{7}",
+            "\u{1b}]52;c;QUJD\u{7}",
+            "\u{1b}[?1049h",
+            "\u{009b}31m",
+            "\u{202e}",
+            "tail",
+        );
+        let sanitized = sanitize_for_terminal(source);
+
+        for control in ['\u{1b}', '\u{7}', '\u{009b}', '\u{202e}'] {
+            assert!(!sanitized.contains(control));
+        }
+        assert!(sanitized.contains("safe"));
+        assert!(sanitized.contains("tail"));
     }
 
     #[test]
