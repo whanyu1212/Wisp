@@ -14,7 +14,10 @@ const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_DISPLAY_ENTRIES: usize = 32;
 const MAX_LOCAL_DISPLAY_BYTES: usize = 4 * 1024 * 1024;
 const THINKING_MAX_BYTES: usize = 64 * 1024;
+const LIVE_TRANSCRIPT_ENTRY_LIMIT: usize = 1_200;
+const LIVE_TRANSCRIPT_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const HISTORY_OMISSION_MARKER: &str = "[earlier session history omitted]";
+const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries omitted]";
 
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
@@ -100,6 +103,7 @@ pub struct TranscriptEntry {
     layout_epoch: u64,
     history_group: Option<u64>,
     history_omission: bool,
+    live_retention_omission: bool,
     durable_entry_ids: Vec<String>,
     history_detail_source: Option<ToolDetailSource>,
     history_result_projection_truncated: bool,
@@ -141,6 +145,30 @@ impl TranscriptEntry {
             TranscriptEntryKind::Process(card) => Some(card),
             TranscriptEntryKind::Message | TranscriptEntryKind::Tool(_) => None,
         }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let kind_bytes = match &self.kind {
+            TranscriptEntryKind::Message => 0,
+            TranscriptEntryKind::Tool(card) => card
+                .call_id
+                .len()
+                .saturating_add(card.name.len())
+                .saturating_add(card.action_arguments.len())
+                .saturating_add(card.detail.len())
+                .saturating_add(card.retained_output.text.len())
+                .saturating_add(card.detail_source.retained_bytes())
+                .saturating_add(card.structured_detail.retained_bytes()),
+            TranscriptEntryKind::Process(card) => card
+                .process_id
+                .len()
+                .saturating_add(card.retained_output.text.len()),
+        };
+        self.content
+            .len()
+            .saturating_add(self.local_display.as_ref().map_or(0, String::len))
+            .saturating_add(self.thinking.len())
+            .saturating_add(kind_bytes)
     }
 }
 
@@ -1110,6 +1138,96 @@ impl Transcript {
         self.insert_history_page(page, index, false)
     }
 
+    pub(crate) fn enforce_live_retention(
+        &mut self,
+        protected_entry: Option<TranscriptEntryId>,
+    ) -> bool {
+        let mut removed = false;
+        while self.live_retained_entry_count() > LIVE_TRANSCRIPT_ENTRY_LIMIT
+            || self.live_retained_bytes() > LIVE_TRANSCRIPT_BYTE_LIMIT
+        {
+            let Some(index) = self.entries.iter().position(|entry| {
+                let unresolved = self
+                    .call_entries
+                    .values()
+                    .any(|binding| binding.entry_id == entry.id && !binding.resolved);
+                entry.history_group.is_none()
+                    && !entry.history_omission
+                    && !entry.live_retention_omission
+                    && entry.state == TranscriptEntryState::Complete
+                    && !unresolved
+                    && protected_entry != Some(entry.id)
+            }) else {
+                break;
+            };
+            self.entries.remove(index);
+            removed = true;
+        }
+        if !removed {
+            return false;
+        }
+
+        self.entries.retain(|entry| !entry.live_retention_omission);
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.history_group.is_none() && !entry.history_omission)
+            .unwrap_or(self.entries.len());
+        let id = TranscriptEntryId(self.next_entry_id);
+        self.next_entry_id = self
+            .next_entry_id
+            .checked_add(1)
+            .expect("transcript entry identifiers exhausted");
+        self.entries.insert(
+            index,
+            TranscriptEntry {
+                id,
+                role: TranscriptRole::Assistant,
+                content: LIVE_RETENTION_OMISSION_MARKER.into(),
+                local_display: None,
+                thinking: String::new(),
+                state: TranscriptEntryState::Complete,
+                kind: TranscriptEntryKind::Message,
+                revision: 0,
+                layout_epoch: 0,
+                history_group: None,
+                history_omission: false,
+                live_retention_omission: true,
+                durable_entry_ids: Vec::new(),
+                history_detail_source: None,
+                history_result_projection_truncated: false,
+                history_calls: Vec::new(),
+                history_pending_result: None,
+            },
+        );
+        self.rebuild_entry_indexes();
+        self.bump_generation();
+        true
+    }
+
+    fn live_retained_entry_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.history_group.is_none()
+                    && !entry.history_omission
+                    && !entry.live_retention_omission
+            })
+            .count()
+    }
+
+    fn live_retained_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.history_group.is_none()
+                    && !entry.history_omission
+                    && !entry.live_retention_omission
+            })
+            .map(TranscriptEntry::retained_bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
     pub(crate) fn replace_history_omission_marker(&mut self, omitted: bool) {
         let marker_index = self.entries.iter().position(|entry| entry.history_omission);
         let marker_count = self
@@ -1155,6 +1273,7 @@ impl Transcript {
                         layout_epoch: 0,
                         history_group: None,
                         history_omission: true,
+                        live_retention_omission: false,
                         durable_entry_ids: Vec::new(),
                         history_detail_source: None,
                         history_result_projection_truncated: false,
@@ -1827,6 +1946,7 @@ impl Transcript {
             layout_epoch: 0,
             history_group: None,
             history_omission: false,
+            live_retention_omission: false,
             durable_entry_ids: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
@@ -1910,6 +2030,7 @@ impl Transcript {
             layout_epoch: 0,
             history_group: None,
             history_omission: false,
+            live_retention_omission: false,
             durable_entry_ids: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
@@ -2210,6 +2331,84 @@ mod tests {
         );
         let latest = format!("{raw}-4");
         assert_eq!(transcript.latest_user_text(), Some(latest.as_str()));
+    }
+
+    #[test]
+    fn live_retention_bounds_completed_entries_and_preserves_stable_ids() {
+        let mut transcript = Transcript::default();
+        let protected = transcript.observe_tool_call(call(
+            "pending",
+            "read",
+            serde_json::json!({"path": "pending.txt"}),
+        ));
+        let first_retained = transcript.append_prompt("first retained".into());
+        for index in 0..LIVE_TRANSCRIPT_ENTRY_LIMIT {
+            transcript.append_prompt(format!("message-{index}"));
+        }
+
+        assert!(transcript.enforce_live_retention(None));
+
+        assert!(transcript.entry(protected).is_some());
+        assert!(transcript.entry(first_retained).is_none());
+        let markers = transcript
+            .entries()
+            .iter()
+            .filter(|entry| entry.live_retention_omission)
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].content, LIVE_RETENTION_OMISSION_MARKER);
+        assert_eq!(
+            transcript
+                .entries()
+                .iter()
+                .filter(|entry| {
+                    entry.history_group.is_none()
+                        && !entry.history_omission
+                        && !entry.live_retention_omission
+                })
+                .count(),
+            LIVE_TRANSCRIPT_ENTRY_LIMIT
+        );
+        let newest = transcript.append_prompt("newest".into());
+        assert!(newest > first_retained);
+    }
+
+    #[test]
+    fn live_retention_bounds_payload_bytes_and_protects_exact_detail() {
+        let mut transcript = Transcript::default();
+        let protected = transcript.append_prompt("protected".into());
+        transcript.append_prompt("x".repeat(LIVE_TRANSCRIPT_BYTE_LIMIT + 1));
+
+        assert!(transcript.enforce_live_retention(Some(protected)));
+
+        assert_eq!(transcript.entry(protected).unwrap().content, "protected");
+        assert!(transcript.live_retained_bytes() <= LIVE_TRANSCRIPT_BYTE_LIMIT);
+        let markers = transcript
+            .entries()
+            .iter()
+            .filter(|entry| entry.live_retention_omission)
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].content, LIVE_RETENTION_OMISSION_MARKER);
+    }
+
+    #[test]
+    fn live_retention_keeps_streaming_responses() {
+        let mut transcript = Transcript::default();
+        for index in 0..=LIVE_TRANSCRIPT_ENTRY_LIMIT {
+            transcript.append_prompt(format!("message-{index}"));
+        }
+        transcript.begin_message(1);
+        let active = transcript.append_message_delta(1, "active");
+
+        assert!(transcript.enforce_live_retention(None));
+
+        assert!(transcript.entry(active).is_some());
+        assert_eq!(
+            transcript.entry(active).unwrap().state,
+            TranscriptEntryState::Streaming
+        );
+        assert!(transcript.live_retained_entry_count() <= LIVE_TRANSCRIPT_ENTRY_LIMIT);
     }
 
     #[test]

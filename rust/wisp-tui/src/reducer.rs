@@ -1241,6 +1241,19 @@ pub fn reduce(
     action: UiAction,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
+    let enforce_retention = matches!(
+        &action,
+        UiAction::Submit(_)
+            | UiAction::SubmitPresented { .. }
+            | UiAction::BackendEvent(
+                BackendEvent::MessageCompleted { .. }
+                    | BackendEvent::ToolResult(_)
+                    | BackendEvent::ToolApprovalResolved { .. }
+                    | BackendEvent::QueueMessageInjected { .. }
+                    | BackendEvent::CommandFinished { .. }
+            )
+            | UiAction::TransportClosed { .. }
+    );
     let mut effects = match action {
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
@@ -1358,6 +1371,14 @@ pub fn reduce(
             Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
         }
     }?;
+    let protected_entry = state
+        .history
+        .active_exact_detail
+        .as_ref()
+        .map(|detail| detail.target);
+    if enforce_retention && state.transcript.enforce_live_retention(protected_entry) {
+        sync_represented_history(state);
+    }
     effects.extend(context::refresh_if_ready(state, ids)?);
     effects.extend(project_files::refresh_if_ready(state, ids)?);
     Ok(effects)

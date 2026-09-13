@@ -76,28 +76,43 @@ for line in sys.stdin:
             command_type=command_type,
             ok=True,
         ))
+        if mode == "long-session" and burst_done_path.exists():
+            release_path.touch()
     elif command_type == "prompt":
         emit(AgentStarted(session_id="pressure-session"))
         emit(MessageStarted(turn=1))
-        if mode in {"burst", "signal-burst"}:
+        if mode in {"burst", "signal-burst", "long-session"}:
             # One bounded write makes the producer substantially outrun terminal
             # rendering and exercises admission beyond the 64-event queue.
             frames = []
-            event_count = 192 if mode == "burst" else 1024
-            prefix = "BURST" if mode == "burst" else "SIGNAL-BURST"
-            for index in range(event_count):
-                marker = f"{prefix}-{index:04d}:"
-                delta = marker + ("x" * (1024 - len(marker)))
-                frames.append(MessageDelta(turn=1, delta=delta).model_dump_json() + "\n")
-            frames.extend([
-                MessageCompleted(
+            if mode == "long-session":
+                event_count = 1_205
+                for index in range(event_count):
+                    turn = index + 1
+                    frames.extend([
+                        MessageStarted(turn=turn).model_dump_json() + "\n",
+                        MessageCompleted(
+                            turn=turn,
+                            content=f"retained-turn-{index:04d}",
+                            finish_reason="stop",
+                        ).model_dump_json() + "\n",
+                    ])
+            else:
+                event_count = 192 if mode == "burst" else 1024
+                prefix = "BURST" if mode == "burst" else "SIGNAL-BURST"
+                for index in range(event_count):
+                    marker = f"{prefix}-{index:04d}:"
+                    delta = marker + ("x" * (1024 - len(marker)))
+                    frames.append(MessageDelta(turn=1, delta=delta).model_dump_json() + "\n")
+                frames.append(MessageCompleted(
                     turn=1,
                     content="BURST-FIRST BURST-LAST",
                     finish_reason="stop",
-                ).model_dump_json() + "\n",
+                ).model_dump_json() + "\n")
+            frames.extend([
                 AgentCompleted(
                     session_id="pressure-session",
-                    turns=1,
+                    turns=event_count if mode == "long-session" else 1,
                     outcome="completed",
                 ).model_dump_json() + "\n",
                 RpcCommandFinished(
@@ -285,6 +300,28 @@ def test_finite_burst_beyond_event_queue_capacity_drains_in_order(tmp_path: Path
         assert burst_done.exists()
         tui.send(b"\x03")
         assert tui.wait_for_exit(failure="Rust TUI did not exit after the burst") == 0
+        assert termios.tcgetattr(tui.fd) == tui.initial_terminal
+    finally:
+        tui.close()
+
+    backend_pid = int(backend_pid_path.read_text(encoding="utf-8"))
+    assert _backend_process_has_exited(backend_pid)
+
+
+@pytest.mark.process
+def test_long_session_bounds_live_transcript_and_remains_responsive(tmp_path: Path) -> None:
+    tui, backend_pid_path, release, burst_done = _launch(tmp_path, mode="long-session")
+    try:
+        tui.wait_ready()
+        assert backend_pid_path.exists()
+        tui.send(b"long session\r")
+        tui.wait_until(
+            lambda _output: burst_done.exists() and release.exists(),
+            timeout=30,
+            failure="long session did not drain through post-prompt synchronization",
+        )
+        tui.send(b"\x03")
+        assert tui.wait_for_exit(failure="Rust TUI did not exit after the long session") == 0
         assert termios.tcgetattr(tui.fd) == tui.initial_terminal
     finally:
         tui.close()
