@@ -166,9 +166,7 @@ fn parse_reference(
             return Some((end, None));
         }
         let encoded = &line[start + 1..quoted_end];
-        let path = serde_json::from_str::<String>(encoded)
-            .or_else(|_| serde_json::from_str(&format!("{encoded}\"")))
-            .ok();
+        let path = serde_json::from_str::<String>(encoded).ok();
         return Some((end, path));
     }
     let end = rest
@@ -323,6 +321,20 @@ mod tests {
             }]
         );
         assert!(highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(true)),).is_empty());
+        assert_eq!(
+            highlights(
+                "@\"space name.md",
+                false,
+                0,
+                1,
+                None,
+                Some(&snapshot(false)),
+            ),
+            vec![Highlight {
+                columns: 0..15,
+                kind: Kind::UnresolvedPath,
+            }]
+        );
     }
 
     #[test]
