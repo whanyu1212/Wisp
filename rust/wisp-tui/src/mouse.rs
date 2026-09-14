@@ -229,7 +229,7 @@ impl LiveUi {
             Layer::Conversation => {
                 if let Some(code) = wheel {
                     if contains(frame.conversation.transcript, event) {
-                        let lines = if code == KeyCode::Up { -3 } else { 3 };
+                        let lines = if code == KeyCode::Up { -1 } else { 1 };
                         let control = self
                             .navigate_transcript_action(
                                 TranscriptViewAction::ScrollLines(lines),

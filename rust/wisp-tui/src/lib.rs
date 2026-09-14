@@ -7645,7 +7645,7 @@ mod tests {
     }
 
     #[test]
-    fn browse_selection_reconciles_after_resize_and_ignores_spacers() {
+    fn browse_selection_reconciles_after_resize_when_selection_is_offscreen() {
         let mut live_ui = LiveUi {
             state: UiState::new("fake".into(), None, None),
             ..LiveUi::default()
@@ -7700,13 +7700,8 @@ mod tests {
             &live_ui.state.transcript,
             &mut live_ui.transcript_row_cache,
         );
-        let mut spacer_visible = false;
         for _ in 0..32 {
-            let visible = live_ui
-                .transcript_viewport
-                .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache);
-            if visible.len() == 1 && visible[0].kind == TranscriptRowKind::Spacer {
-                spacer_visible = true;
+            if live_ui.visible_foldable_entries().is_empty() {
                 break;
             }
             live_ui.transcript_viewport.reduce(
@@ -7715,7 +7710,6 @@ mod tests {
                 &mut live_ui.transcript_row_cache,
             );
         }
-        assert!(spacer_visible);
         assert!(live_ui.visible_foldable_entries().is_empty());
         assert_eq!(live_ui.browse_selected, Some(card_id));
 

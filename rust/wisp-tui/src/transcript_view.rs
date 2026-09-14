@@ -2492,7 +2492,9 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
         amount: usize,
     ) -> usize {
-        let _ = self.visible_rows(transcript, cache);
+        if self.top.is_none() {
+            self.top = self.tail_top(transcript, cache);
+        }
         let Some(mut top) = self.top else {
             return 0;
         };
@@ -2589,22 +2591,8 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
         let entry = transcript.entries().last()?;
-        let latest_user = transcript
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.role == TranscriptRole::User)
-            .map(|entry| RowAnchor {
-                entry_id: entry.id,
-                position: RowPosition::Header,
-            });
         let mut top = cache.last_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
-            // Following the current turn must not place older replies below its
-            // pinned prompt. Those turns remain reachable through normal scrolling.
-            if Some(top) == latest_user {
-                break;
-            }
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
             };
@@ -3051,48 +3039,61 @@ mod tests {
     use std::fmt::Write as _;
 
     #[test]
-    fn short_history_scrolls_row_by_row_until_the_live_turn_boundary() {
+    fn follow_tail_backfills_short_current_turn_and_scrolls_contiguously() {
         let mut transcript = Transcript::default();
-        let first = transcript.append_prompt("first prompt".into());
-        transcript.complete_message(1, "first answer".into());
-        let latest = transcript.append_prompt("latest prompt".into());
+        transcript.append_prompt("older prompt".into());
+        transcript.complete_message(1, numbered_lines("older answer", 20));
+        transcript.append_prompt("latest prompt".into());
         transcript.complete_message(2, "latest answer".into());
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
-        viewport.set_geometry(&transcript, &mut cache, 80, 40);
-        assert_eq!(
-            viewport.visible_rows(&transcript, &mut cache)[0]
-                .anchor
-                .entry_id,
-            latest
+        viewport.set_geometry(&transcript, &mut cache, 40, 8);
+
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert_eq!(rows.len(), 8);
+        assert!(rows.iter().any(|row| row.plain_text() == "latest prompt"));
+        assert!(rows.iter().any(|row| row.plain_text() == "latest answer"));
+        let anchors = rows.iter().map(|row| row.anchor).collect::<Vec<_>>();
+        let expected_top = cache
+            .previous_anchor(&transcript, anchors[0], 40)
+            .expect("backfilled tail has an older row");
+
+        transcript.append_message_delta(3, "unseen output\n");
+        let outcome = viewport.reduce(
+            TranscriptViewAction::ScrollLines(-1),
+            &transcript,
+            &mut cache,
         );
-        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let scrolled = viewport.visible_rows(&transcript, &mut cache);
+        let scrolled_anchors = scrolled.iter().map(|row| row.anchor).collect::<Vec<_>>();
+
+        assert_eq!(outcome.consumed_rows, 1);
+        assert_eq!(scrolled_anchors[0], expected_top);
+        assert_eq!(scrolled_anchors[1..], anchors[..anchors.len() - 1]);
+    }
+
+    #[test]
+    fn scrolling_back_to_the_tail_preserves_the_rendered_rows() {
+        let transcript = transcript_with(30);
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 20, 6);
+        let tail = viewport.visible_rows(&transcript, &mut cache);
+
+        viewport.reduce(
+            TranscriptViewAction::ScrollLines(-1),
+            &transcript,
+            &mut cache,
+        );
+        assert!(!viewport.follows_tail());
         viewport.reduce(
             TranscriptViewAction::ScrollLines(1),
             &transcript,
             &mut cache,
         );
-        assert!(!viewport.follows_tail());
-        let rows = viewport.visible_rows(&transcript, &mut cache);
-        assert_eq!(rows[0].anchor.entry_id, first);
-        assert_eq!(rows[0].plain_text(), "first prompt");
-        for _ in 0..20 {
-            if viewport.follows_tail() {
-                break;
-            }
-            viewport.reduce(
-                TranscriptViewAction::ScrollLines(1),
-                &transcript,
-                &mut cache,
-            );
-        }
+
         assert!(viewport.follows_tail());
-        assert_eq!(
-            viewport.visible_rows(&transcript, &mut cache)[0]
-                .anchor
-                .entry_id,
-            latest
-        );
+        assert_eq!(viewport.visible_rows(&transcript, &mut cache), tail);
     }
 
     #[test]

@@ -365,20 +365,20 @@ async fn wheel_preserves_editor_focus_and_reading_position_during_streaming() {
 }
 
 #[tokio::test]
-async fn wheel_reaches_history_hidden_behind_the_pinned_current_turn() {
+async fn first_wheel_scroll_uses_the_last_rendered_tail_after_unseen_output() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("draft");
-    ui.state.transcript.append_prompt("OLDER-PROMPT".into());
+    ui.state.transcript.start_message(1);
     ui.state
         .transcript
-        .complete_message(1, "OLDER-REPLY".into());
-    ui.state.transcript.append_prompt("CURRENT-PROMPT".into());
-    let live = draw(&mut ui, 80, 24);
-    let live_text = (0..live.area.height)
-        .map(|row| row_text(&live, row))
-        .collect::<String>();
-    assert!(live_text.contains("CURRENT-PROMPT"), "{live_text}");
-    assert!(!live_text.contains("OLDER-PROMPT"), "{live_text}");
+        .append_message_delta(1, &"long transcript line\n".repeat(120));
+    draw(&mut ui, 80, 24);
+    let before = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
+    ui.state
+        .transcript
+        .append_message_delta(1, "unseen output\n");
 
     let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
     ui.handle_input(
@@ -388,13 +388,13 @@ async fn wheel_reaches_history_hidden_behind_the_pinned_current_turn() {
     )
     .await
     .unwrap();
-    assert!(!ui.transcript_viewport.follows_tail());
+    let after = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
 
-    let history = draw(&mut ui, 80, 24);
-    let history_text = (0..history.area.height)
-        .map(|row| row_text(&history, row))
-        .collect::<String>();
-    assert!(history_text.contains("OLDER-REPLY"), "{history_text}");
+    assert!(!ui.transcript_viewport.follows_tail());
+    assert_ne!(after[0].anchor, before[0].anchor);
+    assert_eq!(after[1..], before[..before.len() - 1]);
     assert!(receiver.try_recv().is_err());
 }
 
