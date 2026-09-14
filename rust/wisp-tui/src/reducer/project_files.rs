@@ -35,13 +35,22 @@ impl ProjectFiles {
         self.pending.is_some() || self.refresh
     }
 
+    pub(crate) fn snapshot(&self) -> Option<&ProjectFileSnapshot> {
+        self.snapshot.as_deref()
+    }
+
     pub fn set_open(&mut self, open: bool) {
         if self.open == open {
             return;
         }
         self.open = open;
-        self.retire_snapshot();
         self.refresh = open;
+        if open {
+            self.retire_snapshot();
+        } else if let Some(pending) = &mut self.pending {
+            pending.superseded = true;
+            pending.report = None;
+        }
     }
 
     fn retire_snapshot(&mut self) {
@@ -269,6 +278,24 @@ mod tests {
             );
             assert_eq!(ids.0, 3);
         }
+    }
+
+    #[test]
+    fn completed_snapshot_survives_picker_close_until_policy_invalidation() {
+        let mut state = UiState::unconfigured();
+        let mut ids = Ids::default();
+        reduce(&mut state, UiAction::SetProjectFilesOpen(true), &mut ids).unwrap();
+        event(&mut state, &mut ids, report("get_project_files-1", 1));
+        event(&mut state, &mut ids, finished("get_project_files-1", true));
+        reduce(&mut state, UiAction::SetProjectFilesOpen(false), &mut ids).unwrap();
+
+        assert_eq!(state.project_files.snapshot().unwrap().generation, 1);
+        event(
+            &mut state,
+            &mut ids,
+            BackendEvent::ProjectFilesInvalidated(2),
+        );
+        assert!(state.project_files.snapshot().is_none());
     }
 
     #[test]
