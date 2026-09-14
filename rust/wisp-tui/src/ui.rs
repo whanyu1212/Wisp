@@ -1518,9 +1518,14 @@ fn styled_composer_line(
             PromptHighlightKind::ResolvedPath => Style::default()
                 .fg(palette.success)
                 .add_modifier(Modifier::UNDERLINED),
-            PromptHighlightKind::UnresolvedPath => Style::default()
-                .fg(palette.warning)
-                .add_modifier(Modifier::UNDERLINED),
+            PromptHighlightKind::UnresolvedPath => {
+                let modifier = if palette.is_monochrome() {
+                    Modifier::UNDERLINED | Modifier::DIM
+                } else {
+                    Modifier::UNDERLINED
+                };
+                Style::default().fg(palette.warning).add_modifier(modifier)
+            }
         };
         spans.push(Span::styled(
             row.text[start_byte..end_byte].to_owned(),
@@ -3229,7 +3234,7 @@ mod tests {
             line.spans[0]
                 .style
                 .add_modifier
-                .contains(Modifier::UNDERLINED)
+                .contains(Modifier::UNDERLINED | Modifier::DIM)
         );
     }
 
