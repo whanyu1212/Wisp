@@ -410,9 +410,15 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
             b"CONNECTION-SAFE-TAIL",
             failure="hostile connection metadata did not render through its trailing sentinel",
         )
+        title_offset = len(tui.output)
         tui.send(b"\r")
-        tui.wait_for(b"API key:", failure="hostile API-key title did not render")
-        connection_output = bytes(tui.output)
+        tui.wait_for(
+            b"API key:",
+            b"CONNECTION-SAFE-TAIL",
+            since=title_offset,
+            failure="hostile API-key title did not render through its trailing sentinel",
+        )
+        connection_output = bytes(tui.output[title_offset:])
         for injected in (
             b"\x1b]0;T\x07",
             b"\x1b]52;c;QQ==\x07",
