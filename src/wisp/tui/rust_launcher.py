@@ -7,12 +7,12 @@ import os
 import signal
 import subprocess
 import sys
-import sysconfig
 import termios
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from types import FrameType
 
@@ -67,12 +67,22 @@ def resolve_rust_tui_binary() -> Path:
             raise RustTuiLaunchError(f"{_BINARY_ENV} must be an absolute executable path")
         source = _BINARY_ENV
     else:
-        scripts = sysconfig.get_path("scripts")
-        if not scripts:
+        try:
+            distribution = metadata.distribution("wisp-ai")
+        except metadata.PackageNotFoundError as exc:
             raise RustTuiLaunchError(
-                "the active Python environment has no scripts directory for the Rust TUI"
+                "the active Python environment has no Wisp installation"
+            ) from exc
+        binary = next(
+            (entry for entry in distribution.files or () if entry.name == _BINARY_NAME),
+            None,
+        )
+        if binary is None:
+            raise RustTuiLaunchError(
+                "the active Python environment has no installed Rust TUI binary; "
+                "use `wisp tui --renderer textual`"
             )
-        path = Path(scripts) / _BINARY_NAME
+        path = Path(binary.locate())
         source = "the active Python environment"
 
     try:

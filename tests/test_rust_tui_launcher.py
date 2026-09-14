@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest import MonkeyPatch
@@ -274,7 +275,12 @@ def test_binary_resolution_uses_active_environment_scripts_not_path(
     (hostile / "wisp-tui").write_bytes(b"hostile")
     monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
     monkeypatch.setenv("PATH", str(hostile))
-    monkeypatch.setattr(rust_launcher.sysconfig, "get_path", lambda name: str(scripts))
+    installed_binary = SimpleNamespace(name="wisp-tui", locate=lambda: binary)
+    monkeypatch.setattr(
+        rust_launcher.metadata,
+        "distribution",
+        lambda name: SimpleNamespace(files=(installed_binary,)),
+    )
 
     assert rust_launcher.resolve_rust_tui_binary() == binary.resolve()
 
@@ -283,10 +289,12 @@ def test_missing_environment_binary_is_actionable(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    scripts = tmp_path / "environment" / "bin"
-    scripts.mkdir(parents=True)
     monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
-    monkeypatch.setattr(rust_launcher.sysconfig, "get_path", lambda name: str(scripts))
+    monkeypatch.setattr(
+        rust_launcher.metadata,
+        "distribution",
+        lambda name: SimpleNamespace(files=()),
+    )
 
     with pytest.raises(RustTuiLaunchError, match="active Python environment") as raised:
         rust_launcher.resolve_rust_tui_binary()
