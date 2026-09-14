@@ -27,6 +27,7 @@ mod mouse_tests;
 mod overlay_tests;
 mod process;
 mod prompt_editor;
+mod prompt_highlighting;
 mod prompt_history;
 #[cfg(test)]
 mod prompt_history_tests;
@@ -2854,8 +2855,10 @@ impl LiveUi {
             )?;
             self.apply_effects(effects, writer, limit).await?;
         }
-        self.file_picker
-            .sync_snapshot(self.state.project_files.snapshot.as_ref());
+        self.file_picker.sync_snapshot(
+            open.then_some(self.state.project_files.snapshot.as_ref())
+                .flatten(),
+        );
         Ok(())
     }
 

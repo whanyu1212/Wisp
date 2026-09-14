@@ -147,6 +147,17 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     })
 }
 
+pub(crate) fn is_supported_token(token: &str, catalog: Option<&[CommandDescriptor]>) -> bool {
+    command_descriptors(catalog).into_iter().any(|descriptor| {
+        usage(&descriptor.name).is_some()
+            && (descriptor.slash_command.eq_ignore_ascii_case(token)
+                || descriptor
+                    .slash_aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(token)))
+    })
+}
+
 fn token_context(editor: &PromptEditor) -> Option<(Range<usize>, String)> {
     let text = editor.text();
     if text.contains(['\n', '\r']) {

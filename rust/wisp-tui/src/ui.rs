@@ -3,6 +3,7 @@ use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::mouse;
 use crate::prompt_editor::{PromptEditor, PromptProjection};
+use crate::prompt_highlighting::{self, Highlight, Kind as PromptHighlightKind};
 use crate::reducer::{UiState, ViewStatus};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
@@ -1194,16 +1195,15 @@ fn render_composer(
                 editor_area,
             );
         } else {
-            frame.render_widget(
-                Paragraph::new(
-                    visible_rows
-                        .iter()
-                        .map(|row| row.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-                editor_area,
-            );
+            let line_count = layout
+                .rows
+                .last()
+                .map_or(0, |row| row.logical_row.saturating_add(1));
+            let rows = visible_rows
+                .iter()
+                .map(|row| composer_visual_line(row, layout, line_count, state, palette))
+                .collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(rows), editor_area);
         }
         let cursor_x = editor_area
             .x
@@ -1451,6 +1451,94 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
         cursor_row,
         cursor_column,
     }
+}
+
+fn composer_visual_line(
+    row: &ComposerVisualRow,
+    layout: &ComposerLayout,
+    line_count: usize,
+    state: &UiState,
+    palette: Palette,
+) -> Line<'static> {
+    let mut logical_line = String::new();
+    for part in layout
+        .rows
+        .iter()
+        .filter(|part| part.logical_row == row.logical_row)
+    {
+        if logical_line.len() >= prompt_highlighting::MAX_LINE_BYTES {
+            break;
+        }
+        let remaining = prompt_highlighting::MAX_LINE_BYTES - logical_line.len();
+        let mut end = part.text.len().min(remaining);
+        while !part.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        logical_line.push_str(&part.text[..end]);
+    }
+    let highlights = prompt_highlighting::line_highlights(
+        &logical_line,
+        row.logical_row,
+        line_count,
+        state.command_catalog.as_deref(),
+        state.project_files.snapshot(),
+    );
+    styled_composer_line(row, &highlights, palette)
+}
+
+fn styled_composer_line(
+    row: &ComposerVisualRow,
+    highlights: &[Highlight],
+    palette: Palette,
+) -> Line<'static> {
+    let row_start = row.column_start;
+    let row_end = row_start.saturating_add(row.text.width());
+    let mut spans = Vec::new();
+    let mut byte_start = 0;
+    for highlight in highlights {
+        let start = highlight.columns.start.max(row_start).min(row_end);
+        let end = highlight.columns.end.max(start).min(row_end);
+        if start == end {
+            continue;
+        }
+        let start_byte = byte_at_local_display_column(&row.text, start.saturating_sub(row_start));
+        let end_byte = byte_at_local_display_column(&row.text, end.saturating_sub(row_start));
+        if byte_start < start_byte {
+            spans.push(Span::raw(row.text[byte_start..start_byte].to_owned()));
+        }
+        let style = match highlight.kind {
+            PromptHighlightKind::Command => Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+            PromptHighlightKind::ResolvedPath => Style::default()
+                .fg(palette.success)
+                .add_modifier(Modifier::UNDERLINED),
+            PromptHighlightKind::UnresolvedPath => Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::UNDERLINED),
+        };
+        spans.push(Span::styled(
+            row.text[start_byte..end_byte].to_owned(),
+            style,
+        ));
+        byte_start = end_byte;
+    }
+    if byte_start < row.text.len() {
+        spans.push(Span::raw(row.text[byte_start..].to_owned()));
+    }
+    Line::from(spans)
+}
+
+fn byte_at_local_display_column(text: &str, target: usize) -> usize {
+    let mut column = 0_usize;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        let next = column.saturating_add(grapheme.width());
+        if target < next {
+            return offset;
+        }
+        column = next;
+    }
+    text.len()
 }
 
 fn append_composer_visual_rows(
@@ -3058,6 +3146,86 @@ mod tests {
         );
         let rendered = render_to_string(40, 14, &state, &editor);
         assert!(rendered.contains("TAIL"));
+    }
+
+    #[test]
+    fn composer_styles_commands_and_project_references_without_changing_geometry() {
+        use std::sync::Arc;
+        use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
+
+        let mut state = UiState::new("fake".into(), None, None);
+        state.project_files.snapshot = Some(Arc::new(ProjectFileSnapshot {
+            generation: 1,
+            entries: vec![ProjectFileEntry {
+                path: "src/main.rs".into(),
+                kind: ProjectFileKind::File,
+            }],
+            truncated: false,
+        }));
+        let mut editor = PromptEditor::default();
+        editor.restore_prompt("/theme @src/main.rs @missing");
+        let cursor = (editor.cursor_row(), editor.cursor_column());
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        let mut composer_cache = ComposerLayoutCache::default();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &mut composer_cache,
+                    &editor,
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                );
+            })
+            .unwrap();
+
+        let command = style_at_text(terminal.backend(), "/theme").unwrap();
+        let resolved = style_at_text(terminal.backend(), "@src/main.rs").unwrap();
+        let unresolved = style_at_text(terminal.backend(), "@missing").unwrap();
+        assert_eq!(command.0, Palette::default().primary);
+        assert!(command.2.contains(Modifier::BOLD));
+        assert_eq!(resolved.0, Palette::default().success);
+        assert!(resolved.2.contains(Modifier::UNDERLINED));
+        assert_eq!(unresolved.0, Palette::default().warning);
+        assert!(unresolved.2.contains(Modifier::UNDERLINED));
+        assert_eq!((editor.cursor_row(), editor.cursor_column()), cursor);
+        assert_eq!(editor.text(), "/theme @src/main.rs @missing");
+    }
+
+    #[test]
+    fn monochrome_and_wrapped_composer_highlights_keep_non_color_semantics() {
+        let row = ComposerVisualRow {
+            logical_row: 0,
+            column_start: 5,
+            text: "missing".into(),
+        };
+        let line = styled_composer_line(
+            &row,
+            &[Highlight {
+                columns: 0..12,
+                kind: PromptHighlightKind::UnresolvedPath,
+            }],
+            crate::theme::default_theme().palette(true),
+        );
+        assert_eq!(line.spans[0].content, "missing");
+        assert!(
+            line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
     }
 
     #[test]
