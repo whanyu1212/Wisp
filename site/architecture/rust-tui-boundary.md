@@ -19,7 +19,8 @@ Python.
 The #463 slice started as a transport-only experiment. The current experimental frontend accepts
 prompts, approvals, trust answers, cancellation, steering and follow-up queues, bounded session
 history, and provider connection flows. It does not claim Textual workflow or product parity.
-Textual remains the default and the supported product frontend.
+Textual remains the default and the supported product frontend. Rust is an experimental opt-in;
+the native-wheel release work does not promote it.
 
 The governing rule is:
 
@@ -32,10 +33,10 @@ The governing rule is:
 gate.
 
 1. Textual remains the default and the supported product frontend.
-2. Rust is an experimental opt-in on macOS and Linux, source-build only. Current Python
-   distributions do not include the binary.
-3. Rollout stage is **2** (explicit experimental renderer flag). Stages 3–5 — supported opt-in with
-   shipped artifacts, a default switch, and Textual deprecation — are not authorized.
+2. Rust remains an experimental opt-in on macOS and Linux. Current published Python distributions
+   do not include the binary; #566 prepares verified native wheels for the next approved release.
+3. Rollout stage remains **2** (explicit experimental renderer flag). Stages 3–5 — supported opt-in,
+   a default switch, and Textual deprecation — are not authorized by packaging work alone.
 4. Explicit Rust selection does not fall back to Textual. A missing, non-executable, incompatible,
    or failing binary is an actionable non-zero error. Users who want Textual pass
    `--renderer textual` or unset `WISP_TUI_RENDERER`.
@@ -281,7 +282,7 @@ noncritical** work can wait after stage 3.
 | Large-paste presentation | Compact markers with bounded display metadata; exact raw submission/history/queues | #467 editor, reducer, rendering and PTY regressions; historical replay stays raw |
 | Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Acceptable while experimental; assess accessibility and copying workflows before a default switch |
 | Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | Secret lifecycle, remaining recovery races, platform limits and dependency policy remain blockers for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
-| Prebuilt binary distribution and install lifecycle | Published releases remain source-build only; CI builds non-published single-distribution platform-wheel candidates | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)); release integration, environment-owned discovery, publication integrity, install/update/rollback and target coverage remain |
+| Prebuilt binary distribution and install lifecycle | The tag-gated release flow assembles one pure fallback wheel plus native manylinux x86_64 and macOS x86_64/arm64 wheels; installed Wisp resolves Rust only from its active Python environment | #566 adds post-download release-set verification, provenance, installed fake-provider smoke, native/pure replacement, offline reinstall, corruption and uninstall evidence; publication still requires an approved tag release |
 | Windows | Rejected before binary resolution | Acceptable while experimental; not a claimed Rust target |
 | No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
 | Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Gates against a default switch under [#456](https://github.com/whanyu1212/Wisp/issues/456); in-process frame timings do not satisfy them |
@@ -301,8 +302,8 @@ and logical frame buffering. Deterministic renderer properties and a built-binar
 PTY cover representative terminal/Unicode injection paths; secret lifecycle, recovery races,
 dependency auditing and broader process-memory evidence remain separate #468 acceptance work.
 
-The remaining stage-3 work is hardening (#468) and distribution (#469), including coordinated updates.
-Closing those issues does not itself authorize a default switch or Textual deprecation. Optional
+#468 and #469 are closed; #566 carries the production distribution follow-up. Completing release
+integration does not itself authorize supported opt-in, a default switch, or Textual deprecation. Optional
 experience improvements under [#237](https://github.com/whanyu1212/Wisp/issues/237), including draft
 stash, activity views, and the separate image-attachment roadmap, are not automatic parity blockers.
 
@@ -324,17 +325,18 @@ stash, activity views, and the separate image-attachment roadmap, are not automa
   experiment rather than a prerequisite for Rust.
 - [#445](https://github.com/whanyu1212/Wisp/issues/445) supplies stable action identifiers and
   Rust-local keymaps without sharing renderer implementation.
-- [#468](https://github.com/whanyu1212/Wisp/issues/468), and
-  [#469](https://github.com/whanyu1212/Wisp/issues/469) are the remaining blockers for supported
-  opt-in (stage 3). They do not reopen the #470 default-renderer decision.
+- [#468](https://github.com/whanyu1212/Wisp/issues/468) and
+  [#469](https://github.com/whanyu1212/Wisp/issues/469) are closed. [#566](https://github.com/whanyu1212/Wisp/issues/566)
+  carries their production distribution follow-up without reopening the #470 renderer decision.
 - [#470](https://github.com/whanyu1212/Wisp/issues/470) is the closed decision to remain at
   experimental opt-in with Textual as default.
 
 ## Consequences and reconsideration
 
 The experiment adds a second frontend language, cross-language fixtures, and a lockstep compatibility
-obligation. #469 selects a single-distribution platform-wheel candidate and verifies CI artifacts,
-but published binaries and their release lifecycle add a separate distribution cost and are not done. Those costs are accepted only while Rust stays experimental. They do not justify
+obligation. #469 selected a single-distribution platform-wheel candidate; #566 integrates verified
+native artifacts with the tag-gated release flow and records lifecycle evidence. Published binaries
+still require an approved release, and these costs are accepted only while Rust stays experimental. They do not justify
 moving unrelated Python systems.
 
 #470 closed as a stage-2 hold. After the daily-use readiness work, the remaining reconsideration conditions are:
@@ -343,8 +345,8 @@ moving unrelated Python systems.
 - [#468](https://github.com/whanyu1212/Wisp/issues/468) is closed with bounded transport,
   retention, fuzzing and terminal-safety evidence; its documented limitations remain inputs to a
   later support decision;
-- supported platforms cannot install a published frontend without a local Rust toolchain
-  ([#469](https://github.com/whanyu1212/Wisp/issues/469)).
+- no approved release has yet published the verified native artifacts prepared by
+  [#566](https://github.com/whanyu1212/Wisp/issues/566).
 
 Supported opt-in feedback and an explicit support/accessibility/rollback decision remain required
 before default promotion. The latest merged feature checks do not replace those rollout gates.

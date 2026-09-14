@@ -29,9 +29,10 @@ internal value objects, and Pydantic models for serialized boundaries.
 
 ## Experimental Rust TUI {#rust-tui-scaffold}
 
-The experimental Rust frontend is a Cargo workspace member and is supported for source development
-on macOS and Linux. It is not the default renderer and is not bundled in Python distributions;
-[#470](https://github.com/whanyu1212/Wisp/issues/470) closed that way. The repository pins Rust
+The experimental Rust frontend is a Cargo workspace member and remains available for source
+development on macOS and Linux. It is not the default renderer. Existing published distributions do
+not bundle it; #566 prepares verified native wheels for a later approved release without changing
+[#470](https://github.com/whanyu1212/Wisp/issues/470)'s renderer decision. The repository pins Rust
 1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
 the workspace package settings.
 
@@ -43,9 +44,9 @@ WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" \
   uv run wisp tui --renderer rust
 ```
 
-Published Python packages do not currently bundle this executable. CI also builds non-published
-platform-wheel candidates under #469 to verify the selected single-distribution packaging contract;
-those artifacts do not change source development or launcher discovery. A relative
+The tag-gated release flow now assembles verified platform-wheel candidates under #566. Installed
+native wheels place `wisp-tui` in the active Python environment's scripts directory; the launcher
+never searches `PATH`. Source development still uses the explicit override below. A relative
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 

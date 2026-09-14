@@ -1,6 +1,7 @@
 name: Rust TUI wheel candidates
 
 on:
+  workflow_call:
   workflow_dispatch:
   pull_request:
     branches:
@@ -13,6 +14,8 @@ on:
       - "pyproject.toml"
       - "rust/wisp-protocol/**"
       - "rust/wisp-tui/**"
+      - "scripts/smoke_installed_rust_tui.py"
+      - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"
       - "src/wisp/**"
       - "tests/test_rust_tui_wheel.py"
@@ -73,9 +76,8 @@ jobs:
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pip install --quiet "${wheel[0]}"
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
-          cd /tmp
-          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
-            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
@@ -89,6 +91,14 @@ jobs:
           grep -F "does not match expected backend version" /tmp/mismatch.out
           file /tmp/wisp-wheel/bin/wisp-tui | grep -F "x86-64"
           ! ldd /tmp/wisp-wheel/bin/wisp-tui | grep -F "not found"
+          "$python" scripts/verify_rust_tui_install_lifecycle.py \
+            --environment /tmp/wisp-wheel \
+            --uv "$(command -v uv)" \
+            --native-wheel "${wheel[0]}" \
+            --pure-wheel "${reference[0]}" \
+            --smoke-script "$GITHUB_WORKSPACE/scripts/smoke_installed_rust_tui.py" \
+            --work-dir /tmp/wisp-wheel-lifecycle \
+            --evidence candidate-dist/install-evidence.json
 
       - name: Upload candidate artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -165,9 +175,8 @@ jobs:
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python "${wheel[0]}"
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
-          cd /tmp
-          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
-            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
@@ -189,6 +198,14 @@ jobs:
           codesign -dv /tmp/wisp-wheel/bin/wisp-tui > /tmp/codesign.txt 2>&1 || true
           ! grep -q "^Authority=" /tmp/codesign.txt
           ! grep "^TeamIdentifier=" /tmp/codesign.txt | grep -Fvx "TeamIdentifier=not set"
+          python scripts/verify_rust_tui_install_lifecycle.py \
+            --environment /tmp/wisp-wheel \
+            --uv "$uv_bin" \
+            --native-wheel "${wheel[0]}" \
+            --pure-wheel "${reference[0]}" \
+            --smoke-script "$GITHUB_WORKSPACE/scripts/smoke_installed_rust_tui.py" \
+            --work-dir /tmp/wisp-wheel-lifecycle \
+            --evidence candidate-dist/install-evidence.json
 
       - name: Upload candidate artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

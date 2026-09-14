@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import json
 import zipfile
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from scripts.verify_rust_tui_wheel import (
     cargo_version,
     python_version,
+    verify_release_set,
     verify_versions,
     verify_wheel,
 )
@@ -138,6 +140,78 @@ def test_record_covers_candidate_files(tmp_path: Path) -> None:
             target.writestr(info, content)
     with pytest.raises(ValueError, match="missing from RECORD"):
         verify_wheel(rewritten, expected_tag="py3-none-test_platform", root=root)
+
+
+def test_release_set_requires_exact_supported_matrix(tmp_path: Path) -> None:
+    distributions = tmp_path / "dist"
+    assets = tmp_path / "assets"
+    distributions.mkdir()
+    assets.mkdir()
+    (distributions / f"wisp_ai-{_VERSION}.tar.gz").write_bytes(b"sdist")
+    pure = _wheel(distributions, tag="py3-none-any", native=False)
+    cargo = cargo_version(_ROOT)
+    targets = {
+        "manylinux-x86-64": "py3-none-manylinux_2_28_x86_64",
+        "macos-x86-64": "py3-none-macosx_11_0_x86_64",
+        "macos-arm64": "py3-none-macosx_11_0_arm64",
+    }
+    for target, tag in targets.items():
+        wheel = _wheel(distributions, tag=tag)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        (assets / f"wisp-tui-{target}.sha256").write_text(
+            f"{digest}  {wheel.name}\n",
+            encoding="utf-8",
+        )
+        (assets / f"wisp-tui-{target}.cdx.json").write_text(
+            '{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":'
+            f'{{"component":{{"name":"wisp-tui","version":"{cargo}"}}}}}}',
+            encoding="utf-8",
+        )
+        (assets / f"wisp-tui-{target}-install.json").write_text(
+            json.dumps(
+                {
+                    "wheel_bytes": wheel.stat().st_size,
+                    "binary_bytes": 1,
+                    "binary_startup_seconds": 0.1,
+                    "max_rss_bytes": 1,
+                    "ready_frame_seconds": 0.2,
+                    "total_seconds": 0.3,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    verify_release_set(distributions, assets, root=_ROOT)
+
+    extra = distributions / f"wisp_ai-{_VERSION}-py3-none-win_amd64.whl"
+    extra.write_bytes(pure.read_bytes())
+    with pytest.raises(ValueError, match="differs from supported matrix"):
+        verify_release_set(distributions, assets, root=_ROOT)
+
+
+def test_release_set_rejects_bad_checksum_and_sbom(tmp_path: Path) -> None:
+    distributions = tmp_path / "dist"
+    assets = tmp_path / "assets"
+    distributions.mkdir()
+    assets.mkdir()
+    (distributions / f"wisp_ai-{_VERSION}.tar.gz").write_bytes(b"sdist")
+    _wheel(distributions, tag="py3-none-any", native=False)
+    targets = {
+        "manylinux-x86-64": "py3-none-manylinux_2_28_x86_64",
+        "macos-x86-64": "py3-none-macosx_11_0_x86_64",
+        "macos-arm64": "py3-none-macosx_11_0_arm64",
+    }
+    for target, tag in targets.items():
+        wheel = _wheel(distributions, tag=tag)
+        (assets / f"wisp-tui-{target}.sha256").write_text(
+            f"{'0' * 64}  {wheel.name}\n",
+            encoding="utf-8",
+        )
+        (assets / f"wisp-tui-{target}.cdx.json").write_text("{}", encoding="utf-8")
+        (assets / f"wisp-tui-{target}-install.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        verify_release_set(distributions, assets, root=_ROOT)
 
 
 def test_wheel_fixture_is_deterministic(tmp_path: Path) -> None:

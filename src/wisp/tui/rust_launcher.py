@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from types import FrameType
 
@@ -23,7 +24,7 @@ from wisp.tui.launch import TuiOptions, _preflight_tui_options, _rpc_command, _r
 
 _BINARY_ENV = "WISP_RUST_TUI_BINARY"
 _BINDINGS_ENV = "WISP_RUST_TUI_BINDINGS_JSON"
-_PACKAGED_BINARY = Path(__file__).resolve().parent / "bin" / "wisp-tui"
+_BINARY_NAME = "wisp-tui"
 _GRACE_SECONDS = 1.0
 _TERM_SECONDS = 1.0
 _KILL_SECONDS = 1.0
@@ -64,16 +65,33 @@ def resolve_rust_tui_binary() -> Path:
         path = Path(override).expanduser()
         if not path.is_absolute():
             raise RustTuiLaunchError(f"{_BINARY_ENV} must be an absolute executable path")
+        source = _BINARY_ENV
     else:
-        path = _PACKAGED_BINARY
+        try:
+            distribution = metadata.distribution("wisp-ai")
+        except metadata.PackageNotFoundError as exc:
+            raise RustTuiLaunchError(
+                "the active Python environment has no Wisp installation"
+            ) from exc
+        binary = next(
+            (entry for entry in distribution.files or () if entry.name == _BINARY_NAME),
+            None,
+        )
+        if binary is None:
+            raise RustTuiLaunchError(
+                "the active Python environment has no installed Rust TUI binary; "
+                "use `wisp tui --renderer textual`"
+            )
+        path = Path(binary.locate())
+        source = "the active Python environment"
 
     try:
         resolved = path.resolve(strict=True)
     except OSError as exc:
-        source = _BINARY_ENV if override is not None else "the installed Wisp package"
         raise RustTuiLaunchError(
             f"Rust TUI binary was not found via {source}; "
-            f"set {_BINARY_ENV} to an absolute development binary path"
+            f"set {_BINARY_ENV} to an absolute development binary path or use "
+            "`wisp tui --renderer textual`"
         ) from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise RustTuiLaunchError(f"Rust TUI binary is not executable: {resolved}")

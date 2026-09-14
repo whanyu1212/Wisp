@@ -17,9 +17,10 @@ the live tail, input responsiveness during Markdown rendering, and file-picker r
 It also fixes stale results when reopening a bare `@` mention and stale expand/collapse arrows.
 Supported terminals can use synchronized output to reduce partial-frame flicker.
 
-The Rust frontend remains experimental, source-build opt-in on macOS and Linux. Python wheels do
-not contain a Rust binary, and explicit Rust selection never silently falls back to Textual.
-There is no need to switch renderers to benefit from this release.
+The Rust frontend remains experimental. The already published 0.2.0rc1 wheels do not contain a Rust
+binary; the release workflow now prepares verified native wheels for a later approved release on
+manylinux x86_64 and macOS x86_64/arm64. Explicit Rust selection never silently falls back to
+Textual. There is no need to switch renderers to benefit from this release.
 
 Existing supported JSONL sessions remain readable without manual migration. Python continues to
 load historical data and provides current-version snapshots to frontends. As with any upgrade,
@@ -59,8 +60,8 @@ Historical bundles remain immutable. These live-connection requirements do not c
 backward-readability policy for persisted sessions.
 
 The in-process Python SDK has no serialization boundary and does not perform a wire handshake.
-The experimental Rust TUI additionally requires the exact Python package release: build the
-frontend from the same checkout, using Cargo version `0.2.0-rc.1` for Python `0.2.0rc1`.
+The experimental Rust TUI requires the exact Python package release. Source builds use the matching
+checkout; future native wheels are built and published in lockstep with the same Python release.
 
 ## Trying the candidate
 
