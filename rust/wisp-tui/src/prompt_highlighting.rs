@@ -1,6 +1,6 @@
 //! Bounded semantic spans for the prompt editor's display projection.
 
-use std::ops::Range;
+use std::{collections::HashSet, ops::Range};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -23,15 +23,50 @@ pub(crate) struct Highlight {
     pub kind: Kind,
 }
 
+pub(crate) struct Context<'a> {
+    catalog: Option<&'a [CommandDescriptor]>,
+    files: HashSet<&'a str>,
+    directories: HashSet<&'a str>,
+    paths_complete: bool,
+}
+
+impl<'a> Context<'a> {
+    pub(crate) fn new(
+        catalog: Option<&'a [CommandDescriptor]>,
+        project_files: Option<&'a ProjectFileSnapshot>,
+    ) -> Self {
+        let mut files = HashSet::new();
+        let mut directories = HashSet::new();
+        if let Some(snapshot) = project_files {
+            for entry in &snapshot.entries {
+                match entry.kind {
+                    ProjectFileKind::File => {
+                        files.insert(entry.path.as_str());
+                    }
+                    ProjectFileKind::Directory => {
+                        directories.insert(entry.path.as_str());
+                    }
+                }
+            }
+        }
+        Self {
+            catalog,
+            files,
+            directories,
+            paths_complete: project_files.is_some_and(|snapshot| !snapshot.truncated),
+        }
+    }
+}
+
 pub(crate) fn line_highlights(
     line: &str,
     line_truncated: bool,
     line_index: usize,
     line_count: usize,
-    catalog: Option<&[CommandDescriptor]>,
-    project_files: Option<&ProjectFileSnapshot>,
+    context: &Context<'_>,
 ) -> Vec<Highlight> {
     let scan_end = floor_char_boundary(line, line.len().min(MAX_LINE_BYTES));
+    let line_truncated = line_truncated || scan_end < line.len();
     let mut highlights = Vec::new();
 
     if line_index == 0 && line_count == 1 {
@@ -42,7 +77,7 @@ pub(crate) fn line_highlights(
             .find(char::is_whitespace)
             .map_or(scan_end, |offset| command_start + offset);
         let token = &line[command_start..token_end];
-        if crate::commands::is_supported_token(token, catalog) {
+        if crate::commands::is_supported_token(token, context.catalog) {
             highlights.push(Highlight {
                 columns: display_columns(line, command_start)..display_columns(line, token_end),
                 kind: Kind::Command,
@@ -50,9 +85,9 @@ pub(crate) fn line_highlights(
         }
     }
 
-    let Some(snapshot) = project_files else {
+    if context.files.is_empty() && context.directories.is_empty() && !context.paths_complete {
         return highlights;
-    };
+    }
     let mut cursor = 0;
     while cursor < scan_end && highlights.len() < MAX_HIGHLIGHTS_PER_LINE {
         let Some(relative) = line[cursor..scan_end].find('@') else {
@@ -73,14 +108,12 @@ pub(crate) fn line_highlights(
             continue;
         };
         let resolved = path.as_deref().is_some_and(|path| {
-            snapshot.entries.iter().any(|entry| match entry.kind {
-                ProjectFileKind::File => entry.path == path,
-                ProjectFileKind::Directory => path
+            context.files.contains(path)
+                || path
                     .strip_suffix('/')
-                    .is_some_and(|directory| directory == entry.path),
-            })
+                    .is_some_and(|directory| context.directories.contains(directory))
         });
-        if resolved || !snapshot.truncated {
+        if resolved || context.paths_complete {
             highlights.push(Highlight {
                 columns: display_columns(line, start)..display_columns(line, end),
                 kind: if resolved {
@@ -197,30 +230,51 @@ mod tests {
                     path: "space name.md".into(),
                     kind: ProjectFileKind::File,
                 },
+                ProjectFileEntry {
+                    path: "a b".into(),
+                    kind: ProjectFileKind::File,
+                },
             ],
             truncated,
         }
+    }
+
+    fn highlights(
+        line: &str,
+        line_truncated: bool,
+        line_index: usize,
+        line_count: usize,
+        catalog: Option<&[CommandDescriptor]>,
+        snapshot: Option<&ProjectFileSnapshot>,
+    ) -> Vec<Highlight> {
+        line_highlights(
+            line,
+            line_truncated,
+            line_index,
+            line_count,
+            &Context::new(catalog, snapshot),
+        )
     }
 
     #[test]
     fn commands_are_catalog_backed_and_single_line_only() {
         let catalog = [command("help")];
         assert_eq!(
-            line_highlights("/help", false, 0, 1, Some(&catalog), None),
+            highlights("/help", false, 0, 1, Some(&catalog), None),
             vec![Highlight {
                 columns: 0..5,
                 kind: Kind::Command
             }]
         );
         assert_eq!(
-            line_highlights("  /help argument", false, 0, 1, Some(&catalog), None),
+            highlights("  /help argument", false, 0, 1, Some(&catalog), None),
             vec![Highlight {
                 columns: 2..7,
                 kind: Kind::Command
             }]
         );
-        assert!(line_highlights("/missing", false, 0, 1, Some(&catalog), None).is_empty());
-        assert!(line_highlights("/help", false, 0, 2, Some(&catalog), None).is_empty());
+        assert!(highlights("/missing", false, 0, 1, Some(&catalog), None).is_empty());
+        assert!(highlights("/help", false, 0, 2, Some(&catalog), None).is_empty());
     }
 
     #[test]
@@ -228,7 +282,7 @@ mod tests {
         let line =
             "read @src/main.rs @\"space name.md\" @docs/ @docs @\"space name.md\"suffix @missing";
         assert_eq!(
-            line_highlights(line, false, 0, 1, None, Some(&snapshot(false))),
+            highlights(line, false, 0, 1, None, Some(&snapshot(false))),
             vec![
                 Highlight {
                     columns: 5..17,
@@ -260,7 +314,7 @@ mod tests {
 
     #[test]
     fn malformed_quoted_references_are_unresolved_only_with_complete_snapshots() {
-        let complete = line_highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(false)));
+        let complete = highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(false)));
         assert_eq!(
             complete,
             vec![Highlight {
@@ -268,18 +322,26 @@ mod tests {
                 kind: Kind::UnresolvedPath,
             }]
         );
-        assert!(
-            line_highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(true)),).is_empty()
+        assert!(highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(true)),).is_empty());
+    }
+
+    #[test]
+    fn raw_tabs_cannot_resolve_as_display_spaces() {
+        let complete = highlights("@\"a\tb\"", false, 0, 1, None, Some(&snapshot(false)));
+        assert_eq!(
+            complete,
+            vec![Highlight {
+                columns: 0..6,
+                kind: Kind::UnresolvedPath,
+            }]
         );
     }
 
     #[test]
     fn references_crossing_the_scan_limit_remain_neutral() {
+        assert!(highlights("@src/main.rs", true, 0, 1, None, Some(&snapshot(false)),).is_empty());
         assert!(
-            line_highlights("@src/main.rs", true, 0, 1, None, Some(&snapshot(false)),).is_empty()
-        );
-        assert!(
-            line_highlights(
+            highlights(
                 "@\"space name.md\"",
                 true,
                 0,
@@ -293,7 +355,7 @@ mod tests {
 
     #[test]
     fn incomplete_snapshots_leave_absent_paths_neutral() {
-        let highlights = line_highlights(
+        let highlights = highlights(
             "@src/main.rs @missing",
             false,
             0,
@@ -313,7 +375,7 @@ mod tests {
     #[test]
     fn scanning_is_bounded_and_preserves_unicode_columns() {
         let line = format!("界 @missing {}", "x".repeat(MAX_LINE_BYTES * 2));
-        let highlights = line_highlights(&line, false, 0, 1, None, Some(&snapshot(false)));
+        let highlights = highlights(&line, false, 0, 1, None, Some(&snapshot(false)));
         assert_eq!(
             highlights[0],
             Highlight {

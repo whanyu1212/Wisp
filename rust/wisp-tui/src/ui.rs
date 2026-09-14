@@ -1195,13 +1195,28 @@ fn render_composer(
                 editor_area,
             );
         } else {
-            let line_count = layout
-                .rows
-                .last()
-                .map_or(0, |row| row.logical_row.saturating_add(1));
+            let context = prompt_highlighting::Context::new(
+                state.command_catalog.as_deref(),
+                state.project_files.snapshot(),
+            );
+            let mut highlighted_line = None;
+            let mut highlights = Vec::new();
             let rows = visible_rows
                 .iter()
-                .map(|row| composer_visual_line(row, layout, line_count, state, palette))
+                .map(|row| {
+                    if highlighted_line != Some(row.logical_row) {
+                        let line = &layout.lines[row.logical_row];
+                        highlights = prompt_highlighting::line_highlights(
+                            &line.text,
+                            line.truncated,
+                            row.logical_row,
+                            layout.lines.len(),
+                            &context,
+                        );
+                        highlighted_line = Some(row.logical_row);
+                    }
+                    styled_composer_line(row, &highlights, palette)
+                })
                 .collect::<Vec<_>>();
             frame.render_widget(Paragraph::new(rows), editor_area);
         }
@@ -1316,9 +1331,15 @@ struct ComposerVisualRow {
     text: String,
 }
 
+struct ComposerLogicalLine {
+    text: String,
+    truncated: bool,
+}
+
 struct ComposerLayout {
     revision: u64,
     is_empty: bool,
+    lines: Vec<ComposerLogicalLine>,
     rows: Vec<ComposerVisualRow>,
     cursor_row: usize,
     cursor_column: usize,
@@ -1419,6 +1440,20 @@ fn cursor_needs_continuation_row(projection: &PromptProjection<'_>, width: usize
 fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     let width = width.max(1);
     let projection = editor.projection();
+    let lines = projection
+        .text()
+        .split('\n')
+        .map(|line| {
+            let mut end = line.len().min(prompt_highlighting::MAX_LINE_BYTES);
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            ComposerLogicalLine {
+                text: line[..end].to_owned(),
+                truncated: end < line.len(),
+            }
+        })
+        .collect::<Vec<_>>();
     let mut rows = Vec::new();
     let mut cursor_row = 0_usize;
     let mut cursor_column = 0_usize;
@@ -1447,47 +1482,11 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     ComposerLayout {
         revision: editor.revision(),
         is_empty: editor.text().is_empty(),
+        lines,
         rows,
         cursor_row,
         cursor_column,
     }
-}
-
-fn composer_visual_line(
-    row: &ComposerVisualRow,
-    layout: &ComposerLayout,
-    line_count: usize,
-    state: &UiState,
-    palette: Palette,
-) -> Line<'static> {
-    let mut logical_line = String::new();
-    let mut line_truncated = false;
-    for part in layout
-        .rows
-        .iter()
-        .filter(|part| part.logical_row == row.logical_row)
-    {
-        if logical_line.len() >= prompt_highlighting::MAX_LINE_BYTES {
-            line_truncated |= !part.text.is_empty();
-            continue;
-        }
-        let remaining = prompt_highlighting::MAX_LINE_BYTES - logical_line.len();
-        let mut end = part.text.len().min(remaining);
-        while !part.text.is_char_boundary(end) {
-            end -= 1;
-        }
-        logical_line.push_str(&part.text[..end]);
-        line_truncated |= end < part.text.len();
-    }
-    let highlights = prompt_highlighting::line_highlights(
-        &logical_line,
-        line_truncated,
-        row.logical_row,
-        line_count,
-        state.command_catalog.as_deref(),
-        state.project_files.snapshot(),
-    );
-    styled_composer_line(row, &highlights, palette)
 }
 
 fn styled_composer_line(
