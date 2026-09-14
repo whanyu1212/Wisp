@@ -112,6 +112,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         next_picker_frame = 0.0
         quit_sent = False
         context_redrawn = False
+        selection_redrawn = False
         deadline = time.monotonic() + 25
         try:
             while time.monotonic() < deadline:
@@ -168,6 +169,16 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     os.write(terminal_fd, b"/model fake::custom-model effort\r")
                     submitted = True
                     output.clear()
+                if (
+                    not restart
+                    and not picker_only
+                    and not selection_redrawn
+                    and b"Model selection applied." in output
+                ):
+                    # The footer update can reuse letters from the previous effort.
+                    # Request a full frame so the raw PTY stream contains the label.
+                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
+                    selection_redrawn = True
                 applied = (
                     ready and b"fake/custom-model" in output and b"effort" in output
                     if restart
