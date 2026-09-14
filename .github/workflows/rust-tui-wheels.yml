@@ -1,0 +1,194 @@
+name: Rust TUI wheel candidates
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rust-tui-wheels.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "hatch_build.py"
+      - "pyproject.toml"
+      - "rust/wisp-protocol/**"
+      - "rust/wisp-tui/**"
+      - "scripts/verify_rust_tui_wheel.py"
+      - "src/wisp/**"
+      - "tests/test_rust_tui_wheel.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-tui-wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x86-64:
+    name: Candidate wheel (manylinux_2_28 x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+    env:
+      WISP_RUST_TUI_WHEEL_TAG: py3-none-manylinux_2_28_x86_64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.85.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+
+      - name: Build and verify candidate
+        shell: bash
+        run: |
+          python=/opt/python/cp312-cp312/bin/python
+          "$python" -m pip install --quiet auditwheel==6.8.2 hatchling==1.27.0 twine==6.2.0
+          "$python" -m pip install --quiet uv==0.9.8
+          "$python" -m uv build --no-sources --wheel --out-dir reference-dist
+          "$python" -m hatchling build -t wheel -d candidate-dist
+          wheel=(candidate-dist/*.whl)
+          reference=(reference-dist/*.whl)
+          test "${#wheel[@]}" -eq 1
+          test "${#reference[@]}" -eq 1
+          "$python" scripts/verify_rust_tui_wheel.py "${wheel[0]}" \
+            --expected-tag "$WISP_RUST_TUI_WHEEL_TAG" \
+            --reference-wheel "${reference[0]}"
+          "$python" -m twine check "${wheel[0]}"
+          "$python" -m auditwheel show "${wheel[0]}" | grep -F "manylinux_2_28_x86_64"
+          sha256sum "${wheel[0]}" > candidate-dist/SHA256SUMS
+          cargo install cargo-cyclonedx --version 0.5.9 --locked --quiet
+          cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
+            --format json --describe binaries --spec-version 1.5 --quiet
+          mv rust/wisp-tui/wisp-tui_bin.cdx.json candidate-dist/wisp-tui.cdx.json
+          cargo_version="$("$python" scripts/verify_rust_tui_wheel.py --print-cargo-version)"
+          "$python" -c 'import json, sys; d=json.load(open("candidate-dist/wisp-tui.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-tui" and c["version"] == sys.argv[1]' "$cargo_version"
+          "$python" -m venv /tmp/wisp-wheel
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python -m pip install --quiet "${wheel[0]}"
+          ! PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin command -v cargo
+          cd /tmp
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
+          set +e
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/wisp-tui --expected-backend-version 9.9.9 -- /bin/false \
+            > /tmp/mismatch.out 2>&1
+          mismatch_status=$?
+          set -e
+          test "$mismatch_status" -ne 0
+          grep -F "does not match expected backend version" /tmp/mismatch.out
+          file /tmp/wisp-wheel/bin/wisp-tui | grep -F "x86-64"
+          ! ldd /tmp/wisp-wheel/bin/wisp-tui | grep -F "not found"
+
+      - name: Upload candidate artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-tui-wheel-manylinux-x86-64
+          path: candidate-dist/
+          if-no-files-found: error
+
+  macos:
+    name: Candidate wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS x86_64
+            runner: macos-15-intel
+            architecture: x86_64
+            tag: py3-none-macosx_11_0_x86_64
+          - name: macOS arm64
+            runner: macos-15
+            architecture: arm64
+            tag: py3-none-macosx_11_0_arm64
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      WISP_RUST_TUI_WHEEL_TAG: ${{ matrix.tag }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.85.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+
+      - name: Build and verify candidate
+        shell: bash
+        run: |
+          uv pip install --system hatchling==1.27.0 twine==6.2.0
+          uv build --no-sources --wheel --out-dir reference-dist
+          python -m hatchling build -t wheel -d candidate-dist
+          wheel=(candidate-dist/*.whl)
+          reference=(reference-dist/*.whl)
+          test "${#wheel[@]}" -eq 1
+          test "${#reference[@]}" -eq 1
+          python scripts/verify_rust_tui_wheel.py "${wheel[0]}" \
+            --expected-tag "$WISP_RUST_TUI_WHEEL_TAG" \
+            --reference-wheel "${reference[0]}"
+          python -m twine check "${wheel[0]}"
+          shasum -a 256 "${wheel[0]}" > candidate-dist/SHA256SUMS
+          cargo install cargo-cyclonedx --version 0.5.9 --locked --quiet
+          cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
+            --format json --describe binaries --spec-version 1.5 --quiet
+          mv rust/wisp-tui/wisp-tui_bin.cdx.json candidate-dist/wisp-tui.cdx.json
+          cargo_version="$(python scripts/verify_rust_tui_wheel.py --print-cargo-version)"
+          python -c 'import json, sys; d=json.load(open("candidate-dist/wisp-tui.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-tui" and c["version"] == sys.argv[1]' "$cargo_version"
+          uv venv /tmp/wisp-wheel
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python -m pip install "${wheel[0]}"
+          ! PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin command -v cargo
+          cd /tmp
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
+          set +e
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/wisp-tui --expected-backend-version 9.9.9 -- /usr/bin/false \
+            > /tmp/mismatch.out 2>&1
+          mismatch_status=$?
+          set -e
+          test "$mismatch_status" -ne 0
+          grep -F "does not match expected backend version" /tmp/mismatch.out
+          file /tmp/wisp-wheel/bin/wisp-tui | grep -F "${{ matrix.architecture }}"
+          otool -l /tmp/wisp-wheel/bin/wisp-tui | grep -A5 -E \
+            "LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX" | grep -F "minos 11.0"
+          ! otool -l /tmp/wisp-wheel/bin/wisp-tui | grep -q "LC_RPATH"
+          ! otool -L /tmp/wisp-wheel/bin/wisp-tui | grep -vE \
+            "^/tmp/wisp-wheel/bin/wisp-tui:|^[[:space:]]+(/usr/lib/|/System/Library/)"
+          codesign -dv /tmp/wisp-wheel/bin/wisp-tui 2>&1 | grep -F "Signature=adhoc"
+
+      - name: Upload candidate artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-tui-wheel-${{ matrix.architecture }}-macos
+          path: candidate-dist/
+          if-no-files-found: error

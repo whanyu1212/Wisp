@@ -98,6 +98,12 @@ and lint, configured `uv run mypy`, and `tests/`-only pytest partitions.
 A separate Rust workspace job runs the schema check, Rust formatting, check, Clippy, workspace tests,
 build, and cross-language handoff smoke test on both Linux and macOS.
 
+The `Rust TUI wheel candidates` workflow additionally builds non-published `wisp-ai` platform wheels
+for manylinux x86_64 and macOS x86_64/arm64. It compares Python package files with the current
+`uv_build` wheel, verifies platform/native metadata and executable mode, installs without Cargo on
+the consumer `PATH`, checks exact version mismatch before backend spawn, and uploads checksums plus
+a CycloneDX SBOM. These candidate artifacts are evidence for #469, not release products.
+
 The `production_fault` partition is a required deterministic regression contract:
 
 ```bash

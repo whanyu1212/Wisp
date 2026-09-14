@@ -281,7 +281,7 @@ noncritical** work can wait after stage 3.
 | Large-paste presentation | Compact markers with bounded display metadata; exact raw submission/history/queues | #467 editor, reducer, rendering and PTY regressions; historical replay stays raw |
 | Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Acceptable while experimental; assess accessibility and copying workflows before a default switch |
 | Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | Secret lifecycle, remaining recovery races, platform limits and dependency policy remain blockers for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
-| Prebuilt binary distribution and install lifecycle | Source-build only; no shipped binary | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)); artifact integrity, install/update/rollback and target coverage remain |
+| Prebuilt binary distribution and install lifecycle | Published releases remain source-build only; CI builds non-published single-distribution platform-wheel candidates | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)); release integration, environment-owned discovery, publication integrity, install/update/rollback and target coverage remain |
 | Windows | Rejected before binary resolution | Acceptable while experimental; not a claimed Rust target |
 | No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
 | Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Gates against a default switch under [#456](https://github.com/whanyu1212/Wisp/issues/456); in-process frame timings do not satisfy them |
@@ -333,16 +333,17 @@ stash, activity views, and the separate image-attachment roadmap, are not automa
 ## Consequences and reconsideration
 
 The experiment adds a second frontend language, cross-language fixtures, and a lockstep compatibility
-obligation. Shipping platform binaries would add a separate distribution cost; #469 owns that work
-and is not done. Those costs are accepted only while Rust stays experimental. They do not justify
+obligation. #469 selects a single-distribution platform-wheel candidate and verifies CI artifacts,
+but published binaries and their release lifecycle add a separate distribution cost and are not done. Those costs are accepted only while Rust stays experimental. They do not justify
 moving unrelated Python systems.
 
 #470 closed as a stage-2 hold. After the daily-use readiness work, the remaining reconsideration conditions are:
 
 - there is no comparative PTY input-to-frame measurement against Textual;
-- hardening, backpressure, and terminal-safety evidence is incomplete
-  ([#468](https://github.com/whanyu1212/Wisp/issues/468));
-- supported platforms cannot install the frontend without a local Rust toolchain
+- [#468](https://github.com/whanyu1212/Wisp/issues/468) is closed with bounded transport,
+  retention, fuzzing and terminal-safety evidence; its documented limitations remain inputs to a
+  later support decision;
+- supported platforms cannot install a published frontend without a local Rust toolchain
   ([#469](https://github.com/whanyu1212/Wisp/issues/469)).
 
 Supported opt-in feedback and an explicit support/accessibility/rollback decision remain required

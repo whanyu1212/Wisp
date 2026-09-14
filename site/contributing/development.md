@@ -43,7 +43,9 @@ WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" \
   uv run wisp tui --renderer rust
 ```
 
-The Python packages do not currently bundle this executable. A relative
+Published Python packages do not currently bundle this executable. CI also builds non-published
+platform-wheel candidates under #469 to verify the selected single-distribution packaging contract;
+those artifacts do not change source development or launcher discovery. A relative
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 
@@ -55,6 +57,17 @@ Python's models and committed schemas remain authoritative, and `wisp-protocol` 
 private Rust projections from those schemas at compile time. Package, protocol, event-schema, or
 generated-schema drift must fail a check or the startup handshake rather than degrade to another
 contract.
+
+Candidate native wheels use pinned Hatchling with `hatch_build.py`; ordinary PEP 517 and release
+builds remain on `uv_build`. Set `WISP_RUST_TUI_WHEEL_TAG` only when reproducing a candidate wheel:
+
+```bash
+WISP_RUST_TUI_WHEEL_TAG=py3-none-macosx_11_0_arm64 \
+  uvx --from hatchling==1.27.0 hatchling build -t wheel -d candidate-dist
+```
+
+The tag is CI-owned packaging metadata, not runtime configuration. Use the exact target tag from
+`rust-tui-wheels.yml`; never relabel an artifact built for another platform.
 
 Run the Rust quality gates with the pinned toolchain:
 
