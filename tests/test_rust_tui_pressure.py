@@ -491,15 +491,18 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
         signal_offset = len(tui.output)
         os.kill(tui.pid, signal.SIGINT)
         tui.wait_until(
-            # An optimized frontend can finish draining the burst before the
-            # transient cancellation notice is painted. Check actual dispatch.
-            lambda _output: cancel_received.exists(),
+            # A fast renderer can skip the transient notice; a slow renderer
+            # backpressures the fixture's burst before it can read the cancel.
+            lambda output: (
+                b"Cancelling current prompt" in output[signal_offset:] or cancel_received.exists()
+            ),
             timeout=5,
             failure="external SIGINT was starved by the burst",
         )
         tui.wait_until(
             lambda output: (
                 burst_done.exists()
+                and cancel_received.exists()
                 and b"BURST-LAST" in output[signal_offset:]
                 and output.rfind(b"idle") > output.rfind(b"running")
             ),
