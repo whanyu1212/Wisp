@@ -71,10 +71,11 @@ pub(crate) fn line_highlights(
             cursor = start + 1;
             continue;
         };
-        let resolved = snapshot.entries.iter().any(|entry| {
-            entry.path == path
-                || (entry.kind == ProjectFileKind::Directory
-                    && path.strip_suffix('/') == Some(entry.path.as_str()))
+        let resolved = snapshot.entries.iter().any(|entry| match entry.kind {
+            ProjectFileKind::File => entry.path == path,
+            ProjectFileKind::Directory => path
+                .strip_suffix('/')
+                .is_some_and(|directory| directory == entry.path),
         });
         if resolved || !snapshot.truncated {
             highlights.push(Highlight {
@@ -109,8 +110,14 @@ fn parse_reference(line: &str, start: usize, limit: usize) -> Option<(usize, Str
                 escaped = false;
             }
         }
-        let end = closing.unwrap_or(limit);
-        let encoded = &line[start + 1..end];
+        let quoted_end = closing.unwrap_or(limit);
+        let end = line[quoted_end..limit]
+            .find(char::is_whitespace)
+            .map_or(limit, |offset| quoted_end + offset);
+        if end != quoted_end {
+            return Some((end, line[start + 1..end].to_owned()));
+        }
+        let encoded = &line[start + 1..quoted_end];
         let path = serde_json::from_str::<String>(encoded)
             .or_else(|_| serde_json::from_str(&format!("{encoded}\"")))
             .ok()?;
@@ -200,7 +207,8 @@ mod tests {
 
     #[test]
     fn paths_resolve_quoted_and_directory_references() {
-        let line = "read @src/main.rs @\"space name.md\" @docs/ @missing";
+        let line =
+            "read @src/main.rs @\"space name.md\" @docs/ @docs @\"space name.md\"suffix @missing";
         assert_eq!(
             line_highlights(line, 0, 1, None, Some(&snapshot(false))),
             vec![
@@ -217,7 +225,15 @@ mod tests {
                     kind: Kind::ResolvedPath
                 },
                 Highlight {
-                    columns: 42..50,
+                    columns: 42..47,
+                    kind: Kind::UnresolvedPath
+                },
+                Highlight {
+                    columns: 48..70,
+                    kind: Kind::UnresolvedPath
+                },
+                Highlight {
+                    columns: 71..79,
                     kind: Kind::UnresolvedPath
                 },
             ]
