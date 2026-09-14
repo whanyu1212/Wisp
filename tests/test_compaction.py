@@ -36,6 +36,7 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEventAdapter,
     MessageCompleted,
+    QueueMessageInjected,
     SessionSaved,
     SessionStats,
     TokenUsage,
@@ -1524,17 +1525,17 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
             context_reserve_tokens=100,
         )
 
+        events: list[WispEvent] = []
+
         async def consume() -> None:
             with pytest.raises(ContextOverflowError, match="prompt and steering exceed"):
-                _events = [
-                    event
-                    async for event in agent.run(
-                        "question two",
-                        session=session,
-                        history=history,
-                        operation_id="prompt-1",
-                    )
-                ]
+                async for event in agent.run(
+                    "question two",
+                    session=session,
+                    history=history,
+                    operation_id="prompt-1",
+                ):
+                    events.append(event)
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(consume)
@@ -1542,6 +1543,13 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
             await agent.steer("x" * 8_000)
             release_summary.set()
 
+        injected = next(event for event in events if isinstance(event, QueueMessageInjected))
+        persisted = next(
+            entry
+            for entry in session.read_entries()
+            if isinstance(entry, MessageSessionEntry) and entry.id == injected.message_entry_id
+        )
+        assert persisted.message.content == "x" * 8_000
         assert session.read_context_messages() == history
         assert all(
             entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:]

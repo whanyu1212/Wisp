@@ -388,7 +388,10 @@ impl BackendEvent {
                 approved: bool_field(value, &event_type, "approved")?,
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
-            "tool.result" | "tool.execution.ended" => {
+            "tool.execution.ended" => Self::ToolExecutionEnded {
+                call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+            },
+            "tool.result" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;
                 let is_error = bool_field(value, &event_type, "is_error")?;
                 let exit_code = optional_i64_field(value, &event_type, "exit_code")?;

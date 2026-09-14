@@ -945,6 +945,10 @@ pub enum BackendEvent {
         tool_call_ids: Vec<String>,
         event: Box<BackendEvent>,
     },
+    /// Carries a session-assigned result origin; presentation waits for `tool.result`.
+    ToolExecutionEnded {
+        call_id: String,
+    },
     ProjectFilesReported {
         command_id: String,
         snapshot: project_files::ProjectFilesReport,
@@ -4120,6 +4124,9 @@ fn handle_backend_event(
                         .resolve_history_call(target, &input.call_id);
                     Some(target)
                 }
+                BackendEvent::ToolExecutionEnded { call_id } => {
+                    state.transcript.tool_entry_for_call(call_id)
+                }
                 BackendEvent::QueueMessageInjected { .. } => {
                     handle_backend_event(state, *event, ids)?;
                     state.transcript.latest_user_entry()
@@ -4170,7 +4177,9 @@ fn handle_backend_event(
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::MessageDelta { .. } | BackendEvent::Other { .. } => Ok(Vec::new()),
+        BackendEvent::MessageDelta { .. }
+        | BackendEvent::ToolExecutionEnded { .. }
+        | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted { turn, content } => {
             state.transcript.complete_message(turn, content);
             Ok(vec![UiEffect::RequestRender])
@@ -4220,7 +4229,9 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolResult(result) => {
-            state.transcript.observe_tool_result(*result);
+            let call_id = result.call_id.clone();
+            let target = state.transcript.observe_tool_result(*result);
+            state.transcript.resolve_history_call(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::TrustRequested {
@@ -5019,6 +5030,63 @@ mod tests {
                 "next_after_entry_id": null
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn tool_result_origin_does_not_resolve_and_evict_before_presentation() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let call_id = bounded_identity("poll-final");
+        let call = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "tool.call", "call_id": "poll-final", "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"}
+        }))
+        .unwrap();
+        reduce(&mut state, UiAction::BackendEvent(call), &mut ids).unwrap();
+        let target = state.transcript.tool_entry_for_call(&call_id).unwrap();
+        // A long-lived process can accumulate more origins than the row budget
+        // while its final poll still protects it from eviction.
+        for index in 0..1_200 {
+            state
+                .transcript
+                .add_live_origin(target, &format!("origin-{index}"));
+        }
+        let mut result = serde_json::json!({
+            "type": "tool.execution.ended", "message_entry_id": "final-result",
+            "call_id": "poll-final", "name": "bash", "is_error": false,
+            "output": "final output", "process_id": "process-1",
+            "process_state": "completed", "exit_code": 0
+        });
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&result).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.transcript.has_unresolved_tool_call(&call_id));
+        assert!(state.transcript.entry(target).is_some());
+        assert!(state.transcript.live_history_gap().is_none());
+
+        result["type"] = "tool.result".into();
+        result["message_entry_id"] = Value::Null;
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&result).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.transcript.entry(target).is_none());
+        assert_eq!(
+            state.transcript.live_history_gap().unwrap().newest,
+            "final-result"
+        );
+        // Only the recovery marker remains, with no orphan result card.
+        assert_eq!(state.transcript.entries().len(), 1);
+        assert!(
+            state
+                .transcript
+                .is_live_history_marker(state.transcript.entries()[0].id)
         );
     }
 

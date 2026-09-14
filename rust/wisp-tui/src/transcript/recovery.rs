@@ -550,6 +550,7 @@ mod tests {
             json!({"type":"tool.result", "call_id":"first", "name":"read", "output":"one", "is_error":false}),
             json!({"type":"tool.call", "call_id":"second", "name":"read", "arguments":{}}),
             json!({"type":"tool.execution.ended", "call_id":"second", "name":"read", "output":"two", "is_error":false, "message_entry_id":"result-2"}),
+            json!({"type":"tool.result", "call_id":"second", "name":"read", "output":"two", "is_error":false}),
         ] {
             let event = BackendEvent::from_projection_value(&event).unwrap();
             reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();

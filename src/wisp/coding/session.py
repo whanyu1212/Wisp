@@ -762,6 +762,9 @@ class CodingSession:
                             ),
                             operation_id=operation_id,
                         )
+                        queue_event = queue_event.model_copy(
+                            update={"message_entry_id": queue_entry_id}
+                        )
                         if queue_event.skill_invocation is not None:
                             yield await emit(
                                 SkillInvoked(

@@ -376,6 +376,12 @@ impl Transcript {
             .is_some_and(|binding| !binding.resolved)
     }
 
+    pub(crate) fn tool_entry_for_call(&self, call_id: &str) -> Option<TranscriptEntryId> {
+        self.call_entries
+            .get(call_id)
+            .map(|binding| binding.entry_id)
+    }
+
     pub fn observe_tool_call(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         self.observe_tool_call_from(input, ToolCallSource::Live)
     }
