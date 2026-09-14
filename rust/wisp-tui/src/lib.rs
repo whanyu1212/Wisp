@@ -509,6 +509,7 @@ enum HistoryNavigationIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingHistoryNavigation {
     older: bool,
+    live_recovery: bool,
     intent: HistoryNavigationIntent,
     reader_generation: u64,
 }
@@ -998,7 +999,9 @@ impl LiveUi {
                     send_payload(writer, payload, limit).await?;
                 }
                 UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
-                UiEffect::HistoryWindowChanged { .. } => self.render_pending = true,
+                UiEffect::HistoryWindowChanged { .. } | UiEffect::ReanchorTranscript { .. } => {
+                    self.render_pending = true
+                }
                 UiEffect::HistoryRequestFailed => {
                     self.pending_history_navigation = None;
                     self.render_pending = true;
@@ -1106,6 +1109,11 @@ impl LiveUi {
             self.rendered_overlay = None;
             self.rendered_decision_context = None;
             self.key_help = None;
+        }
+        for effect in &effects {
+            if let UiEffect::ReanchorTranscript { from, to } = effect {
+                self.transcript_viewport.reanchor_entry(*from, *to);
+            }
         }
         let transcript_replaced = effects
             .iter()
@@ -2698,6 +2706,7 @@ impl LiveUi {
         let remaining = rows.saturating_sub(consumed);
         let more_history = if older {
             self.state.history.oldest_cursor.is_some()
+                || (pending.live_recovery && self.state.transcript.live_history_gap().is_some())
         } else {
             self.state.history.tail_evicted
         };
@@ -2716,6 +2725,7 @@ impl LiveUi {
         };
         let more_history = if pending.older {
             self.state.history.oldest_cursor.is_some()
+                || (pending.live_recovery && self.state.transcript.live_history_gap().is_some())
         } else {
             self.state.history.tail_evicted
         };
@@ -2728,7 +2738,10 @@ impl LiveUi {
         if self.state.history_request_direction().is_some() {
             return Ok(Vec::new());
         }
-        let action = if pending.older {
+        let action = if pending.live_recovery && self.state.transcript.live_history_gap().is_some()
+        {
+            UiAction::RecoverLiveHistory
+        } else if pending.older {
             UiAction::LoadOlderHistory
         } else {
             UiAction::LoadNewerHistory
@@ -2768,6 +2781,15 @@ impl LiveUi {
             | TranscriptViewAction::ScrollLines(i32::MIN..=-1)
                 if self
                     .transcript_viewport
+                    .near_live_gap(&self.state.transcript, &mut self.transcript_row_cache) =>
+            {
+                Some(UiAction::RecoverLiveHistory)
+            }
+            TranscriptViewAction::PageUp
+            | TranscriptViewAction::Home
+            | TranscriptViewAction::ScrollLines(i32::MIN..=-1)
+                if self
+                    .transcript_viewport
                     .near_oldest(&self.state.transcript, &mut self.transcript_row_cache) =>
             {
                 Some(UiAction::LoadOlderHistory)
@@ -2783,7 +2805,8 @@ impl LiveUi {
             _ => None,
         };
         if let Some(history_action) = history_action {
-            let older = matches!(history_action, UiAction::LoadOlderHistory);
+            let live_recovery = matches!(history_action, UiAction::RecoverLiveHistory);
+            let older = live_recovery || matches!(history_action, UiAction::LoadOlderHistory);
             let active_direction = self.state.history_request_direction();
             let same_active_request = active_direction == Some(older);
             let reversed_active_request = active_direction.is_some() && !same_active_request;
@@ -2798,11 +2821,13 @@ impl LiveUi {
                     })
                     .unwrap_or(0);
                 let remaining_rows = previous_rows.saturating_add(outcome.remaining_rows());
-                (remaining_rows > 0).then_some(HistoryNavigationIntent::Rows(remaining_rows))
+                (remaining_rows > 0 || live_recovery)
+                    .then_some(HistoryNavigationIntent::Rows(remaining_rows))
             };
             if !reversed_active_request {
                 self.pending_history_navigation = intent.map(|intent| PendingHistoryNavigation {
                     older,
+                    live_recovery,
                     intent,
                     reader_generation: outcome.reader_generation,
                 });
@@ -4531,7 +4556,7 @@ mod tests {
             outcome_tx,
         ));
         let event = json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-large",
@@ -7408,6 +7433,7 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::MessagesReported {
                     command_id: "get_messages-1".into(),
                     messages: reducer::SessionMessages {
+                        source_messages: Default::default(),
                         session: Some(reducer::SessionIdentity {
                             session_id: "active".into(),
                             session_path: "/sessions/active.jsonl".into(),
@@ -7574,7 +7600,7 @@ mod tests {
         };
         let card_id = live_ui.state.transcript.observe_tool_call(call);
         let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "call_id": "edit-detail",
             "name": "edit",
             "output": "Applied 1 edit",
@@ -7725,7 +7751,7 @@ mod tests {
         };
         let card_id = live_ui.state.transcript.observe_tool_call(call);
         let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "call_id": "resize-detail",
             "name": "edit",
             "output": "Applied 1 edit",
@@ -7812,7 +7838,7 @@ mod tests {
         };
         let card_id = live_ui.state.transcript.observe_tool_call(call);
         let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "call_id": "output-detail",
             "name": "edit",
             "output": "Applied 1 edit",
@@ -7962,6 +7988,158 @@ mod tests {
         assert!(live_ui.transcript_viewport.follows_tail());
         assert!(!live_ui.transcript_viewport.has_unseen_output());
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn older_prefix_navigation_does_not_request_a_distant_live_gap() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = LiveUi::default();
+        for index in 0..20 {
+            let start = ui.state.transcript.entries().len();
+            ui.state.transcript.append_prompt(format!("prefix {index}"));
+            ui.state
+                .transcript
+                .mark_history_entries(start, &format!("prefix-{index}"));
+        }
+        ui.state.history.oldest_cursor = Some("prefix-0".into());
+        for index in 0..1_202 {
+            let id = ui
+                .state
+                .transcript
+                .append_prompt(format!("message {index}"));
+            ui.state
+                .transcript
+                .add_live_origin(id, &format!("message-{index}"));
+        }
+        ui.state.transcript.enforce_live_retention(None);
+        ui.transcript_viewport.set_geometry(
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+            40,
+            6,
+        );
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        ui.navigate_transcript_action(
+            TranscriptViewAction::ScrollLines(-3),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_ok());
+        assert!(!ui.pending_history_navigation.unwrap().live_recovery);
+        assert!(
+            ui.state
+                .transcript
+                .live_history_gap()
+                .unwrap()
+                .cursor
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_recovery_continues_a_wheel_gesture_across_pages_without_resetting_draft() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = LiveUi::default();
+        ui.editor.insert_paste("keep this draft");
+        for index in 0..1_203 {
+            let id = ui
+                .state
+                .transcript
+                .append_prompt(format!("message {index}"));
+            ui.state
+                .transcript
+                .add_live_origin(id, &format!("message-{index}"));
+        }
+        ui.state.transcript.enforce_live_retention(None);
+        ui.transcript_viewport.set_geometry(
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+            40,
+            6,
+        );
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        ui.navigate_transcript_action(
+            TranscriptViewAction::ScrollLines(-12),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_ok());
+        assert!(ui.pending_history_navigation.is_some());
+        for (command, range) in [("get_messages-1", 2..3), ("get_messages-2", 0..2)] {
+            let mut transcript = crate::transcript::SharedTranscript::default();
+            let mut origins = Vec::new();
+            for index in range {
+                let start = transcript.entries().len();
+                transcript.append_prompt(format!("message {index}"));
+                let origin = format!("message-{index}");
+                transcript.mark_history_entries(start, &origin);
+                origins.push(origin);
+            }
+            for event in [
+                BackendEvent::MessagesReported {
+                    command_id: command.into(),
+                    messages: reducer::SessionMessages {
+                        source_messages: Default::default(),
+                        session: None,
+                        active_leaf_id: None,
+                        truncated: false,
+                        next_before_entry_id: None,
+                        next_after_entry_id: None,
+                        durable_entry_ids: origins,
+                        exact_tool_result: None,
+                        transcript,
+                    },
+                },
+                BackendEvent::CommandFinished {
+                    command_id: command.into(),
+                    command_type: "get_messages".into(),
+                    ok: true,
+                    error: None,
+                },
+            ] {
+                ui.dispatch(
+                    UiAction::BackendEvent(event),
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            }
+            if command == "get_messages-1" {
+                assert!(
+                    receiver.try_recv().is_ok(),
+                    "remaining wheel movement requests the older gap page"
+                );
+            }
+        }
+        assert!(ui.state.transcript.live_history_gap().is_none());
+        assert!(ui.pending_history_navigation.is_none());
+        assert!(!ui.transcript_viewport.follows_tail());
+        assert_eq!(ui.editor.text(), "keep this draft");
+        let rows = ui
+            .transcript_viewport
+            .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
+        assert_eq!(
+            ui.state
+                .transcript
+                .entry(rows[0].anchor.entry_id)
+                .unwrap()
+                .content,
+            "message 0"
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -8174,6 +8352,7 @@ mod tests {
             BackendEvent::MessagesReported {
                 command_id: command_id.into(),
                 messages: reducer::SessionMessages {
+                    source_messages: Default::default(),
                     session: None,
                     active_leaf_id: None,
                     truncated: more,
@@ -8334,6 +8513,7 @@ mod tests {
                 BackendEvent::MessagesReported {
                     command_id: "get_messages-3".into(),
                     messages: reducer::SessionMessages {
+                        source_messages: Default::default(),
                         session: Some(reducer::SessionIdentity {
                             session_id: "active".into(),
                             session_path: "/sessions/active.jsonl".into(),
@@ -8463,6 +8643,7 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::MessagesReported {
                     command_id: "get_messages-1".into(),
                     messages: reducer::SessionMessages {
+                        source_messages: Default::default(),
                         session: Some(selected),
                         active_leaf_id: None,
                         truncated: false,

@@ -388,6 +388,9 @@ impl BackendEvent {
                 approved: bool_field(value, &event_type, "approved")?,
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
+            "tool.execution.ended" => Self::ToolExecutionEnded {
+                call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+            },
             "tool.result" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;
                 let is_error = bool_field(value, &event_type, "is_error")?;
@@ -603,6 +606,7 @@ impl BackendEvent {
                     Ok(page) => Self::MessagesReported {
                         command_id,
                         messages: SessionMessages {
+                            source_messages: array_field(value, &event_type, "messages")?.into(),
                             session,
                             active_leaf_id: optional_exact_string_field(
                                 value,
@@ -682,6 +686,30 @@ impl BackendEvent {
             },
             _ => Self::Other { event_type },
         };
+        if let Some(entry_id) =
+            optional_exact_string_field(value, "live message", "message_entry_id", 4096)?
+        {
+            let tool_call_ids = value
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .take(128)
+                        .filter_map(|call| {
+                            call.get("call_id")
+                                .and_then(Value::as_str)
+                                .map(bounded_identity)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(Self::MessageOrigin {
+                entry_id,
+                tool_call_ids,
+                event: Box::new(projected),
+            });
+        }
         Ok(projected)
     }
 }

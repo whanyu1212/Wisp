@@ -1,1 +1,1 @@
-{"backend_package_version": "0.1.0", "capabilities": [], "event_schema_version": 38, "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}, "max_protocol_version": 7, "min_protocol_version": 7, "protocol_version": 7, "type": "rpc.handshake.accepted"}
+{"backend_package_version": "0.1.0", "capabilities": [], "event_schema_version": 39, "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}, "max_protocol_version": 8, "min_protocol_version": 8, "protocol_version": 8, "type": "rpc.handshake.accepted"}

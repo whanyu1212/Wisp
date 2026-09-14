@@ -492,6 +492,17 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
         event_bus.on("queue.message.injected", observe_injection)
         events = [event async for event in agent.run("initial", session=session)]
         assert persisted_at_injection
+        entries = {
+            entry.id: entry
+            for entry in session.read_entries()
+            if isinstance(entry, MessageSessionEntry)
+        }
+        started = next(event for event in events if isinstance(event, AgentStarted))
+        assert started.message_entry_id is not None
+        assert entries[started.message_entry_id].message.content == "initial"
+        injected = next(event for event in events if isinstance(event, QueueMessageInjected))
+        assert injected.message_entry_id is not None
+        assert entries[injected.message_entry_id].message.content == "continue"
         with pytest.raises(RuntimeError, match="no active agent run"):
             await agent.follow_up("too late")
         return events, session.read_context_messages(), agent
@@ -1120,6 +1131,11 @@ def test_coding_session_persists_completion_before_exposing_it(
             event = await anext(events)
             if isinstance(event, MessageCompleted):
                 persisted = session.read_messages()[-1]
+                assert event.message_entry_id == next(
+                    entry.id
+                    for entry in session.read_entries()
+                    if isinstance(entry, MessageSessionEntry) and entry.message == persisted
+                )
                 assert persisted.content == "checking"
                 assert persisted.response_id == "response-1"
                 assert persisted.finish_reason == "tool_calls"
@@ -1222,6 +1238,11 @@ def test_coding_session_persists_tool_output_before_exposing_execution_end(
             event = await anext(events)
             if isinstance(event, ToolExecutionEnded):
                 persisted = session.read_messages()[-1]
+                assert event.message_entry_id == next(
+                    entry.id
+                    for entry in session.read_entries()
+                    if isinstance(entry, MessageSessionEntry) and entry.message == persisted
+                )
                 assert persisted.role == "tool"
                 assert persisted.tool_call_id == "call-1"
                 assert persisted.content == "echo: hello"

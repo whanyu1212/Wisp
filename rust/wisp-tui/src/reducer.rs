@@ -64,6 +64,9 @@ pub struct SessionSummary {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionMessages {
+    /// Bounded wire page kept until command completion; overlapping process cards
+    /// need their missing fragments projected before their output is combined.
+    pub source_messages: std::sync::Arc<[Value]>,
     pub session: Option<SessionIdentity>,
     pub active_leaf_id: Option<String>,
     pub truncated: bool,
@@ -181,6 +184,9 @@ struct HistoryRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 enum HistoryRequestKind {
+    RecoverLive {
+        gap: crate::transcript::LiveHistoryGap,
+    },
     Older {
         cursor: String,
     },
@@ -733,7 +739,7 @@ impl UiState {
 
     pub(crate) fn history_request_direction(&self) -> Option<bool> {
         match self.history_request.as_ref()?.kind {
-            HistoryRequestKind::Older { .. } => Some(true),
+            HistoryRequestKind::Older { .. } | HistoryRequestKind::RecoverLive { .. } => Some(true),
             HistoryRequestKind::Newer { .. } => Some(false),
             HistoryRequestKind::Latest
             | HistoryRequestKind::PostPromptSync
@@ -933,6 +939,16 @@ pub enum MessageContentKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
+    /// Session-assigned origin accompanying one ordinary live event.
+    MessageOrigin {
+        entry_id: String,
+        tool_call_ids: Vec<String>,
+        event: Box<BackendEvent>,
+    },
+    /// Carries a session-assigned result origin; presentation waits for `tool.result`.
+    ToolExecutionEnded {
+        call_id: String,
+    },
     ProjectFilesReported {
         command_id: String,
         snapshot: project_files::ProjectFilesReport,
@@ -1159,6 +1175,7 @@ pub enum UiAction {
         command_id: String,
     },
     LoadOlderHistory,
+    RecoverLiveHistory,
     LoadNewerHistory,
     ReloadLatestHistory,
     LoadExactDetail {
@@ -1227,6 +1244,10 @@ pub enum UiEffect {
     HistoryWindowChanged {
         older: bool,
     },
+    ReanchorTranscript {
+        from: crate::transcript::TranscriptEntryId,
+        to: crate::transcript::TranscriptEntryId,
+    },
     HistoryRequestFailed,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
     Notice(String),
@@ -1260,6 +1281,7 @@ pub fn reduce(
             | UiAction::SubmitPresented { .. }
             | UiAction::BackendEvent(
                 BackendEvent::MessageCompleted { .. }
+                    | BackendEvent::MessageOrigin { .. }
                     | BackendEvent::ToolResult(_)
                     | BackendEvent::ToolApprovalResolved { .. }
                     | BackendEvent::QueueMessageInjected { .. }
@@ -1340,6 +1362,7 @@ pub fn reduce(
             reject_post_prompt_session_sync(state, &command_id, limit)
         }
         UiAction::SkipStatsRefresh { command_id } => Ok(context::skip(state, &command_id, ids)?),
+        UiAction::RecoverLiveHistory => recover_live_history(state, ids),
         UiAction::LoadOlderHistory => load_older_history(state, ids),
         UiAction::LoadNewerHistory => load_newer_history(state, ids),
         UiAction::ReloadLatestHistory => reload_latest_history(state, ids),
@@ -2222,6 +2245,37 @@ fn begin_history_request(
         completion: None,
     });
     vec![UiEffect::SendCommand(command), UiEffect::RequestRender]
+}
+
+fn recover_live_history(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if let Some(gap) = state.transcript.live_history_gap().cloned() {
+        if !can_request_history(state, false) {
+            return Ok(Vec::new());
+        }
+        let id = ids.next_id(CommandKind::GetMessages);
+        let command = match &gap.cursor {
+            Some(cursor) => WispTypedClientRpcCommands::get_messages_older(
+                &id,
+                history_session_id(state),
+                cursor,
+            )?,
+            None => WispTypedClientRpcCommands::get_message_snapshot(
+                &id,
+                history_session_id(state),
+                &gap.newest,
+            )?,
+        };
+        return Ok(begin_history_request(
+            state,
+            id,
+            HistoryRequestKind::RecoverLive { gap },
+            command,
+        ));
+    }
+    Ok(Vec::new())
 }
 
 fn load_older_history(
@@ -3354,6 +3408,116 @@ fn handle_history_backend_event(
     }
     let report = request.report.take().expect("checked above");
     match request.kind {
+        HistoryRequestKind::RecoverLive { gap } => {
+            let current = state.transcript.live_history_gap();
+            let valid_scope =
+                same_history_scope(&state.history, &report, request.active_leaf_may_advance);
+            let valid_gap = current.is_some_and(|current| current == &gap);
+            let valid_page = if let Some(cursor) = &gap.cursor {
+                (!report.durable_entry_ids.is_empty()
+                    || (gap.until_start && report.next_before_entry_id.is_none()))
+                    && !report.durable_entry_ids.contains(cursor)
+                    && !report.durable_entry_ids.contains(&gap.newest)
+                    && report.next_before_entry_id.as_ref().is_none_or(|next| {
+                        Some(next) == report.durable_entry_ids.first() && next != cursor
+                    })
+                    && (report.next_before_entry_id.is_some()
+                        || report.durable_entry_ids.contains(&gap.oldest)
+                        || gap.until_start)
+            } else {
+                report.durable_entry_ids == [gap.newest.clone()]
+            };
+            if !valid_scope || !valid_gap || !valid_page {
+                return Some(history_request_failure(
+                    "live history changed or its durable page is unavailable; scroll up to retry"
+                        .into(),
+                ));
+            }
+            let next = if gap.cursor.is_none() {
+                report.durable_entry_ids.first().cloned()
+            } else {
+                report.next_before_entry_id.clone()
+            };
+            let page = match state
+                .transcript
+                .prepare_live_recovery_page(&report.transcript, &report.source_messages)
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    return Some(history_request_failure(format!(
+                        "live history could not be recovered: {error}"
+                    )));
+                }
+            };
+            let successor = state.transcript.live_gap_successor_origin();
+            let anchor =
+                state
+                    .transcript
+                    .recover_live_page(&page, &report.durable_entry_ids, next.clone());
+            let order = &mut state.history.represented_durable_entry_order;
+            let crosses_oldest = order
+                .first()
+                .is_some_and(|id| report.durable_entry_ids.contains(id));
+            let evict_newest = !gap.has_historical_prefix
+                || crosses_oldest
+                || gap
+                    .cursor
+                    .as_ref()
+                    .is_some_and(|cursor| order.first() == Some(cursor));
+            let insertion = order
+                .iter()
+                .position(|id| {
+                    report.durable_entry_ids.contains(id) || gap.cursor.as_ref() == Some(id)
+                })
+                .or_else(|| {
+                    successor
+                        .as_ref()
+                        .and_then(|id| order.iter().position(|existing| existing == id))
+                })
+                .unwrap_or(order.len());
+            order.retain(|id| !report.durable_entry_ids.contains(id));
+            let insertion = insertion.min(order.len());
+            order.splice(insertion..insertion, report.durable_entry_ids);
+            state.history.active_leaf_id = report.active_leaf_id;
+            if evict_newest {
+                state.history.oldest_cursor = next;
+            }
+            let evicted = !state
+                .transcript
+                .retain_historical_entries_in_order(
+                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+                    evict_newest,
+                    &state.history.represented_durable_entry_order,
+                )
+                .unwrap_or_default()
+                .is_empty();
+            sync_represented_history(state);
+            if evicted && !evict_newest {
+                state.history.oldest_cursor = state
+                    .history
+                    .represented_durable_entry_order
+                    .first()
+                    .cloned();
+            }
+            if evicted && evict_newest {
+                state.history.tail_evicted = true;
+                state.history.newest_cursor = state
+                    .history
+                    .represented_durable_entry_order
+                    .last()
+                    .cloned();
+            }
+            clear_evicted_exact_detail(state);
+            let mut effects = Vec::new();
+            if let Some((from, to)) = anchor {
+                effects.push(UiEffect::ReanchorTranscript { from, to });
+            }
+            effects.extend([
+                UiEffect::HistoryWindowChanged { older: true },
+                UiEffect::RequestRender,
+            ]);
+            Some(effects)
+        }
         HistoryRequestKind::PostPromptSync => {
             state.post_prompt_session_sync_pending = false;
             let Some(mut refreshed) = report.session else {
@@ -3943,6 +4107,45 @@ fn handle_backend_event(
         return Ok(effects);
     }
     match event {
+        BackendEvent::MessageOrigin {
+            entry_id,
+            tool_call_ids,
+            event,
+        } => {
+            let assistant = matches!(event.as_ref(), BackendEvent::MessageCompleted { .. });
+            let target = match event.as_ref() {
+                BackendEvent::MessageCompleted { turn, content } => {
+                    state.transcript.complete_message(*turn, content.clone())
+                }
+                BackendEvent::ToolResult(input) => {
+                    let target = state.transcript.observe_tool_result(*input.clone());
+                    state
+                        .transcript
+                        .resolve_history_call(target, &input.call_id);
+                    Some(target)
+                }
+                BackendEvent::ToolExecutionEnded { call_id } => {
+                    state.transcript.tool_entry_for_call(call_id)
+                }
+                BackendEvent::QueueMessageInjected { .. } => {
+                    handle_backend_event(state, *event, ids)?;
+                    state.transcript.latest_user_entry()
+                }
+                BackendEvent::Other { event_type } if event_type == "agent.started" => {
+                    state.transcript.latest_user_entry()
+                }
+                _ => return handle_backend_event(state, *event, ids),
+            };
+            if let Some(target) = target {
+                state.transcript.add_live_origin(target, &entry_id);
+            }
+            if assistant {
+                state
+                    .transcript
+                    .associate_tool_origins(&entry_id, &tool_call_ids);
+            }
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::Diagnostic(message) => {
             if state
                 .current_command
@@ -3974,13 +4177,17 @@ fn handle_backend_event(
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::MessageDelta { .. } | BackendEvent::Other { .. } => Ok(Vec::new()),
+        BackendEvent::MessageDelta { .. }
+        | BackendEvent::ToolExecutionEnded { .. }
+        | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted { turn, content } => {
             state.transcript.complete_message(turn, content);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolCall(input) => {
-            state.transcript.observe_tool_call(input);
+            let call_id = input.call_id.clone();
+            let target = state.transcript.observe_tool_call(input);
+            state.transcript.attach_tool_origin(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolApprovalRequested(pending) => {
@@ -4022,7 +4229,9 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolResult(result) => {
-            state.transcript.observe_tool_result(*result);
+            let call_id = result.call_id.clone();
+            let target = state.transcript.observe_tool_result(*result);
+            state.transcript.resolve_history_call(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::TrustRequested {
@@ -4210,6 +4419,7 @@ mod tests {
             | UiEffect::CloseSessionTree
             | UiEffect::RestoreSessionDraft(_)
             | UiEffect::ReplaceTranscript
+            | UiEffect::ReanchorTranscript { .. }
             | UiEffect::HistoryWindowChanged { .. }
             | UiEffect::HistoryRequestFailed
             | UiEffect::OpenExactDetail(_)
@@ -4416,6 +4626,7 @@ mod tests {
             let report = BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(SessionIdentity {
                         session_name: None,
                         ..selected.clone()
@@ -4485,6 +4696,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(created.clone()),
                     active_leaf_id: Some("created-leaf".into()),
                     truncated: false,
@@ -4822,6 +5034,63 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_origin_does_not_resolve_and_evict_before_presentation() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let call_id = bounded_identity("poll-final");
+        let call = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "tool.call", "call_id": "poll-final", "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"}
+        }))
+        .unwrap();
+        reduce(&mut state, UiAction::BackendEvent(call), &mut ids).unwrap();
+        let target = state.transcript.tool_entry_for_call(&call_id).unwrap();
+        // A long-lived process can accumulate more origins than the row budget
+        // while its final poll still protects it from eviction.
+        for index in 0..1_200 {
+            state
+                .transcript
+                .add_live_origin(target, &format!("origin-{index}"));
+        }
+        let mut result = serde_json::json!({
+            "type": "tool.execution.ended", "message_entry_id": "final-result",
+            "call_id": "poll-final", "name": "bash", "is_error": false,
+            "output": "final output", "process_id": "process-1",
+            "process_state": "completed", "exit_code": 0
+        });
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&result).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.transcript.has_unresolved_tool_call(&call_id));
+        assert!(state.transcript.entry(target).is_some());
+        assert!(state.transcript.live_history_gap().is_none());
+
+        result["type"] = "tool.result".into();
+        result["message_entry_id"] = Value::Null;
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&result).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.transcript.entry(target).is_none());
+        assert_eq!(
+            state.transcript.live_history_gap().unwrap().newest,
+            "final-result"
+        );
+        // Only the recovery marker remains, with no orphan result card.
+        assert_eq!(state.transcript.entries().len(), 1);
+        assert!(
+            state
+                .transcript
+                .is_live_history_marker(state.transcript.entries()[0].id)
+        );
+    }
+
+    #[test]
     fn tool_event_projection_preserves_structured_fields_and_trace_defaults() {
         assert!(matches!(
             BackendEvent::from_projection_value(&serde_json::json!({
@@ -4852,7 +5121,7 @@ mod tests {
             }
         );
         let projected = BackendEvent::from_projection_value(&serde_json::json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "call_id": "call-1",
             "name": "bash",
             "output": "still running",
@@ -4993,7 +5262,7 @@ mod tests {
         let stdout = format!("old{}new", "y".repeat(200_000));
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "call".repeat(5_000),
                 "name": "tool".repeat(5_000),
                 "output": output,
@@ -5029,7 +5298,7 @@ mod tests {
     fn write_before_snapshot_is_bounded_before_reducer_queueing() {
         let BackendEvent::ToolResult(retained) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "write-1",
                 "name": "write",
                 "output": "Wrote file.txt",
@@ -5045,7 +5314,7 @@ mod tests {
 
         let BackendEvent::ToolResult(over_budget) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "write-2",
                 "name": "write",
                 "output": "Wrote file.txt",
@@ -5061,7 +5330,7 @@ mod tests {
 
         let BackendEvent::ToolResult(mismatched) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "write-3",
                 "name": "read",
                 "output": "done",
@@ -5086,7 +5355,7 @@ mod tests {
         let source_bytes = output.len() as u64;
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "call-failed",
                 "name": "bash",
                 "output": output,
@@ -5110,7 +5379,7 @@ mod tests {
         let normalized = output.replace("\r\n", "\n");
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "call-crlf",
                 "name": "read",
                 "output": output,
@@ -5148,7 +5417,7 @@ mod tests {
         );
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "call-success",
                 "name": "read",
                 "output": output,
@@ -5193,7 +5462,7 @@ mod tests {
         );
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "call-cancelled",
                 "name": "bash",
                 "output": output,
@@ -5213,7 +5482,7 @@ mod tests {
     #[test]
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
-            "type": "tool.result",
+            "type": "tool.result", "message_entry_id": null,
             "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-7",
@@ -5302,7 +5571,7 @@ mod tests {
             &mut state,
             UiAction::BackendEvent(
                 BackendEvent::from_projection_value(&serde_json::json!({
-                    "type": "tool.result",
+                    "type": "tool.result", "message_entry_id": null,
                     "call_id": "call-1",
                     "name": "read",
                     "output": "contents",
@@ -5361,7 +5630,7 @@ mod tests {
             let card_id = transcript.observe_tool_call(call);
             let BackendEvent::ToolResult(result) =
                 BackendEvent::from_projection_value(&serde_json::json!({
-                    "type": "tool.result",
+                    "type": "tool.result", "message_entry_id": null,
                     "call_id": call_id,
                     "name": name,
                     "output": output,
@@ -5399,7 +5668,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(call);
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "projected-read",
                 "name": "read",
                 "output": "line\n".repeat(600),
@@ -5438,7 +5707,7 @@ mod tests {
         let card_id = transcript.observe_tool_call(call);
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "mid-line-read",
                 "name": "read",
                 "output": format!("complete\n{}\nlast\n", "x".repeat(70_000)),
@@ -5810,6 +6079,7 @@ mod tests {
         BackendEvent::MessagesReported {
             command_id: command_id.into(),
             messages: SessionMessages {
+                source_messages: Default::default(),
                 session: selected,
                 active_leaf_id: None,
                 truncated: false,
@@ -6330,7 +6600,7 @@ mod tests {
         ));
 
         let injected = BackendEvent::from_projection_value(&serde_json::json!({
-            "type": "queue.message.injected",
+            "type": "queue.message.injected", "message_entry_id": null,
             "kind": "steering",
             "content": "expanded provider content",
             "skill_invocation": {"original_content": "/skill request"}
@@ -6414,7 +6684,7 @@ mod tests {
         ));
         assert!(matches!(
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "queue.message.injected",
+                "type": "queue.message.injected", "message_entry_id": null,
                 "kind": "steering",
                 "content": "x".repeat(QUEUE_CONTENT_BYTES_LIMIT + 1),
                 "skill_invocation": null
@@ -7247,6 +7517,7 @@ mod tests {
         install_history_snapshot(
             &mut state,
             SessionMessages {
+                source_messages: Default::default(),
                 session: Some(session("active")),
                 active_leaf_id: Some("leaf".into()),
                 truncated: true,
@@ -7987,6 +8258,259 @@ mod tests {
         );
     }
 
+    fn recovery_page(
+        state: &mut UiState,
+        ids: &mut DeterministicIds,
+        command: &str,
+        origins: &[&str],
+        next: Option<&str>,
+    ) -> Vec<UiEffect> {
+        let mut transcript = SharedTranscript::default();
+        for origin in origins {
+            let start = transcript.entries().len();
+            transcript.append_prompt((*origin).into());
+            transcript.mark_history_entries(start, origin);
+        }
+        reduce(
+            state,
+            UiAction::BackendEvent(finished(command, "get_messages", true)),
+            ids,
+        )
+        .unwrap();
+        reduce(
+            state,
+            UiAction::BackendEvent(BackendEvent::MessagesReported {
+                command_id: command.into(),
+                messages: SessionMessages {
+                    source_messages: Default::default(),
+                    session: state.history.session.clone(),
+                    active_leaf_id: state.history.active_leaf_id.clone(),
+                    truncated: next.is_some(),
+                    next_before_entry_id: next.map(str::to_owned),
+                    next_after_entry_id: None,
+                    durable_entry_ids: origins.iter().map(|origin| (*origin).into()).collect(),
+                    exact_tool_result: None,
+                    transcript,
+                },
+            }),
+            ids,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn recovery_waits_for_terminal_retries_failure_and_rejects_nonadvancing_pages() {
+        let mut state = UiState::new("fake".into(), None, None);
+        for index in 0..1_202 {
+            let target = state.transcript.append_prompt(format!("message-{index}"));
+            state
+                .transcript
+                .add_live_origin(target, &format!("message-{index}"));
+        }
+        state.transcript.enforce_live_retention(None);
+        let before = state.transcript.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_messages-1", "get_messages", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::HistoryRequestFailed))
+        );
+        assert_eq!(state.transcript, before);
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-2", &["message-1"], None);
+        assert_eq!(
+            state
+                .transcript
+                .live_history_gap()
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("message-1")
+        );
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        let before = state.transcript.clone();
+        let effects = recovery_page(
+            &mut state,
+            &mut ids,
+            "get_messages-3",
+            &["message-0"],
+            Some("message-1"),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::HistoryRequestFailed))
+        );
+        assert_eq!(state.transcript, before);
+        assert!(state.history_request.is_none());
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-4", &["message-0"], None);
+        assert!(state.transcript.live_history_gap().is_none());
+        assert_eq!(state.transcript.entries().len(), 1_202);
+    }
+
+    #[test]
+    fn recovery_retains_new_pages_when_the_historical_prefix_is_full() {
+        let mut state = UiState::new("fake".into(), None, None);
+        for index in 0..TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT {
+            let origin = format!("prefix-{index}");
+            let start = state.transcript.entries().len();
+            state.transcript.append_prompt(origin.clone());
+            state.transcript.mark_history_entries(start, &origin);
+            state.history.represented_durable_entry_order.push(origin);
+        }
+        state.history.oldest_cursor = Some("prefix-0".into());
+        for index in 0..1_202 {
+            let target = state.transcript.append_prompt(format!("message-{index}"));
+            state
+                .transcript
+                .add_live_origin(target, &format!("message-{index}"));
+        }
+        state.transcript.enforce_live_retention(None);
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-1", &["message-1"], None);
+        assert!(
+            state
+                .transcript
+                .entries()
+                .iter()
+                .any(|entry| entry.content == "message-1")
+        );
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-1"));
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(
+            &mut state,
+            &mut ids,
+            "get_messages-2",
+            &["message-0"],
+            Some("message-0"),
+        );
+        assert!(state.transcript.live_history_gap().is_none());
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-2"));
+        assert!(
+            state
+                .transcript
+                .entries()
+                .iter()
+                .any(|entry| entry.content == "message-0")
+        );
+        assert_eq!(
+            &state.history.represented_durable_entry_order
+                [TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT - 2..],
+            ["message-0", "message-1"]
+        );
+    }
+
+    #[test]
+    fn recovery_inserts_a_later_interior_gap_in_durable_order() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut protected = None;
+        for index in 0..1_203 {
+            let target = state.transcript.append_prompt(format!("message-{index}"));
+            state
+                .transcript
+                .add_live_origin(target, &format!("message-{index}"));
+            if index == 1 {
+                protected = Some(target);
+            }
+        }
+        state.transcript.enforce_live_retention(protected);
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-1", &["message-3"], None);
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(
+            &mut state,
+            &mut ids,
+            "get_messages-2",
+            &["message-0", "message-1", "message-2"],
+            None,
+        );
+        let target = state.transcript.append_prompt("new".into());
+        state.transcript.add_live_origin(target, "new");
+        state.transcript.enforce_live_retention(None);
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-3", &["message-1"], None);
+        assert!(state.transcript.live_history_gap().is_none());
+        assert_eq!(
+            state.history.represented_durable_entry_order,
+            ["message-0", "message-1", "message-2", "message-3"]
+        );
+    }
+
+    #[test]
+    fn recovery_updates_the_cursor_when_its_page_crosses_a_resumed_prefix() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_prompt("prefix".into());
+        state.transcript.mark_history_entries(0, "prefix");
+        state.history.oldest_cursor = Some("prefix".into());
+        state.history.represented_durable_entry_order = vec!["prefix".into()];
+        for index in 0..1_202 {
+            let target = state.transcript.append_prompt(format!("message-{index}"));
+            state
+                .transcript
+                .add_live_origin(target, &format!("message-{index}"));
+        }
+        state.transcript.enforce_live_retention(None);
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(&mut state, &mut ids, "get_messages-1", &["message-1"], None);
+        reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
+        recovery_page(
+            &mut state,
+            &mut ids,
+            "get_messages-2",
+            &["before-prefix", "prefix", "message-0"],
+            Some("before-prefix"),
+        );
+        assert!(state.transcript.live_history_gap().is_none());
+        assert_eq!(
+            state.history.oldest_cursor.as_deref(),
+            Some("before-prefix")
+        );
+        let effects = reduce(&mut state, UiAction::LoadOlderHistory, &mut ids).unwrap();
+        assert_eq!(
+            effects.iter().find_map(command_value).unwrap()["before_entry_id"],
+            "before-prefix"
+        );
+    }
+
+    #[test]
+    fn evicted_live_history_can_load_without_an_older_cursor() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let selected = session("active");
+        state.selected_session = Some(selected.clone());
+        state.history.session = Some(selected);
+        for index in 0..1_202 {
+            let target = state.transcript.append_prompt("same text".into());
+            state
+                .transcript
+                .add_live_origin(target, &format!("message-{index}"));
+        }
+        assert!(state.transcript.enforce_live_retention(None));
+        assert!(state.history.oldest_cursor.is_none());
+        let effects = reduce(
+            &mut state,
+            UiAction::RecoverLiveHistory,
+            &mut DeterministicIds::default(),
+        )
+        .unwrap();
+        let request = effects
+            .iter()
+            .find_map(command_value)
+            .expect("upward navigation must recover live eviction");
+        assert_eq!(request["entry_ids"], serde_json::json!(["message-1"]));
+        assert_eq!(request["full_content"], false);
+    }
+
     #[test]
     fn older_history_waits_for_both_events_and_allows_the_active_leaf_to_advance() {
         let selected = session("active");
@@ -8032,6 +8556,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(selected),
                     active_leaf_id: Some("new-leaf".into()),
                     truncated: true,
@@ -8093,6 +8618,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(selected),
                     active_leaf_id: Some("advanced-leaf".into()),
                     truncated: false,
@@ -8152,6 +8678,7 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::MessagesReported {
                     command_id: "get_messages-1".into(),
                     messages: SessionMessages {
+                        source_messages: Default::default(),
                         session: Some(selected),
                         active_leaf_id: Some("leaf".into()),
                         truncated: false,
@@ -8241,6 +8768,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(selected),
                     active_leaf_id: Some("leaf".into()),
                     truncated: false,
@@ -8318,6 +8846,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(selected),
                     active_leaf_id: Some("other-leaf".into()),
                     truncated: false,
@@ -8367,7 +8896,7 @@ mod tests {
         state.transcript.mark_history_entries(0, "call-entry");
         let BackendEvent::ToolResult(result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "read-1",
                 "name": "read",
                 "output": "partial",
@@ -8402,7 +8931,7 @@ mod tests {
 
         let BackendEvent::ToolResult(full_result) =
             BackendEvent::from_projection_value(&serde_json::json!({
-                "type": "tool.result",
+                "type": "tool.result", "message_entry_id": null,
                 "call_id": "read-1",
                 "name": "read",
                 "output": "alpha\nbeta\n",
@@ -8425,6 +8954,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessagesReported {
                 command_id: "get_messages-1".into(),
                 messages: SessionMessages {
+                    source_messages: Default::default(),
                     session: Some(selected),
                     active_leaf_id: Some("advanced-leaf".into()),
                     truncated: false,

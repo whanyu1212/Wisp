@@ -2957,6 +2957,7 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
 
 def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
     ended = ToolExecutionEnded(
+        message_entry_id="persisted-result",
         call_id="call-1",
         name="bash",
         output="Command exited with code 2: output",
@@ -2980,6 +2981,7 @@ def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
 
     result = ToolResultReady.from_execution_ended(ended)
     expected_payload = {
+        "message_entry_id": "persisted-result",
         "call_id": "call-1",
         "name": "bash",
         "output": "Command exited with code 2: output",

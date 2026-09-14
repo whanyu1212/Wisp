@@ -297,9 +297,17 @@ def test_context_help_preserves_draft_and_update_is_local_guidance(tmp_path: Pat
             failure="contextual key help did not open",
         )
 
-        tui.send(b"\x1b")
-        tui.resize(width=102)
         offset = len(tui.output)
+        tui.send(b"\x1b")
+        # The draft is also visible beneath help. Wait for the covered welcome
+        # hint to return before resizing or sending input to the composer.
+        tui.wait_for(
+            b"Type a prompt or / for commands.",
+            since=offset,
+            failure="contextual key help did not close",
+        )
+        offset = len(tui.output)
+        tui.resize(width=102)
         tui.wait_for(
             b"keep draft",
             since=offset,

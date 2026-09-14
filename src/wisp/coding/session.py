@@ -660,12 +660,22 @@ class CodingSession:
                 )
                 persistence.expected_active_leaf_id = run_start_leaf_id
 
-        yield await emit(AgentStarted(session_id=session.session_id))
+        # Allocate the prompt's identity before AgentStarted, preserving the
+        # existing event order while allowing frontends to identify their echo.
+        user_entry = MessageSessionEntry(
+            session_id=session.session_id,
+            message=user_message,
+            operation_id=operation_id,
+            created_at=user_message.created_at,
+        )
+        yield await emit(
+            AgentStarted(session_id=session.session_id, message_entry_id=user_entry.id)
+        )
 
         for prompt_message in prompt_messages:
             await persistence.append_message(prompt_message)
 
-        user_entry = await persistence.append_message(user_message)
+        await persistence.append_entry(user_entry)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(user_message)
@@ -751,6 +761,9 @@ class CodingSession:
                                 created_at=queue_event.timestamp,
                             ),
                             operation_id=operation_id,
+                        )
+                        queue_event = queue_event.model_copy(
+                            update={"message_entry_id": queue_entry_id}
                         )
                         if queue_event.skill_invocation is not None:
                             yield await emit(
@@ -1131,6 +1144,7 @@ class CodingSession:
                             ),
                             operation_id=operation_id,
                         )
+                        event = event.model_copy(update={"message_entry_id": queue_entry_id})
                         if not completed_turn_had_tool_calls and not queue_batch_started_new_turn:
                             active_compaction_entry_id = queue_entry_id
                             queue_batch_started_new_turn = True
@@ -1171,6 +1185,8 @@ class CodingSession:
                                 entry_id=completion_entry_id,
                             )
 
+                    if completion_entry_id is not None:
+                        event = event.model_copy(update={"message_entry_id": completion_entry_id})
                     yield await emit(event)
                 while boundary_events:
                     yield boundary_events.popleft()

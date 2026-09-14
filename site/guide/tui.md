@@ -106,7 +106,7 @@ aliases also work. Project trust remains a compact card at the bottom of the pan
 with `y`/`n` choices; the composer stays a short waiting
 strip instead of a five-row args panel.
 
-The Rust TUI negotiates and validates live RPC v7/event schema v38, supports prompts, approvals,
+The Rust TUI negotiates and validates live RPC v8/event schema v39, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and bounded session history.
 `/resume` opens a picker for up to 50 persisted sessions (or accepts

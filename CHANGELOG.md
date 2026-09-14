@@ -264,7 +264,18 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v38 — current
+## Schema v39 — current
+
+- Added nullable `message_entry_id` to `agent.started`, `message.completed`,
+  `queue.message.injected`, `tool.execution.ended`, and `tool.result`. The coding session
+  publishes assigned message IDs so frontends can reconcile live output with persisted history.
+  An assigned ID does not guarantee a successful write; history reads verify availability.
+- Live JSONL-RPC now negotiates protocol v8 with event schema v39. Published v1–v7 bundles remain
+  immutable, and persisted event schemas v5 through v39 remain readable.
+- Rust TUI scrolling recovers evicted live entries through bounded history pages, preserving
+  surviving rows, pending scroll movement, and composer drafts.
+
+## Schema v38
 
 - Added `rpc.permissions` with effective mode, saved mode, and project path, plus `get_permissions`
   and `set_permissions` commands.
@@ -486,7 +497,7 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v38 remain readable.
+Events at schema v5 through v39 remain readable.
 
 ---
 

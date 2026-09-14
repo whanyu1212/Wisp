@@ -36,6 +36,7 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEventAdapter,
     MessageCompleted,
+    QueueMessageInjected,
     SessionSaved,
     SessionStats,
     TokenUsage,
@@ -992,8 +993,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 38
-    assert completed.schema_version == 38
+    assert started.schema_version == 39
+    assert completed.schema_version == 39
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -1052,7 +1053,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 through 38"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 39"):
         wisp_event_from_json(payload)
 
 
@@ -1524,17 +1525,17 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
             context_reserve_tokens=100,
         )
 
+        events: list[WispEvent] = []
+
         async def consume() -> None:
             with pytest.raises(ContextOverflowError, match="prompt and steering exceed"):
-                _events = [
-                    event
-                    async for event in agent.run(
-                        "question two",
-                        session=session,
-                        history=history,
-                        operation_id="prompt-1",
-                    )
-                ]
+                async for event in agent.run(
+                    "question two",
+                    session=session,
+                    history=history,
+                    operation_id="prompt-1",
+                ):
+                    events.append(event)
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(consume)
@@ -1542,6 +1543,13 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
             await agent.steer("x" * 8_000)
             release_summary.set()
 
+        injected = next(event for event in events if isinstance(event, QueueMessageInjected))
+        persisted = next(
+            entry
+            for entry in session.read_entries()
+            if isinstance(entry, MessageSessionEntry) and entry.id == injected.message_entry_id
+        )
+        assert persisted.message.content == "x" * 8_000
         assert session.read_context_messages() == history
         assert all(
             entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:]

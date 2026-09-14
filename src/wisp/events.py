@@ -34,7 +34,8 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[38] = 38
+EVENT_SCHEMA_VERSION: Literal[39] = 39
+MESSAGE_ORIGIN_SCHEMA_VERSION = 39
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -159,6 +160,7 @@ class WispEvent(BaseModel):
         36,
         37,
         38,
+        39,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -184,7 +186,34 @@ class ToolCallSnapshot(BaseModel):
     parse_error: str | None = None
 
 
-class AgentStarted(WispEvent):
+class _MessageOriginEvent(WispEvent):
+    """Associate live presentation with an assigned session message identity.
+
+    The session assigns the identity before publishing the event. Persistence can
+    still be buffered or fail; consumers must verify the entry in durable history
+    before treating it as recoverable.
+    """
+
+    message_entry_id: str | None = Field(default=None, min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def _validate_message_origin(self) -> Self:
+        if (
+            self.message_entry_id is not None
+            and self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION
+        ):
+            raise ValueError("Message origins require schema_version 39 or newer")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_origin(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
+            data.pop("message_entry_id", None)
+        return data
+
+
+class AgentStarted(_MessageOriginEvent):
     type: Literal["agent.started"] = "agent.started"
     session_id: str
 
@@ -770,7 +799,7 @@ class RpcSessionTreeNode(BaseModel):
         return self
 
 
-class MessageCompleted(WispEvent):
+class MessageCompleted(_MessageOriginEvent):
     type: Literal["message.completed"] = "message.completed"
     turn: int
     content: str
@@ -793,6 +822,8 @@ class MessageCompleted(WispEvent):
     @model_serializer(mode="wrap")
     def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         data = cast(dict[str, object], handler(self))
+        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
+            data.pop("message_entry_id", None)
         if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
             data.pop("cost", None)
         if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
@@ -919,7 +950,7 @@ class ProjectConfigApplied(WispEvent):
         return data
 
 
-class _ToolResultEvent(WispEvent):
+class _ToolResultEvent(_MessageOriginEvent):
     """Shared bounded result contract for distinct tool lifecycle events."""
 
     call_id: str
@@ -984,6 +1015,8 @@ class _ToolResultEvent(WispEvent):
     @model_serializer(mode="wrap")
     def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         data = cast(dict[str, object], handler(self))
+        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
+            data.pop("message_entry_id", None)
         if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
             _strip_process_metadata_fields(data)
         if self.schema_version < TOOL_FAILURE_METADATA_SCHEMA_VERSION:
@@ -1757,7 +1790,7 @@ class QueueItemsRemoved(WispEvent):
         return self
 
 
-class QueueMessageInjected(WispEvent):
+class QueueMessageInjected(_MessageOriginEvent):
     """A queued user message crossed into the active transcript."""
 
     type: Literal["queue.message.injected"] = "queue.message.injected"

@@ -3675,7 +3675,7 @@ mod tests {
         assert!(bold.contains(Modifier::BOLD));
 
         let completed = wisp_protocol::events::deserialize(json!({
-            "type": "message.completed", "turn": 1, "content": source,
+            "type": "message.completed", "message_entry_id": null, "turn": 1, "content": source,
             "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "timestamp": "2026-09-13T00:00:00Z",
             "role": "assistant", "tool_calls": [], "usage": null,
             "finish_reason": "stop", "response_id": null, "cost": null,

@@ -568,6 +568,7 @@ mod tests {
             );
             let before = state.context.stats.clone();
             let messages = SessionMessages {
+                source_messages: Default::default(),
                 session: state.selected_session.clone(),
                 active_leaf_id: Some("new-leaf".into()),
                 truncated: false,
