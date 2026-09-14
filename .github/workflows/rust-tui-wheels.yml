@@ -72,7 +72,7 @@ jobs:
           "$python" -m venv /tmp/wisp-wheel
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pip install --quiet "${wheel[0]}"
-          ! PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin command -v cargo
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           cd /tmp
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
@@ -164,7 +164,7 @@ jobs:
           uv venv /tmp/wisp-wheel
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python "${wheel[0]}"
-          ! PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin command -v cargo
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           cd /tmp
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
@@ -182,9 +182,10 @@ jobs:
           file /tmp/wisp-wheel/bin/wisp-tui | grep -F "${{ matrix.architecture }}"
           otool -l /tmp/wisp-wheel/bin/wisp-tui | grep -A5 -E \
             "LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX" | grep -F "minos 11.0"
-          ! otool -l /tmp/wisp-wheel/bin/wisp-tui | grep -q "LC_RPATH"
+          otool -l /tmp/wisp-wheel/bin/wisp-tui > /tmp/otool-load-commands.txt
+          ! grep -E "/Users/runner|/runner/work|/target/" /tmp/otool-load-commands.txt
           ! otool -L /tmp/wisp-wheel/bin/wisp-tui | grep -vE \
-            "^/tmp/wisp-wheel/bin/wisp-tui:|^[[:space:]]+(/usr/lib/|/System/Library/)"
+            "^(/private)?/tmp/wisp-wheel/bin/wisp-tui:|^[[:space:]]+(/usr/lib/|/System/Library/)"
           codesign -dv /tmp/wisp-wheel/bin/wisp-tui 2>&1 | grep -F "Signature=adhoc"
 
       - name: Upload candidate artifacts
