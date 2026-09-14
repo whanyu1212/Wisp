@@ -78,7 +78,7 @@ pub(crate) fn line_highlights(
             .find(char::is_whitespace)
             .map_or(scan_end, |offset| command_start + offset);
         let token = &line[command_start..token_end];
-        if crate::commands::is_supported_token(token, context.catalog) {
+        if token.starts_with('/') && crate::commands::is_supported_token(token, context.catalog) {
             highlights.push(Highlight {
                 columns: display_columns(line, command_start)..display_columns(line, token_end),
                 kind: Kind::Command,
@@ -273,6 +273,14 @@ mod tests {
             }]
         );
         assert!(highlights("/missing", false, 0, 1, Some(&catalog), None).is_empty());
+        let quit = CommandDescriptor {
+            name: "quit".into(),
+            description: String::new(),
+            slash_command: "/quit".into(),
+            slash_aliases: vec![":q".into()],
+            order: 0,
+        };
+        assert!(highlights(":q", false, 0, 1, Some(&[quit]), None).is_empty());
         assert!(highlights("/help", false, 0, 2, Some(&catalog), None).is_empty());
     }
 
