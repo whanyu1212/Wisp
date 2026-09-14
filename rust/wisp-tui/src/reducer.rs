@@ -731,6 +731,16 @@ impl UiState {
         self.queue.follow_up.len()
     }
 
+    pub(crate) fn history_request_direction(&self) -> Option<bool> {
+        match self.history_request.as_ref()?.kind {
+            HistoryRequestKind::Older { .. } => Some(true),
+            HistoryRequestKind::Newer { .. } => Some(false),
+            HistoryRequestKind::Latest
+            | HistoryRequestKind::PostPromptSync
+            | HistoryRequestKind::ExactDetail { .. } => None,
+        }
+    }
+
     pub(crate) fn editor_editable(&self) -> bool {
         !self.exit_requested
             && !self.configuration_active()
@@ -1214,7 +1224,10 @@ pub enum UiEffect {
     },
     SendPostPromptSessionSync(WispTypedClientRpcCommands),
     ReplaceTranscript,
-    HistoryWindowChanged,
+    HistoryWindowChanged {
+        older: bool,
+    },
+    HistoryRequestFailed,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
     Notice(String),
     Diagnostic(String),
@@ -3263,6 +3276,7 @@ fn history_request_failure(error: String) -> Vec<UiEffect> {
             &format!("Session history request failed: {error}"),
             SESSION_NOTICE_MAX_BYTES,
         )),
+        UiEffect::HistoryRequestFailed,
         UiEffect::RequestRender,
     ]
 }
@@ -3416,7 +3430,7 @@ fn handle_history_backend_event(
                 .replace_history_omission_marker(state.history.oldest_cursor.is_some());
             clear_evicted_exact_detail(state);
             Some(vec![
-                UiEffect::HistoryWindowChanged,
+                UiEffect::HistoryWindowChanged { older: true },
                 UiEffect::RequestRender,
             ])
         }
@@ -3455,7 +3469,7 @@ fn handle_history_backend_event(
                 .replace_history_omission_marker(state.history.oldest_cursor.is_some());
             clear_evicted_exact_detail(state);
             Some(vec![
-                UiEffect::HistoryWindowChanged,
+                UiEffect::HistoryWindowChanged { older: false },
                 UiEffect::RequestRender,
             ])
         }
@@ -4205,7 +4219,8 @@ mod tests {
             | UiEffect::CloseSessionTree
             | UiEffect::RestoreSessionDraft(_)
             | UiEffect::ReplaceTranscript
-            | UiEffect::HistoryWindowChanged
+            | UiEffect::HistoryWindowChanged { .. }
+            | UiEffect::HistoryRequestFailed
             | UiEffect::OpenExactDetail(_)
             | UiEffect::ShowModelPicker
             | UiEffect::ModelCatalogUpdated(_)
@@ -8048,7 +8063,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert!(state.history_request.is_none());
         assert_eq!(state.history.active_leaf_id.as_deref(), Some("new-leaf"));
@@ -8123,7 +8138,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert_eq!(
             state.history.active_leaf_id.as_deref(),
@@ -8184,7 +8199,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert!(!state.history.tail_evicted);
         assert!(state.history.newest_cursor.is_none());

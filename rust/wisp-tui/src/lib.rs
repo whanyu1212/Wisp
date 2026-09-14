@@ -500,6 +500,19 @@ struct DeferredQueueRecovery {
     local_order: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryNavigationIntent {
+    Rows(usize),
+    Home,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingHistoryNavigation {
+    older: bool,
+    intent: HistoryNavigationIntent,
+    reader_generation: u64,
+}
+
 struct LiveUi {
     state: UiState,
     bindings: Bindings,
@@ -512,6 +525,7 @@ struct LiveUi {
     mouse_frame: Option<mouse::Frame>,
     transcript_viewport: TranscriptViewport,
     transcript_row_cache: TranscriptRowCache,
+    pending_history_navigation: Option<PendingHistoryNavigation>,
     detail_view: DetailView,
     browse_selected: Option<TranscriptEntryId>,
     editor: PromptEditor,
@@ -554,6 +568,7 @@ impl Default for LiveUi {
             mouse_frame: None,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
+            pending_history_navigation: None,
             detail_view: DetailView::default(),
             browse_selected: None,
             editor: PromptEditor::default(),
@@ -589,6 +604,7 @@ impl LiveUi {
         self.mouse_frame = None;
         self.transcript_viewport = TranscriptViewport::default();
         self.transcript_row_cache = TranscriptRowCache::default();
+        self.pending_history_navigation = None;
         self.detail_view = DetailView::default();
         self.browse_selected = None;
         self.transcript_row_cache.fold_mut().clear();
@@ -982,7 +998,11 @@ impl LiveUi {
                     send_payload(writer, payload, limit).await?;
                 }
                 UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
-                UiEffect::HistoryWindowChanged => self.render_pending = true,
+                UiEffect::HistoryWindowChanged { .. } => self.render_pending = true,
+                UiEffect::HistoryRequestFailed => {
+                    self.pending_history_navigation = None;
+                    self.render_pending = true;
+                }
                 UiEffect::OpenExactDetail(entry_id) => {
                     if self.browse_selected != Some(entry_id) {
                         self.state.history.active_exact_detail = None;
@@ -1090,9 +1110,11 @@ impl LiveUi {
         let transcript_replaced = effects
             .iter()
             .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
-        let history_window_changed = effects
-            .iter()
-            .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged));
+        let history_window_direction = effects.iter().find_map(|effect| match effect {
+            UiEffect::HistoryWindowChanged { older } => Some(*older),
+            _ => None,
+        });
+        let history_window_changed = history_window_direction.is_some();
         if matches!(
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -1140,6 +1162,33 @@ impl LiveUi {
                 &self.state.transcript,
                 &mut self.transcript_row_cache,
             );
+            if let (Some(older), Some(pending)) = (
+                history_window_direction,
+                self.pending_history_navigation.take(),
+            ) {
+                if pending.older == older
+                    && pending.reader_generation == self.transcript_viewport.reader_generation()
+                {
+                    match pending.intent {
+                        HistoryNavigationIntent::Rows(rows) => {
+                            self.transcript_viewport.continue_navigation(
+                                older,
+                                rows,
+                                &self.state.transcript,
+                                &mut self.transcript_row_cache,
+                                self.state.history.tail_evicted,
+                            );
+                        }
+                        HistoryNavigationIntent::Home => {
+                            self.transcript_viewport.reduce(
+                                TranscriptViewAction::Home,
+                                &self.state.transcript,
+                                &mut self.transcript_row_cache,
+                            );
+                        }
+                    }
+                }
+            }
             self.reconcile_browse_selection();
         }
         if automatic_decision_response
@@ -2638,10 +2687,12 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        self.transcript_viewport.reduce(
+        let previous_pending = self.pending_history_navigation.take();
+        let outcome = self.transcript_viewport.reduce_with_newer_history(
             action,
             &self.state.transcript,
             &mut self.transcript_row_cache,
+            self.state.history.tail_evicted,
         );
         let history_action = match action {
             TranscriptViewAction::PageUp
@@ -2653,24 +2704,58 @@ impl LiveUi {
             {
                 Some(UiAction::LoadOlderHistory)
             }
-            TranscriptViewAction::PageDown
-            | TranscriptViewAction::FollowTail
-            | TranscriptViewAction::ScrollLines(1..=i32::MAX)
-                if self.transcript_viewport.follows_tail() && self.state.history.tail_evicted =>
+            TranscriptViewAction::PageDown | TranscriptViewAction::ScrollLines(1..=i32::MAX)
+                if self.state.history.tail_evicted && outcome.remaining_rows() > 0 =>
             {
+                Some(UiAction::LoadNewerHistory)
+            }
+            TranscriptViewAction::FollowTail if self.state.history.tail_evicted => {
                 Some(UiAction::LoadNewerHistory)
             }
             _ => None,
         };
         if let Some(history_action) = history_action {
+            let older = matches!(history_action, UiAction::LoadOlderHistory);
+            let active_direction = self.state.history_request_direction();
+            let same_active_request = active_direction == Some(older);
+            let reversed_active_request = active_direction.is_some() && !same_active_request;
+            let intent = if action == TranscriptViewAction::Home {
+                Some(HistoryNavigationIntent::Home)
+            } else {
+                let previous_rows = previous_pending
+                    .filter(|pending| pending.older == older && same_active_request)
+                    .and_then(|pending| match pending.intent {
+                        HistoryNavigationIntent::Rows(rows) => Some(rows),
+                        HistoryNavigationIntent::Home => None,
+                    })
+                    .unwrap_or(0);
+                let remaining_rows = previous_rows.saturating_add(outcome.remaining_rows());
+                (remaining_rows > 0).then_some(HistoryNavigationIntent::Rows(remaining_rows))
+            };
+            if !reversed_active_request {
+                self.pending_history_navigation = intent.map(|intent| PendingHistoryNavigation {
+                    older,
+                    intent,
+                    reader_generation: outcome.reader_generation,
+                });
+            }
+            if same_active_request {
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
             if let Some(notice) =
                 self.reduced_action_frame_limit_notice(&history_action, "history request", limit)?
             {
+                self.pending_history_navigation = None;
                 self.notice = Some(notice);
                 self.render_pending = true;
                 return Ok(LoopControl::Continue);
             }
-            return self.dispatch(history_action, writer, limit).await;
+            let control = self.dispatch(history_action, writer, limit).await?;
+            if self.state.history_request_direction() != Some(older) {
+                self.pending_history_navigation = None;
+            }
+            return Ok(control);
         }
         self.render_pending = true;
         Ok(LoopControl::Continue)
@@ -7822,6 +7907,202 @@ mod tests {
         assert!(live_ui.transcript_viewport.follows_tail());
         assert!(!live_ui.transcript_viewport.has_unseen_output());
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn history_navigation_coalesces_reverses_and_clears_failed_intent() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        let current = live_ui.state.transcript.append_prompt("current".into());
+        live_ui
+            .state
+            .transcript
+            .mark_history_entries(0, "current-entry");
+        live_ui.state.history.oldest_cursor = Some("current-entry".into());
+        live_ui
+            .state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            40,
+            6,
+        );
+
+        live_ui
+            .navigate_transcript_action(
+                TranscriptViewAction::PageUp,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let first = live_ui.pending_history_navigation.unwrap();
+        assert!(first.older);
+        assert!(matches!(first.intent, HistoryNavigationIntent::Rows(rows) if rows > 0));
+        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+            panic!("older history request must queue one frame");
+        };
+
+        live_ui
+            .navigate_transcript_action(
+                TranscriptViewAction::PageUp,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let coalesced = live_ui.pending_history_navigation.unwrap();
+        assert!(matches!(
+            (first.intent, coalesced.intent),
+            (HistoryNavigationIntent::Rows(first), HistoryNavigationIntent::Rows(next))
+                if next > first
+        ));
+        assert!(writer_rx.try_recv().is_err());
+
+        live_ui
+            .navigate_transcript_action(
+                TranscriptViewAction::PageDown,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.pending_history_navigation.is_none());
+        assert_eq!(
+            live_ui
+                .transcript_viewport
+                .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache)[0]
+                .anchor
+                .entry_id,
+            current
+        );
+
+        live_ui
+            .navigate_transcript_action(
+                TranscriptViewAction::PageUp,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_messages-1".into(),
+                    command_type: "get_messages".into(),
+                    ok: false,
+                    error: Some("temporary failure".into()),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(live_ui.pending_history_navigation.is_none());
+        assert!(
+            live_ui
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("temporary failure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_older_page_continues_the_triggering_page_up() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        let selected = reducer::SessionIdentity {
+            session_id: "active".into(),
+            session_path: "/sessions/active.jsonl".into(),
+            session_name: None,
+        };
+        live_ui.state.selected_session = Some(selected.clone());
+        live_ui.state.history.session = Some(selected.clone());
+        live_ui.state.history.oldest_cursor = Some("current-entry".into());
+        live_ui
+            .state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        let current = live_ui.state.transcript.append_prompt("current".into());
+        live_ui
+            .state
+            .transcript
+            .mark_history_entries(0, "current-entry");
+        live_ui.transcript_viewport.set_geometry(
+            &live_ui.state.transcript,
+            &mut live_ui.transcript_row_cache,
+            40,
+            6,
+        );
+
+        live_ui
+            .navigate_transcript_action(
+                TranscriptViewAction::PageUp,
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+            panic!("older history request must queue one frame");
+        };
+
+        let mut older = crate::transcript::SharedTranscript::default();
+        for index in 0..4 {
+            let start = older.entries().len();
+            older.append_prompt(format!("older-{index}"));
+            older.mark_history_entries(start, &format!("older-entry-{index}"));
+        }
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::MessagesReported {
+                    command_id: "get_messages-1".into(),
+                    messages: reducer::SessionMessages {
+                        session: Some(selected),
+                        active_leaf_id: None,
+                        truncated: false,
+                        next_before_entry_id: None,
+                        next_after_entry_id: None,
+                        durable_entry_ids: (0..4)
+                            .map(|index| format!("older-entry-{index}"))
+                            .collect(),
+                        exact_tool_result: None,
+                        transcript: older,
+                    },
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "get_messages-1".into(),
+                    command_type: "get_messages".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+
+        assert!(live_ui.pending_history_navigation.is_none());
+        assert_ne!(
+            live_ui
+                .transcript_viewport
+                .visible_rows(&live_ui.state.transcript, &mut live_ui.transcript_row_cache)[0]
+                .anchor
+                .entry_id,
+            current
+        );
+        assert!(!live_ui.transcript_viewport.follows_tail());
     }
 
     #[tokio::test]

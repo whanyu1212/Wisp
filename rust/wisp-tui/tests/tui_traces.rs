@@ -418,7 +418,8 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::ShowSessionTreePage { .. }
                 | UiEffect::CloseSessionTree
                 | UiEffect::ReplaceTranscript
-                | UiEffect::HistoryWindowChanged
+                | UiEffect::HistoryWindowChanged { .. }
+                | UiEffect::HistoryRequestFailed
                 | UiEffect::OpenExactDetail(_)
                 | UiEffect::ShowModelPicker
                 | UiEffect::ModelCatalogUpdated(_)

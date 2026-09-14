@@ -2229,6 +2229,19 @@ pub enum TranscriptViewAction {
     HistoryChanged,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NavigationOutcome {
+    pub requested_rows: usize,
+    pub consumed_rows: usize,
+    pub reader_generation: u64,
+}
+
+impl NavigationOutcome {
+    pub fn remaining_rows(self) -> usize {
+        self.requested_rows.saturating_sub(self.consumed_rows)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptViewport {
     top: Option<RowAnchor>,
@@ -2236,6 +2249,7 @@ pub struct TranscriptViewport {
     unseen_output: bool,
     width: usize,
     height: usize,
+    reader_generation: u64,
 }
 
 impl Default for TranscriptViewport {
@@ -2246,6 +2260,7 @@ impl Default for TranscriptViewport {
             unseen_output: false,
             width: 1,
             height: 1,
+            reader_generation: 0,
         }
     }
 }
@@ -2257,6 +2272,10 @@ impl TranscriptViewport {
 
     pub fn has_unseen_output(&self) -> bool {
         self.unseen_output
+    }
+
+    pub fn reader_generation(&self) -> u64 {
+        self.reader_generation
     }
 
     pub fn set_geometry(
@@ -2273,6 +2292,7 @@ impl TranscriptViewport {
         }
         self.width = width;
         self.height = height;
+        self.reader_generation = self.reader_generation.wrapping_add(1);
         if !self.follow_tail {
             self.top = self.top.and_then(|anchor| {
                 normalize_anchor(
@@ -2294,8 +2314,35 @@ impl TranscriptViewport {
         action: TranscriptViewAction,
         transcript: &Transcript,
         cache: &mut TranscriptRowCache,
-    ) {
-        match action {
+    ) -> NavigationOutcome {
+        self.reduce_with_newer_history(action, transcript, cache, false)
+    }
+
+    pub fn reduce_with_newer_history(
+        &mut self,
+        action: TranscriptViewAction,
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        newer_history_available: bool,
+    ) -> NavigationOutcome {
+        let requested_rows = match action {
+            TranscriptViewAction::PageUp | TranscriptViewAction::PageDown => {
+                self.height.saturating_sub(1).max(1)
+            }
+            TranscriptViewAction::ScrollLines(lines) => lines.unsigned_abs() as usize,
+            _ => 0,
+        };
+        if matches!(
+            action,
+            TranscriptViewAction::ScrollLines(_)
+                | TranscriptViewAction::PageUp
+                | TranscriptViewAction::PageDown
+                | TranscriptViewAction::Home
+                | TranscriptViewAction::FollowTail
+        ) {
+            self.reader_generation = self.reader_generation.wrapping_add(1);
+        }
+        let consumed_rows = match action {
             TranscriptViewAction::HistoryChanged => {
                 if !self.follow_tail {
                     self.top = self.top.and_then(|anchor| {
@@ -2315,6 +2362,7 @@ impl TranscriptViewport {
                         self.follow_tail = self.top.is_none();
                     }
                 }
+                0
             }
             TranscriptViewAction::OutputChanged => {
                 if !self.follow_tail {
@@ -2333,28 +2381,38 @@ impl TranscriptViewport {
                         self.unseen_output = true;
                     }
                 }
+                0
             }
             TranscriptViewAction::FollowTail => {
                 self.follow_tail = true;
                 self.unseen_output = false;
                 self.top = None;
+                0
             }
             TranscriptViewAction::PageUp => {
                 let amount = self.height.saturating_sub(1).max(1);
-                self.scroll_up(transcript, cache, amount);
+                self.scroll_up(transcript, cache, amount)
             }
             TranscriptViewAction::PageDown => {
                 let amount = self.height.saturating_sub(1).max(1);
-                self.scroll_down(transcript, cache, amount);
+                self.scroll_down(transcript, cache, amount, !newer_history_available)
             }
-            TranscriptViewAction::Home => self.jump_home(transcript, cache),
+            TranscriptViewAction::Home => {
+                self.jump_home(transcript, cache);
+                0
+            }
             TranscriptViewAction::ScrollLines(lines) if lines < 0 => {
-                self.scroll_up(transcript, cache, lines.unsigned_abs() as usize);
+                self.scroll_up(transcript, cache, lines.unsigned_abs() as usize)
             }
             TranscriptViewAction::ScrollLines(lines) if lines > 0 => {
-                self.scroll_down(transcript, cache, lines as usize);
+                self.scroll_down(transcript, cache, lines as usize, !newer_history_available)
             }
-            TranscriptViewAction::ScrollLines(_) => {}
+            TranscriptViewAction::ScrollLines(_) => 0,
+        };
+        NavigationOutcome {
+            requested_rows,
+            consumed_rows,
+            reader_generation: self.reader_generation,
         }
     }
 
@@ -2433,12 +2491,12 @@ impl TranscriptViewport {
         transcript: &Transcript,
         cache: &mut TranscriptRowCache,
         amount: usize,
-    ) {
+    ) -> usize {
         let _ = self.visible_rows(transcript, cache);
         let Some(mut top) = self.top else {
-            return;
+            return 0;
         };
-        let mut moved = false;
+        let mut moved = 0;
         let mut seen = HashSet::from([top]);
         for _ in 0..amount {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
@@ -2448,12 +2506,13 @@ impl TranscriptViewport {
                 break;
             }
             top = previous;
-            moved = true;
+            moved += 1;
         }
-        if moved {
+        if moved > 0 {
             self.top = Some(top);
             self.follow_tail = false;
         }
+        moved
     }
 
     fn scroll_down(
@@ -2461,40 +2520,66 @@ impl TranscriptViewport {
         transcript: &Transcript,
         cache: &mut TranscriptRowCache,
         amount: usize,
-    ) {
+        rejoin_tail: bool,
+    ) -> usize {
         if self.follow_tail {
-            return;
+            return 0;
         }
         let Some(mut top) = self.top else {
-            self.follow_tail = true;
-            self.unseen_output = false;
-            return;
+            if rejoin_tail {
+                self.follow_tail = true;
+                self.unseen_output = false;
+            }
+            return 0;
         };
+        let mut moved = 0;
         for _ in 0..amount {
             let Some(cached) = cache.row_at(transcript, top, self.width) else {
                 break;
             };
             let Some(next) = cached.next else {
-                self.follow_tail = true;
-                self.unseen_output = false;
-                self.top = None;
-                return;
+                if rejoin_tail {
+                    self.follow_tail = true;
+                    self.unseen_output = false;
+                    self.top = None;
+                } else if moved > 0 {
+                    self.top = Some(top);
+                }
+                return moved;
             };
             top = next;
+            moved += 1;
         }
         // The live view may start at the latest prompt even when older turns
         // would also fit. Rejoin only after scrolling into that live interval.
-        let reaches_tail = self.tail_top(transcript, cache).is_some_and(|tail| {
-            collect_rows(transcript, cache, tail, self.width, self.height)
-                .iter()
-                .any(|row| row.anchor == top)
-        });
+        let reaches_tail = rejoin_tail
+            && self.tail_top(transcript, cache).is_some_and(|tail| {
+                collect_rows(transcript, cache, tail, self.width, self.height)
+                    .iter()
+                    .any(|row| row.anchor == top)
+            });
         if reaches_tail {
             self.follow_tail = true;
             self.unseen_output = false;
             self.top = None;
         } else {
             self.top = Some(top);
+        }
+        moved
+    }
+
+    pub fn continue_navigation(
+        &mut self,
+        older: bool,
+        rows: usize,
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        newer_history_available: bool,
+    ) -> usize {
+        if older {
+            self.scroll_up(transcript, cache, rows)
+        } else {
+            self.scroll_down(transcript, cache, rows, !newer_history_available)
         }
     }
 
@@ -3706,6 +3791,7 @@ mod tests {
             unseen_output: false,
             width: 40,
             height: 5,
+            reader_generation: 0,
         };
         let mut cache = TranscriptRowCache::default();
         cache.fold_mut().expand(card_id);
@@ -3780,6 +3866,7 @@ mod tests {
             unseen_output: false,
             width: 10,
             height: 4,
+            reader_generation: 0,
         };
         let mut cache = TranscriptRowCache::default();
         cache.fold_mut().expand(card_id);
@@ -3796,6 +3883,102 @@ mod tests {
                 }),
             }) if entry_id == card_id
         ));
+    }
+
+    #[test]
+    fn older_page_continues_unconsumed_navigation_from_the_preserved_anchor() {
+        let mut transcript = Transcript::default();
+        let current = transcript.append_prompt("current".into());
+        transcript.mark_history_entries(0, "current-entry");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 20, 6);
+
+        let outcome = viewport.reduce(TranscriptViewAction::PageUp, &transcript, &mut cache);
+        assert_eq!(outcome.consumed_rows, 0);
+        assert!(outcome.remaining_rows() > 0);
+        assert_eq!(
+            viewport.visible_rows(&transcript, &mut cache)[0]
+                .anchor
+                .entry_id,
+            current
+        );
+
+        let mut older = Transcript::default();
+        for index in 0..4 {
+            let start = older.entries().len();
+            older.append_prompt(format!("older-{index}"));
+            older.mark_history_entries(start, &format!("older-entry-{index}"));
+        }
+        assert!(transcript.prepend_history_page(&older));
+        cache = TranscriptRowCache::default();
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        let moved = viewport.continue_navigation(
+            true,
+            outcome.remaining_rows(),
+            &transcript,
+            &mut cache,
+            false,
+        );
+
+        assert!(moved > 0);
+        assert_ne!(
+            viewport.visible_rows(&transcript, &mut cache)[0]
+                .anchor
+                .entry_id,
+            current
+        );
+        assert!(!viewport.follows_tail());
+    }
+
+    #[test]
+    fn newer_page_continues_unconsumed_navigation_without_premature_tail_follow() {
+        let mut transcript = Transcript::default();
+        for index in 0..8 {
+            let start = transcript.entries().len();
+            transcript.append_prompt(format!("line-{index}"));
+            transcript.mark_history_entries(start, &format!("entry-{index}"));
+        }
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 20, 5);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let outcome = viewport.reduce_with_newer_history(
+            TranscriptViewAction::ScrollLines(100),
+            &transcript,
+            &mut cache,
+            true,
+        );
+        assert!(outcome.remaining_rows() > 0);
+        assert!(!viewport.follows_tail());
+
+        let mut newer = Transcript::default();
+        for index in 8..12 {
+            let start = newer.entries().len();
+            newer.append_prompt(format!("line-{index}"));
+            newer.mark_history_entries(start, &format!("entry-{index}"));
+        }
+        assert!(transcript.append_history_page(&newer));
+        cache = TranscriptRowCache::default();
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert!(
+            viewport.continue_navigation(
+                false,
+                outcome.remaining_rows(),
+                &transcript,
+                &mut cache,
+                false,
+            ) > 0
+        );
+        assert!(viewport.follows_tail());
     }
 
     #[test]
@@ -3839,6 +4022,21 @@ mod tests {
 
         assert!(viewport.follows_tail());
         assert!(!viewport.has_unseen_output());
+    }
+
+    #[test]
+    fn resize_invalidates_pending_reader_navigation() {
+        let transcript = transcript_with(30);
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 20, 5);
+        let generation = viewport
+            .reduce(TranscriptViewAction::PageUp, &transcript, &mut cache)
+            .reader_generation;
+
+        viewport.set_geometry(&transcript, &mut cache, 9, 5);
+
+        assert_ne!(viewport.reader_generation(), generation);
     }
 
     #[test]
