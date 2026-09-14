@@ -76,9 +76,8 @@ jobs:
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pip install --quiet "${wheel[0]}"
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
-          cd /tmp
-          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
-            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
@@ -176,9 +175,8 @@ jobs:
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python "${wheel[0]}"
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
-          cd /tmp
-          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
-            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py"
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /tmp/wisp-wheel/bin/wisp --help >/dev/null
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/wisp-tui --version | grep -F "wisp-tui ${cargo_version}"
