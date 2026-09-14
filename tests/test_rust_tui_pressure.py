@@ -93,9 +93,8 @@ for line in sys.stdin:
             release_path.touch()
     elif command_type == "get_connection_catalog" and mode == "terminal-safety":
         hostile = (
-            "provider-safe-tail\x1b]0;WISP-INJECTED-TITLE\x07"
-            "\x1b]52;c;V0lTUA==\x07\x1b[77;77H\x1b[5n\x1b[c"
-            "\x1bP$qm\x1b\\\u202e"
+            "p\x1b]0;T\x07\x1b]52;c;QQ==\x07\x1b[H\x1b[5n\x1b[c"
+            "\x1bP$qm\x1b\\\u202eCONNECTION-SAFE-TAIL"
         )
         emit_fragmented(RpcConnectionCatalogReported(
             command_id=command_id,
@@ -139,8 +138,8 @@ for line in sys.stdin:
             elif mode == "terminal-safety":
                 event_count = 1
                 hostile = (
-                    "visible-safe-tail\x1b]8;;https://WISP-INJECTED-LINK.invalid\x07"
-                    "link\x1b]8;;\x07\x1b[77;77H\x1b[5n\x1b[c\x1bP$qm\x1b\\\u2066"
+                    "v\x1b]8;;x\x07l\x1b]8;;\x07\x1b[H\x1b[5n\x1b[c"
+                    "\x1bP$qm\x1b\\\u2066PROMPT-SAFE-TAIL"
                 )
                 frames.extend([
                     ToolCallRequested(
@@ -408,16 +407,16 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
 
         tui.send(b"/connect\r")
         tui.wait_for(
-            b"provider-safe-tail",
-            failure="hostile connection metadata did not render safely",
+            b"CONNECTION-SAFE-TAIL",
+            failure="hostile connection metadata did not render through its trailing sentinel",
         )
         tui.send(b"\r")
         tui.wait_for(b"API key:", failure="hostile API-key title did not render")
         connection_output = bytes(tui.output)
         for injected in (
-            b"\x1b]0;WISP-INJECTED-TITLE\x07",
-            b"\x1b]52;c;V0lTUA==\x07",
-            b"\x1b[77;77H",
+            b"\x1b]0;T\x07",
+            b"\x1b]52;c;QQ==\x07",
+            b"\x1b[H",
             b"\x1b[5n",
             b"\x1b[c",
             b"\x1bP$qm\x1b\\",
@@ -435,12 +434,15 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
             lambda _output: burst_done.exists() and release.exists(),
             failure="hostile prompt payloads did not drain through synchronization",
         )
-        tui.wait_for(b"visible-safe-tail", failure="safe payload text did not remain visible")
+        tui.wait_for(
+            b"PROMPT-SAFE-TAIL",
+            failure="hostile prompt payload did not render through its trailing sentinel",
+        )
 
         prompt_output = bytes(tui.output)
         for injected in (
-            b"\x1b]8;;https://WISP-INJECTED-LINK.invalid\x07",
-            b"\x1b[77;77H",
+            b"\x1b]8;;x\x07",
+            b"\x1b[H",
             b"\x1b[5n",
             b"\x1b[c",
             b"\x1bP$qm\x1b\\",
