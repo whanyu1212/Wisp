@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::ops::Range;
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
@@ -8,6 +9,8 @@ pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_LINES: usize = 10_000;
 const COMPACT_PASTE_CHAR_THRESHOLD: usize = 2_000;
 const MAX_PASTE_FOLDS: usize = 64;
+const MAX_UNDO_BYTES: usize = 4 * MAX_PROMPT_BYTES;
+const MAX_UNDO_STEPS: usize = 100;
 const TAB_WIDTH: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,6 +134,33 @@ enum Movement {
     DocumentEnd,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditGroup {
+    Typing,
+    Backspace,
+    Delete,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+    selection_anchor: Option<usize>,
+    preferred_column: Option<usize>,
+    folds: Vec<PasteFold>,
+    next_fold_id: u64,
+}
+
+impl EditorSnapshot {
+    fn retained_bytes(&self) -> usize {
+        self.text.len().saturating_add(
+            self.folds
+                .len()
+                .saturating_mul(std::mem::size_of::<PasteFold>()),
+        )
+    }
+}
+
 fn movement_for_key(key: KeyEvent) -> Option<Movement> {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alternate = key.modifiers.contains(KeyModifiers::ALT);
@@ -164,6 +194,7 @@ pub(crate) fn is_extended_edit_key(key: KeyEvent) -> bool {
         KeyCode::Home | KeyCode::End => selecting || alternate,
         KeyCode::Char('a' | 'A' | 'b' | 'B' | 'f' | 'F' | 'd' | 'D') => alternate,
         KeyCode::Char('w' | 'W' | 'u' | 'U' | 'k' | 'K') => control,
+        KeyCode::Char('y' | 'Y' | 'z' | 'Z') => control && !alternate,
         KeyCode::Backspace | KeyCode::Delete => control || alternate,
         _ => false,
     }
@@ -196,6 +227,11 @@ pub struct PromptEditor {
     revision: u64,
     folds: Vec<PasteFold>,
     next_fold_id: u64,
+    undo: VecDeque<EditorSnapshot>,
+    undo_bytes: usize,
+    redo: VecDeque<EditorSnapshot>,
+    redo_bytes: usize,
+    edit_group: Option<EditGroup>,
 }
 
 impl PromptEditor {
@@ -282,6 +318,11 @@ impl PromptEditor {
         self.selection_anchor = None;
         self.preferred_column = None;
         self.folds.clear();
+        self.undo.clear();
+        self.undo_bytes = 0;
+        self.redo.clear();
+        self.redo_bytes = 0;
+        self.edit_group = None;
     }
 
     #[cfg(test)]
@@ -320,6 +361,7 @@ impl PromptEditor {
     }
 
     pub(crate) fn place_projected_cursor(&mut self, row: usize, column: usize) -> EditOutcome {
+        self.edit_group = None;
         let Some(target) = self.projection().target(row, column) else {
             return EditOutcome::default();
         };
@@ -348,6 +390,15 @@ impl PromptEditor {
         range: std::ops::Range<usize>,
         replacement: &str,
     ) -> EditOutcome {
+        self.replace_range_grouped(range, replacement, None)
+    }
+
+    fn replace_range_grouped(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+        group: Option<EditGroup>,
+    ) -> EditOutcome {
         if range.start > range.end
             || range.end > self.text.len()
             || !self.text.is_char_boundary(range.start)
@@ -366,6 +417,7 @@ impl PromptEditor {
                 ..EditOutcome::default()
             };
         }
+        self.record_undo(group);
         self.adjust_folds_for_replacement(&range, replacement.len());
         self.text.replace_range(range.clone(), replacement);
         self.revision = self.revision.wrapping_add(1);
@@ -408,14 +460,25 @@ impl PromptEditor {
         let alternate = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if let Some(movement) = movement_for_key(key) {
+            self.edit_group = None;
             self.move_cursor(movement, shift);
             return EditorAction::Edit(EditOutcome::changed());
         }
         match key.code {
-            KeyCode::Enter if shift || alternate => EditorAction::Edit(self.insert_text("\n")),
+            KeyCode::Char('z' | 'Z') if control && !alternate && !shift => {
+                EditorAction::Edit(self.undo())
+            }
+            KeyCode::Char('y' | 'Y') if control && !alternate => EditorAction::Edit(self.redo()),
+            KeyCode::Char('z' | 'Z') if control && !alternate && shift => {
+                EditorAction::Edit(self.redo())
+            }
+            KeyCode::Enter if shift || alternate => {
+                EditorAction::Edit(self.insert_text("\n", None))
+            }
             KeyCode::Enter => EditorAction::Submit,
-            KeyCode::Char('j') if control => EditorAction::Edit(self.insert_text("\n")),
+            KeyCode::Char('j') if control => EditorAction::Edit(self.insert_text("\n", None)),
             KeyCode::Char('a' | 'A') if alternate => {
+                self.edit_group = None;
                 self.selection_anchor = Some(0);
                 self.cursor = self.text.len();
                 self.preferred_column = None;
@@ -425,10 +488,10 @@ impl PromptEditor {
             KeyCode::Char('u' | 'U') if control => EditorAction::Edit(self.delete_line(false)),
             KeyCode::Char('k' | 'K') if control => EditorAction::Edit(self.delete_line(true)),
             KeyCode::Char('d' | 'D') if alternate => EditorAction::Edit(self.delete_word(true)),
-            KeyCode::Char(character) if !control => {
-                EditorAction::Edit(self.insert_text(&character.to_string()))
-            }
-            KeyCode::Tab => EditorAction::Edit(self.insert_text("\t")),
+            KeyCode::Char(character) if !control => EditorAction::Edit(
+                self.insert_text(&character.to_string(), Some(EditGroup::Typing)),
+            ),
+            KeyCode::Tab => EditorAction::Edit(self.insert_text("\t", None)),
             KeyCode::Backspace if control || alternate => {
                 EditorAction::Edit(self.delete_word(false))
             }
@@ -445,7 +508,7 @@ impl PromptEditor {
         let characters = safe.chars().count();
         let lines = safe.bytes().filter(|byte| *byte == b'\n').count() + 1;
         let bytes = safe.len();
-        let outcome = self.insert_sanitized(&safe, ignored_controls);
+        let outcome = self.insert_sanitized(&safe, ignored_controls, None);
         if outcome.changed
             && characters > COMPACT_PASTE_CHAR_THRESHOLD
             && self.folds.len() < MAX_PASTE_FOLDS
@@ -463,8 +526,9 @@ impl PromptEditor {
         };
         let mut outcome = replacement.insert_paste(prompt);
         if !outcome.rejected_limit {
-            replacement.revision = self.revision.wrapping_add(1);
-            *self = replacement;
+            self.record_undo(None);
+            let target = replacement.snapshot();
+            self.restore_snapshot(target);
             outcome.changed = true;
         }
         outcome
@@ -492,6 +556,7 @@ impl PromptEditor {
                 ..EditOutcome::default()
             };
         }
+        self.record_undo(None);
         let separator = usize::from(!self.text.is_empty());
         let prefix_len = safe.len().saturating_add(separator);
         for fold in &mut self.folds {
@@ -518,6 +583,93 @@ impl PromptEditor {
         }
     }
 
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            selection_anchor: self.selection_anchor,
+            preferred_column: self.preferred_column,
+            folds: self.folds.clone(),
+            next_fold_id: self.next_fold_id,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.preferred_column = snapshot.preferred_column;
+        self.folds = snapshot.folds;
+        self.next_fold_id = snapshot.next_fold_id;
+        self.revision = self.revision.wrapping_add(1);
+        self.edit_group = None;
+    }
+
+    fn record_undo(&mut self, group: Option<EditGroup>) {
+        if group.is_some() && self.edit_group == group {
+            return;
+        }
+        let snapshot = self.snapshot();
+        Self::push_history(&mut self.undo, &mut self.undo_bytes, snapshot);
+        self.redo.clear();
+        self.redo_bytes = 0;
+        self.edit_group = group;
+    }
+
+    fn push_history(
+        history: &mut VecDeque<EditorSnapshot>,
+        retained_bytes: &mut usize,
+        snapshot: EditorSnapshot,
+    ) {
+        let snapshot_bytes = snapshot.retained_bytes();
+        if snapshot_bytes > MAX_UNDO_BYTES {
+            history.clear();
+            *retained_bytes = 0;
+            return;
+        }
+        while history.len() >= MAX_UNDO_STEPS
+            || retained_bytes.saturating_add(snapshot_bytes) > MAX_UNDO_BYTES
+        {
+            let Some(removed) = history.pop_front() else {
+                break;
+            };
+            *retained_bytes = retained_bytes.saturating_sub(removed.retained_bytes());
+        }
+        history.push_back(snapshot);
+        *retained_bytes = retained_bytes.saturating_add(snapshot_bytes);
+    }
+
+    fn pop_history(
+        history: &mut VecDeque<EditorSnapshot>,
+        retained_bytes: &mut usize,
+    ) -> Option<EditorSnapshot> {
+        let snapshot = history.pop_back()?;
+        *retained_bytes = retained_bytes.saturating_sub(snapshot.retained_bytes());
+        Some(snapshot)
+    }
+
+    fn undo(&mut self) -> EditOutcome {
+        self.edit_group = None;
+        let Some(snapshot) = Self::pop_history(&mut self.undo, &mut self.undo_bytes) else {
+            return EditOutcome::default();
+        };
+        let current = self.snapshot();
+        Self::push_history(&mut self.redo, &mut self.redo_bytes, current);
+        self.restore_snapshot(snapshot);
+        EditOutcome::changed()
+    }
+
+    fn redo(&mut self) -> EditOutcome {
+        self.edit_group = None;
+        let Some(snapshot) = Self::pop_history(&mut self.redo, &mut self.redo_bytes) else {
+            return EditOutcome::default();
+        };
+        let current = self.snapshot();
+        Self::push_history(&mut self.undo, &mut self.undo_bytes, current);
+        self.restore_snapshot(snapshot);
+        EditOutcome::changed()
+    }
+
     fn restored_text_fits(&self, safe: &str) -> bool {
         let separator = usize::from(!self.text.is_empty());
         self.text
@@ -532,26 +684,31 @@ impl PromptEditor {
                 <= MAX_PROMPT_LINES
     }
 
-    fn insert_text(&mut self, inserted: &str) -> EditOutcome {
+    fn insert_text(&mut self, inserted: &str, group: Option<EditGroup>) -> EditOutcome {
         let (safe, ignored_controls) = safe_prompt_text(inserted);
-        self.insert_sanitized(&safe, ignored_controls)
+        self.insert_sanitized(&safe, ignored_controls, group)
     }
 
-    fn insert_sanitized(&mut self, safe: &str, ignored_controls: usize) -> EditOutcome {
+    fn insert_sanitized(
+        &mut self,
+        safe: &str,
+        ignored_controls: usize,
+        group: Option<EditGroup>,
+    ) -> EditOutcome {
         if safe.is_empty() {
             return EditOutcome {
                 ignored_controls,
                 ..EditOutcome::default()
             };
         }
-        let mut outcome = self.replace_range(self.insert_range(), safe);
+        let mut outcome = self.replace_range_grouped(self.insert_range(), safe, group);
         outcome.ignored_controls = ignored_controls;
         outcome
     }
 
     fn backspace(&mut self) -> EditOutcome {
         if let Some(range) = self.selection_range() {
-            return self.replace_range(range, "");
+            return self.replace_range_grouped(range, "", Some(EditGroup::Backspace));
         }
         let Some(previous) = previous_grapheme_boundary(&self.text, self.cursor) else {
             return EditOutcome::default();
@@ -559,12 +716,12 @@ impl PromptEditor {
         if self.expand_fold_intersecting(previous..self.cursor) {
             return EditOutcome::changed();
         }
-        self.replace_range(previous..self.cursor, "")
+        self.replace_range_grouped(previous..self.cursor, "", Some(EditGroup::Backspace))
     }
 
     fn delete(&mut self) -> EditOutcome {
         if let Some(range) = self.selection_range() {
-            return self.replace_range(range, "");
+            return self.replace_range_grouped(range, "", Some(EditGroup::Delete));
         }
         let Some(next) = next_grapheme_boundary(&self.text, self.cursor) else {
             return EditOutcome::default();
@@ -572,7 +729,7 @@ impl PromptEditor {
         if self.expand_fold_intersecting(self.cursor..next) {
             return EditOutcome::changed();
         }
-        self.replace_range(self.cursor..next, "")
+        self.replace_range_grouped(self.cursor..next, "", Some(EditGroup::Delete))
     }
 
     fn move_cursor(&mut self, movement: Movement, selecting: bool) {
@@ -915,6 +1072,160 @@ mod tests {
 
     fn press(editor: &mut PromptEditor, code: KeyCode, modifiers: KeyModifiers) {
         editor.handle_key(KeyEvent::new(code, modifiers));
+    }
+
+    fn undo(editor: &mut PromptEditor) {
+        press(editor, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    }
+
+    fn redo(editor: &mut PromptEditor) {
+        press(editor, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    }
+
+    #[test]
+    fn undo_redo_coalesce_typing_and_repeated_character_deletion() {
+        let mut editor = PromptEditor::default();
+        for character in ['a', 'b', '界'] {
+            press(&mut editor, KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        assert_eq!(editor.text(), "ab界");
+        undo(&mut editor);
+        assert_eq!(editor.text(), "");
+        redo(&mut editor);
+        assert_eq!(editor.text(), "ab界");
+
+        press(&mut editor, KeyCode::Left, KeyModifiers::NONE);
+        press(&mut editor, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(editor.text(), "abx界");
+        undo(&mut editor);
+        assert_eq!(editor.text(), "ab界");
+        assert_eq!(editor.cursor_offset(), 2);
+
+        press(&mut editor, KeyCode::Backspace, KeyModifiers::NONE);
+        press(&mut editor, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(editor.text(), "界");
+        undo(&mut editor);
+        assert_eq!(editor.text(), "ab界");
+        assert_eq!(editor.cursor_offset(), 2);
+    }
+
+    #[test]
+    fn undo_restores_selection_and_new_edits_invalidate_redo() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("café 👩🏽‍💻");
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        press(&mut editor, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(editor.text(), "x");
+
+        undo(&mut editor);
+        assert_eq!(editor.text(), "café 👩🏽‍💻");
+        assert_eq!(editor.selection_range(), Some(0..editor.text().len()));
+        press(
+            &mut editor,
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(editor.text(), "x");
+
+        undo(&mut editor);
+        press(&mut editor, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(editor.text(), "y");
+        redo(&mut editor);
+        assert_eq!(editor.text(), "y");
+    }
+
+    #[test]
+    fn paste_folds_and_external_draft_replacements_are_undoable() {
+        let large = "🙂".repeat(COMPACT_PASTE_CHAR_THRESHOLD + 1);
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&large);
+        assert!(editor.has_folds());
+        undo(&mut editor);
+        assert_eq!(editor.text(), "");
+        redo(&mut editor);
+        assert_eq!(editor.text(), large);
+        assert!(editor.has_folds());
+
+        editor.restore_prompt("history draft");
+        undo(&mut editor);
+        assert_eq!(editor.text(), large);
+        assert!(editor.has_folds());
+        editor.prepend_restored("queued draft");
+        assert!(editor.text().starts_with("queued draft\n"));
+        undo(&mut editor);
+        assert_eq!(editor.text(), large);
+    }
+
+    #[test]
+    fn undo_history_is_bounded_and_clear_starts_a_new_editing_session() {
+        let mut editor = PromptEditor::default();
+        for _ in 0..MAX_UNDO_STEPS + 10 {
+            assert!(
+                editor
+                    .replace_range(editor.text().len()..editor.text().len(), "x")
+                    .changed
+            );
+        }
+        assert_eq!(editor.undo.len(), MAX_UNDO_STEPS);
+        assert!(editor.undo_bytes <= MAX_UNDO_BYTES);
+        for _ in 0..MAX_UNDO_STEPS {
+            undo(&mut editor);
+        }
+        assert_eq!(editor.text(), "x".repeat(10));
+
+        editor.clear();
+        undo(&mut editor);
+        assert_eq!(editor.text(), "");
+        assert!(editor.undo.is_empty());
+        assert!(editor.redo.is_empty());
+    }
+
+    #[test]
+    fn undo_and_redo_history_evict_oldest_large_snapshots_by_bytes() {
+        const LARGE_STATE_BYTES: usize = 800 * 1024;
+
+        fn large_state(index: usize, bytes: usize) -> String {
+            let prefix = format!("state-{index}:");
+            let padding = bytes - prefix.len();
+            prefix + &"x".repeat(padding)
+        }
+
+        let states = (0..8)
+            .map(|index| {
+                large_state(
+                    index,
+                    if index == 7 {
+                        MAX_PROMPT_BYTES
+                    } else {
+                        LARGE_STATE_BYTES
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut editor = PromptEditor::default();
+        for state in &states {
+            assert!(editor.restore_prompt(state).changed);
+        }
+
+        assert_eq!(editor.undo.len(), 5);
+        assert_eq!(editor.undo.front().unwrap().text, states[2]);
+        assert!(editor.undo_bytes <= MAX_UNDO_BYTES);
+
+        for expected in states[2..7].iter().rev() {
+            undo(&mut editor);
+            assert_eq!(editor.text(), expected);
+        }
+        undo(&mut editor);
+        assert_eq!(editor.text(), states[2]);
+        assert_eq!(editor.redo.len(), 4);
+        assert!(editor.redo_bytes <= MAX_UNDO_BYTES);
+
+        for expected in &states[3..7] {
+            redo(&mut editor);
+            assert_eq!(editor.text(), expected);
+        }
+        redo(&mut editor);
+        assert_eq!(editor.text(), states[6]);
     }
 
     #[test]

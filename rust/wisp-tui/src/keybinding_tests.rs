@@ -157,6 +157,36 @@ async fn composer_selection_bypasses_completion_and_rebound_newline_replaces_it(
 }
 
 #[tokio::test]
+async fn composer_undo_bypasses_and_restores_visible_completion() {
+    let mut ui = LiveUi::default();
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("/the");
+    draw(&mut ui, 80, 24);
+    assert!(ui.completion.view(None, None).is_some());
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_ne!(ui.editor.text(), "/the");
+    let completed = ui.editor.text().to_owned();
+
+    ui.handle_input(ctrl('z'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/the");
+    assert!(ui.completion.view(None, None).is_some());
+    ui.handle_input(ctrl('y'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), completed);
+    assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn selected_draft_submits_in_full_and_ctrl_c_keeps_cancellation_precedence() {
     for cancel in [false, true] {
         let mut ui = LiveUi::default();
@@ -203,6 +233,9 @@ fn application_bindings_cannot_shadow_composer_selection_and_word_editing() {
         "Ctrl+W",
         "Ctrl+U",
         "Ctrl+K",
+        "Ctrl+Z",
+        "Ctrl+Y",
+        "Ctrl+Shift+Z",
     ] {
         let json = serde_json::json!({"history.open": [chord]}).to_string();
         assert!(Bindings::from_json(&json).is_err(), "{chord}");
