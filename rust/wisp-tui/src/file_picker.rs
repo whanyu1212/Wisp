@@ -35,6 +35,9 @@ struct Reference {
 
 /// Find a reference on the cursor's line, including quoted paths and token suffixes.
 fn reference(editor: &PromptEditor) -> Option<Reference> {
+    if editor.selection_range().is_some() {
+        return None;
+    }
     let text = editor.text();
     let cursor = editor.cursor_offset();
     let line_start = text[..cursor].rfind('\n').map_or(0, |offset| offset + 1);

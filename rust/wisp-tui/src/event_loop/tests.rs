@@ -330,6 +330,36 @@ async fn ordinary_typing_and_paste_survive_unrelated_workflow_revision_changes()
 }
 
 #[tokio::test]
+async fn selection_with_file_completion_survives_workflow_revision_changes() {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.editor.insert_paste("@src");
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    ui.file_picker.sync_editor(&ui.editor);
+    assert!(ui.file_picker.is_open());
+    let pending = PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
+        &ui,
+        16,
+    );
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::MessageCompleted {
+            turn: 1,
+            content: "tool output".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui);
+    pending.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert_eq!(ui.editor.selection_range(), Some(3..4));
+    assert!(!ui.file_picker.is_open());
+}
+
+#[tokio::test]
 async fn pending_browse_activation_cannot_fall_through_to_the_editor() {
     let (writer, mut commands) = mpsc::channel(16);
     let mut ui = LiveUi::default();

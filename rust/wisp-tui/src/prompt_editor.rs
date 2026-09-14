@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::borrow::Cow;
 use std::ops::Range;
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
@@ -43,6 +43,7 @@ pub(crate) struct PromptProjection<'a> {
     cursor_column: usize,
     source_len: usize,
     pieces: Vec<ProjectionPiece>,
+    selection: Option<Range<usize>>,
 }
 
 impl PromptProjection<'_> {
@@ -56,6 +57,10 @@ impl PromptProjection<'_> {
 
     pub(crate) fn cursor_column(&self) -> usize {
         self.cursor_column
+    }
+
+    pub(crate) fn selection(&self) -> Option<Range<usize>> {
+        self.selection.clone()
     }
 
     fn target(&self, row: usize, column: usize) -> Option<ProjectedCursor> {
@@ -112,10 +117,81 @@ pub enum EditorAction {
     Ignored,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Movement {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    WordLeft,
+    WordRight,
+    DocumentStart,
+    DocumentEnd,
+}
+
+fn movement_for_key(key: KeyEvent) -> Option<Movement> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alternate = key.modifiers.contains(KeyModifiers::ALT);
+    Some(match key.code {
+        KeyCode::Left if control || alternate => Movement::WordLeft,
+        KeyCode::Right if control || alternate => Movement::WordRight,
+        KeyCode::Home if control || alternate => Movement::DocumentStart,
+        KeyCode::End if control || alternate => Movement::DocumentEnd,
+        KeyCode::Left => Movement::Left,
+        KeyCode::Right => Movement::Right,
+        KeyCode::Up => Movement::Up,
+        KeyCode::Down => Movement::Down,
+        KeyCode::Home => Movement::Home,
+        KeyCode::End => Movement::End,
+        KeyCode::Char('a' | 'A') if control => Movement::Home,
+        KeyCode::Char('e' | 'E') if control => Movement::End,
+        KeyCode::Char('b' | 'B') if alternate => Movement::WordLeft,
+        KeyCode::Char('f' | 'F') if alternate => Movement::WordRight,
+        _ => return None,
+    })
+}
+
+/// Composer gestures that must not activate a completion or transcript shortcut.
+pub(crate) fn is_extended_edit_key(key: KeyEvent) -> bool {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alternate = key.modifiers.contains(KeyModifiers::ALT);
+    let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Left | KeyCode::Right => selecting || control || alternate,
+        KeyCode::Up | KeyCode::Down => selecting,
+        KeyCode::Home | KeyCode::End => selecting || alternate,
+        KeyCode::Char('a' | 'A' | 'b' | 'B' | 'f' | 'F' | 'd' | 'D') => alternate,
+        KeyCode::Char('w' | 'W' | 'u' | 'U' | 'k' | 'K') => control,
+        KeyCode::Backspace | KeyCode::Delete => control || alternate,
+        _ => false,
+    }
+}
+
+/// Skip whitespace, then cross one Unicode word or punctuation segment.
+fn word_boundary(text: &str, cursor: usize, forward: bool) -> usize {
+    if forward {
+        text[cursor..]
+            .split_word_bound_indices()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(text.len(), |(offset, segment)| {
+                cursor + offset + segment.len()
+            })
+    } else {
+        text[..cursor]
+            .split_word_bound_indices()
+            .rev()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(0, |(offset, _)| offset)
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PromptEditor {
     text: String,
     cursor: usize,
+    selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
     revision: u64,
     folds: Vec<PasteFold>,
@@ -152,6 +228,7 @@ impl PromptEditor {
                 cursor_column: self.cursor_column(),
                 source_len: self.text.len(),
                 pieces,
+                selection: self.selection_range(),
             };
         }
         let mut text = String::new();
@@ -184,12 +261,17 @@ impl PromptEditor {
         let cursor_prefix = &text[..cursor_display_offset];
         let cursor_row = cursor_prefix.bytes().filter(|byte| *byte == b'\n').count();
         let cursor_line_start = cursor_prefix.rfind('\n').map_or(0, |index| index + 1);
+        let selection = self.selection_range().map(|range| {
+            projected_display_offset(&pieces, range.start, text.len())
+                ..projected_display_offset(&pieces, range.end, text.len())
+        });
         PromptProjection {
             cursor_column: display_width(&text[cursor_line_start..cursor_display_offset]),
             cursor_row,
             text: Cow::Owned(text),
             source_len: self.text.len(),
             pieces,
+            selection,
         }
     }
 
@@ -197,6 +279,7 @@ impl PromptEditor {
         self.revision = self.revision.wrapping_add(1);
         self.text.clear();
         self.cursor = 0;
+        self.selection_anchor = None;
         self.preferred_column = None;
         self.folds.clear();
     }
@@ -222,6 +305,16 @@ impl PromptEditor {
         self.cursor
     }
 
+    pub(crate) fn selection_range(&self) -> Option<Range<usize>> {
+        self.selection_anchor
+            .filter(|anchor| *anchor != self.cursor)
+            .map(|anchor| anchor.min(self.cursor)..anchor.max(self.cursor))
+    }
+
+    pub(crate) fn insert_range(&self) -> Range<usize> {
+        self.selection_range().unwrap_or(self.cursor..self.cursor)
+    }
+
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
@@ -233,9 +326,12 @@ impl PromptEditor {
         let expanded = target
             .fold_id
             .is_some_and(|fold_id| self.expand_fold(fold_id));
-        let cursor_changed = self.cursor != target.source_offset || self.preferred_column.is_some();
+        let cursor_changed = self.cursor != target.source_offset
+            || self.preferred_column.is_some()
+            || self.selection_anchor.is_some();
         if cursor_changed {
             self.cursor = target.source_offset;
+            self.selection_anchor = None;
             self.preferred_column = None;
             self.revision = self.revision.wrapping_add(1);
         }
@@ -274,6 +370,21 @@ impl PromptEditor {
         self.text.replace_range(range.clone(), replacement);
         self.revision = self.revision.wrapping_add(1);
         self.cursor = range.start + replacement.len();
+        // Joining the retained suffix can form a new grapheme (combining marks,
+        // ZWJ sequences). Keep the caret outside that complete grapheme.
+        if self.cursor < self.text.len() {
+            let mut cursor = GraphemeCursor::new(self.cursor, self.text.len(), true);
+            if !cursor
+                .is_boundary(&self.text, 0)
+                .expect("complete draft context")
+            {
+                self.cursor = cursor
+                    .next_boundary(&self.text, 0)
+                    .expect("complete draft context")
+                    .unwrap_or(self.text.len());
+            }
+        }
+        self.selection_anchor = None;
         self.preferred_column = None;
         EditOutcome::changed()
     }
@@ -284,8 +395,9 @@ impl PromptEditor {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> EditorAction {
         let cursor = self.cursor;
+        let selection_anchor = self.selection_anchor;
         let action = self.handle_editor_key(key);
-        if self.cursor != cursor {
+        if self.cursor != cursor || self.selection_anchor != selection_anchor {
             self.revision = self.revision.wrapping_add(1);
         }
         action
@@ -295,55 +407,41 @@ impl PromptEditor {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alternate = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if let Some(movement) = movement_for_key(key) {
+            self.move_cursor(movement, shift);
+            return EditorAction::Edit(EditOutcome::changed());
+        }
         match key.code {
             KeyCode::Enter if shift || alternate => EditorAction::Edit(self.insert_text("\n")),
             KeyCode::Enter => EditorAction::Submit,
             KeyCode::Char('j') if control => EditorAction::Edit(self.insert_text("\n")),
-            KeyCode::Char('a') if control => {
-                self.move_home();
+            KeyCode::Char('a' | 'A') if alternate => {
+                self.selection_anchor = Some(0);
+                self.cursor = self.text.len();
+                self.preferred_column = None;
                 EditorAction::Edit(EditOutcome::changed())
             }
-            KeyCode::Char('e') if control => {
-                self.move_end();
-                EditorAction::Edit(EditOutcome::changed())
-            }
+            KeyCode::Char('w' | 'W') if control => EditorAction::Edit(self.delete_word(false)),
+            KeyCode::Char('u' | 'U') if control => EditorAction::Edit(self.delete_line(false)),
+            KeyCode::Char('k' | 'K') if control => EditorAction::Edit(self.delete_line(true)),
+            KeyCode::Char('d' | 'D') if alternate => EditorAction::Edit(self.delete_word(true)),
             KeyCode::Char(character) if !control => {
                 EditorAction::Edit(self.insert_text(&character.to_string()))
             }
             KeyCode::Tab => EditorAction::Edit(self.insert_text("\t")),
+            KeyCode::Backspace if control || alternate => {
+                EditorAction::Edit(self.delete_word(false))
+            }
+            KeyCode::Delete if control || alternate => EditorAction::Edit(self.delete_word(true)),
             KeyCode::Backspace => EditorAction::Edit(self.backspace()),
             KeyCode::Delete => EditorAction::Edit(self.delete()),
-            KeyCode::Left => {
-                self.move_left();
-                EditorAction::Edit(EditOutcome::changed())
-            }
-            KeyCode::Right => {
-                self.move_right();
-                EditorAction::Edit(EditOutcome::changed())
-            }
-            KeyCode::Up => {
-                self.move_vertical(-1);
-                EditorAction::Edit(EditOutcome::changed())
-            }
-            KeyCode::Down => {
-                self.move_vertical(1);
-                EditorAction::Edit(EditOutcome::changed())
-            }
-            KeyCode::Home => {
-                self.move_home();
-                EditorAction::Edit(EditOutcome::changed())
-            }
-            KeyCode::End => {
-                self.move_end();
-                EditorAction::Edit(EditOutcome::changed())
-            }
             _ => EditorAction::Ignored,
         }
     }
 
     pub fn insert_paste(&mut self, pasted: &str) -> EditOutcome {
         let (safe, ignored_controls) = safe_prompt_text(pasted);
-        let start = self.cursor;
+        let start = self.insert_range().start;
         let characters = safe.chars().count();
         let lines = safe.bytes().filter(|byte| *byte == b'\n').count() + 1;
         let bytes = safe.len();
@@ -406,6 +504,7 @@ impl PromptEditor {
             self.text.insert(safe.len(), '\n');
         }
         self.cursor = self.cursor.saturating_add(prefix_len);
+        self.selection_anchor = self.selection_anchor.map(|anchor| anchor + prefix_len);
         self.preferred_column = None;
         let characters = safe.chars().count();
         if characters > COMPACT_PASTE_CHAR_THRESHOLD && self.folds.len() < MAX_PASTE_FOLDS {
@@ -445,56 +544,115 @@ impl PromptEditor {
                 ..EditOutcome::default()
             };
         }
-        let next_bytes = self.text.len().saturating_add(safe.len());
-        let next_lines = self
-            .line_count()
-            .saturating_add(safe.bytes().filter(|byte| *byte == b'\n').count());
-        if next_bytes > MAX_PROMPT_BYTES || next_lines > MAX_PROMPT_LINES {
-            return EditOutcome {
-                ignored_controls,
-                rejected_limit: true,
-                ..EditOutcome::default()
-            };
-        }
-        self.adjust_folds_for_replacement(&(self.cursor..self.cursor), safe.len());
-        self.text.insert_str(self.cursor, safe);
-        self.revision = self.revision.wrapping_add(1);
-        self.cursor += safe.len();
-        self.preferred_column = None;
-        EditOutcome {
-            changed: true,
-            ignored_controls,
-            rejected_limit: false,
-        }
+        let mut outcome = self.replace_range(self.insert_range(), safe);
+        outcome.ignored_controls = ignored_controls;
+        outcome
     }
 
     fn backspace(&mut self) -> EditOutcome {
+        if let Some(range) = self.selection_range() {
+            return self.replace_range(range, "");
+        }
         let Some(previous) = previous_grapheme_boundary(&self.text, self.cursor) else {
             return EditOutcome::default();
         };
         if self.expand_fold_intersecting(previous..self.cursor) {
             return EditOutcome::changed();
         }
-        self.adjust_folds_for_replacement(&(previous..self.cursor), 0);
-        self.text.drain(previous..self.cursor);
-        self.revision = self.revision.wrapping_add(1);
-        self.cursor = previous;
-        self.preferred_column = None;
-        EditOutcome::changed()
+        self.replace_range(previous..self.cursor, "")
     }
 
     fn delete(&mut self) -> EditOutcome {
+        if let Some(range) = self.selection_range() {
+            return self.replace_range(range, "");
+        }
         let Some(next) = next_grapheme_boundary(&self.text, self.cursor) else {
             return EditOutcome::default();
         };
         if self.expand_fold_intersecting(self.cursor..next) {
             return EditOutcome::changed();
         }
-        self.adjust_folds_for_replacement(&(self.cursor..next), 0);
-        self.text.drain(self.cursor..next);
-        self.revision = self.revision.wrapping_add(1);
-        self.preferred_column = None;
-        EditOutcome::changed()
+        self.replace_range(self.cursor..next, "")
+    }
+
+    fn move_cursor(&mut self, movement: Movement, selecting: bool) {
+        if selecting {
+            self.selection_anchor.get_or_insert(self.cursor);
+        } else if let Some(range) = self.selection_range() {
+            self.selection_anchor = None;
+            if matches!(movement, Movement::Left | Movement::Right) {
+                self.cursor = if movement == Movement::Left {
+                    range.start
+                } else {
+                    range.end
+                };
+                self.preferred_column = None;
+                return;
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        match movement {
+            Movement::Left => self.move_left(),
+            Movement::Right => self.move_right(),
+            Movement::Up => self.move_vertical(-1),
+            Movement::Down => self.move_vertical(1),
+            Movement::Home => self.move_home(),
+            Movement::End => self.move_end(),
+            Movement::WordLeft | Movement::WordRight => {
+                self.cursor =
+                    word_boundary(&self.text, self.cursor, movement == Movement::WordRight);
+                self.expand_fold_containing(self.cursor);
+                self.preferred_column = None;
+            }
+            Movement::DocumentStart | Movement::DocumentEnd => {
+                self.cursor = if movement == Movement::DocumentStart {
+                    0
+                } else {
+                    self.text.len()
+                };
+                self.preferred_column = None;
+            }
+        }
+    }
+
+    fn delete_word(&mut self, forward: bool) -> EditOutcome {
+        let target = word_boundary(&self.text, self.cursor, forward);
+        self.delete_to(target)
+    }
+
+    fn delete_line(&mut self, forward: bool) -> EditOutcome {
+        let (start, end) = self.current_line_bounds();
+        let target = if forward {
+            if self.cursor == end {
+                (end + 1).min(self.text.len())
+            } else {
+                end
+            }
+        } else if self.cursor == start {
+            start.saturating_sub(1)
+        } else {
+            start
+        };
+        self.delete_to(target)
+    }
+
+    fn delete_to(&mut self, target: usize) -> EditOutcome {
+        if let Some(range) = self.selection_range() {
+            return self.replace_range(range, "");
+        }
+        let range = target.min(self.cursor)..target.max(self.cursor);
+        if range.is_empty() {
+            return EditOutcome::default();
+        }
+        let mut expanded = false;
+        while self.expand_fold_intersecting(range.clone()) {
+            expanded = true;
+        }
+        if expanded {
+            return EditOutcome::changed();
+        }
+        self.replace_range(range, "")
     }
 
     fn move_left(&mut self) {
@@ -719,7 +877,7 @@ fn next_grapheme_boundary(text: &str, cursor: usize) -> Option<usize> {
         .map(|grapheme| cursor + grapheme.len())
 }
 
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     display_width_at_column(text, 0)
 }
 
@@ -753,6 +911,178 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn press(editor: &mut PromptEditor, code: KeyCode, modifiers: KeyModifiers) {
+        editor.handle_key(KeyEvent::new(code, modifiers));
+    }
+
+    #[test]
+    fn selection_replaces_complete_unicode_graphemes_and_collapses_at_either_edge() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("a e\u{301}👩🏽‍💻🇸🇬z");
+        press(&mut editor, KeyCode::Left, KeyModifiers::NONE);
+        let end = editor.cursor;
+        for _ in 0..3 {
+            press(&mut editor, KeyCode::Left, KeyModifiers::SHIFT);
+        }
+        assert_eq!(
+            &editor.text()[editor.selection_range().unwrap()],
+            "e\u{301}👩🏽‍💻🇸🇬"
+        );
+        let start = editor.cursor;
+        let selected = editor.clone();
+        press(&mut editor, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(editor.cursor, end);
+        assert!(editor.selection_range().is_none());
+        editor = selected.clone();
+        press(&mut editor, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(editor.cursor, start);
+        editor = selected;
+        press(&mut editor, KeyCode::Char('X'), KeyModifiers::NONE);
+        assert_eq!(editor.text(), "a Xz");
+        assert!(editor.selection_range().is_none());
+    }
+
+    #[test]
+    fn vertical_and_document_selection_keep_anchor_and_visual_column() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("abcd\n界\nabcdef");
+        press(&mut editor, KeyCode::Home, KeyModifiers::ALT);
+        for _ in 0..3 {
+            press(&mut editor, KeyCode::Right, KeyModifiers::NONE);
+        }
+        press(&mut editor, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(editor.cursor_column(), 2);
+        press(&mut editor, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(editor.cursor_column(), 3);
+        assert_eq!(
+            &editor.text()[editor.selection_range().unwrap()],
+            "d\n界\nabc"
+        );
+        press(
+            &mut editor,
+            KeyCode::Home,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(editor.selection_range(), Some(0..3));
+        press(
+            &mut editor,
+            KeyCode::End,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(editor.selection_range(), Some(3..editor.text.len()));
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        assert_eq!(editor.selection_range(), Some(0..editor.text.len()));
+        editor.insert_paste("replacement\ntext");
+        assert_eq!(editor.text(), "replacement\ntext");
+    }
+
+    #[test]
+    fn word_and_line_editing_preserve_unicode_and_existing_line_home_binding() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("one café 👩🏽‍💻 last");
+        press(&mut editor, KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(&editor.text()[editor.cursor..], "last");
+        press(
+            &mut editor,
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        );
+        assert_eq!(&editor.text()[editor.selection_range().unwrap()], "👩🏽‍💻 ");
+        press(&mut editor, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(editor.text(), "one café last");
+        press(&mut editor, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(editor.text(), "one last");
+        press(&mut editor, KeyCode::Char('d'), KeyModifiers::ALT);
+        assert_eq!(editor.text(), "one ");
+        editor.restore_prompt("first\nsecond\nthird");
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(&editor.text()[editor.cursor..], "third");
+        press(&mut editor, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(editor.text(), "first\nsecond\n");
+        press(&mut editor, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(editor.text(), "first\nsecond");
+        press(&mut editor, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(editor.text(), "first\n");
+    }
+
+    #[test]
+    fn selected_fold_is_replaced_atomically_but_unselected_word_delete_expands_first() {
+        let mut editor = PromptEditor::default();
+        let paste = "word ".repeat(500);
+        editor.insert_paste(&paste);
+        let folded = editor.clone();
+        press(&mut editor, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(editor.text(), paste);
+        assert!(!editor.has_folds());
+        editor = folded;
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        let projection = editor.projection();
+        assert_eq!(projection.selection(), Some(0..projection.text().len()));
+        editor.insert_paste("new");
+        assert_eq!(editor.text(), "new");
+        assert!(!editor.has_folds());
+    }
+
+    #[test]
+    fn selected_replacement_accounts_for_removed_bytes_and_rejection_is_atomic() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"x".repeat(MAX_PROMPT_BYTES));
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        let before = editor.clone();
+        assert!(
+            editor
+                .insert_paste(&"y".repeat(MAX_PROMPT_BYTES + 1))
+                .rejected_limit
+        );
+        assert_eq!(editor, before);
+        assert!(editor.insert_paste(&"y".repeat(MAX_PROMPT_BYTES)).changed);
+        assert_eq!(editor.text().len(), MAX_PROMPT_BYTES);
+        assert!(editor.selection_range().is_none());
+    }
+
+    #[test]
+    fn caret_stays_on_a_grapheme_boundary_when_replacement_joins_the_suffix() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("x\n\u{301}z");
+        editor.replace_range(1..2, "");
+        assert_eq!(editor.text(), "x\u{301}z");
+        assert_eq!(editor.cursor, "x\u{301}".len());
+        press(&mut editor, KeyCode::Left, KeyModifiers::SHIFT);
+        assert_eq!(editor.selection_range(), Some(0.."x\u{301}".len()));
+    }
+
+    #[test]
+    fn queue_prepend_preserves_the_original_selection_and_history_restore_clears_it() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("current draft");
+        press(
+            &mut editor,
+            KeyCode::Left,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        editor.prepend_restored("queued");
+        assert_eq!(&editor.text()[editor.selection_range().unwrap()], "draft");
+        editor.insert_paste("replacement");
+        assert_eq!(editor.text(), "queued\ncurrent replacement");
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        editor.restore_prompt("from history");
+        assert!(editor.selection_range().is_none());
+        assert_eq!(editor.text(), "from history");
+    }
+
+    #[test]
+    fn selecting_and_clicking_without_moving_the_caret_invalidates_the_layout() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("word");
+        let revision = editor.revision();
+        press(&mut editor, KeyCode::Char('a'), KeyModifiers::ALT);
+        assert_ne!(editor.revision(), revision);
+        let revision = editor.revision();
+        assert!(editor.place_projected_cursor(0, 4).changed);
+        assert!(editor.selection_range().is_none());
+        assert_ne!(editor.revision(), revision);
     }
 
     #[test]

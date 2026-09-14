@@ -293,11 +293,34 @@ the entire default keymap; other valid user settings still apply.
 
 Chords accept case-insensitive `Ctrl`, `Alt` and `Shift`, an ASCII character, Enter, navigation keys,
 or F1–F12, for example `Ctrl+F`, `Alt+Enter`, or `Ctrl+Shift+F3`. Printable keys require Ctrl or Alt.
-Escape, Ctrl+C, Ctrl+G, Ctrl+A/E, unmodified editor arrows/Home/End, and Tab/BackTab/Backspace/Delete
-are reserved. Default Ctrl+Enter submits; other combined Enter modifiers preserve legacy newline
-behavior. Default Ctrl+J and Ctrl+navigation accept extra modifiers. Replacing an action removes
+Escape, Ctrl+C, Ctrl+G, Ctrl+A/E, editor selection and word/line editing keys listed below,
+unmodified editor arrows/Home/End, and Tab/BackTab/Backspace/Delete are reserved.
+Default Ctrl+Enter submits; other combined Enter modifiers preserve legacy newline
+behavior. Default Ctrl+J and Ctrl+navigation accept extra modifiers, except that Shift+navigation
+selects text while editing the composer. Replacing an action removes
 these inherited aliases too. Some terminals cannot distinguish every modified chord; use a function
 key if your chosen combination does not arrive distinctly.
+
+The Rust composer supports these fixed editing keys:
+
+| Keys | Behavior |
+|---|---|
+| Shift+arrows, Shift+Home/End | Extend selection by character, line, or to a line edge |
+| Ctrl+Shift+Home/End | Extend selection to the start/end of the draft |
+| Alt+A | Select the whole draft; Ctrl+A retains line-start behavior |
+| Alt+Home/End | Move to the start/end of the draft |
+| Ctrl/Alt+Left/Right, Alt+B/F | Move across a Unicode word or punctuation segment, skipping whitespace; add Shift to select |
+| Ctrl+W, Ctrl/Alt+Backspace | Delete backward to the word boundary |
+| Alt+D, Ctrl/Alt+Delete | Delete forward to the word boundary |
+| Ctrl+U/K | Delete to line start/end; at that edge, remove the adjacent newline |
+
+Typing, pasting, Tab, and newline insertion replace the selection. Backspace and Delete remove it.
+Unmodified Left/Right collapse the selection to its start/end; a composer click clears it.
+Explicitly selecting a folded paste selects its exact underlying text, and replacement removes that
+selected text in one edit. Without a selection, a destructive edit into a paste marker expands it first.
+Rejected oversized edits preserve the draft and selection. Submission sends the entire draft;
+Ctrl+C and Escape retain cancellation behavior. Clipboard copy/cut, undo/redo, and mouse drag selection
+remain separate work.
 
 Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing
 Tab/Shift+Tab/Enter/Space, decision approval/denial, and editor navigation. They take precedence over

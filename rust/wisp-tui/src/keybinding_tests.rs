@@ -126,6 +126,90 @@ fn ctrl(character: char) -> Input {
 }
 
 #[tokio::test]
+async fn composer_selection_bypasses_completion_and_rebound_newline_replaces_it() {
+    let mut ui = configured(r#"{"prompt.newline":["f3"]}"#);
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("/the");
+    draw(&mut ui, 80, 24);
+    assert!(ui.completion.view(None, None).is_some());
+    ui.handle_input(
+        Input::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.selection_range(), Some(0..4));
+    assert!(ui.completion.view(None, None).is_none());
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.text(), "\n");
+    assert!(ui.editor.selection_range().is_none());
+    assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn selected_draft_submits_in_full_and_ctrl_c_keeps_cancellation_precedence() {
+    for cancel in [false, true] {
+        let mut ui = LiveUi::default();
+        let (writer, mut received) = mpsc::channel(8);
+        ui.editor.insert_paste("whole draft");
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.selection_range(), Some(10..11));
+        let input = if cancel {
+            ctrl('c')
+        } else {
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+        let outcome = ui
+            .handle_input(input, &writer, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        if cancel {
+            assert_eq!(outcome, LoopControl::Exit);
+            assert!(received.try_recv().is_err());
+        } else {
+            let WriterMessage::Frame { payload, .. } = received.try_recv().unwrap() else {
+                panic!("prompt frame")
+            };
+            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(value["prompt"], "whole draft");
+            assert!(ui.editor.selection_range().is_none());
+        }
+    }
+}
+
+#[test]
+fn application_bindings_cannot_shadow_composer_selection_and_word_editing() {
+    for chord in [
+        "Shift+Left",
+        "Ctrl+Shift+Home",
+        "Alt+Left",
+        "Alt+A",
+        "Ctrl+W",
+        "Ctrl+U",
+        "Ctrl+K",
+    ] {
+        let json = serde_json::json!({"history.open": [chord]}).to_string();
+        assert!(Bindings::from_json(&json).is_err(), "{chord}");
+    }
+}
+
+#[tokio::test]
 async fn contextual_help_preserves_theme_preview_and_routes_ctrl_c_to_its_owner() {
     let mut ui = LiveUi::default();
     ui.editor.insert_paste("preserved draft");

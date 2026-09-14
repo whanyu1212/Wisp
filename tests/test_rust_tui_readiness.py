@@ -173,6 +173,50 @@ def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
 
 
 @pytest.mark.process
+def test_composer_selection_and_word_deletion_submit_exact_unicode_text(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    tui, session_dir = _launch(tmp_path, home=home)
+    prefix = "keep e\u0301👩🏽‍💻 "
+    try:
+        tui.wait_ready()
+        offset = len(tui.output)
+        tui.send(b"\x1b[200~" + (prefix + "old").encode() + b"\x1b[201~")
+        tui.wait_for(b"old", since=offset, failure="initial Unicode draft did not render")
+
+        # Ctrl+Shift+Left selects the last word; bracketed paste replaces it.
+        offset = len(tui.output)
+        tui.send(b"\x1b[1;6D")
+        tui.wait_for(b"old", since=offset, failure="selected word did not repaint")
+        offset = len(tui.output)
+        tui.send(b"\x1b[200~new\nline\x1b[201~")
+        tui.wait_for(
+            b"line", since=offset, failure="multiline selection replacement did not render"
+        )
+
+        offset = len(tui.output)
+        # Check the persisted submission: differential redraws may reuse the
+        # letters shared by "line" and "final" instead of emitting the word.
+        tui.send(b"\x17final\r")  # Ctrl+W deletes the word on the second line.
+        tui.wait_until(
+            lambda output: (
+                _has_fragments(output, offset, b"fake", b"response", b"to:")
+                and output.rfind(b"idle") > output.rfind(b"working")
+            ),
+            failure="edited prompt did not complete",
+        )
+        tui.quit()
+    finally:
+        tui.close()
+
+    expected = prefix + "new\nfinal"
+    assert _conversation_messages(session_dir) == [
+        ("user", expected),
+        ("assistant", "fake response to: " + expected),
+    ]
+
+
+@pytest.mark.process
 def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_user_settings(

@@ -159,6 +159,9 @@ pub(crate) fn is_supported_token(token: &str, catalog: Option<&[CommandDescripto
 }
 
 fn token_context(editor: &PromptEditor) -> Option<(Range<usize>, String)> {
+    if editor.selection_range().is_some() {
+        return None;
+    }
     let text = editor.text();
     if text.contains(['\n', '\r']) {
         return None;

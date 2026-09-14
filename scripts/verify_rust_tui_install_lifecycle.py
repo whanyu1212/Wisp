@@ -132,15 +132,20 @@ def _smoke(
     smoke_script: Path,
     session_dir: Path,
 ) -> dict[str, float | int]:
-    completed = _run(
-        python,
-        smoke_script,
-        "--wisp",
-        wisp,
-        "--session-dir",
-        session_dir,
-        env=_consumer_environment(python.parent.parent),
-    )
+    try:
+        completed = _run(
+            python,
+            smoke_script,
+            "--wisp",
+            wisp,
+            "--session-dir",
+            session_dir,
+            env=_consumer_environment(python.parent.parent),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"Installed Rust TUI smoke failed ({exc.returncode}):\n{exc.stdout}\n{exc.stderr}"
+        ) from exc
     result = json.loads(completed.stdout)
     if not isinstance(result, dict):
         raise RuntimeError("installed Rust TUI smoke returned invalid measurements")
