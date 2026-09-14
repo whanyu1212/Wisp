@@ -13,7 +13,10 @@ import zipfile
 from pathlib import Path
 
 _SCRIPT_SUFFIX = ".data/scripts/wisp-tui"
-_CARGO_PRERELEASE = re.compile(r"^(?P<release>\d+\.\d+\.\d+)-(?P<kind>a|b|rc)\.(?P<number>\d+)$")
+_CARGO_PRERELEASE = re.compile(
+    r"^(?P<release>\d+\.\d+\.\d+)-(?P<kind>alpha|beta|rc)\.(?P<number>\d+)$"
+)
+_CARGO_TO_PYTHON_PRERELEASE = {"alpha": "a", "beta": "b", "rc": "rc"}
 
 
 def python_version(cargo_version: str) -> str:
@@ -29,7 +32,7 @@ def python_version(cargo_version: str) -> str:
     match = _CARGO_PRERELEASE.fullmatch(cargo_version)
     if match is None:
         return cargo_version
-    return f"{match['release']}{match['kind']}{match['number']}"
+    return f"{match['release']}{_CARGO_TO_PYTHON_PRERELEASE[match['kind']]}{match['number']}"
 
 
 def project_versions(root: Path) -> tuple[str, str, str]:

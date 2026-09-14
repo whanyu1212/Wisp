@@ -160,9 +160,10 @@ jobs:
           mv rust/wisp-tui/wisp-tui_bin.cdx.json candidate-dist/wisp-tui.cdx.json
           cargo_version="$(python scripts/verify_rust_tui_wheel.py --print-cargo-version)"
           python -c 'import json, sys; d=json.load(open("candidate-dist/wisp-tui.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-tui" and c["version"] == sys.argv[1]' "$cargo_version"
+          uv_bin="$(command -v uv)"
           uv venv /tmp/wisp-wheel
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
-            /tmp/wisp-wheel/bin/python -m pip install "${wheel[0]}"
+            "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python "${wheel[0]}"
           ! PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin command -v cargo
           cd /tmp
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \

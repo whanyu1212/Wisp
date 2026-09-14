@@ -62,9 +62,12 @@ def _wheel(
 
 
 def test_cargo_prerelease_conversion_is_exact() -> None:
-    assert python_version("0.2.0-rc.1") == "0.2.0rc1"
+    assert python_version("0.2.0-alpha.1") == "0.2.0a1"
+    assert python_version("0.2.0-beta.2") == "0.2.0b2"
+    assert python_version("0.2.0-rc.3") == "0.2.0rc3"
     assert python_version("1.2.3") == "1.2.3"
     assert python_version("0.2.0-dev.1") == "0.2.0-dev.1"
+    assert python_version("0.2.0-a.1") == "0.2.0-a.1"
 
 
 def test_repository_versions_are_lockstep() -> None:
