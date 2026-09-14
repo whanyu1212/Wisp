@@ -113,6 +113,7 @@ impl PendingInput {
             && target.browse_entry.is_none()
             && match &input {
                 Input::Paste(_) => true,
+                Input::Key(key) if crate::prompt_editor::is_extended_edit_key(*key) => true,
                 Input::Key(key) => {
                     let activates = matches!(
                         ui.bindings.action(*key),
