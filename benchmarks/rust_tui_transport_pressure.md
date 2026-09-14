@@ -70,13 +70,14 @@ blocked terminal itself is outside that fairness guarantee.
 | Deferred activation | `event_loop::tests` approval/trust/model, first-paint and browse tests; existing file/mouse/overlay tests | Original decision, catalog, visibility and entry ownership survive an intervening redraw |
 | EOF/fatal outcome handling | `event_loop::tests` EOF and writer-outcome tests | FIFO drain on EOF; fatal failure preempts input/events even without another command; held event remains accounted |
 | Process/terminal pressure | `tests/test_rust_tui_pressure.py` | 192 × 1-KiB burst, 1,024 × 1-KiB burst with external SIGINT, synchronized EOF/malformed frame, malformed output after shutdown success, visible final state, terminal restoration and backend PID cleanup |
+| Terminal-output hygiene | `ui::tests::terminal_sanitizer_*`, renderer-specific hostile-input tests, `tests/test_rust_tui_pressure.py::test_hostile_live_payloads_cannot_inject_terminal_controls` | Tested C0/C1, ANSI/CSI/OSC/DCS, title, hyperlink, clipboard, cursor, alternate-screen, terminal-query and bidi payloads are neutralized while ordinary Unicode remains renderable; fragmented JSONL writes are reassembled before typed decoding and rendering; dynamic connection titles use the same bounded sanitizer |
 | Shared control ordering | `tests/fixtures/tui_traces/approval_resolution_then_cancel.json`, existing cancel-before-approval/trust and decision traces | Python and Rust agree on exact commands and terminal state; these reducer traces do not test live channel scheduling |
 | Live transcript retention | `transcript::tests::live_retention_*`, `tests/test_rust_tui_pressure.py::test_long_session_bounds_live_transcript_and_remains_responsive` | Completed live presentation stays within count/payload limits while active lifecycle state survives; a 1,205-turn built-binary stream completes and exits cleanly |
 | Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `test_process_manager.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no exact process-RSS claim |
 
 The generated cases are deterministic, finite smoke tests in ordinary Cargo CI. They are not a
-standalone coverage-guided fuzz campaign. Broader fuzz targets/policy, Unicode/terminal injection,
-secret cleanup, remaining lifecycle races and platform recovery remain under #468.
+standalone coverage-guided fuzz campaign or proof for every terminal emulator. Secret cleanup,
+remaining lifecycle races, platform recovery and dependency policy remain under #468.
 
 ## Local verification
 

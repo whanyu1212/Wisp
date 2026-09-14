@@ -476,6 +476,10 @@ fn render_api_key(
     value: &ApiKeyInput,
     palette: Palette,
 ) {
+    let title = terminal_row(
+        &format!(" API key: {provider} "),
+        usize::from(area.width.saturating_sub(2)),
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -487,7 +491,7 @@ fn render_api_key(
         ))
         .block(
             Block::default()
-                .title(format!(" API key: {provider} "))
+                .title(title)
                 .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
@@ -512,6 +516,10 @@ fn render_device_code(
     scroll: &mut usize,
     palette: Palette,
 ) {
+    let title = terminal_row(
+        &format!(" device login: {provider} "),
+        usize::from(area.width.saturating_sub(2)),
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(2), Constraint::Length(1)])
@@ -539,7 +547,7 @@ fn render_device_code(
         ))
         .block(
             Block::default()
-                .title(format!(" device login: {provider} "))
+                .title(title)
                 .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
@@ -683,6 +691,49 @@ mod tests {
         panel.finish_device_code();
         assert!(matches!(panel.mode, ConnectionPanelMode::Picker { .. }));
     }
+    #[test]
+    fn dynamic_connection_titles_and_challenges_are_terminal_safe() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let hostile = "provider\u{1b}]52;c;owned\u{7}\u{009b}2J\u{202e}tail";
+        let mut catalog = catalog();
+        catalog.providers[0].methods[0].provider = hostile.into();
+        catalog.providers[0].methods[1].provider = hostile.into();
+        let mut panel = ConnectionPanel::new(catalog);
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+
+        panel.handle_key(key(KeyCode::Enter));
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &mut panel, Palette::default());
+            })
+            .unwrap();
+        assert_terminal_safe(terminal.backend().buffer());
+
+        panel.return_to_picker();
+        panel.handle_key(key(KeyCode::Down));
+        panel.handle_key(key(KeyCode::Enter));
+        panel.show_device_code(
+            hostile,
+            "https://example.invalid/\u{1b}]0;owned\u{7}".into(),
+            "CODE\u{1b}[2J\u{2066}".into(),
+        );
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &mut panel, Palette::default());
+            })
+            .unwrap();
+        assert_terminal_safe(terminal.backend().buffer());
+    }
+
+    fn assert_terminal_safe(buffer: &ratatui::buffer::Buffer) {
+        assert!(buffer.content.iter().all(|cell| {
+            cell.symbol()
+                .chars()
+                .all(|character| !character.is_control() && !crate::is_bidi_control(character))
+        }));
+    }
+
     #[test]
     fn long_device_challenges_wrap_losslessly_and_scroll_at_minimum_size() {
         use ratatui::{Terminal, backend::TestBackend};

@@ -33,7 +33,13 @@ from wisp.events import (
     MessageDelta,
     MessageStarted,
     RpcCommandFinished,
+    RpcConnectionCatalogReported,
+    RpcConnectionCatalogSnapshot,
+    RpcConnectionMethodSnapshot,
+    RpcConnectionProviderSnapshot,
     RpcMessagesReported,
+    ToolCallRequested,
+    ToolResultReady,
 )
 from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION
 
@@ -48,6 +54,13 @@ pid_path.write_text(str(os.getpid()), encoding="utf-8")
 def emit(event):
     sys.stdout.write(event.model_dump_json() + "\n")
     sys.stdout.flush()
+
+
+def emit_fragmented(event):
+    frame = event.model_dump_json() + "\n"
+    for offset in range(0, len(frame), 7):
+        sys.stdout.write(frame[offset:offset + 7])
+        sys.stdout.flush()
 
 
 request = json.loads(sys.stdin.readline())
@@ -76,12 +89,37 @@ for line in sys.stdin:
             command_type=command_type,
             ok=True,
         ))
-        if mode == "long-session" and burst_done_path.exists():
+        if mode in {"long-session", "terminal-safety"} and burst_done_path.exists():
             release_path.touch()
+    elif command_type == "get_connection_catalog" and mode == "terminal-safety":
+        hostile = (
+            "p\x1b]0;T\x07\x1b]52;c;QQ==\x07\x1b[H\x1b[5n\x1b[c"
+            "\x1bP$qm\x1b\\\u202eCONNECTION-SAFE-TAIL"
+        )
+        emit_fragmented(RpcConnectionCatalogReported(
+            command_id=command_id,
+            catalog=RpcConnectionCatalogSnapshot(providers=(
+                RpcConnectionProviderSnapshot(
+                    id="hostile",
+                    label="Hostile",
+                    methods=(RpcConnectionMethodSnapshot(
+                        provider=hostile,
+                        label="API key",
+                        kind="api_key",
+                        source="missing",
+                    ),),
+                ),
+            )),
+        ))
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type=command_type,
+            ok=True,
+        ))
     elif command_type == "prompt":
         emit(AgentStarted(session_id="pressure-session"))
         emit(MessageStarted(turn=1))
-        if mode in {"burst", "signal-burst", "long-session"}:
+        if mode in {"burst", "signal-burst", "long-session", "terminal-safety"}:
             # One bounded write makes the producer substantially outrun terminal
             # rendering and exercises admission beyond the 64-event queue.
             frames = []
@@ -97,6 +135,30 @@ for line in sys.stdin:
                             finish_reason="stop",
                         ).model_dump_json() + "\n",
                     ])
+            elif mode == "terminal-safety":
+                event_count = 1
+                hostile = (
+                    "v\x1b]8;;x\x07l\x1b]8;;\x07\x1b[H\x1b[5n\x1b[c"
+                    "\x1bP$qm\x1b\\\u2066PROMPT-SAFE-TAIL"
+                )
+                frames.extend([
+                    ToolCallRequested(
+                        call_id="hostile-tool",
+                        name="read",
+                        arguments={"path": "unsafe.txt"},
+                    ).model_dump_json() + "\n",
+                    ToolResultReady(
+                        call_id="hostile-tool",
+                        name="read",
+                        output=hostile,
+                        is_error=False,
+                    ).model_dump_json() + "\n",
+                    MessageCompleted(
+                        turn=1,
+                        content=hostile,
+                        finish_reason="stop",
+                    ).model_dump_json() + "\n",
+                ])
             else:
                 event_count = 192 if mode == "burst" else 1024
                 prefix = "BURST" if mode == "burst" else "SIGNAL-BURST"
@@ -109,6 +171,12 @@ for line in sys.stdin:
                     content="BURST-FIRST BURST-LAST",
                     finish_reason="stop",
                 ).model_dump_json() + "\n")
+            if mode == "terminal-safety":
+                for frame in frames:
+                    for offset in range(0, len(frame), 7):
+                        sys.stdout.write(frame[offset:offset + 7])
+                        sys.stdout.flush()
+                frames.clear()
             frames.extend([
                 AgentCompleted(
                     session_id="pressure-session",
@@ -322,6 +390,73 @@ def test_long_session_bounds_live_transcript_and_remains_responsive(tmp_path: Pa
         )
         tui.send(b"\x03")
         assert tui.wait_for_exit(failure="Rust TUI did not exit after the long session") == 0
+        assert termios.tcgetattr(tui.fd) == tui.initial_terminal
+    finally:
+        tui.close()
+
+    backend_pid = int(backend_pid_path.read_text(encoding="utf-8"))
+    assert _backend_process_has_exited(backend_pid)
+
+
+@pytest.mark.process
+def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -> None:
+    tui, backend_pid_path, release, burst_done = _launch(tmp_path, mode="terminal-safety")
+    try:
+        tui.wait_ready()
+        assert backend_pid_path.exists()
+
+        tui.send(b"/connect\r")
+        tui.wait_for(
+            b"CONNECTION-SAFE-TAIL",
+            failure="hostile connection metadata did not render through its trailing sentinel",
+        )
+        title_offset = len(tui.output)
+        tui.send(b"\r")
+        tui.wait_for(
+            b"API key:",
+            b"CONNECTION-SAFE-TAIL",
+            since=title_offset,
+            failure="hostile API-key title did not render through its trailing sentinel",
+        )
+        connection_output = bytes(tui.output[title_offset:])
+        for injected in (
+            b"\x1b]0;T\x07",
+            b"\x1b]52;c;QQ==\x07",
+            b"\x1b[H",
+            b"\x1b[5n",
+            b"\x1b[c",
+            b"\x1bP$qm\x1b\\",
+        ):
+            assert injected not in connection_output
+        tui.output.clear()
+        tui.send(b"\x03")
+        tui.wait_for(
+            b"Connection panel closed.",
+            failure="connection panel did not return to the composer",
+        )
+
+        tui.send(b"terminal safety\r")
+        tui.wait_until(
+            lambda _output: burst_done.exists() and release.exists(),
+            failure="hostile prompt payloads did not drain through synchronization",
+        )
+        tui.wait_for(
+            b"PROMPT-SAFE-TAIL",
+            failure="hostile prompt payload did not render through its trailing sentinel",
+        )
+
+        prompt_output = bytes(tui.output)
+        for injected in (
+            b"\x1b]8;;x\x07",
+            b"\x1b[H",
+            b"\x1b[5n",
+            b"\x1b[c",
+            b"\x1bP$qm\x1b\\",
+        ):
+            assert injected not in prompt_output
+
+        tui.send(b"\x03")
+        assert tui.wait_for_exit(failure="Rust TUI did not exit after hostile payloads") == 0
         assert termios.tcgetattr(tui.fd) == tui.initial_terminal
     finally:
         tui.close()

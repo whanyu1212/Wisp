@@ -280,7 +280,7 @@ noncritical** work can wait after stage 3.
 | Essential layout, editing, and focus acceptance | Consolidated feature regressions plus configured-input/help/paste launcher PTYs | #467 acceptance inventory; broad adversarial and terminal coverage remains #468; decorative polish is deferred noncritical |
 | Large-paste presentation | Compact markers with bounded display metadata; exact raw submission/history/queues | #467 editor, reducer, rendering and PTY regressions; historical replay stays raw |
 | Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Acceptable while experimental; assess accessibility and copying workflows before a default switch |
-| Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, sanitization and shared traces | Complete adversarial acceptance remains a blocker for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
+| Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | Secret lifecycle, remaining recovery races, platform limits and dependency policy remain blockers for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
 | Prebuilt binary distribution and install lifecycle | Source-build only; no shipped binary | Blocker for stage 3 ([#469](https://github.com/whanyu1212/Wisp/issues/469)); artifact integrity, install/update/rollback and target coverage remain |
 | Windows | Rejected before binary resolution | Acceptable while experimental; not a claimed Rust target |
 | No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
@@ -297,8 +297,9 @@ Protocol hardening also includes fixed-seed raw-wire and JSONL framing propertie
 fixture/seed replay, and bounded AddressSanitizer fuzz campaigns for client and server wire
 decoding. See the [fuzzing instructions](https://github.com/whanyu1212/Wisp/blob/main/fuzz/README.md)
 for budgets, manual extended runs, and failure reproduction. These checks cover protocol parsing
-and logical frame buffering; terminal/Unicode rendering, secret lifecycle, recovery races,
-dependency auditing, and whole-session memory remain separate #468 acceptance work.
+and logical frame buffering. Deterministic renderer properties and a built-binary hostile-payload
+PTY cover representative terminal/Unicode injection paths; secret lifecycle, recovery races,
+dependency auditing and broader process-memory evidence remain separate #468 acceptance work.
 
 The remaining stage-3 work is hardening (#468) and distribution (#469), including coordinated updates.
 Closing those issues does not itself authorize a default switch or Textual deprecation. Optional
