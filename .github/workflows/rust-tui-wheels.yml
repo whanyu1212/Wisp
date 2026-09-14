@@ -62,7 +62,7 @@ jobs:
             --reference-wheel "${reference[0]}"
           "$python" -m twine check "${wheel[0]}"
           "$python" -m auditwheel show "${wheel[0]}" | grep -F "manylinux_2_28_x86_64"
-          sha256sum "${wheel[0]}" > candidate-dist/SHA256SUMS
+          (cd candidate-dist && sha256sum *.whl > SHA256SUMS)
           cargo install cargo-cyclonedx --version 0.5.9 --locked --quiet
           cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
             --format json --describe binaries --spec-version 1.5 --quiet
@@ -153,7 +153,7 @@ jobs:
             --expected-tag "$WISP_RUST_TUI_WHEEL_TAG" \
             --reference-wheel "${reference[0]}"
           python -m twine check "${wheel[0]}"
-          shasum -a 256 "${wheel[0]}" > candidate-dist/SHA256SUMS
+          (cd candidate-dist && shasum -a 256 *.whl > SHA256SUMS)
           cargo install cargo-cyclonedx --version 0.5.9 --locked --quiet
           cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
             --format json --describe binaries --spec-version 1.5 --quiet
@@ -186,7 +186,9 @@ jobs:
           ! grep -E "/Users/runner|/runner/work|/target/" /tmp/otool-load-commands.txt
           ! otool -L /tmp/wisp-wheel/bin/wisp-tui | grep -vE \
             "^(/private)?/tmp/wisp-wheel/bin/wisp-tui:|^[[:space:]]+(/usr/lib/|/System/Library/)"
-          codesign -dv /tmp/wisp-wheel/bin/wisp-tui 2>&1 | grep -F "Signature=adhoc"
+          codesign -dv /tmp/wisp-wheel/bin/wisp-tui > /tmp/codesign.txt 2>&1 || true
+          ! grep -q "^Authority=" /tmp/codesign.txt
+          ! grep "^TeamIdentifier=" /tmp/codesign.txt | grep -Fvx "TeamIdentifier=not set"
 
       - name: Upload candidate artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

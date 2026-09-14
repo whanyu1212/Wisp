@@ -35,7 +35,7 @@ Each target job:
 2. builds the Hatchling candidate from locked Cargo dependencies;
 3. verifies exact project/runtime/Cargo version lockstep;
 4. verifies non-pure metadata, exact platform tag, one executable shared script, executable mode, complete `RECORD`, no debug artifacts, and Python package file parity;
-5. checks Linux ABI compatibility or macOS minimum-version/linkage metadata, runs `twine check`, and writes a SHA-256 manifest;
+5. checks Linux ABI compatibility or macOS minimum-version/linkage metadata, runs `twine check`, and writes an artifact-relative SHA-256 manifest;
 6. emits a CycloneDX 1.5 Rust binary SBOM;
 7. installs the candidate into an isolated environment;
 8. verifies the installed SDK, `wisp` command, native binary architecture and binary version;
