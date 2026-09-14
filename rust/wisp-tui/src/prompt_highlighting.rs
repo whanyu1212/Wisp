@@ -53,7 +53,8 @@ impl<'a> Context<'a> {
             catalog,
             files,
             directories,
-            paths_complete: project_files.is_some_and(|snapshot| !snapshot.truncated),
+            paths_complete: project_files
+                .is_some_and(|snapshot| !snapshot.truncated && !snapshot.entries.is_empty()),
         }
     }
 }
@@ -363,6 +364,16 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn empty_snapshots_leave_references_neutral() {
+        let empty = ProjectFileSnapshot {
+            generation: 1,
+            entries: Vec::new(),
+            truncated: false,
+        };
+        assert!(highlights("@missing", false, 0, 1, None, Some(&empty)).is_empty());
     }
 
     #[test]

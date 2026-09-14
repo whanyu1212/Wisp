@@ -1210,7 +1210,7 @@ fn render_composer(
                             &line.text,
                             line.truncated,
                             row.logical_row,
-                            layout.lines.len(),
+                            layout.raw_line_count,
                             &context,
                         );
                         highlighted_line = Some(row.logical_row);
@@ -1339,6 +1339,7 @@ struct ComposerLogicalLine {
 struct ComposerLayout {
     revision: u64,
     is_empty: bool,
+    raw_line_count: usize,
     lines: Vec<ComposerLogicalLine>,
     rows: Vec<ComposerVisualRow>,
     cursor_row: usize,
@@ -1482,6 +1483,7 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     ComposerLayout {
         revision: editor.revision(),
         is_empty: editor.text().is_empty(),
+        raw_line_count: editor.line_count(),
         lines,
         rows,
         cursor_row,
@@ -3229,6 +3231,34 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::UNDERLINED)
         );
+    }
+
+    #[test]
+    fn folded_multiline_drafts_do_not_highlight_commands_as_executable() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.command_catalog = Some(std::sync::Arc::from([
+            wisp_protocol::events::CommandDescriptor {
+                name: "help".into(),
+                description: String::new(),
+                slash_command: "/help".into(),
+                slash_aliases: Vec::new(),
+                order: 0,
+            },
+        ]));
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&format!("/help {}\ncontinued", "x".repeat(2_001)));
+        let layout = composer_layout(&editor, 80);
+        let context = prompt_highlighting::Context::new(state.command_catalog.as_deref(), None);
+        let highlights = prompt_highlighting::line_highlights(
+            &layout.lines[0].text,
+            layout.lines[0].truncated,
+            0,
+            layout.raw_line_count,
+            &context,
+        );
+
+        assert!(highlights.is_empty());
+        assert_eq!(layout.raw_line_count, 2);
     }
 
     #[test]
