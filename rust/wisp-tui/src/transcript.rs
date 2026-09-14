@@ -179,6 +179,12 @@ enum ToolBindingKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolCallSource {
+    Live,
+    Historical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ToolBinding {
     entry_id: TranscriptEntryId,
     kind: ToolBindingKind,
@@ -352,13 +358,29 @@ impl Transcript {
     }
 
     pub fn observe_tool_call(&mut self, input: ToolCallInput) -> TranscriptEntryId {
-        let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested);
+        self.observe_tool_call_from(input, ToolCallSource::Live)
+    }
+
+    pub(crate) fn observe_historical_tool_call(
+        &mut self,
+        input: ToolCallInput,
+    ) -> TranscriptEntryId {
+        self.observe_tool_call_from(input, ToolCallSource::Historical)
+    }
+
+    fn observe_tool_call_from(
+        &mut self,
+        input: ToolCallInput,
+        source: ToolCallSource,
+    ) -> TranscriptEntryId {
+        let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested, source);
         self.update_pending_detail_tracking(entry_id);
         entry_id
     }
 
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
-        let entry_id = self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval);
+        let entry_id =
+            self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval, ToolCallSource::Live);
         self.update_pending_detail_tracking(entry_id);
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             return entry_id;
@@ -642,6 +664,7 @@ impl Transcript {
         &mut self,
         input: &ToolCallInput,
         initial_status: ToolStatus,
+        source: ToolCallSource,
     ) -> TranscriptEntryId {
         if let Some(binding) = self.call_entries.get(&input.call_id).copied() {
             if binding.resolved {
@@ -722,7 +745,9 @@ impl Transcript {
                     } else {
                         self.next_tool_sequence = self.next_tool_sequence.max(sequence);
                     }
-                    self.promote_history_entry_to_live(entry_id);
+                    if source == ToolCallSource::Live {
+                        self.promote_history_entry_to_live(entry_id);
+                    }
                 }
                 let binding =
                     self.new_tool_binding(entry_id, ToolBindingKind::Process(operation), false);
