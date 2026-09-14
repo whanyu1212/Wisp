@@ -111,6 +111,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         picker_width = 121
         next_picker_frame = 0.0
         quit_sent = False
+        quit_frame_requested = False
         context_redrawn = False
         selection_redrawn = False
         deadline = time.monotonic() + 25
@@ -187,7 +188,18 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                         and (picker_only or (b"custom-model" in output and b"effort" in output))
                     )
                 )
-                if submitted and applied and not quit_sent:
+                if submitted and applied and not quit_frame_requested:
+                    # Observe a fresh ready frame after applying the model before
+                    # sending Ctrl-C. Do not send it alongside the resize above.
+                    output.clear()
+                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 124, 0, 0))
+                    quit_frame_requested = True
+                elif (
+                    quit_frame_requested
+                    and b"Type a prompt or / for commands." in output
+                    and (picker_only or (b"custom-model" in output and b"effort" in output))
+                    and not quit_sent
+                ):
                     os.write(terminal_fd, b"\x03")
                     quit_sent = True
                 if picker_phase == "effort" and time.monotonic() >= next_picker_frame:
