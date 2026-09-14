@@ -1148,9 +1148,13 @@ impl LiveUi {
                 self.browse_selected = None;
             }
         }
-        if !transcript_replaced && self.state.transcript.generation() != transcript_generation {
+        if !transcript_replaced
+            && (self.state.transcript.generation() != transcript_generation
+                || history_window_changed)
+        {
             let action = if history_window_changed {
-                self.transcript_row_cache = TranscriptRowCache::default();
+                self.transcript_row_cache
+                    .retain_entries(&self.state.transcript);
                 TranscriptViewAction::HistoryChanged
             } else if follow_after_update {
                 TranscriptViewAction::FollowTail
@@ -1162,32 +1166,8 @@ impl LiveUi {
                 &self.state.transcript,
                 &mut self.transcript_row_cache,
             );
-            if let (Some(older), Some(pending)) = (
-                history_window_direction,
-                self.pending_history_navigation.take(),
-            ) {
-                if pending.older == older
-                    && pending.reader_generation == self.transcript_viewport.reader_generation()
-                {
-                    match pending.intent {
-                        HistoryNavigationIntent::Rows(rows) => {
-                            self.transcript_viewport.continue_navigation(
-                                older,
-                                rows,
-                                &self.state.transcript,
-                                &mut self.transcript_row_cache,
-                                self.state.history.tail_evicted,
-                            );
-                        }
-                        HistoryNavigationIntent::Home => {
-                            self.transcript_viewport.reduce(
-                                TranscriptViewAction::Home,
-                                &self.state.transcript,
-                                &mut self.transcript_row_cache,
-                            );
-                        }
-                    }
-                }
+            if let Some(older) = history_window_direction {
+                self.continue_history_navigation(older);
             }
             self.reconcile_browse_selection();
         }
@@ -1198,7 +1178,11 @@ impl LiveUi {
             self.unsendable_response_context = None;
             self.notice = None;
         }
-        let control = self.apply_effects(effects, writer, limit).await?;
+        let mut control = self.apply_effects(effects, writer, limit).await?;
+        if control != LoopControl::Exit {
+            let effects = self.request_pending_history_navigation(limit)?;
+            control = self.apply_effects(effects, writer, limit).await?;
+        }
         if control != LoopControl::Exit {
             self.sync_file_picker(writer, limit).await?;
             if self
@@ -2681,6 +2665,87 @@ impl LiveUi {
         self.navigate_transcript_action(action, writer, limit).await
     }
 
+    /// Apply queued movement only after its matching page arrives.
+    fn continue_history_navigation(&mut self, older: bool) {
+        let Some(pending) = self
+            .pending_history_navigation
+            .filter(|pending| pending.older == older)
+        else {
+            return;
+        };
+        self.pending_history_navigation = None;
+        if pending.reader_generation != self.transcript_viewport.reader_generation() {
+            return;
+        }
+        let rows = match pending.intent {
+            HistoryNavigationIntent::Home => {
+                self.transcript_viewport.reduce(
+                    TranscriptViewAction::Home,
+                    &self.state.transcript,
+                    &mut self.transcript_row_cache,
+                );
+                return;
+            }
+            HistoryNavigationIntent::Rows(rows) => rows,
+        };
+        let consumed = self.transcript_viewport.continue_navigation(
+            older,
+            rows,
+            &self.state.transcript,
+            &mut self.transcript_row_cache,
+            self.state.history.tail_evicted,
+        );
+        let remaining = rows.saturating_sub(consumed);
+        let more_history = if older {
+            self.state.history.oldest_cursor.is_some()
+        } else {
+            self.state.history.tail_evicted
+        };
+        if remaining > 0 && more_history {
+            self.pending_history_navigation = Some(PendingHistoryNavigation {
+                intent: HistoryNavigationIntent::Rows(remaining),
+                ..pending
+            });
+        }
+    }
+
+    /// Resume after page loads or metadata refreshes, preserving intent while requests are blocked.
+    fn request_pending_history_navigation(&mut self, limit: usize) -> Result<Vec<UiEffect>, Error> {
+        let Some(pending) = self.pending_history_navigation else {
+            return Ok(Vec::new());
+        };
+        let more_history = if pending.older {
+            self.state.history.oldest_cursor.is_some()
+        } else {
+            self.state.history.tail_evicted
+        };
+        if pending.reader_generation != self.transcript_viewport.reader_generation()
+            || !more_history
+        {
+            self.pending_history_navigation = None;
+            return Ok(Vec::new());
+        }
+        if self.state.history_request_direction().is_some() {
+            return Ok(Vec::new());
+        }
+        let action = if pending.older {
+            UiAction::LoadOlderHistory
+        } else {
+            UiAction::LoadNewerHistory
+        };
+        if let Some(notice) =
+            self.reduced_action_frame_limit_notice(&action, "history request", limit)?
+        {
+            self.pending_history_navigation = None;
+            self.notice = Some(notice);
+            self.render_pending = true;
+            return Ok(Vec::new());
+        }
+        // The reducer serializes history requests with metadata synchronization. A no-op
+        // keeps the remaining movement pending until a later dispatch can request its page.
+        Ok(reducer::reduce(&mut self.state, action, &mut self.ids)?)
+    }
+
     async fn navigate_transcript_action(
         &mut self,
         action: TranscriptViewAction,
@@ -2694,13 +2759,16 @@ impl LiveUi {
             &mut self.transcript_row_cache,
             self.state.history.tail_evicted,
         );
+        // Navigation changes the viewport even when a history request is a no-op
+        // (for example, after reaching the oldest page). Paint that movement now.
+        self.render_pending = true;
         let history_action = match action {
             TranscriptViewAction::PageUp
             | TranscriptViewAction::Home
             | TranscriptViewAction::ScrollLines(i32::MIN..=-1)
                 if self
                     .transcript_viewport
-                    .at_oldest(&self.state.transcript, &mut self.transcript_row_cache) =>
+                    .near_oldest(&self.state.transcript, &mut self.transcript_row_cache) =>
             {
                 Some(UiAction::LoadOlderHistory)
             }
@@ -2723,7 +2791,7 @@ impl LiveUi {
                 Some(HistoryNavigationIntent::Home)
             } else {
                 let previous_rows = previous_pending
-                    .filter(|pending| pending.older == older && same_active_request)
+                    .filter(|pending| pending.older == older && !reversed_active_request)
                     .and_then(|pending| match pending.intent {
                         HistoryNavigationIntent::Rows(rows) => Some(rows),
                         HistoryNavigationIntent::Home => None,
@@ -2740,7 +2808,6 @@ impl LiveUi {
                 });
             }
             if same_active_request {
-                self.render_pending = true;
                 return Ok(LoopControl::Continue);
             }
             if let Some(notice) =
@@ -2748,16 +2815,10 @@ impl LiveUi {
             {
                 self.pending_history_navigation = None;
                 self.notice = Some(notice);
-                self.render_pending = true;
                 return Ok(LoopControl::Continue);
             }
-            let control = self.dispatch(history_action, writer, limit).await?;
-            if self.state.history_request_direction() != Some(older) {
-                self.pending_history_navigation = None;
-            }
-            return Ok(control);
+            return self.dispatch(history_action, writer, limit).await;
         }
-        self.render_pending = true;
         Ok(LoopControl::Continue)
     }
 
@@ -8002,6 +8063,352 @@ mod tests {
                 .as_deref()
                 .is_some_and(|notice| notice.contains("temporary failure"))
         );
+    }
+
+    #[tokio::test]
+    async fn pending_history_navigation_survives_streaming_output() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = history_navigation_fixture(true);
+        ui.state.current_command = Some(reducer::ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: reducer::ActiveCommandType::Prompt,
+        });
+        ui.state.transcript.start_message(1);
+        ui.navigate_transcript_action(
+            TranscriptViewAction::PageUp,
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        let pending = ui.pending_history_navigation.expect("queued page up");
+        assert!(receiver.try_recv().is_ok());
+
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                turn: 1,
+                delta: "live output".into(),
+                content_kind: reducer::MessageContentKind::Text,
+            }),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ui.pending_history_navigation, Some(pending));
+        finish_navigation_page(
+            &mut ui,
+            &writer,
+            "get_messages-1",
+            true,
+            false,
+            Some("older"),
+        )
+        .await;
+        assert!(ui.pending_history_navigation.is_none());
+        assert_eq!(
+            ui.transcript_viewport
+                .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache)[1]
+                .plain_text(),
+            "older"
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    fn history_navigation_fixture(older: bool) -> LiveUi {
+        let mut ui = LiveUi::default();
+        ui.state
+            .transcript
+            .append_prompt(vec!["current"; 30].join("\n"));
+        ui.state.transcript.mark_history_entries(0, "current-entry");
+        ui.state
+            .history
+            .represented_durable_entry_ids
+            .insert("current-entry".into());
+        ui.state
+            .history
+            .represented_durable_entry_order
+            .push("current-entry".into());
+        ui.state.history.oldest_cursor = older.then(|| "current-entry".into());
+        ui.state.history.newest_cursor = (!older).then(|| "current-entry".into());
+        ui.state.history.tail_evicted = !older;
+        ui.transcript_viewport.set_geometry(
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+            40,
+            6,
+        );
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        if !older {
+            ui.transcript_viewport.continue_navigation(
+                false,
+                100,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+                true,
+            );
+        }
+        ui
+    }
+
+    async fn finish_navigation_page(
+        ui: &mut LiveUi,
+        writer: &mpsc::Sender<WriterMessage>,
+        command_id: &str,
+        older: bool,
+        more: bool,
+        content: Option<&str>,
+    ) {
+        let entry_id = format!("{command_id}-entry");
+        let mut transcript = crate::transcript::SharedTranscript::default();
+        if let Some(content) = content {
+            transcript.append_prompt(content.into());
+            transcript.mark_history_entries(0, &entry_id);
+        }
+        for event in [
+            BackendEvent::MessagesReported {
+                command_id: command_id.into(),
+                messages: reducer::SessionMessages {
+                    session: None,
+                    active_leaf_id: None,
+                    truncated: more,
+                    next_before_entry_id: (older && more).then(|| entry_id.clone()),
+                    next_after_entry_id: (!older && more).then(|| entry_id.clone()),
+                    durable_entry_ids: vec![entry_id],
+                    exact_tool_result: None,
+                    transcript,
+                },
+            },
+            BackendEvent::CommandFinished {
+                command_id: command_id.into(),
+                command_type: "get_messages".into(),
+                ok: true,
+                error: None,
+            },
+        ] {
+            ui.dispatch(
+                UiAction::BackendEvent(event),
+                writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_history_navigation_continues_across_multiple_pages() {
+        for older in [true, false] {
+            let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+            let mut ui = history_navigation_fixture(older);
+            for _ in 0..2 {
+                ui.navigate_transcript_action(
+                    if older {
+                        TranscriptViewAction::PageUp
+                    } else {
+                        TranscriptViewAction::PageDown
+                    },
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            }
+            let mut remaining = 10_usize;
+            // A system-only page changes cursors but has no visible transcript rows.
+            for page in 1..=5 {
+                assert!(
+                    receiver.try_recv().is_ok(),
+                    "missing request for page {page}, older={older}"
+                );
+                assert!(receiver.try_recv().is_err(), "duplicate page request");
+                finish_navigation_page(
+                    &mut ui,
+                    &writer,
+                    &format!("get_messages-{page}"),
+                    older,
+                    true,
+                    (page > 1).then_some("loaded"),
+                )
+                .await;
+                if page > 1 {
+                    remaining = remaining.saturating_sub(3_usize);
+                }
+                assert_eq!(
+                    ui.pending_history_navigation.map(|pending| pending.intent),
+                    (remaining > 0).then_some(HistoryNavigationIntent::Rows(remaining)),
+                    "page {page}, older={older}"
+                );
+            }
+            assert!(
+                receiver.try_recv().is_err(),
+                "movement fulfilled; do not load another page"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_history_navigation_waits_for_post_prompt_sync() {
+        for stats_first in [true, false] {
+            let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+            let mut ui = history_navigation_fixture(true);
+            ui.state.current_command = Some(reducer::ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: reducer::ActiveCommandType::Prompt,
+            });
+            for _ in 0..2 {
+                ui.navigate_transcript_action(
+                    TranscriptViewAction::PageUp,
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(receiver.try_recv().is_ok());
+            ui.dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "prompt-1".into(),
+                    command_type: "prompt".into(),
+                    ok: true,
+                    error: None,
+                }),
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            assert!(receiver.try_recv().is_ok(), "context stats request");
+            for finish_stats in [stats_first, !stats_first] {
+                if finish_stats {
+                    ui.dispatch(
+                        UiAction::BackendEvent(BackendEvent::CommandFinished {
+                            command_id: "get_session_stats-2".into(),
+                            command_type: "get_session_stats".into(),
+                            ok: true,
+                            error: None,
+                        }),
+                        &writer,
+                        MAX_APPLICATION_FRAME_BYTES,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    finish_navigation_page(
+                        &mut ui,
+                        &writer,
+                        "get_messages-1",
+                        true,
+                        true,
+                        Some("older"),
+                    )
+                    .await;
+                    assert_eq!(
+                        ui.pending_history_navigation.map(|pending| pending.intent),
+                        Some(HistoryNavigationIntent::Rows(7)),
+                        "keep movement during metadata refresh, stats_first={stats_first}"
+                    );
+                }
+            }
+            assert!(receiver.try_recv().is_ok(), "session metadata request");
+            assert!(receiver.try_recv().is_err());
+            ui.navigate_transcript_action(
+                TranscriptViewAction::PageUp,
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                ui.pending_history_navigation.map(|pending| pending.intent),
+                Some(HistoryNavigationIntent::Rows(12)),
+                "coalesce input while metadata sync holds the history request"
+            );
+            assert!(receiver.try_recv().is_err());
+            for event in [
+                BackendEvent::MessagesReported {
+                    command_id: "get_messages-3".into(),
+                    messages: reducer::SessionMessages {
+                        session: Some(reducer::SessionIdentity {
+                            session_id: "active".into(),
+                            session_path: "/sessions/active.jsonl".into(),
+                            session_name: None,
+                        }),
+                        active_leaf_id: None,
+                        truncated: false,
+                        next_before_entry_id: None,
+                        next_after_entry_id: None,
+                        durable_entry_ids: Vec::new(),
+                        exact_tool_result: None,
+                        transcript: crate::transcript::SharedTranscript::default(),
+                    },
+                },
+                BackendEvent::CommandFinished {
+                    command_id: "get_messages-3".into(),
+                    command_type: "get_messages".into(),
+                    ok: true,
+                    error: None,
+                },
+            ] {
+                ui.dispatch(
+                    UiAction::BackendEvent(event),
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            }
+            let WriterMessage::Frame { payload, .. } =
+                receiver.try_recv().expect("resume pagination")
+            else {
+                panic!("expected history request");
+            };
+            let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(request["id"], "get_messages-4");
+            assert_eq!(ui.state.history_request_direction(), Some(true));
+            assert_eq!(
+                ui.pending_history_navigation.map(|pending| pending.intent),
+                Some(HistoryNavigationIntent::Rows(12))
+            );
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_history_navigation_stops_when_history_is_exhausted() {
+        for older in [true, false] {
+            let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+            let mut ui = history_navigation_fixture(older);
+            ui.navigate_transcript_action(
+                if older {
+                    TranscriptViewAction::PageUp
+                } else {
+                    TranscriptViewAction::PageDown
+                },
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            assert!(receiver.try_recv().is_ok());
+            finish_navigation_page(
+                &mut ui,
+                &writer,
+                "get_messages-1",
+                older,
+                false,
+                Some("last page"),
+            )
+            .await;
+            assert!(ui.pending_history_navigation.is_none());
+            assert!(ui.state.history_request_direction().is_none());
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

@@ -650,18 +650,20 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
     if height == 0 {
         return;
     }
-    let thumb_height = ((end - start) * height as f64).round().max(1.0) as usize;
-    let thumb_height = thumb_height.min(height);
-    let travel = height - thumb_height;
+    // Entry/source ranks locate the viewport but do not measure rendered height.
+    // A proportional thumb would grow over short entries and shrink over long replies,
+    // even while the viewport and history stay unchanged. Use a fixed position marker
+    // until the paged transcript has a global row extent.
+    let travel = height - 1;
     let position = if end >= 1.0 {
         travel
     } else {
-        (start * height as f64).floor() as usize
+        ((start / (start + 1.0 - end)) * travel as f64).round() as usize
     }
     .min(travel);
     let x = frame.area().right().saturating_sub(1);
     for offset in 0..height {
-        let thumb = (position..position + thumb_height).contains(&offset);
+        let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
         cell.set_symbol(if thumb { "┃" } else { "│" });
         cell.set_style(
@@ -2206,6 +2208,31 @@ mod tests {
     use ratatui::backend::TestBackend;
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
+
+    #[test]
+    fn scrollbar_marker_stays_one_row_across_different_visible_entry_spans() {
+        for height in [1, 8, 40] {
+            for (start, end) in [(0.0, 0.1), (0.2, 0.21), (0.2, 0.8), (0.9, 1.0)] {
+                let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_scrollbar(frame, frame.area(), start, end, Palette::default());
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let marked = (0..height)
+                    .filter(|y| buffer[(9, *y)].symbol() == "┃")
+                    .collect::<Vec<_>>();
+                assert_eq!(marked.len(), 1, "height {height}, range {start}..{end}");
+                if start == 0.0 {
+                    assert_eq!(marked[0], 0);
+                }
+                if end == 1.0 {
+                    assert_eq!(marked[0], height - 1);
+                }
+            }
+        }
+    }
 
     #[derive(Default)]
     struct TestIds(u64);

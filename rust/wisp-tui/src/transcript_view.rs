@@ -1899,6 +1899,7 @@ impl TranscriptRowCache {
         if self.rows.contains_key(&key) {
             return;
         }
+
         self.retained_bytes = self
             .retained_bytes
             .saturating_add(value.row.retained_bytes());
@@ -1941,6 +1942,51 @@ impl TranscriptRowCache {
                 self.remove_indexes(oldest, &removed);
             }
         }
+    }
+
+    /// Keep surviving entry interiors while rebuilding links across history boundaries.
+    ///
+    /// A history page splices into the transcript and leaves surviving entries with their
+    /// identifiers intact, so their interior rows, markdown snapshots, and card projections stay
+    /// valid. Terminal rows and separators depend on neighboring entries, whose identities can
+    /// change without revising the surviving entry.
+    /// Rebuilding the whole cache on every page instead re-laid out the viewport at exactly the
+    /// moment a paging round trip had already stalled scrolling.
+    pub(crate) fn retain_entries(&mut self, transcript: &Transcript) {
+        let live = |entry_id| transcript.entry(entry_id).is_some();
+        self.rows.retain(|key, cached| {
+            live(key.entry_id)
+                && cached.next.is_some_and(|next| {
+                    next.entry_id == key.entry_id && next.position != RowPosition::Spacer
+                })
+        });
+        let rows = &self.rows;
+        self.predecessors.retain(|key, previous| {
+            rows.contains_key(&RowKey {
+                position: previous.position,
+                ..*key
+            })
+        });
+        self.furthest_content.retain(|key, _| live(key.0));
+        self.markdown.retain(|key, _| live(key.entry_id));
+        self.cards.retain(|key, _| live(key.entry_id));
+        let rows = &self.rows;
+        self.insertion_order.retain(|key| rows.contains_key(key));
+        let markdown = &self.markdown;
+        self.markdown_order.retain(|key| markdown.contains_key(key));
+        let cards = &self.cards;
+        self.card_order.retain(|key| cards.contains_key(key));
+        self.retained_bytes = self
+            .rows
+            .values()
+            .map(|cached| cached.row.retained_bytes())
+            .sum();
+        self.markdown_retained_bytes = self
+            .markdown
+            .values()
+            .map(|entry| entry.retained_bytes)
+            .sum();
+        self.card_retained_bytes = self.cards.values().map(|card| card.retained_bytes()).sum();
     }
 
     fn remove_indexes(&mut self, key: RowKey, cached: &CachedRow) {
@@ -2440,10 +2486,23 @@ impl TranscriptViewport {
         rows
     }
 
-    pub fn at_oldest(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) -> bool {
+    /// Whether fewer than one viewport of retained rows remains above the top row.
+    ///
+    /// Requesting the next page only once scrolling has already reached the oldest row makes every
+    /// wheel tick at the boundary wait for a round trip. Reporting the approach one viewport early
+    /// lets the request overlap the rows that are still locally available.
+    pub fn near_oldest(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) -> bool {
         let _ = self.visible_rows(transcript, cache);
-        self.top
-            .is_some_and(|top| cache.previous_anchor(transcript, top, self.width).is_none())
+        let Some(mut anchor) = self.top else {
+            return false;
+        };
+        for _ in 0..self.height.max(1) {
+            let Some(previous) = cache.previous_anchor(transcript, anchor, self.width) else {
+                return true;
+            };
+            anchor = previous;
+        }
+        false
     }
 
     /// Estimate the visible interval in retained history without laying out offscreen rows.
@@ -4059,6 +4118,154 @@ mod tests {
             }
             _ => assert_eq!(after.position, before.position),
         }
+    }
+
+    #[test]
+    fn retaining_history_cache_connects_a_loaded_page_to_the_previous_tail() {
+        for live_suffix in [false, true] {
+            let mut transcript = Transcript::default();
+            let older = transcript.append_prompt("older".into());
+            transcript.mark_history_entries(0, "older-entry");
+            if live_suffix {
+                transcript.append_prompt("live".into());
+            }
+            let mut cache = TranscriptRowCache::default();
+            let top = RowAnchor {
+                entry_id: older,
+                position: RowPosition::Header,
+            };
+            let _ = collect_rows(&transcript, &mut cache, top, 40, 20);
+
+            let mut page = Transcript::default();
+            page.append_prompt("newer".into());
+            page.mark_history_entries(0, "newer-entry");
+            assert!(transcript.append_history_page(&page));
+            cache.retain_entries(&transcript);
+
+            let texts = collect_rows(&transcript, &mut cache, top, 40, 20)
+                .iter()
+                .map(TranscriptRow::plain_text)
+                .collect::<Vec<_>>();
+            assert!(texts.iter().any(|text| text == "newer"), "{texts:?}");
+            assert_eq!(texts.iter().any(|text| text == "live"), live_suffix);
+        }
+    }
+
+    #[test]
+    fn retaining_history_cache_removes_links_into_an_evicted_suffix() {
+        let mut transcript = Transcript::default();
+        let older = transcript.append_prompt("older".into());
+        transcript.mark_history_entries(0, "older-entry");
+        let start = transcript.entries().len();
+        transcript.append_prompt("newer".into());
+        transcript.mark_history_entries(start, "newer-entry");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 2);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let _ = viewport.visible_rows(&transcript, &mut cache);
+
+        transcript.retain_historical_entries(1, true).unwrap();
+        cache.retain_entries(&transcript);
+        let last = cache.last_anchor(&transcript, transcript.entry(older).unwrap(), 40);
+        assert!(cache.row_at(&transcript, last, 40).unwrap().next.is_none());
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        viewport.reduce(TranscriptViewAction::PageDown, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(rows.iter().any(|row| row.plain_text() == "older"));
+        assert!(rows.iter().all(|row| row.anchor.entry_id == older));
+    }
+
+    #[test]
+    fn retaining_history_cache_keeps_the_viewport_anchored_after_a_prepend() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("current\n".repeat(30));
+        transcript.mark_history_entries(0, "current-entry");
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let before = viewport.visible_rows(&transcript, &mut cache);
+
+        let mut page = Transcript::default();
+        page.append_prompt("older".into());
+        page.mark_history_entries(0, "older-entry");
+        assert!(transcript.prepend_history_page(&page));
+        cache.retain_entries(&transcript);
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(viewport.visible_rows(&transcript, &mut cache), before);
+
+        viewport.reduce(
+            TranscriptViewAction::ScrollLines(-20),
+            &transcript,
+            &mut cache,
+        );
+        let texts = viewport
+            .visible_rows(&transcript, &mut cache)
+            .iter()
+            .map(TranscriptRow::plain_text)
+            .collect::<Vec<_>>();
+        let older = texts
+            .iter()
+            .position(|text| text == "older")
+            .expect("prepended page");
+        let current = texts
+            .iter()
+            .position(|text| text == "current")
+            .expect("retained page");
+        assert!(older < current, "{texts:?}");
+    }
+
+    #[test]
+    fn retaining_entries_keeps_surviving_layout_and_drops_evicted_entries() {
+        let mut transcript = Transcript::default();
+        let current = transcript.append_prompt("current".into());
+        transcript.mark_history_entries(0, "current-entry");
+        let mut cache = TranscriptRowCache::default();
+        let anchor = RowAnchor {
+            entry_id: current,
+            position: RowPosition::Header,
+        };
+        assert!(cache.row_at(&transcript, anchor, 40).is_some());
+
+        // A prepended page leaves the surviving entry's cached layout reusable.
+        let mut older = Transcript::default();
+        older.append_prompt("older".into());
+        older.mark_history_entries(0, "older-entry");
+        assert!(transcript.prepend_history_page(&older));
+        cache.retain_entries(&transcript);
+        cache.reset_work();
+        assert!(cache.row_at(&transcript, anchor, 40).is_some());
+        assert_eq!(cache.work().rows_built, 0, "surviving row was rebuilt");
+        assert_eq!(cache.work().cache_hits, 1);
+
+        // Evicting the entry drops its rows and the bookkeeping that indexed them.
+        transcript.retain_historical_entries(0, false).unwrap();
+        cache.retain_entries(&transcript);
+        assert!(transcript.entry(current).is_none());
+        assert!(cache.rows.keys().all(|key| key.entry_id != current));
+        assert!(
+            cache
+                .insertion_order
+                .iter()
+                .all(|key| key.entry_id != current)
+        );
+        assert_eq!(
+            cache.retained_bytes,
+            cache
+                .rows
+                .values()
+                .map(|cached| cached.row.retained_bytes())
+                .sum::<usize>(),
+        );
     }
 
     #[test]

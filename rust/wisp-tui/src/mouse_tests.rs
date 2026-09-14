@@ -365,6 +365,56 @@ async fn wheel_preserves_editor_focus_and_reading_position_during_streaming() {
 }
 
 #[tokio::test]
+async fn scrolling_near_the_start_repaints_when_no_older_history_remains() {
+    for navigation in 0..4 {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = ui("draft");
+        ui.state.transcript.complete_message(
+            1,
+            (0..60)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        ui.state.transcript.mark_history_entries(0, "oldest-entry");
+        draw(&mut ui, 80, 24);
+        for action in [
+            TranscriptViewAction::Home,
+            TranscriptViewAction::ScrollLines(5),
+        ] {
+            ui.transcript_viewport.reduce(
+                action,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+            );
+        }
+        let before = draw(&mut ui, 80, 24);
+        let viewport = ui.transcript_viewport.clone();
+        let editor = ui.editor.clone();
+        let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+        let input = match navigation {
+            0 => Input::Mouse(event(MouseEventKind::ScrollUp, area.x + 2, area.y + 2)),
+            1 => Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            2 => key(KeyCode::PageUp),
+            _ => Input::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)),
+        };
+        assert!(!ui.render_pending);
+        assert!(ui.state.history.oldest_cursor.is_none());
+
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+
+        assert_ne!(ui.transcript_viewport, viewport, "navigation {navigation}");
+        assert!(
+            ui.render_pending,
+            "navigation {navigation} moved without scheduling a repaint"
+        );
+        assert_ne!(draw(&mut ui, 80, 24), before);
+        assert_eq!(ui.editor, editor);
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
 async fn first_wheel_scroll_uses_the_last_rendered_tail_after_unseen_output() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("draft");
