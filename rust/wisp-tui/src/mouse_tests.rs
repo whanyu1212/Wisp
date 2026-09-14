@@ -365,20 +365,70 @@ async fn wheel_preserves_editor_focus_and_reading_position_during_streaming() {
 }
 
 #[tokio::test]
-async fn wheel_reaches_history_hidden_behind_the_pinned_current_turn() {
+async fn scrolling_near_the_start_repaints_when_no_older_history_remains() {
+    for navigation in 0..4 {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = ui("draft");
+        ui.state.transcript.complete_message(
+            1,
+            (0..60)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        ui.state.transcript.mark_history_entries(0, "oldest-entry");
+        draw(&mut ui, 80, 24);
+        for action in [
+            TranscriptViewAction::Home,
+            TranscriptViewAction::ScrollLines(5),
+        ] {
+            ui.transcript_viewport.reduce(
+                action,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+            );
+        }
+        let before = draw(&mut ui, 80, 24);
+        let viewport = ui.transcript_viewport.clone();
+        let editor = ui.editor.clone();
+        let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+        let input = match navigation {
+            0 => Input::Mouse(event(MouseEventKind::ScrollUp, area.x + 2, area.y + 2)),
+            1 => Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            2 => key(KeyCode::PageUp),
+            _ => Input::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)),
+        };
+        assert!(!ui.render_pending);
+        assert!(ui.state.history.oldest_cursor.is_none());
+
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+
+        assert_ne!(ui.transcript_viewport, viewport, "navigation {navigation}");
+        assert!(
+            ui.render_pending,
+            "navigation {navigation} moved without scheduling a repaint"
+        );
+        assert_ne!(draw(&mut ui, 80, 24), before);
+        assert_eq!(ui.editor, editor);
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn first_wheel_scroll_uses_the_last_rendered_tail_after_unseen_output() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("draft");
-    ui.state.transcript.append_prompt("OLDER-PROMPT".into());
+    ui.state.transcript.start_message(1);
     ui.state
         .transcript
-        .complete_message(1, "OLDER-REPLY".into());
-    ui.state.transcript.append_prompt("CURRENT-PROMPT".into());
-    let live = draw(&mut ui, 80, 24);
-    let live_text = (0..live.area.height)
-        .map(|row| row_text(&live, row))
-        .collect::<String>();
-    assert!(live_text.contains("CURRENT-PROMPT"), "{live_text}");
-    assert!(!live_text.contains("OLDER-PROMPT"), "{live_text}");
+        .append_message_delta(1, &"long transcript line\n".repeat(120));
+    draw(&mut ui, 80, 24);
+    let before = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
+    ui.state
+        .transcript
+        .append_message_delta(1, "unseen output\n");
 
     let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
     ui.handle_input(
@@ -388,13 +438,13 @@ async fn wheel_reaches_history_hidden_behind_the_pinned_current_turn() {
     )
     .await
     .unwrap();
-    assert!(!ui.transcript_viewport.follows_tail());
+    let after = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
 
-    let history = draw(&mut ui, 80, 24);
-    let history_text = (0..history.area.height)
-        .map(|row| row_text(&history, row))
-        .collect::<String>();
-    assert!(history_text.contains("OLDER-REPLY"), "{history_text}");
+    assert!(!ui.transcript_viewport.follows_tail());
+    assert_ne!(after[0].anchor, before[0].anchor);
+    assert_eq!(after[1..], before[..before.len() - 1]);
     assert!(receiver.try_recv().is_err());
 }
 

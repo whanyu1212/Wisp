@@ -11,8 +11,8 @@ use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    RowAnchor, RowPosition, TranscriptRow, TranscriptRowCache, TranscriptRowKind,
-    TranscriptRowTone, TranscriptViewport,
+    RowAnchor, TranscriptRow, TranscriptRowCache, TranscriptRowKind, TranscriptRowTone,
+    TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -39,7 +39,6 @@ const EMPTY_TRANSCRIPT_WORDMARK: [&str; 5] = [
     "█   █  ███  ████  █   ",
 ];
 const EMPTY_TRANSCRIPT_FULL_WIDTH: usize = 40;
-const STICKY_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
@@ -448,85 +447,6 @@ fn footer_trailing_parts(state: &UiState) -> Vec<String> {
     parts
 }
 
-fn sticky_user_rows(
-    state: &UiState,
-    viewport: &TranscriptViewport,
-    row_cache: &mut TranscriptRowCache,
-    width: usize,
-) -> Vec<TranscriptRow> {
-    if !viewport.follows_tail() {
-        return Vec::new();
-    }
-    let Some(user) = state
-        .transcript
-        .entries()
-        .iter()
-        .rev()
-        .find(|entry| entry.role == TranscriptRole::User)
-    else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    let mut anchor = RowAnchor {
-        entry_id: user.id,
-        position: RowPosition::Header,
-    };
-    while rows.len() < STICKY_USER_ROWS {
-        let Some(cached) = row_cache.row_at(&state.transcript, anchor, width) else {
-            break;
-        };
-        if cached.row.kind == TranscriptRowKind::Spacer || cached.row.anchor.entry_id != user.id {
-            break;
-        }
-        rows.push(cached.row);
-        let Some(next) = cached.next else {
-            break;
-        };
-        if next.entry_id != user.id {
-            break;
-        }
-        anchor = next;
-    }
-    rows
-}
-
-fn clipped_tail_assistant_header(
-    state: &UiState,
-    rows: &[TranscriptRow],
-    row_cache: &mut TranscriptRowCache,
-    width: usize,
-    active_reply: Option<TranscriptEntryId>,
-) -> Option<TranscriptRow> {
-    let assistant = active_reply
-        .and_then(|id| state.transcript.entry(id))
-        .or_else(|| state.transcript.entries().last())?;
-    if assistant.role != TranscriptRole::Assistant
-        || (active_reply.is_none()
-            && !rows.iter().any(|row| {
-                row.anchor.entry_id == assistant.id
-                    && !matches!(
-                        row.kind,
-                        TranscriptRowKind::Header | TranscriptRowKind::Spacer
-                    )
-            }))
-        || rows
-            .iter()
-            .any(|row| row.anchor.entry_id == assistant.id && row.kind == TranscriptRowKind::Header)
-    {
-        return None;
-    }
-    row_cache
-        .row_at(
-            &state.transcript,
-            RowAnchor {
-                entry_id: assistant.id,
-                position: RowPosition::Header,
-            },
-            width,
-        )
-        .map(|cached| cached.row)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_transcript(
     frame: &mut Frame<'_>,
@@ -587,43 +507,7 @@ fn render_transcript(
     let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(rows_area.height).max(1);
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
-    let mut sticky = sticky_user_rows(state, viewport, row_cache, content_width);
-    let mut rows = viewport.visible_rows(&state.transcript, row_cache);
-    if !sticky.is_empty() {
-        let user_id = sticky[0].anchor.entry_id;
-        rows.retain(|row| row.anchor.entry_id != user_id);
-    }
-    // Reserve a row for the active assistant's identity and one for its tail.
-    // A compact user projection may otherwise consume the whole viewport.
-    sticky.truncate(visible_lines.saturating_sub(rows.len().min(2)));
-    if !sticky.is_empty() && visible_lines >= sticky.len() + 3 {
-        let mut spacer = sticky.last().expect("nonempty user projection").clone();
-        spacer.kind = TranscriptRowKind::Spacer;
-        spacer.anchor.position = RowPosition::Spacer;
-        spacer.spans.clear();
-        sticky.push(spacer);
-    }
-    let mut budget = visible_lines.saturating_sub(sticky.len());
-    if rows.len() > budget {
-        rows.drain(..rows.len() - budget);
-    }
-    let assistant_header = (viewport.follows_tail() && budget >= 2)
-        .then(|| {
-            clipped_tail_assistant_header(state, &rows, row_cache, content_width, active_reply)
-        })
-        .flatten();
-    if assistant_header.is_some() {
-        budget = budget.saturating_sub(1);
-        if rows.len() > budget {
-            rows.drain(..rows.len() - budget);
-        }
-    }
-    if !sticky.is_empty() || assistant_header.is_some() {
-        let mut combined = sticky;
-        combined.extend(assistant_header);
-        combined.append(&mut rows);
-        rows = combined;
-    }
+    let rows = viewport.visible_rows(&state.transcript, row_cache);
     let painted_rows = rows.len();
     let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
     let selected_row = browse_selected.and_then(|selected_entry| {
@@ -766,18 +650,20 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
     if height == 0 {
         return;
     }
-    let thumb_height = ((end - start) * height as f64).round().max(1.0) as usize;
-    let thumb_height = thumb_height.min(height);
-    let travel = height - thumb_height;
+    // Entry/source ranks locate the viewport but do not measure rendered height.
+    // A proportional thumb would grow over short entries and shrink over long replies,
+    // even while the viewport and history stay unchanged. Use a fixed position marker
+    // until the paged transcript has a global row extent.
+    let travel = height - 1;
     let position = if end >= 1.0 {
         travel
     } else {
-        (start * height as f64).floor() as usize
+        ((start / (start + 1.0 - end)) * travel as f64).round() as usize
     }
     .min(travel);
     let x = frame.area().right().saturating_sub(1);
     for offset in 0..height {
-        let thumb = (position..position + thumb_height).contains(&offset);
+        let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
         cell.set_symbol(if thumb { "┃" } else { "│" });
         cell.set_style(
@@ -813,7 +699,7 @@ fn render_transcript_row(
 ) {
     let selected = selected_row == Some(row.anchor);
     // The trailing spacer belongs to the user panel, giving the message a
-    // padded bottom edge in both the pinned turn and scrollback.
+    // padded bottom edge in both tail-follow and scrollback.
     let user = row.role == TranscriptRole::User;
     let code = row
         .spans
@@ -2323,6 +2209,31 @@ mod tests {
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
 
+    #[test]
+    fn scrollbar_marker_stays_one_row_across_different_visible_entry_spans() {
+        for height in [1, 8, 40] {
+            for (start, end) in [(0.0, 0.1), (0.2, 0.21), (0.2, 0.8), (0.9, 1.0)] {
+                let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_scrollbar(frame, frame.area(), start, end, Palette::default());
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let marked = (0..height)
+                    .filter(|y| buffer[(9, *y)].symbol() == "┃")
+                    .collect::<Vec<_>>();
+                assert_eq!(marked.len(), 1, "height {height}, range {start}..{end}");
+                if start == 0.0 {
+                    assert_eq!(marked[0], 0);
+                }
+                if end == 1.0 {
+                    assert_eq!(marked[0], height - 1);
+                }
+            }
+        }
+    }
+
     #[derive(Default)]
     struct TestIds(u64);
 
@@ -2647,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_tail_pins_the_compact_user_turn_above_a_long_assistant_echo() {
+    fn follow_tail_does_not_pin_a_compact_prompt_above_a_long_assistant_echo() {
         let mut state = UiState::new("fake".into(), None, None);
         let raw = format!("{}\n🙂END", "界".repeat(2001));
         state.transcript.append_prompt_with_display(
@@ -2658,13 +2569,12 @@ mod tests {
             .transcript
             .complete_message(1, format!("fake response to: {raw}"));
         let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
-        assert!(rendered.contains("Pasted content #1"));
-        assert!(rendered.contains("2006"));
-        assert!(rendered.contains("6011"));
+        assert!(rendered.contains("🙂END"), "{rendered}");
+        assert!(!rendered.contains("Pasted content #1"), "{rendered}");
     }
 
     #[test]
-    fn follow_tail_keeps_both_speaker_labels_with_a_long_assistant_reply() {
+    fn follow_tail_keeps_a_long_assistant_reply_at_its_tail() {
         for (width, height) in [(80, 18), (36, 12)] {
             let mut state = UiState::new("fake".into(), None, None);
             state.transcript.append_prompt("LATEST-USER".into());
@@ -2678,21 +2588,13 @@ mod tests {
             );
 
             let rendered = render_to_string(width, height, &state, &PromptEditor::default());
-            let user = rendered.find("you").expect("user label");
-            let prompt = rendered.find("LATEST-USER").expect("latest prompt");
-            let assistant = rendered.find("wisp").expect("assistant label");
-            let tail = rendered
-                .find("FINAL-ASSISTANT-LINE")
-                .expect("assistant tail");
-            assert!(
-                user < prompt && prompt < assistant && assistant < tail,
-                "{rendered}"
-            );
+            assert!(rendered.contains("FINAL-ASSISTANT-LINE"), "{rendered}");
+            assert!(!rendered.contains("LATEST-USER"), "{rendered}");
         }
     }
 
     #[test]
-    fn follow_tail_keeps_the_latest_user_turn_at_the_top_when_it_is_still_in_view() {
+    fn follow_tail_backfills_above_a_short_latest_turn() {
         let mut state = UiState::new("fake".into(), None, None);
         state.transcript.append_prompt("older-prompt".into());
         state.transcript.complete_message(
@@ -2707,12 +2609,14 @@ mod tests {
             .append_prompt("latest-prompt-marker".into());
         state.transcript.complete_message(2, "short-ok".into());
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+        let older = rendered
+            .find("OLDER-ASSISTANT-LINE-39")
+            .expect("preceding context");
         let latest = rendered
             .find("latest-prompt-marker")
             .expect("latest user turn");
         let short = rendered.find("short-ok").expect("latest assistant");
-        assert!(latest < short);
-        assert!(!rendered.contains("OLDER-ASSISTANT-LINE-"), "{rendered}");
+        assert!(older < latest && latest < short, "{rendered}");
         assert!(!rendered.contains("older-prompt"));
     }
 
@@ -3626,7 +3530,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(30, 2)).unwrap();
             let anchor = RowAnchor {
                 entry_id: TranscriptEntryId::from_raw(1),
-                position: RowPosition::Content(0),
+                position: crate::transcript_view::RowPosition::Content(0),
             };
             let row = TranscriptRow {
                 anchor,
@@ -3691,7 +3595,7 @@ mod tests {
     }
 
     #[test]
-    fn reported_tool_table_keeps_borders_and_assistant_identity_on_screen() {
+    fn reported_tool_table_keeps_borders_and_tail_on_screen() {
         let mut state = UiState::new("fake".into(), None, None);
         state
             .transcript
@@ -3709,8 +3613,6 @@ mod tests {
         ).into());
         for (width, height) in [(100, 40), (60, 20)] {
             let rendered = render_to_string(width, height, &state, &PromptEditor::default());
-            assert!(rendered.contains("you"), "{rendered}");
-            assert!(rendered.contains("wisp"), "{rendered}");
             assert!(rendered.contains("└"), "{rendered}");
             assert!(rendered.contains("│ skill │"), "{rendered}");
             assert!(rendered.contains("MCP integrations."), "{rendered}");
@@ -3971,7 +3873,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_live_view_only_renders_the_current_retained_turn() {
+    fn transcript_live_view_backfills_retained_turns_when_they_fit() {
         let mut state = UiState::unconfigured();
         state.transcript.append_exchange("first prompt".into());
         state.transcript.complete_message(1, "first answer".into());
@@ -3980,8 +3882,8 @@ mod tests {
 
         let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
 
-        assert!(!rendered.contains("first prompt"));
-        assert!(!rendered.contains("first answer"));
+        assert!(rendered.contains("first prompt"));
+        assert!(rendered.contains("first answer"));
         assert!(rendered.contains("second prompt"));
         assert!(rendered.contains("second answer"));
         assert_eq!(state.transcript.entries().len(), 4);
@@ -4139,7 +4041,7 @@ mod tests {
         }
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
-            assert!(running.contains("wisp"), "{running}");
+            assert!(running.contains("check 19"), "{running}");
             assert!(!running.contains("working ⠙"), "{running}");
             assert!(!running.contains('⠙'), "{running}");
         }

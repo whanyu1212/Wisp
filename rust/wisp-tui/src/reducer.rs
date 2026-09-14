@@ -731,6 +731,16 @@ impl UiState {
         self.queue.follow_up.len()
     }
 
+    pub(crate) fn history_request_direction(&self) -> Option<bool> {
+        match self.history_request.as_ref()?.kind {
+            HistoryRequestKind::Older { .. } => Some(true),
+            HistoryRequestKind::Newer { .. } => Some(false),
+            HistoryRequestKind::Latest
+            | HistoryRequestKind::PostPromptSync
+            | HistoryRequestKind::ExactDetail { .. } => None,
+        }
+    }
+
     pub(crate) fn editor_editable(&self) -> bool {
         !self.exit_requested
             && !self.configuration_active()
@@ -1214,7 +1224,10 @@ pub enum UiEffect {
     },
     SendPostPromptSessionSync(WispTypedClientRpcCommands),
     ReplaceTranscript,
-    HistoryWindowChanged,
+    HistoryWindowChanged {
+        older: bool,
+    },
+    HistoryRequestFailed,
     OpenExactDetail(crate::transcript::TranscriptEntryId),
     Notice(String),
     Diagnostic(String),
@@ -3215,9 +3228,6 @@ fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
         tail_evicted: false,
         active_exact_detail: None,
     };
-    state
-        .transcript
-        .replace_history_omission_marker(state.history.oldest_cursor.is_some());
 }
 
 fn same_optional_session(left: &Option<SessionIdentity>, right: &Option<SessionIdentity>) -> bool {
@@ -3263,6 +3273,7 @@ fn history_request_failure(error: String) -> Vec<UiEffect> {
             &format!("Session history request failed: {error}"),
             SESSION_NOTICE_MAX_BYTES,
         )),
+        UiEffect::HistoryRequestFailed,
         UiEffect::RequestRender,
     ]
 }
@@ -3411,12 +3422,9 @@ fn handle_history_backend_event(
                     .last()
                     .cloned();
             }
-            state
-                .transcript
-                .replace_history_omission_marker(state.history.oldest_cursor.is_some());
             clear_evicted_exact_detail(state);
             Some(vec![
-                UiEffect::HistoryWindowChanged,
+                UiEffect::HistoryWindowChanged { older: true },
                 UiEffect::RequestRender,
             ])
         }
@@ -3450,12 +3458,9 @@ fn handle_history_backend_event(
                     .first()
                     .cloned();
             }
-            state
-                .transcript
-                .replace_history_omission_marker(state.history.oldest_cursor.is_some());
             clear_evicted_exact_detail(state);
             Some(vec![
-                UiEffect::HistoryWindowChanged,
+                UiEffect::HistoryWindowChanged { older: false },
                 UiEffect::RequestRender,
             ])
         }
@@ -4205,7 +4210,8 @@ mod tests {
             | UiEffect::CloseSessionTree
             | UiEffect::RestoreSessionDraft(_)
             | UiEffect::ReplaceTranscript
-            | UiEffect::HistoryWindowChanged
+            | UiEffect::HistoryWindowChanged { .. }
+            | UiEffect::HistoryRequestFailed
             | UiEffect::OpenExactDetail(_)
             | UiEffect::ShowModelPicker
             | UiEffect::ModelCatalogUpdated(_)
@@ -7263,7 +7269,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_history_with_an_older_cursor_installs_one_omission_marker() {
+    fn startup_history_keeps_the_older_cursor_without_inserting_a_notice() {
         let event = BackendEvent::from_projection_value(&serde_json::json!({
             "type": "rpc.messages",
             "command_id": "get_messages-1",
@@ -7291,13 +7297,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.transcript.history_omission_count(), 1);
-        assert_eq!(state.transcript.entries().len(), 2);
-        assert_eq!(
-            state.transcript.entries()[0].content,
-            "[earlier session history omitted]"
-        );
-        assert_eq!(state.transcript.entries()[1].content, "retained");
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("entry-1"));
+        assert_eq!(state.transcript.entries().len(), 1);
+        assert_eq!(state.transcript.entries()[0].content, "retained");
     }
 
     #[test]
@@ -7999,8 +8001,7 @@ mod tests {
             .insert("current-entry".into());
         state.transcript.append_prompt("current".into());
         state.transcript.mark_history_entries(0, "current-entry");
-        state.transcript.replace_history_omission_marker(true);
-        let marker_id = state.transcript.entries()[0].id;
+        let current_id = state.transcript.entries()[0].id;
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -8048,23 +8049,15 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert!(state.history_request.is_none());
         assert_eq!(state.history.active_leaf_id.as_deref(), Some("new-leaf"));
         assert_eq!(state.history.oldest_cursor.as_deref(), Some("older-entry"));
-        assert_eq!(state.transcript.entries()[0].id, marker_id);
-        assert_eq!(state.transcript.entries()[1].content, "older");
-        assert_eq!(state.transcript.entries()[2].content, "current");
-        assert_eq!(
-            state
-                .transcript
-                .entries()
-                .iter()
-                .filter(|entry| entry.content == "[earlier session history omitted]")
-                .count(),
-            1
-        );
+        assert_eq!(state.transcript.entries().len(), 2);
+        assert_eq!(state.transcript.entries()[0].content, "older");
+        assert_eq!(state.transcript.entries()[1].content, "current");
+        assert_eq!(state.transcript.entries()[1].id, current_id);
     }
 
     #[test]
@@ -8123,7 +8116,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert_eq!(
             state.history.active_leaf_id.as_deref(),
@@ -8184,7 +8177,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged))
+                .any(|effect| matches!(effect, UiEffect::HistoryWindowChanged { .. }))
         );
         assert!(!state.history.tail_evicted);
         assert!(state.history.newest_cursor.is_none());

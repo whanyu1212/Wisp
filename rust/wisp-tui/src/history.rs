@@ -191,7 +191,7 @@ fn project_assistant(
             process_ids.push_back((tool_call.call_id.clone(), process.process_id));
         }
         let call_id = tool_call.call_id.clone();
-        let entry_id = transcript.observe_tool_call(tool_call);
+        let entry_id = transcript.observe_historical_tool_call(tool_call);
         transcript.record_history_call(entry_id, &call_id);
         entries.push(entry_id);
     }
@@ -297,7 +297,7 @@ fn project_tool_result(
     }
     if tool_result_status(message) == Some("denied") {
         if request_missing {
-            transcript.observe_tool_call(ToolCallInput {
+            transcript.observe_historical_tool_call(ToolCallInput {
                 call_id: result.call_id.clone(),
                 name: result.name.clone(),
                 arguments: Value::Object(Map::new()),
@@ -1455,6 +1455,41 @@ mod tests {
         assert_eq!(card.call_count, 2);
         assert_eq!(card.poll_count, 1);
         assert_eq!(card.display_state.status().as_str(), "cancelled");
+    }
+
+    #[test]
+    fn repeated_running_polls_remain_complete_historical_page_entries() {
+        let mut messages = Vec::new();
+        for index in 0..40 {
+            let call_id = format!("poll-{index}");
+            let mut poll = message("assistant", "");
+            poll["tool_calls"] = json!([{
+                "call_id": call_id,
+                "name": "bash",
+                "arguments": {"operation": "poll", "process_id": "process-running"},
+            }]);
+            let mut result = message(
+                "tool",
+                "Process process-running is still running\nstdout:\nprogress",
+            );
+            result["tool_call_id"] = json!(call_id);
+            result["tool_name"] = json!("bash");
+            result["tool_result"] = json!({"status": "done"});
+            messages.extend([poll, result]);
+        }
+
+        let page = project_rpc_messages(&messages).unwrap();
+
+        assert!(
+            page.entries()
+                .iter()
+                .all(|entry| entry.state == crate::transcript::TranscriptEntryState::Complete)
+        );
+        assert_eq!(page.entries().len(), 1);
+        assert_eq!(page.entries()[0].process_card().unwrap().poll_count, 40);
+
+        let mut current = project_rpc_messages(&[message("user", "current")]).unwrap();
+        assert!(current.prepend_history_page(&page));
     }
 
     #[test]
