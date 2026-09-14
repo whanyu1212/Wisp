@@ -1101,7 +1101,13 @@ fn render_composer(
                         );
                         highlighted_line = Some(row.logical_row);
                     }
-                    styled_composer_line(row, &highlights, palette)
+                    styled_composer_line(
+                        row,
+                        &highlights,
+                        layout.lines[row.logical_row].selection.as_ref(),
+                        usize::from(editor_area.width),
+                        palette,
+                    )
                 })
                 .collect::<Vec<_>>();
             frame.render_widget(Paragraph::new(rows), editor_area);
@@ -1220,6 +1226,7 @@ struct ComposerVisualRow {
 struct ComposerLogicalLine {
     text: String,
     truncated: bool,
+    selection: Option<std::ops::Range<usize>>,
 }
 
 struct ComposerLayout {
@@ -1327,6 +1334,8 @@ fn cursor_needs_continuation_row(projection: &PromptProjection<'_>, width: usize
 fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     let width = width.max(1);
     let projection = editor.projection();
+    let selection = projection.selection();
+    let mut line_start = 0;
     let lines = projection
         .text()
         .split('\n')
@@ -1335,9 +1344,25 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
             while !line.is_char_boundary(end) {
                 end -= 1;
             }
+            let line_end = line_start + line.len();
+            let selected_columns = selection.as_ref().and_then(|range| {
+                let start = range.start.max(line_start);
+                let end = range.end.min(line_end);
+                let newline = range.start <= line_end && range.end > line_end;
+                (start < end || newline).then(|| {
+                    crate::prompt_editor::display_width(
+                        &line[..start.saturating_sub(line_start).min(line.len())],
+                    )
+                        ..crate::prompt_editor::display_width(
+                            &line[..end.saturating_sub(line_start)],
+                        ) + usize::from(newline)
+                })
+            });
+            line_start = line_end + 1;
             ComposerLogicalLine {
                 text: line[..end].to_owned(),
                 truncated: end < line.len(),
+                selection: selected_columns,
             }
         })
         .collect::<Vec<_>>();
@@ -1347,15 +1372,22 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     for (logical_row, line) in projection.text().split('\n').enumerate() {
         let first_row = rows.len();
         append_composer_visual_rows(&mut rows, logical_row, line, width);
-        if logical_row != projection.cursor_row() {
-            continue;
-        }
-        if cursor_needs_continuation_row(&projection, width) {
+        let line_columns = crate::prompt_editor::display_width(line);
+        let selected_newline_wraps = lines[logical_row].selection.as_ref().is_some_and(|range| {
+            range.end > line_columns && rows.last().is_some_and(|row| row.text.width() == width)
+        });
+        if selected_newline_wraps
+            || (logical_row == projection.cursor_row()
+                && cursor_needs_continuation_row(&projection, width))
+        {
             rows.push(ComposerVisualRow {
                 logical_row,
-                column_start: projection.cursor_column(),
+                column_start: line_columns,
                 text: String::new(),
             });
+        }
+        if logical_row != projection.cursor_row() {
+            continue;
         }
         let relative = rows[first_row..]
             .iter()
@@ -1380,6 +1412,8 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
 fn styled_composer_line(
     row: &ComposerVisualRow,
     highlights: &[Highlight],
+    selection: Option<&std::ops::Range<usize>>,
+    width: usize,
     palette: Palette,
 ) -> Line<'static> {
     let row_start = row.column_start;
@@ -1422,7 +1456,36 @@ fn styled_composer_line(
     if byte_start < row.text.len() {
         spans.push(Span::raw(row.text[byte_start..].to_owned()));
     }
-    Line::from(spans)
+    let Some(selection) = selection else {
+        return Line::from(spans);
+    };
+    let mut selected_spans: Vec<Span<'static>> = Vec::new();
+    let mut column = row_start;
+    for span in spans {
+        for grapheme in span.content.graphemes(true) {
+            let end = column + grapheme.width();
+            let selected = column < selection.end && end > selection.start;
+            let style = if selected {
+                span.style.patch(palette.selection())
+            } else {
+                span.style
+            };
+            if let Some(previous) = selected_spans
+                .last_mut()
+                .filter(|previous| previous.style == style)
+            {
+                previous.content.to_mut().push_str(grapheme);
+            } else {
+                selected_spans.push(Span::styled(grapheme.to_owned(), style));
+            }
+            column = end;
+        }
+    }
+    // A selected newline needs a visible cell even on an otherwise empty line.
+    if column >= selection.start && column < selection.end && column - row_start < width {
+        selected_spans.push(Span::styled(" ", palette.selection()));
+    }
+    Line::from(selected_spans)
 }
 
 fn byte_at_local_display_column(text: &str, target: usize) -> usize {
@@ -3063,6 +3126,94 @@ mod tests {
     }
 
     #[test]
+    fn selecting_a_newline_after_a_full_row_shows_its_cell_before_the_caret_line() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("abcd\nx");
+        for (code, modifiers) in [
+            (KeyCode::Home, KeyModifiers::ALT),
+            (KeyCode::End, KeyModifiers::NONE),
+            (KeyCode::Right, KeyModifiers::SHIFT),
+        ] {
+            editor.handle_key(KeyEvent::new(code, modifiers));
+        }
+        assert_eq!(editor.selection_range(), Some(4..5));
+        let layout = composer_layout(&editor, 4);
+        assert_eq!(layout.rows.len(), 3);
+        assert_eq!(layout.cursor_row, 2);
+        let line = styled_composer_line(
+            &layout.rows[1],
+            &[],
+            layout.lines[0].selection.as_ref(),
+            4,
+            Palette::default(),
+        );
+        assert_eq!(line.spans[0].content, " ");
+        assert_eq!(line.spans[0].style, Palette::default().selection());
+    }
+
+    #[test]
+    fn composer_selection_covers_tabs_wide_graphemes_wraps_and_newlines() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("a\t界e\u{301}\n\nlast");
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::ALT,
+        ));
+        let layout = composer_layout(&editor, 4);
+        assert_eq!(layout.lines[0].selection, Some(0..8));
+        assert_eq!(layout.lines[1].selection, Some(0..1));
+        for monochrome in [false, true] {
+            let palette = crate::theme::default_theme().palette(monochrome);
+            for row in &layout.rows {
+                let line = styled_composer_line(
+                    row,
+                    &[],
+                    layout.lines[row.logical_row].selection.as_ref(),
+                    4,
+                    palette,
+                );
+                for span in line.spans {
+                    assert_eq!(span.style, palette.selection());
+                }
+            }
+        }
+        assert_eq!(editor.text(), "a\t界e\u{301}\n\nlast");
+    }
+
+    #[test]
+    fn composer_selection_overrides_color_but_keeps_semantic_modifiers() {
+        let row = ComposerVisualRow {
+            logical_row: 0,
+            column_start: 0,
+            text: "/theme".into(),
+        };
+        let palette = Palette::default();
+        let line = styled_composer_line(
+            &row,
+            &[Highlight {
+                columns: 0..6,
+                kind: PromptHighlightKind::Command,
+            }],
+            Some(&(1..4)),
+            80,
+            palette,
+        );
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "/theme"
+        );
+        assert_eq!(line.spans[1].content, "the");
+        assert_eq!(line.spans[1].style.bg, palette.selection().bg);
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_ne!(line.spans[0].style.bg, palette.selection().bg);
+        assert_ne!(line.spans[2].style.bg, palette.selection().bg);
+    }
+
+    #[test]
     fn composer_styles_commands_and_project_references_without_changing_geometry() {
         use std::sync::Arc;
         use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
@@ -3131,6 +3282,8 @@ mod tests {
                 columns: 0..12,
                 kind: PromptHighlightKind::UnresolvedPath,
             }],
+            None,
+            80,
             crate::theme::default_theme().palette(true),
         );
         assert_eq!(line.spans[0].content, "missing");

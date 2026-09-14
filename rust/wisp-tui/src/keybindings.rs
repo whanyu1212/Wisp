@@ -499,6 +499,9 @@ fn parse_key(name: &str) -> Result<KeyCode, &'static str> {
 }
 
 fn validate_chord(code: &KeyCode, modifiers: KeyModifiers) -> Result<(), &'static str> {
+    if crate::prompt_editor::is_extended_edit_key(KeyEvent::new(*code, modifiers)) {
+        return Err("selection and word/line editing keys are reserved for the composer");
+    }
     let control = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
     match code {
@@ -815,18 +818,18 @@ mod tests {
         assert_eq!(punctuation.label(Action::Newline), "Alt+-");
 
         let letter_f =
-            Bindings::from_json(r#"{"prompt.submit":["Ctrl+F"],"prompt.newline":["Alt+F"]}"#)
+            Bindings::from_json(r#"{"prompt.submit":["Ctrl+F"],"prompt.newline":["Alt+Q"]}"#)
                 .unwrap();
         assert_eq!(
             letter_f.action(key(KeyCode::Char('f'), KeyModifiers::CONTROL)),
             Some(Action::Submit)
         );
         assert_eq!(
-            letter_f.action(key(KeyCode::Char('F'), KeyModifiers::ALT)),
+            letter_f.action(key(KeyCode::Char('Q'), KeyModifiers::ALT)),
             Some(Action::Newline)
         );
         assert_eq!(letter_f.label(Action::Submit), "Ctrl+F");
-        assert_eq!(letter_f.label(Action::Newline), "Alt+F");
+        assert_eq!(letter_f.label(Action::Newline), "Alt+Q");
     }
 
     #[test]

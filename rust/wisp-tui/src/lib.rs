@@ -3282,6 +3282,17 @@ impl LiveUi {
             Input::Paste(_) if !decision_pending && self.browse_selected.is_some() => {
                 Ok(LoopControl::Continue)
             }
+            Input::Key(key)
+                if self.editor_editable() && prompt_editor::is_extended_edit_key(key) =>
+            {
+                if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
+                    self.update_edit_notice(outcome);
+                    self.render_pending |= outcome.changed;
+                }
+                self.completion.sync(&self.editor);
+                self.file_picker.sync_editor(&self.editor);
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if self.editor_editable() && self.handle_file_picker_key(key) => {
                 Ok(LoopControl::Continue)
             }
@@ -3436,8 +3447,7 @@ impl LiveUi {
                     }
                     Some(KeyAction::Submit) => self.submit_editor(writer, limit).await,
                     Some(KeyAction::Newline | KeyAction::AlternateSubmit) => {
-                        let cursor = self.editor.cursor_offset();
-                        let outcome = self.editor.replace_range(cursor..cursor, "\n");
+                        let outcome = self.editor.replace_range(self.editor.insert_range(), "\n");
                         self.update_edit_notice(outcome);
                         self.render_pending = true;
                         Ok(LoopControl::Continue)

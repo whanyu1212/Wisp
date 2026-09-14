@@ -117,6 +117,7 @@ for line in sys.stdin:
             ok=True,
         ))
     elif command_type == "prompt":
+        prompt_id = command_id
         emit(AgentStarted(session_id="pressure-session"))
         emit(MessageStarted(turn=1))
         if mode in {"burst", "signal-burst", "long-session", "terminal-safety"}:
@@ -204,6 +205,14 @@ for line in sys.stdin:
             # fatal protocol error.
             while True:
                 time.sleep(1)
+    elif command_type == "cancel" and mode == "signal-burst":
+        assert command["target_id"] == prompt_id
+        release_path.touch()
+        emit(RpcCommandFinished(
+            command_id=command_id,
+            command_type=command_type,
+            ok=True,
+        ))
     elif command_type == "shutdown":
         emit(RpcCommandFinished(
             command_id=command_id,
@@ -467,7 +476,7 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
 
 @pytest.mark.process
 def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> None:
-    tui, backend_pid_path, _release, burst_done = _launch(tmp_path, mode="signal-burst")
+    tui, backend_pid_path, cancel_received, burst_done = _launch(tmp_path, mode="signal-burst")
     try:
         tui.wait_ready()
         assert backend_pid_path.exists()
@@ -482,10 +491,9 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
         signal_offset = len(tui.output)
         os.kill(tui.pid, signal.SIGINT)
         tui.wait_until(
-            lambda output: all(
-                marker in output[signal_offset:]
-                for marker in (b"Cancelling", b"current", b"prompt")
-            ),
+            # An optimized frontend can finish draining the burst before the
+            # transient cancellation notice is painted. Check actual dispatch.
+            lambda _output: cancel_received.exists(),
             timeout=5,
             failure="external SIGINT was starved by the burst",
         )

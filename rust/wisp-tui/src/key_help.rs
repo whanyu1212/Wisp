@@ -123,8 +123,12 @@ impl KeyHelp {
                 "Ctrl+C retains normal cancellation/exit behavior.",
             ],
             Owner::Composer => &[
-                "Editor: arrows, Home/End, Ctrl+A/E, Backspace/Delete and Tab retain editing behavior.",
-                "Large-paste markers expand on first cursor/edit interaction.",
+                "Editor: arrows move; Home/End or Ctrl+A/E move to line edges.",
+                "Selection: Shift+arrows/Home/End; Ctrl+Shift+Home/End extends to document edges; Alt+A selects all.",
+                "Words: Ctrl/Alt+Left/Right or Alt+B/F move; add Shift to extend selection.",
+                "Delete: Ctrl+W / Alt+Backspace backward word, Alt+D / Ctrl+Delete forward word, Ctrl+U/K to line edges.",
+                "Typing, paste, Tab, newline and deletion replace selected text. Plain arrows collapse selection.",
+                "Large-paste markers expand on first cursor/edit interaction; an explicit selection replaces its raw text.",
                 "Esc cancels active work; Ctrl+C cancels or exits when idle.",
             ],
         };
