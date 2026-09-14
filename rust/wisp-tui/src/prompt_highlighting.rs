@@ -25,6 +25,7 @@ pub(crate) struct Highlight {
 
 pub(crate) fn line_highlights(
     line: &str,
+    line_truncated: bool,
     line_index: usize,
     line_count: usize,
     catalog: Option<&[CommandDescriptor]>,
@@ -67,15 +68,17 @@ pub(crate) fn line_highlights(
             cursor = start + 1;
             continue;
         }
-        let Some((end, path)) = parse_reference(line, start, scan_end) else {
+        let Some((end, path)) = parse_reference(line, start, scan_end, line_truncated) else {
             cursor = start + 1;
             continue;
         };
-        let resolved = snapshot.entries.iter().any(|entry| match entry.kind {
-            ProjectFileKind::File => entry.path == path,
-            ProjectFileKind::Directory => path
-                .strip_suffix('/')
-                .is_some_and(|directory| directory == entry.path),
+        let resolved = path.as_deref().is_some_and(|path| {
+            snapshot.entries.iter().any(|entry| match entry.kind {
+                ProjectFileKind::File => entry.path == path,
+                ProjectFileKind::Directory => path
+                    .strip_suffix('/')
+                    .is_some_and(|directory| directory == entry.path),
+            })
         });
         if resolved || !snapshot.truncated {
             highlights.push(Highlight {
@@ -92,7 +95,12 @@ pub(crate) fn line_highlights(
     highlights
 }
 
-fn parse_reference(line: &str, start: usize, limit: usize) -> Option<(usize, String)> {
+fn parse_reference(
+    line: &str,
+    start: usize,
+    limit: usize,
+    line_truncated: bool,
+) -> Option<(usize, Option<String>)> {
     let rest = &line[start + 1..limit];
     if rest.is_empty() {
         return None;
@@ -110,23 +118,33 @@ fn parse_reference(line: &str, start: usize, limit: usize) -> Option<(usize, Str
                 escaped = false;
             }
         }
-        let quoted_end = closing.unwrap_or(limit);
+        let quoted_end = match closing {
+            Some(end) => end,
+            None if line_truncated => return None,
+            None => limit,
+        };
         let end = line[quoted_end..limit]
             .find(char::is_whitespace)
             .map_or(limit, |offset| quoted_end + offset);
+        if end == limit && line_truncated {
+            return None;
+        }
         if end != quoted_end {
-            return Some((end, line[start + 1..end].to_owned()));
+            return Some((end, None));
         }
         let encoded = &line[start + 1..quoted_end];
         let path = serde_json::from_str::<String>(encoded)
             .or_else(|_| serde_json::from_str(&format!("{encoded}\"")))
-            .ok()?;
+            .ok();
         return Some((end, path));
     }
     let end = rest
         .find(char::is_whitespace)
         .map_or(limit, |offset| start + 1 + offset);
-    (end > start + 1).then(|| (end, line[start + 1..end].to_owned()))
+    if end == limit && line_truncated {
+        return None;
+    }
+    (end > start + 1).then(|| (end, Some(line[start + 1..end].to_owned())))
 }
 
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
@@ -188,21 +206,21 @@ mod tests {
     fn commands_are_catalog_backed_and_single_line_only() {
         let catalog = [command("help")];
         assert_eq!(
-            line_highlights("/help", 0, 1, Some(&catalog), None),
+            line_highlights("/help", false, 0, 1, Some(&catalog), None),
             vec![Highlight {
                 columns: 0..5,
                 kind: Kind::Command
             }]
         );
         assert_eq!(
-            line_highlights("  /help argument", 0, 1, Some(&catalog), None),
+            line_highlights("  /help argument", false, 0, 1, Some(&catalog), None),
             vec![Highlight {
                 columns: 2..7,
                 kind: Kind::Command
             }]
         );
-        assert!(line_highlights("/missing", 0, 1, Some(&catalog), None).is_empty());
-        assert!(line_highlights("/help", 0, 2, Some(&catalog), None).is_empty());
+        assert!(line_highlights("/missing", false, 0, 1, Some(&catalog), None).is_empty());
+        assert!(line_highlights("/help", false, 0, 2, Some(&catalog), None).is_empty());
     }
 
     #[test]
@@ -210,7 +228,7 @@ mod tests {
         let line =
             "read @src/main.rs @\"space name.md\" @docs/ @docs @\"space name.md\"suffix @missing";
         assert_eq!(
-            line_highlights(line, 0, 1, None, Some(&snapshot(false))),
+            line_highlights(line, false, 0, 1, None, Some(&snapshot(false))),
             vec![
                 Highlight {
                     columns: 5..17,
@@ -241,9 +259,48 @@ mod tests {
     }
 
     #[test]
+    fn malformed_quoted_references_are_unresolved_only_with_complete_snapshots() {
+        let complete = line_highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(false)));
+        assert_eq!(
+            complete,
+            vec![Highlight {
+                columns: 0..8,
+                kind: Kind::UnresolvedPath,
+            }]
+        );
+        assert!(
+            line_highlights("@\"bad\\q\"", false, 0, 1, None, Some(&snapshot(true)),).is_empty()
+        );
+    }
+
+    #[test]
+    fn references_crossing_the_scan_limit_remain_neutral() {
+        assert!(
+            line_highlights("@src/main.rs", true, 0, 1, None, Some(&snapshot(false)),).is_empty()
+        );
+        assert!(
+            line_highlights(
+                "@\"space name.md\"",
+                true,
+                0,
+                1,
+                None,
+                Some(&snapshot(false)),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn incomplete_snapshots_leave_absent_paths_neutral() {
-        let highlights =
-            line_highlights("@src/main.rs @missing", 0, 1, None, Some(&snapshot(true)));
+        let highlights = line_highlights(
+            "@src/main.rs @missing",
+            false,
+            0,
+            1,
+            None,
+            Some(&snapshot(true)),
+        );
         assert_eq!(
             highlights,
             vec![Highlight {
@@ -256,7 +313,7 @@ mod tests {
     #[test]
     fn scanning_is_bounded_and_preserves_unicode_columns() {
         let line = format!("界 @missing {}", "x".repeat(MAX_LINE_BYTES * 2));
-        let highlights = line_highlights(&line, 0, 1, None, Some(&snapshot(false)));
+        let highlights = line_highlights(&line, false, 0, 1, None, Some(&snapshot(false)));
         assert_eq!(
             highlights[0],
             Highlight {

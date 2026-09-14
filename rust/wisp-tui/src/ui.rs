@@ -1461,13 +1461,15 @@ fn composer_visual_line(
     palette: Palette,
 ) -> Line<'static> {
     let mut logical_line = String::new();
+    let mut line_truncated = false;
     for part in layout
         .rows
         .iter()
         .filter(|part| part.logical_row == row.logical_row)
     {
         if logical_line.len() >= prompt_highlighting::MAX_LINE_BYTES {
-            break;
+            line_truncated |= !part.text.is_empty();
+            continue;
         }
         let remaining = prompt_highlighting::MAX_LINE_BYTES - logical_line.len();
         let mut end = part.text.len().min(remaining);
@@ -1475,9 +1477,11 @@ fn composer_visual_line(
             end -= 1;
         }
         logical_line.push_str(&part.text[..end]);
+        line_truncated |= end < part.text.len();
     }
     let highlights = prompt_highlighting::line_highlights(
         &logical_line,
+        line_truncated,
         row.logical_row,
         line_count,
         state.command_catalog.as_deref(),
