@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-14
 **POC:** Hanyu Wu
-**TL;DR:** Wisp can reproducibly build non-published, platform-tagged `wisp-ai` wheel candidates containing the lockstep Rust TUI. Publication, launcher discovery, lifecycle testing, and support promotion remain separate work.
+**TL;DR:** Wisp can reproducibly build and assemble publish-ready, platform-tagged `wisp-ai` wheels containing the lockstep Rust TUI. An approved tag release and any support promotion remain separate decisions.
 
 ## Packaging decision
 
@@ -51,6 +51,10 @@ Two builds with the same source and `SOURCE_DATE_EPOCH` produced identical SHA-2
 
 A local Docker run of the pinned manylinux 2.28 x86_64 image also built the candidate, passed package parity and full `RECORD` validation, reported exact `manylinux_2_28_x86_64` compatibility through `auditwheel show`, passed `twine check`, installed with Cargo absent from the consumer `PATH`, and ran the stripped x86-64 ELF binary. These local results do not substitute for terminal CI on every matrix target.
 
-## Remaining work
+## Production integration follow-up (#566)
 
-This evidence does not make Rust a supported or default renderer. #469 still owns production release integration, environment-owned binary discovery, signed/attested publication, fake-provider installed-wheel smoke tests, upgrade/downgrade/rollback/uninstall, corruption and offline behavior, and size/startup/process-memory reporting.
+#566 makes the native-wheel workflow reusable from the tag-gated release flow. Release assembly verifies one sdist, one pure `py3-none-any` fallback wheel, and the three native wheels after download; it rechecks wheel contents, checksums, SBOM identity, supported tags, and exact versions before trusted publication. Tag releases attest the assembled distributions and release evidence before PyPI publication.
+
+Installed Wisp resolves `wisp-tui` only from the active interpreter's scripts directory or an explicit absolute development override—never from `PATH`. Each native target exercises a fake-provider prompt through the installed launcher, native-to-pure replacement, explicit Textual routing, native restoration, non-executable and corrupt failures without fallback, uninstall, offline local-wheel reinstall, final uninstall, and terminal/process cleanup. Per-target artifacts record wheel size, binary size, cold binary startup, launcher-to-ready-frame time, total smoke time, and child-process peak RSS as observations rather than thresholds.
+
+This integration does not make Rust a supported or default renderer, and no release is published during pull-request validation. A real tag release remains an explicit operation. True cross-version downgrade evidence requires at least two published native versions and therefore remains future release evidence rather than a synthetic claim.

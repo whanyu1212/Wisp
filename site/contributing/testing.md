@@ -98,11 +98,16 @@ and lint, configured `uv run mypy`, and `tests/`-only pytest partitions.
 A separate Rust workspace job runs the schema check, Rust formatting, check, Clippy, workspace tests,
 build, and cross-language handoff smoke test on both Linux and macOS.
 
-The `Rust TUI wheel candidates` workflow additionally builds non-published `wisp-ai` platform wheels
-for manylinux x86_64 and macOS x86_64/arm64. It compares Python package files with the current
-`uv_build` wheel, verifies platform/native metadata and executable mode, installs without Cargo on
-the consumer `PATH`, checks exact version mismatch before backend spawn, and uploads checksums plus
-a CycloneDX SBOM. These candidate artifacts are evidence for #469, not release products.
+The reusable `Rust TUI wheel candidates` workflow builds `wisp-ai` platform wheels for manylinux
+x86_64 and macOS x86_64/arm64. It compares Python package files with the current `uv_build` wheel,
+verifies platform/native metadata and executable mode, and installs without Cargo on the consumer
+`PATH`. Each target exercises an installed fake-provider Rust TUI prompt, native/pure replacement,
+explicit Textual routing, corruption, offline reinstall, and uninstall; it uploads checksums, a
+CycloneDX SBOM, and observed size/startup/RSS evidence.
+
+Pull requests and manual workflow runs only upload candidates. The tag-gated release workflow calls
+the same reusable builder, verifies the complete downloaded distribution set, and requires
+provenance attestation before trusted publication.
 
 The `production_fault` partition is a required deterministic regression contract:
 

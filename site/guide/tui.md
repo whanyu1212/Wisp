@@ -13,9 +13,10 @@ active, a spinning `Working…` row stays at the live transcript tail as assista
 cards appear, and changes labels for retries, approvals, trust, or compaction.
 
 ::: info Two terminal frontends
-Wisp currently ships two terminal clients over the same Python runtime. Textual is the default and
-supported product TUI. The Rust client is an experimental opt-in for presentation performance:
-source-build, macOS and Linux, with no silent fallback. It is not a rewrite of the agent, and it is
+Wisp maintains two terminal clients over the same Python runtime. Textual is the default and
+supported product TUI. The Rust client is an experimental macOS/Linux opt-in for presentation
+performance, with no silent fallback. Existing published wheels remain source-build only; #566
+prepares verified native wheels for a later approved release. It is not a rewrite of the agent, and it is
 not the default until a later explicit decision. See the
 [terminal frontend boundary](../architecture/rust-tui-boundary).
 :::
@@ -37,16 +38,16 @@ compact billing and context fields.
 
 The two frontends coexist during this period. Features may land in Rust first without changing the
 default. [#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the supported
-product TUI; Rust stays an experimental opt-in on macOS and Linux, source-build only, with no
-fallback and no stage-3 supported-opt-in claim. [#468](https://github.com/whanyu1212/Wisp/issues/468), and
-[#469](https://github.com/whanyu1212/Wisp/issues/469) remain the blockers for that later stage. A
-default switch requires a new explicit issue.
+product TUI; Rust stays an experimental opt-in on macOS and Linux, with no fallback and no stage-3
+supported-opt-in claim. [#468](https://github.com/whanyu1212/Wisp/issues/468) and
+[#469](https://github.com/whanyu1212/Wisp/issues/469) are closed; [#566](https://github.com/whanyu1212/Wisp/issues/566)
+prepares their production distribution follow-up. A default switch requires a new explicit issue.
 
 The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
 model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
 completion, themes, mouse navigation, configurable bindings, and compact paste presentation.
 Rust uses external update instructions instead of Textual's install/restart flow, as described below.
-Hardening and binary distribution remain required before supported opt-in.
+Published native artifacts, rollout feedback, and a new explicit support decision remain required before supported opt-in.
 
 During a backend output burst, Rust waits up to five seconds for inbound queue capacity while
 continuing to give input and redraws turns. Sustained transport stalls and failed command writes

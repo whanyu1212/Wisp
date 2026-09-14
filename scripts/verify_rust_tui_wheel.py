@@ -7,6 +7,7 @@ import base64
 import csv
 import email.parser
 import hashlib
+import json
 import re
 import tomllib
 import zipfile
@@ -17,6 +18,11 @@ _CARGO_PRERELEASE = re.compile(
     r"^(?P<release>\d+\.\d+\.\d+)-(?P<kind>alpha|beta|rc)\.(?P<number>\d+)$"
 )
 _CARGO_TO_PYTHON_PRERELEASE = {"alpha": "a", "beta": "b", "rc": "rc"}
+_NATIVE_RELEASE_TARGETS = {
+    "manylinux-x86-64": "py3-none-manylinux_2_28_x86_64",
+    "macos-x86-64": "py3-none-macosx_11_0_x86_64",
+    "macos-arm64": "py3-none-macosx_11_0_arm64",
+}
 
 
 def python_version(cargo_version: str) -> str:
@@ -212,6 +218,85 @@ def verify_wheel(
             raise ValueError(f"candidate wheel contains debug artifacts: {debug_files!r}")
 
 
+def verify_release_set(distributions: Path, release_assets: Path, *, root: Path) -> None:
+    """Verify the complete publishable distribution and native evidence set.
+
+    Args:
+        distributions: Directory containing the source distribution and wheels.
+        release_assets: Directory containing per-target checksums and SBOMs.
+        root: Repository root used for version checks.
+
+    Raises:
+        ValueError: If the release set is incomplete, ambiguous, or inconsistent.
+    """
+
+    version = verify_versions(root)
+    source_distributions = sorted(distributions.glob(f"wisp_ai-{version}.tar.gz"))
+    pure_wheels = sorted(distributions.glob(f"wisp_ai-{version}-py3-none-any.whl"))
+    if len(source_distributions) != 1 or len(pure_wheels) != 1:
+        raise ValueError("release set requires exactly one sdist and one pure fallback wheel")
+    pure_wheel = pure_wheels[0]
+    expected_wheels = {pure_wheel.name}
+    cargo = cargo_version(root)
+
+    for target, tag in _NATIVE_RELEASE_TARGETS.items():
+        candidates = sorted(distributions.glob(f"wisp_ai-{version}-{tag}.whl"))
+        if len(candidates) != 1:
+            raise ValueError(f"release set requires exactly one {target} native wheel")
+        wheel = candidates[0]
+        expected_wheels.add(wheel.name)
+        verify_wheel(wheel, expected_tag=tag, root=root, reference_wheel=pure_wheel)
+        _verify_checksum(release_assets / f"wisp-tui-{target}.sha256", wheel)
+        _verify_sbom(release_assets / f"wisp-tui-{target}.cdx.json", cargo)
+        _verify_install_evidence(
+            release_assets / f"wisp-tui-{target}-install.json",
+            wheel,
+        )
+
+    actual_wheels = {wheel.name for wheel in distributions.glob("*.whl")}
+    if actual_wheels != expected_wheels:
+        raise ValueError(
+            f"release wheel set differs from supported matrix: {sorted(actual_wheels)!r}"
+        )
+
+
+def _verify_checksum(manifest: Path, wheel: Path) -> None:
+    line = manifest.read_text(encoding="utf-8").strip()
+    parts = line.split()
+    if len(parts) != 2 or parts[1].lstrip("*") != wheel.name:
+        raise ValueError(f"invalid checksum manifest for {wheel.name}")
+    if parts[0] != hashlib.sha256(wheel.read_bytes()).hexdigest():
+        raise ValueError(f"checksum mismatch for {wheel.name}")
+
+
+def _verify_sbom(path: Path, expected_version: str) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    component = document.get("metadata", {}).get("component", {})
+    if (
+        document.get("bomFormat") != "CycloneDX"
+        or document.get("specVersion") != "1.5"
+        or component.get("name") != "wisp-tui"
+        or component.get("version") != expected_version
+    ):
+        raise ValueError(f"invalid Rust TUI SBOM: {path}")
+
+
+def _verify_install_evidence(path: Path, wheel: Path) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    required_positive = (
+        "binary_bytes",
+        "binary_startup_seconds",
+        "max_rss_bytes",
+        "ready_frame_seconds",
+        "total_seconds",
+    )
+    if document.get("wheel_bytes") != wheel.stat().st_size or any(
+        not isinstance(document.get(field), (int, float)) or document[field] <= 0
+        for field in required_positive
+    ):
+        raise ValueError(f"invalid installed-wheel evidence: {path}")
+
+
 def _one(names: list[str], suffix: str) -> str:
     matches = [name for name in names if name.endswith(suffix)]
     if len(matches) != 1:
@@ -227,13 +312,20 @@ def main() -> None:
     parser.add_argument("--expected-tag")
     parser.add_argument("--print-cargo-version", action="store_true")
     parser.add_argument("--reference-wheel", type=Path)
+    parser.add_argument("--release-dir", type=Path)
+    parser.add_argument("--release-assets", type=Path)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     arguments = parser.parse_args()
     if arguments.print_cargo_version:
         print(cargo_version(arguments.root))
         return
+    if arguments.release_dir is not None or arguments.release_assets is not None:
+        if arguments.release_dir is None or arguments.release_assets is None:
+            parser.error("--release-dir and --release-assets must be used together")
+        verify_release_set(arguments.release_dir, arguments.release_assets, root=arguments.root)
+        return
     if arguments.wheel is None or arguments.expected_tag is None:
-        parser.error("wheel and --expected-tag are required unless --print-cargo-version is used")
+        parser.error("wheel and --expected-tag are required unless another mode is selected")
     verify_wheel(
         arguments.wheel,
         expected_tag=arguments.expected_tag,
