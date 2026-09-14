@@ -2312,6 +2312,15 @@ impl Default for TranscriptViewport {
 }
 
 impl TranscriptViewport {
+    pub(crate) fn reanchor_entry(&mut self, from: TranscriptEntryId, to: TranscriptEntryId) {
+        if !self.follow_tail && self.top.is_some_and(|anchor| anchor.entry_id == from) {
+            self.top = Some(RowAnchor {
+                entry_id: to,
+                position: RowPosition::Header,
+            });
+        }
+    }
+
     pub fn follows_tail(&self) -> bool {
         self.follow_tail
     }
@@ -2505,6 +2514,27 @@ impl TranscriptViewport {
         false
     }
 
+    pub(crate) fn near_live_gap(
+        &mut self,
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+    ) -> bool {
+        let _ = self.visible_rows(transcript, cache);
+        let Some(mut anchor) = self.top else {
+            return false;
+        };
+        for _ in 0..=self.height.max(1) {
+            if transcript.is_live_history_marker(anchor.entry_id) {
+                return true;
+            }
+            let Some(previous) = cache.previous_anchor(transcript, anchor, self.width) else {
+                return false;
+            };
+            anchor = previous;
+        }
+        false
+    }
+
     /// Estimate the visible interval in retained history without laying out offscreen rows.
     /// Entry order and source offsets provide a stable, bounded-cost approximation;
     /// wrapped rows, Markdown tables, and folded groups need not have equal heights.
@@ -2560,6 +2590,9 @@ impl TranscriptViewport {
         let mut moved = 0;
         let mut seen = HashSet::from([top]);
         for _ in 0..amount {
+            if transcript.is_live_history_marker(top.entry_id) {
+                break;
+            }
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
             };

@@ -44,6 +44,7 @@ HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (4, "fc80ee4beaaad41c6534130bab3c277c0109b3831d34c4ad623d0417d92eed02"),
     (5, "37dc90b7fe06005444def1710af98be7b6b8fddb4231ff161dc119365fdcafc2"),
     (6, "98be3f2fac077427b65884fb9be56057909888f5938d39f227c8894fd3ebe562"),
+    (7, "30705ba4f61caaa932b833bb7572d89ab86d1b845e16543fe76f301a5d85e445"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"

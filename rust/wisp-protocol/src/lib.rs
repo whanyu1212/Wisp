@@ -15,12 +15,12 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v7 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v7/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v8 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v8/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 7;
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 8;
 /// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 38;
+pub const EVENT_SCHEMA_VERSION: u32 = 39;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -154,22 +154,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v7/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v8/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v7/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v8/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v7/commands.schema.json"
+        "../../../schemas/live-rpc/v8/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v7/events.schema.json"
+        "../../../schemas/live-rpc/v8/events.schema.json"
     ))
 });
 
@@ -431,7 +431,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v7/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v8/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -466,7 +466,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v7/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v8/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -526,7 +526,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v7/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v8/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -834,6 +834,22 @@ pub mod commands {
             deserialize(value)
         }
 
+        /// Fetch the bounded projection of a single evicted message.
+        pub fn get_message_snapshot(
+            id: &str,
+            session_id: Option<&str>,
+            entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "get_messages", "id": id, "entry_ids": [entry_id], "limit": 1,
+                "complete_structure": true, "full_content": false,
+            });
+            if let Some(session_id) = session_id {
+                value["session_id"] = serde_json::Value::String(session_id.into());
+            }
+            deserialize(value)
+        }
+
         /// Construct one bounded older-page history request.
         pub fn get_messages_older(
             id: &str,
@@ -1056,7 +1072,7 @@ pub mod events {
         SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v7/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v8/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(

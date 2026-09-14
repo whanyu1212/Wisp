@@ -253,7 +253,7 @@ fn trace_schema_enforces_queue_events_but_allows_unknown_events() {
             "operation": "pop",
         }),
         serde_json::json!({
-            "type": "queue.message.injected",
+            "type": "queue.message.injected", "message_entry_id": null,
             "schema_version": 34,
             "kind": "steering",
             "content": "expanded",
@@ -418,6 +418,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::ShowSessionTreePage { .. }
                 | UiEffect::CloseSessionTree
                 | UiEffect::ReplaceTranscript
+                | UiEffect::ReanchorTranscript { .. }
                 | UiEffect::HistoryWindowChanged { .. }
                 | UiEffect::HistoryRequestFailed
                 | UiEffect::OpenExactDetail(_)

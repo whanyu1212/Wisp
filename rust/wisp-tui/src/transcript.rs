@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+mod recovery;
+pub(crate) use recovery::LiveHistoryGap;
+
 const MAX_CALL_INDEX_ENTRIES: usize = 1_024;
 const MAX_CALL_INDEX_BYTES: usize = 1024 * 1024;
 const MAX_PROCESS_INDEX_ENTRIES: usize = 128;
@@ -103,6 +106,7 @@ pub struct TranscriptEntry {
     history_group: Option<u64>,
     live_retention_omission: bool,
     durable_entry_ids: Vec<String>,
+    live_message_origins: Vec<String>,
     history_detail_source: Option<ToolDetailSource>,
     history_result_projection_truncated: bool,
     history_calls: Vec<HistoricalCall>,
@@ -167,6 +171,19 @@ impl TranscriptEntry {
             .saturating_add(self.local_display.as_ref().map_or(0, String::len))
             .saturating_add(self.thinking.len())
             .saturating_add(kind_bytes)
+            .saturating_add(
+                self.live_message_origins
+                    .iter()
+                    .chain(&self.durable_entry_ids)
+                    .map(|id| id.len() + std::mem::size_of::<String>())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.history_calls
+                    .iter()
+                    .map(|call| call.call_id.len() + std::mem::size_of::<HistoricalCall>())
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -217,6 +234,10 @@ pub struct Transcript {
     pending_detail_order: VecDeque<TranscriptEntryId>,
     pending_detail_source_bytes: usize,
     next_tool_sequence: u64,
+    live_origin_sequence: u64,
+    live_origins: HashMap<String, u64>,
+    pending_call_origins: HashMap<String, String>,
+    live_history_gap: Option<LiveHistoryGap>,
 }
 
 impl Transcript {
@@ -1166,6 +1187,7 @@ impl Transcript {
         protected_entry: Option<TranscriptEntryId>,
     ) -> bool {
         let mut removed = false;
+        let mut first_removed_index = self.entries.len();
         while self.live_retained_entry_count() > LIVE_TRANSCRIPT_ENTRY_LIMIT
             || self.live_retained_bytes() > LIVE_TRANSCRIPT_BYTE_LIMIT
         {
@@ -1182,6 +1204,8 @@ impl Transcript {
             }) else {
                 break;
             };
+            self.record_live_eviction(index);
+            first_removed_index = first_removed_index.min(index);
             self.entries.remove(index);
             removed = true;
         }
@@ -1189,12 +1213,18 @@ impl Transcript {
             return false;
         }
 
-        self.entries.retain(|entry| !entry.live_retention_omission);
-        let index = self
+        // Retain the marker identity while it is a reader anchor.
+        if self
             .entries
             .iter()
-            .position(|entry| entry.history_group.is_none())
-            .unwrap_or(self.entries.len());
+            .any(|entry| entry.live_retention_omission)
+        {
+            self.rebuild_entry_indexes();
+            self.prune_live_origins();
+            self.bump_generation();
+            return true;
+        }
+        let index = first_removed_index.min(self.entries.len());
         let id = TranscriptEntryId(self.next_entry_id);
         self.next_entry_id = self
             .next_entry_id
@@ -1215,6 +1245,7 @@ impl Transcript {
                 history_group: None,
                 live_retention_omission: true,
                 durable_entry_ids: Vec::new(),
+                live_message_origins: Vec::new(),
                 history_detail_source: None,
                 history_result_projection_truncated: false,
                 history_calls: Vec::new(),
@@ -1222,6 +1253,7 @@ impl Transcript {
             },
         );
         self.rebuild_entry_indexes();
+        self.prune_live_origins();
         self.bump_generation();
         true
     }
@@ -1230,7 +1262,8 @@ impl Transcript {
         self.entries
             .iter()
             .filter(|entry| entry.history_group.is_none() && !entry.live_retention_omission)
-            .count()
+            .map(|entry| entry.live_message_origins.len().max(1))
+            .sum()
     }
 
     fn live_retained_bytes(&self) -> usize {
@@ -1239,6 +1272,26 @@ impl Transcript {
             .filter(|entry| entry.history_group.is_none() && !entry.live_retention_omission)
             .map(TranscriptEntry::retained_bytes)
             .fold(0usize, usize::saturating_add)
+            .saturating_add(
+                self.live_origins
+                    .keys()
+                    .map(|origin| {
+                        origin
+                            .len()
+                            .saturating_add(std::mem::size_of::<(String, u64)>())
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.pending_call_origins
+                    .iter()
+                    .map(|(call, origin)| {
+                        call.len()
+                            .saturating_add(origin.len())
+                            .saturating_add(std::mem::size_of::<(String, String)>())
+                    })
+                    .sum::<usize>(),
+            )
     }
 
     fn insert_history_page(&mut self, page: &Transcript, index: usize) -> bool {
@@ -1869,6 +1922,7 @@ impl Transcript {
             history_group: None,
             live_retention_omission: false,
             durable_entry_ids: Vec::new(),
+            live_message_origins: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
             history_calls: Vec::new(),
@@ -1952,6 +2006,7 @@ impl Transcript {
             history_group: None,
             live_retention_omission: false,
             durable_entry_ids: Vec::new(),
+            live_message_origins: Vec::new(),
             history_detail_source: None,
             history_result_projection_truncated: false,
             history_calls: Vec::new(),

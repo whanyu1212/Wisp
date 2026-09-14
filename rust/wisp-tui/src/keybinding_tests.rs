@@ -358,7 +358,7 @@ async fn rebound_browse_enter_keeps_fixed_detail_activation() {
     let id = ui.state.transcript.observe_tool_call(call);
     let BackendEvent::ToolResult(result) =
         BackendEvent::from_projection_value(&serde_json::json!({
-            "type": "tool.result", "call_id": "edit-one", "name": "edit",
+            "type": "tool.result", "message_entry_id": null, "call_id": "edit-one", "name": "edit",
             "output": "Applied 1 edit", "is_error": false
         }))
         .unwrap()

@@ -213,7 +213,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
   passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
   and checks exact equality before spawning the backend. The backend repeats its Python package
   version in the handshake. This spelling conversion does not permit different release versions.
-- The only accepted live contract is RPC protocol v7 with event schema v38 and no negotiated
+- The only accepted live contract is RPC protocol v8 with event schema v39 and no negotiated
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
@@ -222,7 +222,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
 
-The committed v7 schema manifest and generated projections define the current handshake fields,
+The committed v8 schema manifest and generated projections define the current handshake fields,
 frame limits, strict event variants, and UTF-8 JSON representation. See
 [Compatibility and versioning](../reference/compatibility) for Wisp's durable contracts.
 
@@ -266,7 +266,7 @@ noncritical** work can wait after stage 3.
 | Bounded history paging, `/resume`, `/new` | Implemented | [#466](https://github.com/whanyu1212/Wisp/issues/466) |
 | `/clone`, `/tree`, `/unrevert`, `/name` | Implemented in Rust; not exposed in Textual | [#466](https://github.com/whanyu1212/Wisp/issues/466); intentional frontend difference |
 | `/connect` API-key and device-code flows | Implemented | [#497](https://github.com/whanyu1212/Wisp/pull/497); secret-lifecycle hardening remains #468 |
-| Live RPC v7 / event schema v38 lockstep | Enforced at handshake | [#544](https://github.com/whanyu1212/Wisp/pull/544); no older live-contract negotiation |
+| Live RPC v8 / event schema v39 lockstep | Enforced at handshake | [Current contract](../reference/compatibility.md#live-jsonl-rpc-protocol); no older live-contract negotiation |
 | Model/provider/effort selection | Backend-driven picker, typed commands, saved defaults | Implemented in [#538](https://github.com/whanyu1212/Wisp/pull/538) |
 | `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, graceful exit | Implemented in [#539](https://github.com/whanyu1212/Wisp/pull/539) |
 | Context/cost visibility and compaction | `/context`, automatic-compaction controls, `/compact` | Implemented in [#540](https://github.com/whanyu1212/Wisp/pull/540) |

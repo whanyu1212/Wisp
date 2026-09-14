@@ -629,7 +629,7 @@ async fn tool_browsing_hides_completion_until_composer_regains_focus() {
         .await
         .unwrap();
     let event = BackendEvent::from_projection_value(&serde_json::json!({
-        "type": "tool.result", "call_id": "tool-1", "name": "edit", "output": "Applied 1 edit", "is_error": false
+        "type": "tool.result", "message_entry_id": null, "call_id": "tool-1", "name": "edit", "output": "Applied 1 edit", "is_error": false
     })).unwrap();
     ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
         .await

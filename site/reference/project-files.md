@@ -71,5 +71,5 @@ External frontends use the RPC capability. Rust's typed protocol client can requ
 and decode snapshots; the Rust picker UI is a separate change. Agent grep/find
 behavior and authorization are unchanged.
 
-The contract uses live protocol v7 and event schema v38. Historical v1–v6 protocol
+The contract uses live protocol v8 and event schema v39. Historical v1–v7 protocol
 bundles stay immutable, and supported persisted event schemas remain readable.
