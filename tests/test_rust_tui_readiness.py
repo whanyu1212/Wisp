@@ -217,6 +217,48 @@ def test_composer_selection_and_word_deletion_submit_exact_unicode_text(tmp_path
 
 
 @pytest.mark.process
+def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    tui, session_dir = _launch(tmp_path, home=home)
+    try:
+        tui.wait_ready()
+        offset = len(tui.output)
+        tui.send(b"typed")
+        tui.wait_for(b"typed", since=offset, failure="typed undo group did not render")
+
+        offset = len(tui.output)
+        tui.send(b"\x1a")  # Ctrl+Z
+        tui.resize(width=102)
+        tui.wait_for(
+            b"Type a prompt or / for commands.",
+            since=offset,
+            failure="undo did not restore the empty composer",
+        )
+
+        offset = len(tui.output)
+        tui.send(b"\x19")  # Ctrl+Y
+        tui.wait_for(b"typed", since=offset, failure="redo did not restore the edit group")
+
+        tui.send(b"\x1afinal\x19\r")
+        tui.wait_until(
+            lambda output: (
+                _has_fragments(output, offset, b"fake", b"response", b"to:")
+                and output.rfind(b"idle") > output.rfind(b"working")
+            ),
+            failure="branched undo draft did not complete",
+        )
+        tui.quit()
+    finally:
+        tui.close()
+
+    assert _conversation_messages(session_dir) == [
+        ("user", "final"),
+        ("assistant", "fake response to: final"),
+    ]
+
+
+@pytest.mark.process
 def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_user_settings(
@@ -335,9 +377,7 @@ def test_context_help_preserves_draft_and_update_is_local_guidance(tmp_path: Pat
         offset = len(tui.output)
         tui.send(b"\x07")  # Ctrl+G
         tui.wait_until(
-            lambda output: _has_fragments(
-                output, offset, b"Keys", b"Large-paste", b"markers", b"expand"
-            ),
+            lambda output: _has_fragments(output, offset, b"Keys", b"Undo:", b"Ctrl+Z", b"Redo:"),
             failure="contextual key help did not open",
         )
 

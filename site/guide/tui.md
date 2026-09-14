@@ -313,13 +313,20 @@ The Rust composer supports these fixed editing keys:
 | Ctrl+W, Ctrl/Alt+Backspace | Delete backward to the word boundary |
 | Alt+D, Ctrl/Alt+Delete | Delete forward to the word boundary |
 | Ctrl+U/K | Delete to line start/end; at that edge, remove the adjacent newline |
+| Ctrl+Z | Undo the latest edit group |
+| Ctrl+Y, Ctrl+Shift+Z | Redo the latest undone edit group |
+
+Undo and redo retain at most 100 states and 4 MiB of draft text in each direction. Consecutive
+typing and repeated character deletion are grouped; paste, completion, file insertion, prompt-history
+restoration, and queued-draft restoration are individual steps. Sending or clearing a draft starts a
+new editing session and clears this process-local history.
 
 Typing, pasting, Tab, and newline insertion replace the selection. Backspace and Delete remove it.
 Unmodified Left/Right collapse the selection to its start/end; a composer click clears it.
 Explicitly selecting a folded paste selects its exact underlying text, and replacement removes that
 selected text in one edit. Without a selection, a destructive edit into a paste marker expands it first.
 Rejected oversized edits preserve the draft and selection. Submission sends the entire draft;
-Ctrl+C and Escape retain cancellation behavior. Clipboard copy/cut, undo/redo, and mouse drag selection
+Ctrl+C and Escape retain cancellation behavior. Clipboard copy/cut and mouse drag selection
 remain separate work.
 
 Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing

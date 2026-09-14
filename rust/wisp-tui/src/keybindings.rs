@@ -500,7 +500,9 @@ fn parse_key(name: &str) -> Result<KeyCode, &'static str> {
 
 fn validate_chord(code: &KeyCode, modifiers: KeyModifiers) -> Result<(), &'static str> {
     if crate::prompt_editor::is_extended_edit_key(KeyEvent::new(*code, modifiers)) {
-        return Err("selection and word/line editing keys are reserved for the composer");
+        return Err(
+            "selection, word/line editing, and undo/redo keys are reserved for the composer",
+        );
     }
     let control = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
@@ -864,6 +866,9 @@ mod tests {
             "Ctrl+Shift+BackTab",
             "Alt+Backspace",
             "Shift+Delete",
+            "Ctrl+Z",
+            "Ctrl+Y",
+            "Ctrl+Shift+Z",
         ] {
             let json = format!(r#"{{"theme.toggle":["{chord}"],"prompt.newline":["Ctrl+J"]}}"#);
             assert!(Bindings::from_json(&json).is_err(), "accepted {chord}");
