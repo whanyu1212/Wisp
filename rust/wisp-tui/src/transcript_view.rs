@@ -966,6 +966,8 @@ impl TranscriptRowCache {
         let mut column = 0_usize;
         let mut next_offset = None;
         let mut ended_with_break = false;
+        let mut word_break = None::<(usize, usize)>;
+        let mut previous_space = false;
         for (relative_offset, grapheme) in content[start..].grapheme_indices(true) {
             self.work.graphemes_scanned = self.work.graphemes_scanned.saturating_add(1);
             self.work.bytes_scanned = self.work.bytes_scanned.saturating_add(grapheme.len());
@@ -977,16 +979,30 @@ impl TranscriptRowCache {
             }
             let safe = sanitize_grapheme(grapheme, column);
             let grapheme_width = UnicodeWidthStr::width(safe.as_str());
+            let space = entry.role == TranscriptRole::User
+                && grapheme != "\t"
+                && grapheme.chars().all(char::is_whitespace);
+            if space && column > 0 {
+                if previous_space {
+                    if let Some((offset, _)) = &mut word_break {
+                        *offset = absolute_offset + grapheme.len();
+                    }
+                } else {
+                    word_break = Some((absolute_offset + grapheme.len(), text.len()));
+                }
+            }
+            previous_space = space;
             if !text.is_empty() && column.saturating_add(grapheme_width) > width {
-                next_offset = Some(absolute_offset);
+                if let Some((offset, text_len)) = word_break {
+                    text.truncate(text_len);
+                    next_offset = Some(offset);
+                } else {
+                    next_offset = Some(absolute_offset);
+                }
                 break;
             }
             text.push_str(&safe);
             column = column.saturating_add(grapheme_width);
-            if column >= width {
-                next_offset = Some(absolute_offset + grapheme.len());
-                break;
-            }
         }
 
         let next = match next_offset {
@@ -3132,6 +3148,24 @@ fn terminal_control_character(character: char) -> bool {
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    #[test]
+    fn user_prose_wraps_at_words_and_long_tokens_still_wrap_safely() {
+        let mut transcript = Transcript::default();
+        let user = transcript.append_prompt("alpha beta gamma delta abcdefghijklmn".into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 12, 10);
+
+        let content = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| row.anchor.entry_id == user && row.kind == TranscriptRowKind::Content)
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+
+        assert_eq!(content, ["alpha beta", "gamma delta", "abcdefghijkl", "mn"]);
+    }
 
     #[test]
     fn follow_tail_backfills_short_current_turn_and_scrolls_contiguously() {

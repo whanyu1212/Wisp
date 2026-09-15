@@ -320,13 +320,7 @@ class ProcessSupervisor:
             budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
             process = await self._spawn(command, cwd=cwd)
             self._one_shot_locks[process] = asyncio.Lock()
-            capture_task = asyncio.create_task(
-                _collect_limited_output(
-                    process,
-                    budget,
-                    terminate=lambda: self._terminate_one_shot(process, force=True),
-                )
-            )
+            capture_task = asyncio.create_task(_collect_limited_output(process, budget))
             self._one_shot[process] = capture_task
 
         release_ownership = False

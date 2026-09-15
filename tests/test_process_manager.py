@@ -12,7 +12,6 @@ import anyio
 import pytest
 
 import wisp.tools.shell.supervisor as process_manager_module
-from wisp.tools.process import ProcessResult
 from wisp.tools.process_manager import (
     ProcessSupervisor,
     ProcessUpdate,
@@ -892,10 +891,7 @@ def test_supervisor_close_bounds_one_shot_capture_drain(
     async def hold_capture(
         _process: asyncio.subprocess.Process,
         _budget: object,
-        *,
-        terminate: object,
     ) -> tuple[bytes, bytes]:
-        assert callable(terminate)
         capture_started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -1195,7 +1191,7 @@ def test_exec_command_does_not_bypass_detached_background_job_recording(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
-def test_output_limit_kills_detached_background_job(tmp_path: Path) -> None:
+def test_endless_output_times_out_and_kills_detached_background_job(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "detached-output-limit.pid"
     command = (
         _detached_python_background_command(
@@ -1206,24 +1202,23 @@ def test_output_limit_kills_detached_background_job(tmp_path: Path) -> None:
         + "; yes x"
     )
 
-    async def run() -> tuple[ProcessResult, int]:
+    async def run() -> int:
         supervisor = ProcessSupervisor()
         try:
-            result = await supervisor.run_to_completion(
-                command,
-                cwd=tmp_path,
-                timeout=5,
-                max_output_bytes=20,
-                max_output_lines=100,
-            )
-            child_pid = await _wait_for_pid_file(child_pid_path)
-            return result, child_pid
+            with pytest.raises(ToolError, match="timed out"):
+                await supervisor.run_to_completion(
+                    command,
+                    cwd=tmp_path,
+                    timeout=2,
+                    max_output_bytes=20,
+                    max_output_lines=100,
+                )
+            return await _wait_for_pid_file(child_pid_path)
         finally:
             await supervisor.aclose()
 
-    result, child_pid = anyio.run(run)
+    child_pid = anyio.run(run)
 
-    assert result.stdout_truncated is True
     _assert_process_gone(child_pid)
 
 
@@ -1596,10 +1591,7 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
     async def fail_capture(
         _process: asyncio.subprocess.Process,
         _budget: object,
-        *,
-        terminate: object,
     ) -> tuple[bytes, bytes]:
-        assert callable(terminate)
         raise OSError("broken pipe")
 
     async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
@@ -1833,10 +1825,7 @@ def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
     async def fail_capture(
         process: asyncio.subprocess.Process,
         _budget: object,
-        *,
-        terminate: object,
     ) -> tuple[bytes, bytes]:
-        assert callable(terminate)
         captured_processes.append(process)
         raise OSError("broken pipe")
 

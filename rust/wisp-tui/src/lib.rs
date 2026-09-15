@@ -130,6 +130,10 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 // queued events together retain at most one maximum-size wire-frame budget.
 const EVENT_RETAINED_WIRE_BYTES: usize = MAX_APPLICATION_FRAME_BYTES;
 const INPUT_CHANNEL_CAPACITY: usize = 16;
+// Ghostty can emit several SGR reports for one physical wheel notch. Keep each
+// immediately available directional run out of the input queue, but bound each
+// viewport action so high-resolution devices still reach scheduling checkpoints.
+const SCROLL_BATCH_MAX_ROWS: u32 = 12;
 const STDERR_RETAINED_BYTES: usize = 64 * 1024;
 const TOP_LEVEL_ERROR_MAX_BYTES: usize = 8 * 1024;
 const TOP_LEVEL_ERROR_MAX_CHARS: usize = 4 * 1024;
@@ -3070,6 +3074,7 @@ impl LiveUi {
         self.sync_file_picker(writer, limit).await?;
         let control = match input {
             Input::Mouse(event) => self.handle_mouse(event, writer, limit).await?,
+            Input::Scroll(scroll) => self.handle_scroll(scroll, writer, limit).await?,
             input => self.handle_focused_input(input, writer, limit).await?,
         };
         if control != LoopControl::Exit {
@@ -3629,7 +3634,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Error(error) => Err(Error::Io(error)),
-            Input::Mouse(_) => Ok(LoopControl::Continue),
+            Input::Mouse(_) | Input::Scroll(_) => Ok(LoopControl::Continue),
             Input::Key(_) => Ok(LoopControl::Continue),
         }
     }
@@ -4215,9 +4220,32 @@ fn is_bidi_control(character: char) -> bool {
 enum Input {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Scroll(mouse::Scroll),
     Paste(String),
     Redraw,
     Error(io::Error),
+}
+
+/// Drain one immediately available directional run before it can backlog behind itself.
+fn collect_scroll_run(
+    first: MouseEvent,
+    mut next: impl FnMut() -> io::Result<Option<Event>>,
+) -> io::Result<(mouse::Scroll, Option<Event>)> {
+    let mut scroll = mouse::Scroll::from_event(first).expect("scroll event is prefiltered");
+    let mut deferred = None;
+    while scroll.lines.unsigned_abs() < SCROLL_BATCH_MAX_ROWS {
+        let Some(event) = next()? else {
+            break;
+        };
+        match event {
+            Event::Mouse(event) if scroll.merge(event) => {}
+            event => {
+                deferred = Some(event);
+                break;
+            }
+        }
+    }
+    Ok((scroll, deferred))
 }
 
 fn input_task(
@@ -4225,8 +4253,9 @@ fn input_task(
     mut stop: watch::Receiver<bool>,
     mouse_enabled: bool,
 ) -> Result<(), Error> {
+    let mut deferred = None;
     while !*stop.borrow() {
-        if !event::poll(Duration::from_millis(50))? {
+        if deferred.is_none() && !event::poll(Duration::from_millis(50))? {
             match stop.has_changed() {
                 Ok(true) => {
                     let _ = stop.borrow_and_update();
@@ -4236,7 +4265,8 @@ fn input_task(
             }
             continue;
         }
-        match event::read() {
+        let terminal_event = deferred.take().map_or_else(event::read, Ok);
+        match terminal_event {
             Ok(Event::Key(key))
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
@@ -4255,7 +4285,16 @@ fn input_task(
                 }
             }
             Ok(Event::Mouse(event)) if mouse_enabled && mouse::supported(event) => {
-                if sender.blocking_send(Input::Mouse(event)).is_err() {
+                let input = if mouse::Scroll::from_event(event).is_some() {
+                    let (scroll, next) = collect_scroll_run(event, || {
+                        event::poll(Duration::ZERO)?.then(event::read).transpose()
+                    })?;
+                    deferred = next;
+                    Input::Scroll(scroll)
+                } else {
+                    Input::Mouse(event)
+                };
+                if sender.blocking_send(input).is_err() {
                     return Ok(());
                 }
             }
@@ -4278,6 +4317,65 @@ mod tests {
     use std::fmt::Write as _;
     use tokio::io::duplex;
     use wisp_protocol::events;
+
+    fn wheel_event(kind: crossterm::event::MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 4,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn scroll_input_coalesces_one_bounded_directional_run() {
+        use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+
+        let mut events = VecDeque::from([
+            Event::Mouse(wheel_event(ScrollUp)),
+            Event::Mouse(wheel_event(ScrollUp)),
+            Event::Mouse(wheel_event(ScrollDown)),
+            Event::Paste("later".into()),
+        ]);
+        let (scroll, deferred) =
+            collect_scroll_run(wheel_event(ScrollUp), || Ok(events.pop_front())).unwrap();
+
+        assert_eq!(scroll.lines, -3);
+        assert!(matches!(
+            deferred,
+            Some(Event::Mouse(MouseEvent {
+                kind: ScrollDown,
+                ..
+            }))
+        ));
+        assert!(matches!(events.pop_front(), Some(Event::Paste(text)) if text == "later"));
+
+        let mut moved = wheel_event(ScrollUp);
+        moved.column += 1;
+        let mut events = VecDeque::from([Event::Mouse(moved)]);
+        let (scroll, deferred) =
+            collect_scroll_run(wheel_event(ScrollUp), || Ok(events.pop_front())).unwrap();
+        assert_eq!(scroll.lines, -1);
+        assert_eq!(deferred, Some(Event::Mouse(moved)));
+
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        let mut events = VecDeque::from([Event::Key(key)]);
+        let (scroll, deferred) =
+            collect_scroll_run(wheel_event(ScrollUp), || Ok(events.pop_front())).unwrap();
+        assert_eq!(scroll.lines, -1);
+        assert_eq!(deferred, Some(Event::Key(key)));
+
+        let mut events = VecDeque::from(
+            (0..SCROLL_BATCH_MAX_ROWS)
+                .map(|_| Event::Mouse(wheel_event(ScrollDown)))
+                .collect::<Vec<_>>(),
+        );
+        let (scroll, deferred) =
+            collect_scroll_run(wheel_event(ScrollDown), || Ok(events.pop_front())).unwrap();
+        assert_eq!(scroll.lines, SCROLL_BATCH_MAX_ROWS as i32);
+        assert!(deferred.is_none());
+        assert_eq!(events.len(), 1, "the next bounded run remains unread");
+    }
 
     fn handshake() -> serde_json::Value {
         json!({

@@ -221,8 +221,8 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             assert_eq!(buffer[(3, user)].fg, palette.foreground);
             assert!(!buffer[(3, user)].modifier.contains(Modifier::BOLD));
             assert_eq!(buffer[(3, user + 1)].symbol(), " ");
-            assert_eq!(buffer[(2, user + 1)].bg, palette.panel);
-            assert_eq!(buffer[(97, user + 1)].bg, palette.panel);
+            assert_eq!(buffer[(2, user + 1)].bg, palette.background);
+            assert_eq!(buffer[(97, user + 1)].bg, palette.background);
             assert_eq!(buffer[(3, user + 2)].bg, palette.background);
             let code = row_containing(&buffer, "let ready");
             for y in code..=code + 2 {

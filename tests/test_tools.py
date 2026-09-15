@@ -1309,6 +1309,29 @@ def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacemen
     assert truncated is True
 
 
+def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    marker = tmp_path / "finished-after-truncation.txt"
+    output_bytes = 10_000
+    code = (
+        "import pathlib, sys; "
+        f"sys.stdout.write('x' * {output_bytes}); sys.stdout.flush(); "
+        f"pathlib.Path({str(marker)!r}).write_text('ok')"
+    )
+    command = f"{python} -u -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["exit_code"] == 0
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == output_bytes - context.max_output_bytes
+    assert result.truncated is True
+    assert marker.read_text(encoding="utf-8") == "ok"
+
+
 def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=1)
     python = shlex.quote(sys.executable)

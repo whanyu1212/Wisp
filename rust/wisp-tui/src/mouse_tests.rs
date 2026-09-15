@@ -319,6 +319,46 @@ async fn failed_cancellation_warning_is_not_replaced_by_mouse_history_requests()
 }
 
 #[tokio::test]
+async fn coalesced_wheel_run_moves_the_transcript_atomically() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state.transcript.start_message(1);
+    ui.state
+        .transcript
+        .append_message_delta(1, &"long transcript line\n".repeat(120));
+    draw(&mut ui, 80, 24);
+    let before = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
+    let generation = ui.transcript_viewport.reader_generation();
+    let editor = ui.editor.clone();
+    let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+
+    ui.handle_input(
+        Input::Scroll(mouse::Scroll {
+            event: event(MouseEventKind::ScrollUp, area.x + 2, area.y + 2),
+            lines: -3,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+
+    let after = ui
+        .transcript_viewport
+        .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache);
+    assert_eq!(after[3..], before[..before.len() - 3]);
+    assert_eq!(
+        ui.transcript_viewport.reader_generation(),
+        generation.wrapping_add(1),
+        "one raw wheel run is one viewport action"
+    );
+    assert_eq!(ui.editor, editor);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn wheel_preserves_editor_focus_and_reading_position_during_streaming() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("draft 👩‍💻");
@@ -570,13 +610,24 @@ async fn wheel_targets_only_the_active_popup_and_can_repeat_between_frames() {
     }
     assert_eq!(ui.command_help.as_ref().unwrap().offset, 2);
     ui.handle_input(
+        Input::Scroll(mouse::Scroll {
+            event: event(MouseEventKind::ScrollDown, popup.x + 2, popup.y + 2),
+            lines: 3,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.command_help.as_ref().unwrap().offset, 5);
+    ui.handle_input(
         Input::Mouse(event(MouseEventKind::ScrollUp, 1, 4)),
         &writer,
         8192,
     )
     .await
     .unwrap();
-    assert_eq!(ui.command_help.as_ref().unwrap().offset, 2);
+    assert_eq!(ui.command_help.as_ref().unwrap().offset, 5);
     assert_eq!(ui.transcript_viewport, viewport);
     assert!(receiver.try_recv().is_err());
 }

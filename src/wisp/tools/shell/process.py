@@ -152,7 +152,6 @@ class _OutputBudget:
         self._remaining_bytes = max(0, max_bytes)
         self._remaining_lines = max(0, max_lines)
         self._lock = asyncio.Lock()
-        self._kill_requested = False
         self.exhausted = self._remaining_bytes == 0 or self._remaining_lines == 0
 
     async def take(self, chunk: bytes) -> tuple[bytes, bool]:
@@ -172,13 +171,6 @@ class _OutputBudget:
             if len(accepted) < len(chunk):
                 self.exhausted = True
             return accepted, self.exhausted
-
-    async def request_kill_once(self) -> bool:
-        async with self._lock:
-            if self._kill_requested:
-                return False
-            self._kill_requested = True
-            return True
 
 
 def _offset_after_nth_newline(chunk: bytes, newline_count: int) -> int:
@@ -1230,18 +1222,12 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
     budget: _OutputBudget,
-    *,
-    terminate: Callable[[], Awaitable[bool]] | None = None,
 ) -> tuple[_LimitedStreamResult, _LimitedStreamResult]:
     assert process.stdout is not None
     assert process.stderr is not None
 
-    stdout_task = asyncio.create_task(
-        _read_stream_limited(process.stdout, budget, process, terminate=terminate)
-    )
-    stderr_task = asyncio.create_task(
-        _read_stream_limited(process.stderr, budget, process, terminate=terminate)
-    )
+    stdout_task = asyncio.create_task(_read_stream_limited(process.stdout, budget))
+    stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, budget))
     try:
         stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
         await process.wait()
@@ -1256,9 +1242,6 @@ async def _collect_limited_output(
 async def _read_stream_limited(
     stream: asyncio.StreamReader,
     budget: _OutputBudget,
-    process: asyncio.subprocess.Process,
-    *,
-    terminate: Callable[[], Awaitable[bool]] | None = None,
 ) -> _LimitedStreamResult:
     chunks: list[bytes] = []
     dropped_bytes = 0
@@ -1274,8 +1257,8 @@ async def _read_stream_limited(
             truncated = True
             dropped_bytes += len(chunk) - len(accepted)
         if exhausted:
-            if await budget.request_kill_once():
-                await _terminate_for_output_limit(process, terminate=terminate)
+            # Capture limits bound retained memory, not execution. Keep draining so the
+            # subprocess can finish; timeout and cancellation remain responsible for termination.
             while overflow := await stream.read(8192):
                 truncated = True
                 dropped_bytes += len(overflow)
@@ -1383,9 +1366,7 @@ async def _run_exec_limited_stdout(
             max_bytes=max_buffered_stderr_bytes if max_buffered_stderr_bytes is not None else 2**63,
             max_lines=max_buffered_stderr_lines if max_buffered_stderr_lines is not None else 2**63,
         )
-        stderr_task = asyncio.create_task(
-            _read_stream_limited(process.stderr, stderr_budget, process, terminate=terminate)
-        )
+        stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, stderr_budget))
     else:
         stderr_task = asyncio.create_task(process.stderr.read())
     stdout_lines: list[bytes] = []

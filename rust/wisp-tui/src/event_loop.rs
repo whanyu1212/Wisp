@@ -93,7 +93,7 @@ impl ActivationTarget {
             composer_copy: matches!(input, Input::Key(key) if is_ctrl_c(*key)
                 && ui.composer_clipboard_action(*key)
                     == Some(crate::clipboard::ClipboardAction::Copy)),
-            mouse_frame: matches!(input, Input::Mouse(_))
+            mouse_frame: matches!(input, Input::Mouse(_) | Input::Scroll(_))
                 .then(|| ui.mouse_frame.clone())
                 .flatten(),
         }

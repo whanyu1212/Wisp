@@ -11,8 +11,8 @@ use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    RowAnchor, TranscriptRow, TranscriptRowCache, TranscriptRowKind, TranscriptRowTone,
-    TranscriptViewport,
+    RowAnchor, RowPosition, TranscriptRow, TranscriptRowCache, TranscriptRowKind,
+    TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -39,6 +39,7 @@ const EMPTY_TRANSCRIPT_WORDMARK: [&str; 5] = [
     "█   █  ███  ████  █   ",
 ];
 const EMPTY_TRANSCRIPT_FULL_WIDTH: usize = 40;
+const PINNED_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
@@ -447,6 +448,77 @@ fn footer_trailing_parts(state: &UiState) -> Vec<String> {
     parts
 }
 
+fn pinned_user_rows(
+    state: &UiState,
+    viewport: &TranscriptViewport,
+    row_cache: &mut TranscriptRowCache,
+    width: usize,
+) -> Option<(TranscriptEntryId, Vec<TranscriptRow>)> {
+    if !viewport.follows_tail() {
+        return None;
+    }
+    let user = state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| entry.role == TranscriptRole::User)?;
+    let mut rows = Vec::new();
+    let mut anchor = RowAnchor {
+        entry_id: user.id,
+        position: RowPosition::Header,
+    };
+    while rows.len() < PINNED_USER_ROWS {
+        let cached = row_cache.row_at(&state.transcript, anchor, width)?;
+        if cached.row.kind == TranscriptRowKind::Spacer || cached.row.anchor.entry_id != user.id {
+            break;
+        }
+        rows.push(cached.row);
+        let Some(next) = cached.next.filter(|next| next.entry_id == user.id) else {
+            break;
+        };
+        anchor = next;
+    }
+    (!rows.is_empty()).then_some((user.id, rows))
+}
+
+fn clipped_tail_assistant_header(
+    state: &UiState,
+    rows: &[TranscriptRow],
+    row_cache: &mut TranscriptRowCache,
+    width: usize,
+    active_reply: Option<TranscriptEntryId>,
+) -> Option<TranscriptRow> {
+    let assistant = active_reply
+        .and_then(|id| state.transcript.entry(id))
+        .or_else(|| state.transcript.entries().last())?;
+    if assistant.role != TranscriptRole::Assistant
+        || (active_reply.is_none()
+            && !rows.iter().any(|row| {
+                row.anchor.entry_id == assistant.id
+                    && !matches!(
+                        row.kind,
+                        TranscriptRowKind::Header | TranscriptRowKind::Spacer
+                    )
+            }))
+        || rows
+            .iter()
+            .any(|row| row.anchor.entry_id == assistant.id && row.kind == TranscriptRowKind::Header)
+    {
+        return None;
+    }
+    row_cache
+        .row_at(
+            &state.transcript,
+            RowAnchor {
+                entry_id: assistant.id,
+                position: RowPosition::Header,
+            },
+            width,
+        )
+        .map(|cached| cached.row)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transcript(
     frame: &mut Frame<'_>,
@@ -487,8 +559,7 @@ fn render_transcript(
         height: area.height.saturating_sub(parked.height),
     });
     let active_reply = active_reply(state);
-    let activity = active_reply
-        .is_none()
+    let activity = waiting_for_output(state)
         .then(|| activity_label(state, activity_frame))
         .flatten();
     let activity_height = if activity.is_some() {
@@ -506,10 +577,55 @@ fn render_transcript(
     let content = content_area(rows_area);
     let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(rows_area.height).max(1);
+    let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
+    if let Some((user_id, rows)) = &mut pinned {
+        let has_reply = state.transcript.entry_after(*user_id).is_some();
+        let reply_rows = if has_reply {
+            visible_lines.saturating_sub(1).min(2)
+        } else {
+            0
+        };
+        rows.truncate(visible_lines.saturating_sub(reply_rows));
+        if has_reply && visible_lines >= rows.len().saturating_add(3) {
+            let mut spacer = rows.last().expect("nonempty user projection").clone();
+            spacer.kind = TranscriptRowKind::Spacer;
+            spacer.anchor.position = RowPosition::Spacer;
+            spacer.spans.clear();
+            rows.push(spacer);
+        }
+    }
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
-    let rows = viewport.visible_rows(&state.transcript, row_cache);
-    let painted_rows = rows.len();
+    let mut rows = viewport.visible_rows(&state.transcript, row_cache);
     let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
+    if let Some((user_id, mut user_rows)) = pinned {
+        let user_index = state.transcript.entry_index(user_id).unwrap_or(usize::MAX);
+        rows.retain(|row| {
+            state
+                .transcript
+                .entry_index(row.anchor.entry_id)
+                .is_some_and(|index| index > user_index)
+        });
+        let mut tail_budget = visible_lines.saturating_sub(user_rows.len());
+        if rows.len() > tail_budget {
+            rows.drain(..rows.len() - tail_budget);
+        }
+        let assistant_header = (tail_budget >= 2)
+            .then(|| {
+                clipped_tail_assistant_header(state, &rows, row_cache, content_width, active_reply)
+            })
+            .flatten();
+        if let Some(header) = assistant_header {
+            tail_budget = tail_budget.saturating_sub(1);
+            if rows.len() > tail_budget {
+                rows.drain(..rows.len() - tail_budget);
+            }
+            user_rows.push(header);
+        }
+        user_rows.append(&mut rows);
+        rows = user_rows;
+    }
+    rows.truncate(visible_lines);
+    let painted_rows = rows.len();
     let selected_row = browse_selected.and_then(|selected_entry| {
         rows.iter()
             .find(|row| {
@@ -597,6 +713,27 @@ fn active_reply(state: &UiState) -> Option<TranscriptEntryId> {
         .take_while(|entry| entry.role != TranscriptRole::User)
         .find(|entry| entry.role == TranscriptRole::Assistant && !entry.content.is_empty())
         .map(|entry| entry.id)
+}
+
+fn waiting_for_output(state: &UiState) -> bool {
+    if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
+        return true;
+    }
+    if state.configuration_active() || state.view_status != ViewStatus::Running {
+        return false;
+    }
+    !state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .take_while(|entry| entry.role != TranscriptRole::User)
+        .any(|entry| {
+            (entry.role == TranscriptRole::Assistant
+                && entry.state == crate::transcript::TranscriptEntryState::Streaming
+                && !entry.content.is_empty())
+                || tool_in_progress(entry)
+        })
 }
 
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
@@ -698,9 +835,9 @@ fn render_transcript_row(
     pulse: Option<u8>,
 ) {
     let selected = selected_row == Some(row.anchor);
-    // The trailing spacer belongs to the user panel, giving the message a
-    // padded bottom edge in both tail-follow and scrollback.
-    let user = row.role == TranscriptRole::User;
+    // Keep the separator after a user message on the conversation background.
+    // This leaves a clear visual beat before the assistant without adding scroll-only rows.
+    let user = row.role == TranscriptRole::User && row.kind != TranscriptRowKind::Spacer;
     let code = row
         .spans
         .iter()
@@ -1869,7 +2006,12 @@ fn render_footer(
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow.
     let terminal_width = usize::from(frame.area().width);
-    let notice = notice.or(state.context.compaction_notice.as_deref());
+    let compaction_notice = state
+        .context
+        .compaction_notice
+        .as_deref()
+        .filter(|_| state.context.compaction_notice_is_warning);
+    let notice = notice.or(compaction_notice);
     let status_budget = if notice.is_some() {
         if terminal_width >= 80 {
             (terminal_width / 2).max(24)
@@ -2577,9 +2719,14 @@ mod tests {
         assert!(rendered.contains("Model catalog unavailable"), "{rendered}");
 
         state.context.compaction_notice =
-            Some("manual compaction cancelled. Compaction cancelled".into());
-        let cancelled = render_to_string(100, 18, &state, &PromptEditor::default());
-        assert!(cancelled.contains("cancelled"), "{cancelled}");
+            Some("threshold compaction completed: 10 entries replaced, 4 retained.".into());
+        let completed = render_to_string(100, 18, &state, &PromptEditor::default());
+        assert!(!completed.contains("compaction completed"), "{completed}");
+
+        state.context.compaction_notice = Some("threshold compaction failed.".into());
+        state.context.compaction_notice_is_warning = true;
+        let failed = render_to_string(100, 18, &state, &PromptEditor::default());
+        assert!(failed.contains("compaction failed"), "{failed}");
     }
 
     #[test]
@@ -2621,7 +2768,34 @@ mod tests {
     }
 
     #[test]
-    fn follow_tail_does_not_pin_a_compact_prompt_above_a_long_assistant_echo() {
+    fn newly_submitted_prompt_is_visible_before_the_reply_begins() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_prompt("older prompt".into());
+        state.transcript.complete_message(
+            1,
+            (0..80)
+                .map(|index| format!("older-assistant-line-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        state
+            .transcript
+            .append_prompt("CURRENT-PROMPT-MARKER".into());
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = crate::reducer::InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+
+        let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
+
+        assert!(rendered.contains("CURRENT-PROMPT-MARKER"), "{rendered}");
+        assert!(!rendered.contains("older-assistant-line-79"), "{rendered}");
+    }
+
+    #[test]
+    fn follow_tail_pins_a_compact_prompt_above_a_long_assistant_echo() {
         let mut state = UiState::new("fake".into(), None, None);
         let raw = format!("{}\n🙂END", "界".repeat(2001));
         state.transcript.append_prompt_with_display(
@@ -2632,12 +2806,14 @@ mod tests {
             .transcript
             .complete_message(1, format!("fake response to: {raw}"));
         let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+        assert!(rendered.contains("Pasted content #1"), "{rendered}");
+        assert!(rendered.contains("2006"), "{rendered}");
+        assert!(rendered.contains("6011"), "{rendered}");
         assert!(rendered.contains("🙂END"), "{rendered}");
-        assert!(!rendered.contains("Pasted content #1"), "{rendered}");
     }
 
     #[test]
-    fn follow_tail_keeps_a_long_assistant_reply_at_its_tail() {
+    fn follow_tail_keeps_the_current_prompt_and_long_assistant_tail_visible() {
         for (width, height) in [(80, 18), (36, 12)] {
             let mut state = UiState::new("fake".into(), None, None);
             state.transcript.append_prompt("LATEST-USER".into());
@@ -2651,13 +2827,13 @@ mod tests {
             );
 
             let rendered = render_to_string(width, height, &state, &PromptEditor::default());
+            assert!(rendered.contains("LATEST-USER"), "{rendered}");
             assert!(rendered.contains("FINAL-ASSISTANT-LINE"), "{rendered}");
-            assert!(!rendered.contains("LATEST-USER"), "{rendered}");
         }
     }
 
     #[test]
-    fn follow_tail_backfills_above_a_short_latest_turn() {
+    fn follow_tail_only_shows_the_latest_turn_when_it_fits() {
         let mut state = UiState::new("fake".into(), None, None);
         state.transcript.append_prompt("older-prompt".into());
         state.transcript.complete_message(
@@ -2672,15 +2848,13 @@ mod tests {
             .append_prompt("latest-prompt-marker".into());
         state.transcript.complete_message(2, "short-ok".into());
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
-        let older = rendered
-            .find("OLDER-ASSISTANT-LINE-39")
-            .expect("preceding context");
         let latest = rendered
             .find("latest-prompt-marker")
             .expect("latest user turn");
         let short = rendered.find("short-ok").expect("latest assistant");
-        assert!(older < latest && latest < short, "{rendered}");
-        assert!(!rendered.contains("older-prompt"));
+        assert!(latest < short, "{rendered}");
+        assert!(!rendered.contains("OLDER-ASSISTANT-LINE-"), "{rendered}");
+        assert!(!rendered.contains("older-prompt"), "{rendered}");
     }
 
     #[test]
@@ -4026,7 +4200,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_live_view_backfills_retained_turns_when_they_fit() {
+    fn transcript_live_view_only_renders_the_current_retained_turn() {
         let mut state = UiState::unconfigured();
         state.transcript.append_exchange("first prompt".into());
         state.transcript.complete_message(1, "first answer".into());
@@ -4035,8 +4209,8 @@ mod tests {
 
         let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
 
-        assert!(rendered.contains("first prompt"));
-        assert!(rendered.contains("first answer"));
+        assert!(!rendered.contains("first prompt"));
+        assert!(!rendered.contains("first answer"));
         assert!(rendered.contains("second prompt"));
         assert!(rendered.contains("second answer"));
         assert_eq!(state.transcript.entries().len(), 4);
@@ -4169,7 +4343,7 @@ mod tests {
     }
 
     #[test]
-    fn working_spinner_stops_when_reply_streaming_starts() {
+    fn working_spinner_stops_for_visible_progress_and_returns_between_steps() {
         let mut state = UiState::new("fake".into(), None, None);
         state.view_status = ViewStatus::Running;
         state.interaction_status = crate::reducer::InteractionStatus::Running;
@@ -4198,6 +4372,14 @@ mod tests {
             assert!(!running.contains("working ◓"), "{running}");
             assert!(!running.contains('◓'), "{running}");
         }
+        for index in 0..20 {
+            state
+                .transcript
+                .observe_tool_result(tool_result(&format!("tool-{index}"), "done"));
+        }
+        let between_steps = render_to_string_with_activity(80, 18, &state, 2);
+        assert!(between_steps.contains("working ◑"), "{between_steps}");
+
         for status in [
             ViewStatus::Idle,
             ViewStatus::Error,
