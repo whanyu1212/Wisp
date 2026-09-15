@@ -249,6 +249,66 @@ async fn ctrl_c_copies_a_composer_selection_and_otherwise_keeps_interrupt_behavi
 }
 
 #[tokio::test]
+async fn focused_composer_popups_keep_ctrl_c_interrupt_precedence_over_hidden_selection() {
+    let selected_ui = || {
+        let (clipboard, state) = crate::clipboard::test_clipboard();
+        let mut ui = LiveUi {
+            clipboard,
+            ..LiveUi::default()
+        };
+        ui.editor.insert_paste("@selected");
+        (ui, state)
+    };
+
+    let (mut help_ui, help_clipboard) = selected_ui();
+    help_ui
+        .editor
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    help_ui.state.view_status = ViewStatus::Running;
+    help_ui.state.interaction_status = InteractionStatus::Running;
+    help_ui.state.current_command = Some(crate::reducer::ActiveCommand {
+        id: "prompt-help".into(),
+        command_type: crate::reducer::ActiveCommandType::Prompt,
+    });
+    let (help_writer, mut help_received) = mpsc::channel(8);
+    help_ui
+        .handle_input(ctrl('g'), &help_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(help_ui.key_help.is_some());
+    let control = help_ui
+        .handle_input(ctrl('c'), &help_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Continue);
+    assert!(help_ui.key_help.is_none());
+    assert!(help_clipboard.lock().unwrap().copied.is_empty());
+    let WriterMessage::Frame { payload, .. } = help_received.try_recv().unwrap() else {
+        panic!("cancel frame")
+    };
+    let cancel: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(cancel["type"], "cancel");
+    assert_eq!(cancel["target_id"], "prompt-help");
+
+    let (mut file_ui, file_clipboard) = selected_ui();
+    file_ui.file_picker.sync_editor(&file_ui.editor);
+    // Build the selection after opening file completion to exercise a stale
+    // hidden editor selection behind the focused popup.
+    file_ui
+        .editor
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    assert!(file_ui.file_picker.is_open());
+    let (file_writer, mut file_received) = mpsc::channel(8);
+    let control = file_ui
+        .handle_input(ctrl('c'), &file_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Exit);
+    assert!(file_clipboard.lock().unwrap().copied.is_empty());
+    assert!(file_received.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn clipboard_cut_and_paste_are_selection_aware_and_undoable() {
     let (clipboard, state) = crate::clipboard::test_clipboard();
     let mut ui = LiveUi {

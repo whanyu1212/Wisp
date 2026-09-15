@@ -1849,6 +1849,8 @@ impl LiveUi {
 
     fn composer_owns_clipboard(&self) -> bool {
         self.editor_editable()
+            && self.key_help.is_none()
+            && !self.file_picker.is_open()
             && self.active_overlay().is_none()
             && self.current_decision_context().is_none()
             && self.browse_selected.is_none()
@@ -3059,6 +3061,12 @@ impl LiveUi {
             }
             return Ok(LoopControl::Continue);
         }
+        if let Input::Key(key) = &input {
+            if let Some(action) = self.composer_clipboard_action(*key) {
+                self.handle_composer_clipboard(action);
+                return Ok(LoopControl::Continue);
+            }
+        }
         self.sync_file_picker(writer, limit).await?;
         let control = match input {
             Input::Mouse(event) => self.handle_mouse(event, writer, limit).await?,
@@ -3368,13 +3376,6 @@ impl LiveUi {
                     panel.handle_paste(&pasted);
                 }
                 self.render_pending = true;
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if self.composer_clipboard_action(key).is_some() => {
-                let action = self
-                    .composer_clipboard_action(key)
-                    .expect("matched composer clipboard action");
-                self.handle_composer_clipboard(action);
                 Ok(LoopControl::Continue)
             }
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
