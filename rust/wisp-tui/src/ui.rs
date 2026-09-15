@@ -205,7 +205,7 @@ pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
         }
     }
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(palette.base()), area);
+    frame.render_widget(Block::default().style(palette.overlay()), area);
 }
 
 #[cfg(test)]
@@ -816,15 +816,11 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
         let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
         cell.set_symbol(if thumb { "┃" } else { "│" });
-        cell.set_style(
-            Style::default()
-                .fg(if thumb {
-                    palette.primary
-                } else {
-                    palette.muted
-                })
-                .bg(palette.background),
-        );
+        cell.set_style(palette.base().fg(if thumb {
+            palette.primary
+        } else {
+            palette.muted
+        }));
     }
 }
 
@@ -2183,7 +2179,7 @@ fn render_permission_gate(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(palette.border())
-        .style(palette.base())
+        .style(palette.overlay())
         .title(" Permission required ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3326,6 +3322,32 @@ mod tests {
         assert!(parked.contains("4 Deny"));
         assert!(parked.contains("3 YOLO (saved)"));
         assert!(parked.contains("args:"));
+    }
+
+    #[test]
+    fn glass_permission_gate_uses_an_opaque_surface() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "ask".into(),
+        });
+        let palette = crate::theme::resolve("glass").unwrap().palette(false);
+        assert_eq!(palette.base().bg, None);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_permission_gate(frame, frame.area(), &state, None, palette);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 1)].bg, palette.surface);
+        assert_eq!(buffer[(78, 9)].bg, palette.surface);
     }
 
     #[test]

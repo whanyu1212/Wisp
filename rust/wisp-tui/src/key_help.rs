@@ -3,7 +3,6 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
@@ -165,11 +164,7 @@ impl KeyHelp {
             } else {
                 " Keys · Ctrl+G / Esc close "
             })
-            .style(
-                Style::default()
-                    .fg(palette.foreground)
-                    .bg(palette.background),
-            );
+            .style(palette.overlay());
         let inner = block.inner(area);
         frame.render_widget(block, area);
         // Materialize visual rows so even a long configured alias list can be

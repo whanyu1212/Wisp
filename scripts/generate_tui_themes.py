@@ -53,6 +53,7 @@ def catalog_json() -> str:
                 "label": spec.label,
                 "description": spec.description,
                 "dark": spec.dark,
+                "terminal_background": spec.terminal_background,
                 "colors": colors,
             }
         )

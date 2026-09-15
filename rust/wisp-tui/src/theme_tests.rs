@@ -169,6 +169,12 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
         assert_eq!(color.selection().fg, Some(color.background));
         assert_eq!(color.selection().bg, Some(color.primary));
     }
+    let glass = theme::resolve("glass").unwrap().palette(false);
+    assert_eq!(glass.base().bg, None);
+    assert_eq!(glass.overlay().bg, Some(glass.surface));
+    let vapor = theme::resolve("vapor").unwrap().palette(false);
+    assert_eq!(vapor.base().bg, Some(vapor.background));
+    assert_eq!(vapor.overlay().bg, Some(vapor.background));
     assert!(theme::resolve("not-a-theme").is_none());
     assert!(
         theme::named("paper").is_none(),
@@ -663,12 +669,16 @@ async fn recoloring_during_streaming_preserves_semantic_caches_and_monochrome_is
             ui.no_color = no_color;
             let frame = draw(&mut ui, 80, 24);
             assert!(text(&frame).contains("Heading"));
-            assert_eq!(frame[(79, 0)].bg, selected.palette(no_color).background);
+            assert_eq!(
+                frame[(79, 0)].bg,
+                selected.palette(no_color).base().bg.unwrap_or(Color::Reset)
+            );
             if no_color {
                 for cell in &frame.content {
                     for color in [cell.fg, cell.bg] {
                         let Color::Rgb(r, g, b) = color else {
-                            panic!("explicit theme color: {color:?}")
+                            assert_eq!(color, Color::Reset);
+                            continue;
                         };
                         assert_eq!(r, g);
                         assert_eq!(g, b);

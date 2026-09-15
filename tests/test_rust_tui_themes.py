@@ -40,6 +40,9 @@ def test_native_theme_catalog_is_current() -> None:
         spec.name for spec in WISP_THEME_SPECS
     ]
     assert catalog["command"]["slash_command"] == "/theme"
+    assert {entry["slug"]: entry["terminal_background"] for entry in catalog["themes"]} == {
+        spec.slug: spec.terminal_background for spec in WISP_THEME_SPECS
+    }
 
 
 @pytest.mark.tui

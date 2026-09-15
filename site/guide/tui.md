@@ -201,8 +201,9 @@ trust controls take precedence. Below 30×8 no hidden selection can be inserted.
 opt-in, and modified submission shortcuts retain their existing meanings.
 
 Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Glass, Orchid, Ember, Storm,
-Grove, Wave, Paper, and Dawn palettes as Textual. Glass combines a smoky graphite elevation ladder
-with luminous ice, lilac, and mint accents; terminal opacity and blur remain emulator-owned. The
+Grove, Wave, Paper, and Dawn palettes as Textual. Glass leaves the main canvas on the terminal's
+default background, with smoky graphite surfaces and luminous ice, lilac, and mint accents. Configure
+opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate those effects. The
 picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
 or `Home`/`End`; `Enter` applies the displayed choice, while `Escape` or `Ctrl+C` restores the
 committed theme. Streaming continues behind it. A new approval, trust request, or presented workflow
