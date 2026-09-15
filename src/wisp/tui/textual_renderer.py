@@ -870,6 +870,13 @@ class TextualTuiRenderer:
                     self._process_started.pop(identity.process_id, None)
                 self._tool_elapsed(event.call_id, event.timestamp)
             self._history.record_live_tool_result(event.call_id, widget=card)
+            if self._progress_active and not self.app.has_pending_tool_calls():
+                # Visible assistant text retires the heartbeat while tool cards carry
+                # progress. Restore it as soon as the final call settles: persistence,
+                # continuation policy, and the next provider request can all be quiet.
+                # Renewing ownership also prevents a delayed stream frame from
+                # retiring the indicator for this newer post-tool phase.
+                self.app.renew_working_indicator()
         elif isinstance(event, AgentCompleted):
             self._finish_progress(
                 after_stream=event.outcome == "completed",

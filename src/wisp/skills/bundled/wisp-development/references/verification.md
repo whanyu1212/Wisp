@@ -14,9 +14,13 @@ Use `uv run mypy` without a path so configured package discovery remains authori
 to `tests`; `refs/` contains reference repositories, not Wisp's suite.
 
 Provider-facing tests must use deterministic fake or scripted providers, not live credentials.
-When an event crosses RPC, verify the real JSON round trip. For package-owned resources, build an
-artifact and inspect or install the wheel so a source-tree-only success cannot hide omitted package
-data:
+When an event crosses RPC, verify the real JSON round trip. For Rust changes, also run the workspace
+format, Clippy, and test gates from `AGENTS.md`; frontend-boundary changes require the Python/Rust
+handoff tests. Generated theme changes require
+`uv run python scripts/generate_tui_themes.py --check`.
+
+For package-owned resources, build an artifact and inspect or install the wheel so a source-tree-only
+success cannot hide omitted package data:
 
 ```bash
 uv build --no-sources

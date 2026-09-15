@@ -97,7 +97,7 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
             .map(|theme| theme.slug.as_str())
             .collect::<Vec<_>>(),
         [
-            "vapor", "orchid", "ember", "storm", "grove", "wave", "paper", "dawn"
+            "vapor", "glass", "orchid", "ember", "storm", "grove", "wave", "paper", "dawn"
         ]
     );
     assert_eq!(theme::default_theme().name, "wisp");
@@ -313,7 +313,7 @@ async fn preview_cancel_and_toggle_do_not_commit_or_disturb_draft_or_viewport() 
     assert_ne!(preview, before);
     assert_eq!(
         ui.palette(),
-        theme::resolve("orchid").unwrap().palette(false)
+        theme::resolve("glass").unwrap().palette(false)
     );
     ui.handle_input(ctrl('t'), &writer, 8192).await.unwrap();
     assert_eq!(ui.theme.active.slug, "vapor");

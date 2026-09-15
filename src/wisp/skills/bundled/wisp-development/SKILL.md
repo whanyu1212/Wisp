@@ -5,7 +5,7 @@ license: MIT
 compatibility: Wisp source checkouts and installed wisp-ai packages.
 metadata:
   author: Wisp
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Wisp Development
@@ -17,12 +17,14 @@ proposing changes.
 ## Workflow
 
 1. Identify the narrowest owning layer: agent loop, harness, coding session, RPC host, or frontend.
-2. Preserve event-driven contracts and keep the Textual TUI a pure RPC client.
+2. Preserve event-driven contracts and keep both terminal frontends as pure RPC clients.
 3. Treat project trust, protected paths, tool safety, and approvals as independent boundaries.
 4. Use the existing runtime registration API instead of wiring capabilities into a frontend.
-5. Add deterministic tests with fake or scripted providers and exercise real JSON round trips when
+5. Update authoritative sources before generated artifacts, preserving stable catalog and schema
+   ordering.
+6. Add deterministic tests with fake or scripted providers and exercise real JSON round trips when
    events cross RPC.
-6. Run the repository's documented format, lint, type, and test gates.
+7. Run the repository's documented Python, Rust, handoff, and packaging gates that match the change.
 
 ## GitHub delivery boundary
 

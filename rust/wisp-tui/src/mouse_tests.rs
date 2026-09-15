@@ -585,9 +585,9 @@ async fn popup_selection_is_not_activation_and_outside_click_never_passes_throug
     ui.theme_picker = Some(ThemePicker::new(ui.theme.active));
     let buffer = draw(&mut ui, 80, 24);
     let (x, y) = row_point(&ui, 1);
-    assert!(row_text(&buffer, y).contains("Orchid"));
+    assert!(row_text(&buffer, y).contains("Glass"));
     ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
-    assert_eq!(ui.theme_picker.as_ref().unwrap().preview().slug, "orchid");
+    assert_eq!(ui.theme_picker.as_ref().unwrap().preview().slug, "glass");
     assert_eq!(ui.theme.active.slug, "vapor");
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await

@@ -15,6 +15,11 @@ Never discard, overwrite, stage, reformat, or relocate unrelated changes to obta
 current worktree contains concurrent work, use a separate worktree and focused branch when practical.
 Do not remove another process's worktree or lock.
 
+For work requested after a prior PR merges, verify the remote merged state first. Fetch the target
+branch, confirm the merge commit is its ancestor, fast-forward the local target branch, and create the
+follow-up branch from the fetched tip. Do not continue new work on the already-merged feature branch or
+infer authorization to delete it.
+
 ## Verify the change
 
 Start with focused tests, then run repository-required format, lint, type, and broader test gates when
