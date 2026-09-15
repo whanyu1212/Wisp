@@ -1999,6 +1999,8 @@ impl LiveUi {
                 row.kind,
                 TranscriptRowKind::CardAction
                     | TranscriptRowKind::CardGroup
+                    | TranscriptRowKind::CardDetail
+                    | TranscriptRowKind::CardOmission
                     | TranscriptRowKind::Thought
             ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_));
             if !foldable || !seen.insert(row.anchor.entry_id) {

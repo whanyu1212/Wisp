@@ -303,7 +303,6 @@ pub fn render(
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
         ])
         .split(area);
     let current = picker
@@ -330,8 +329,17 @@ pub fn render(
         Paragraph::new(terminal_row(&current, usize::from(chunks[0].width))),
         chunks[0],
     );
-    let height = usize::from(chunks[1].height.saturating_sub(2));
-    let width = usize::from(chunks[1].width.saturating_sub(2));
+    let model_block = Block::default()
+        .title(" model ")
+        .borders(Borders::ALL)
+        .border_style(palette.border());
+    let model_inner = model_block.inner(chunks[1]);
+    let model_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(model_inner);
+    let height = usize::from(model_chunks[0].height);
+    let width = usize::from(model_chunks[0].width);
     let start = picker.selected.map_or(0, |selected| {
         selected.saturating_sub(height.saturating_sub(1))
     });
@@ -392,15 +400,6 @@ pub fn render(
     } else {
         vec![Line::from("Catalog unavailable. Press r to retry.")]
     };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" model ")
-                .borders(Borders::ALL)
-                .border_style(palette.border()),
-        ),
-        chunks[1],
-    );
     let effort = picker
         .selected_model()
         .map(|(provider, model)| {
@@ -416,9 +415,12 @@ pub fn render(
             }
         })
         .unwrap_or_default();
+    frame.render_widget(model_block, chunks[1]);
+    frame.render_widget(Paragraph::new(Text::from(lines)), model_chunks[0]);
     frame.render_widget(
-        Paragraph::new(terminal_row(&effort, usize::from(chunks[2].width))),
-        chunks[2],
+        Paragraph::new(terminal_row(&effort, usize::from(model_chunks[1].width)))
+            .style(Style::default().fg(palette.muted)),
+        model_chunks[1],
     );
     let hint = if applying {
         "Applying… · Esc close"
@@ -426,25 +428,20 @@ pub fn render(
         "↑/↓ model · Enter apply · Esc close · r refresh"
     };
     frame.render_widget(
-        Paragraph::new(terminal_row(hint, usize::from(chunks[3].width))),
-        chunks[3],
+        Paragraph::new(terminal_row(hint, usize::from(chunks[2].width))),
+        chunks[2],
     );
     frame.render_widget(
         Paragraph::new(terminal_row(
             notice.unwrap_or(""),
-            usize::from(chunks[4].width),
+            usize::from(chunks[3].width),
         )),
-        chunks[4],
+        chunks[3],
     );
     if picker.loading || applying {
         Rows::default()
     } else {
-        Rows::new(
-            chunks[1].inner(ratatui::layout::Margin::new(1, 1)),
-            start,
-            picker.rows.len(),
-            1,
-        )
+        Rows::new(model_chunks[0], start, picker.rows.len(), 1)
     }
 }
 
@@ -610,6 +607,16 @@ pub(crate) mod tests {
                     .iter()
                     .any(|cell| cell.bg == Palette::default().primary)
             );
+            let effort_row = (0..height)
+                .find(|&y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("Effort:")
+                })
+                .expect("effort control should remain visible");
+            assert_eq!(buffer[(0, effort_row)].symbol(), "│");
+            assert_eq!(buffer[(width - 1, effort_row)].symbol(), "│");
         }
     }
 }

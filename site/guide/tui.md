@@ -65,8 +65,9 @@ The conversation uses the terminal width with modest side margins. User turns ha
 background with padding above the speaker label and below the message; assistant prose and collapsed tool rows stay open on the transcript background.
 The transcript has space at the top and above the composer, collapsing on short terminals.
 The composer shares the transcript background, with a thin rounded frame, a `›` prompt, and a hint when
-empty. Long logical lines soft-wrap onto additional visual rows without adding newlines to the submitted
-prompt. The composer grows to its bounded height, then keeps the cursor's wrapped row visible. The frame
+empty. Long logical lines soft-wrap at word boundaries, falling back to safe hard wrapping for long
+tokens, without adding newlines to the submitted prompt. The composer grows to its bounded height, then
+keeps the cursor's wrapped row visible. The frame
 collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
 mode, model, context, and the selected session on the right, as space permits.
@@ -87,16 +88,19 @@ Replies that omit a table header are also supported: a paragraph beginning with 
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
 Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
-Ctrl+G lists every resolved binding. Tool and process previews stay collapsed to an action line; consecutive
-`read` / `grep` / `find` / `ls` cards group as `explored N files`. Thinking streams as a collapsed
-`thought` row. F6 browses foldable rows: Right expands, Left collapses, Enter opens retained
+Ctrl+G lists every resolved binding. Successful `edit` and `write` cards show a bounded inline diff
+preview with the file, change counts, stable `+`/`-` gutters, and themed changed-row bands. Other tool
+and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
+cards group as `explored N files`. Thinking streams as a collapsed `thought` row. F6 browses visible
+card rows: Right expands, Left collapses, Enter opens retained
 detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
 Before reply text arrives, a working row animates below the transcript. Once text starts
 streaming, the working row and spinner disappear. The `wisp` label stays visible at the live tail
 during intervening tool calls.
-Compaction keeps its separate activity row. Active tool markers pulse gently in brightness;
+Compaction keeps its separate activity row. Active tool cards use a prominent solid-dot marker that
+pulses gently in brightness and active shell calls say `Running`;
 completed, failed, denied, cancelled, and approval-waiting calls stay steady. In monochrome mode,
 active markers alternate normal and dim intensity. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard
@@ -141,8 +145,9 @@ commands remain available while the bare picker reports the catalog as unavailab
 
 Rust also supports `/model` while idle. The picker groups models by provider, disables unavailable
 providers, and labels preview and legacy models. Use `Up`/`Down`, `PageUp`/`PageDown`, or `Home`/`End`
-to select a model, `Left`/`Right` to choose its reasoning effort (including the provider default),
-`Enter` to apply, `r` to refresh, and `Escape` or `Ctrl+C` to close. Navigating does not change the
+to select a model, `Left`/`Right` to choose its reasoning effort (including the provider default).
+The effort control stays within the model panel's border. Use `Enter` to apply, `r` to refresh, and
+`Escape` or `Ctrl+C` to close. Navigating does not change the
 runtime. Closing after submitting a selection does not cancel its application. The picker requires
 at least 30 columns and 8 rows; a smaller terminal cannot apply a hidden selection.
 
