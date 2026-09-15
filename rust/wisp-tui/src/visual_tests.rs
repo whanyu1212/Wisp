@@ -221,8 +221,8 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             assert_eq!(buffer[(3, user)].fg, palette.foreground);
             assert!(!buffer[(3, user)].modifier.contains(Modifier::BOLD));
             assert_eq!(buffer[(3, user + 1)].symbol(), " ");
-            assert_eq!(buffer[(2, user + 1)].bg, palette.background);
-            assert_eq!(buffer[(97, user + 1)].bg, palette.background);
+            assert_eq!(buffer[(2, user + 1)].bg, palette.panel);
+            assert_eq!(buffer[(97, user + 1)].bg, palette.panel);
             assert_eq!(buffer[(3, user + 2)].bg, palette.background);
             let code = row_containing(&buffer, "let ready");
             for y in code..=code + 2 {
@@ -242,6 +242,22 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             assert!(theme::contrast_ratio(palette.primary, palette.panel) >= 4.5);
         }
     }
+}
+
+#[test]
+fn active_user_surface_keeps_one_highlighted_row_above_and_below() {
+    let mut ui = fixture("new-turn");
+    let palette = ui.palette();
+    let buffer = draw(&mut ui, 80, 24);
+    let label = row_containing(&buffer, "you");
+    let prompt = row_containing(&buffer, "Now check the remaining edge cases.");
+
+    assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
+    assert_eq!(buffer[(77, label - 1)].bg, palette.panel);
+    assert_eq!(buffer[(2, prompt + 1)].bg, palette.panel);
+    assert_eq!(buffer[(77, prompt + 1)].bg, palette.panel);
+    assert_eq!(buffer[(1, prompt + 1)].bg, palette.background);
+    assert_eq!(buffer[(78, prompt + 1)].bg, palette.background);
 }
 
 #[test]
@@ -309,6 +325,40 @@ fn composer_soft_wraps_long_logical_lines_without_changing_the_prompt() {
     assert!(row_containing(&buffer, "TAIL") > editor.area.y);
     assert_eq!(ui.editor.text(), prompt);
     assert_eq!(ui.editor.line_count(), 1);
+}
+
+#[test]
+fn composer_wraps_prose_at_word_boundaries_without_changing_the_prompt() {
+    let mut ui = fixture("conversation");
+    ui.mouse_enabled = true;
+    let prompt = "alpha beta gamma delta tail";
+    ui.editor.restore_prompt(prompt);
+
+    let buffer = draw(&mut ui, 30, 16);
+    let editor = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap();
+    let rendered = (editor.area.y..editor.area.bottom())
+        .map(|y| {
+            (editor.area.x..editor.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(ui.editor.text(), prompt);
+    assert_eq!(ui.editor.line_count(), 1);
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.trim_end() == "alpha beta gamma delta")
+    );
+    assert!(rendered.iter().any(|row| row.trim_end() == "tail"));
 }
 
 #[test]

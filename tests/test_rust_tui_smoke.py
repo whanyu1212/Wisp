@@ -900,6 +900,24 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x1b[200~needle\x1b[201~")
                 phase = "history filtered"
             elif phase == "history filtered" and b"needle" in output[phase_output_offset:]:
+                # The query can paint before the filtered selection is marked as
+                # rendered. Force a complete frame and wait for both before Enter.
+                phase_output_offset = len(output)
+                fcntl.ioctl(
+                    terminal_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 24, 103, 0, 0),
+                )
+                phase = "history filtered frame"
+            elif phase == "history filtered frame" and all(
+                marker in output[phase_output_offset:]
+                for marker in (
+                    b"Prompt history",
+                    b"> needle",
+                    b"history exact first needle second",
+                    b"1 matches",
+                )
+            ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\r")
                 phase = "history restored"

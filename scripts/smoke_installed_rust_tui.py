@@ -64,6 +64,8 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
     startup_redraw_offset: int | None = None
     prompt_sent = False
     response_seen = False
+    settled_redraw_offset: int | None = None
+    settled_at: float | None = None
     quit_sent = False
     status: int | None = None
     deadline = time.monotonic() + 30
@@ -97,7 +99,30 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
                 prompt_sent = True
             if prompt_sent and b"response" in output:
                 response_seen = True
-            if response_seen and not quit_sent and output.rfind(b"idle") > output.rfind(b"working"):
+            if (
+                response_seen
+                and settled_redraw_offset is None
+                and output.rfind(b"idle") > output.rfind(b"working")
+            ):
+                # The first differential idle paint can share a scheduling turn
+                # with final prompt cleanup. Require one complete settled frame
+                # before testing graceful installed-package shutdown.
+                settled_redraw_offset = len(output)
+                settled_at = time.monotonic()
+                fcntl.ioctl(
+                    terminal_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 24, 83, 0, 0),
+                )
+                continue
+            if (
+                settled_redraw_offset is not None
+                and settled_at is not None
+                and not quit_sent
+                and b"fake response to: installed wheel smoke" in output[settled_redraw_offset:]
+                and b"idle" in output[settled_redraw_offset:]
+                and time.monotonic() - settled_at >= 0.25
+            ):
                 os.write(terminal_fd, b"\x03")
                 quit_sent = True
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)

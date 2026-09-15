@@ -586,7 +586,7 @@ fn render_transcript(
             0
         };
         rows.truncate(visible_lines.saturating_sub(reply_rows));
-        if has_reply && visible_lines >= rows.len().saturating_add(3) {
+        if visible_lines >= rows.len().saturating_add(reply_rows).saturating_add(1) {
             let mut spacer = rows.last().expect("nonempty user projection").clone();
             spacer.kind = TranscriptRowKind::Spacer;
             spacer.anchor.position = RowPosition::Spacer;
@@ -663,7 +663,7 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
-        for (offset, row) in rows.into_iter().enumerate() {
+        for (offset, row) in rows.iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
                 conversation.y + offset as u16,
@@ -676,10 +676,23 @@ fn render_transcript(
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
             }
+            let user_surface = row.role == TranscriptRole::User
+                || (row.kind == TranscriptRowKind::Spacer
+                    && rows.get(offset + 1).is_some_and(|next| {
+                        next.role == TranscriptRole::User && next.kind == TranscriptRowKind::Header
+                    }));
             let pulse = (state.view_status == ViewStatus::Running
-                && row_tool_in_progress(state, &row))
+                && row_tool_in_progress(state, row))
             .then_some(activity_frame);
-            render_transcript_row(frame, area, row, selected_row, palette, pulse);
+            render_transcript_row(
+                frame,
+                area,
+                row.clone(),
+                selected_row,
+                user_surface,
+                palette,
+                pulse,
+            );
         }
     }
     if let Some(label) = activity.filter(|_| activity_height > 0) {
@@ -816,14 +829,22 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
 }
 
 fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
-    let color = match tone {
-        TranscriptRowTone::Pending => palette.primary,
-        TranscriptRowTone::Success => palette.success,
-        TranscriptRowTone::Warning => palette.warning,
-        TranscriptRowTone::Error => palette.error,
-        _ => palette.muted,
-    };
-    Style::default().fg(color)
+    match tone {
+        TranscriptRowTone::Pending => Style::default().fg(palette.primary),
+        TranscriptRowTone::Success => Style::default().fg(palette.success),
+        TranscriptRowTone::Warning => Style::default().fg(palette.warning),
+        TranscriptRowTone::Error => Style::default().fg(palette.error),
+        TranscriptRowTone::DiffHeader => Style::default()
+            .fg(palette.primary)
+            .add_modifier(Modifier::BOLD),
+        TranscriptRowTone::DiffAddition => Style::default()
+            .fg(palette.addition)
+            .bg(palette.addition_background),
+        TranscriptRowTone::DiffDeletion => Style::default()
+            .fg(palette.deletion)
+            .bg(palette.deletion_background),
+        _ => Style::default().fg(palette.muted),
+    }
 }
 
 fn render_transcript_row(
@@ -831,13 +852,12 @@ fn render_transcript_row(
     area: Rect,
     row: TranscriptRow,
     selected_row: Option<RowAnchor>,
+    user_surface: bool,
     palette: Palette,
     pulse: Option<u8>,
 ) {
     let selected = selected_row == Some(row.anchor);
-    // Keep the separator after a user message on the conversation background.
-    // This leaves a clear visual beat before the assistant without adding scroll-only rows.
-    let user = row.role == TranscriptRole::User && row.kind != TranscriptRowKind::Spacer;
+    let user = user_surface;
     let code = row
         .spans
         .iter()
@@ -854,6 +874,15 @@ fn render_transcript_row(
     let content = content_area(area);
     if code && !selected {
         frame.render_widget(Block::default().style(palette.composer()), content);
+    } else if matches!(
+        row.tone,
+        TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion
+    ) && !selected
+    {
+        frame.render_widget(
+            Block::default().style(base.patch(tone_style(row.tone, palette))),
+            content,
+        );
     }
     let style = match row.kind {
         TranscriptRowKind::Header
@@ -871,6 +900,9 @@ fn render_transcript_row(
                 | TranscriptRowTone::Success
                 | TranscriptRowTone::Warning
                 | TranscriptRowTone::Error
+                | TranscriptRowTone::DiffHeader
+                | TranscriptRowTone::DiffAddition
+                | TranscriptRowTone::DiffDeletion
         ) =>
         {
             base.patch(tone_style(row.tone, palette))
@@ -904,7 +936,7 @@ fn render_transcript_row(
         if selected {
             marker = marker.patch(palette.selection());
         }
-        spans.insert(0, Span::styled("• ", marker_style(marker)));
+        spans.insert(0, Span::styled("● ", marker_style(marker)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
@@ -1266,6 +1298,7 @@ fn render_composer(
                 .map(|row| mouse::EditorRow {
                     logical_row: row.logical_row,
                     column_start: row.column_start,
+                    column_end: row.column_start.saturating_add(row.text.width()),
                 })
                 .collect(),
         });
@@ -1432,32 +1465,14 @@ fn visual_row_count(line: &str, width: usize) -> usize {
 }
 
 fn visual_row_metrics(line: &str, width: usize) -> (usize, usize, usize) {
-    let mut rows = 1_usize;
-    let mut used = 0_usize;
-    let mut source_column = 0_usize;
-    for grapheme in line.graphemes(true) {
-        let mut remaining = source_grapheme_display_width(grapheme, source_column);
-        if grapheme == "\t" {
-            while remaining > 0 {
-                if used == width {
-                    rows += 1;
-                    used = 0;
-                }
-                let take = remaining.min(width - used);
-                used += take;
-                source_column += take;
-                remaining -= take;
-            }
-        } else {
-            if used > 0 && used.saturating_add(remaining) > width {
-                rows += 1;
-                used = 0;
-            }
-            used = used.saturating_add(remaining);
-            source_column = source_column.saturating_add(remaining);
-        }
-    }
-    (rows, used, source_column)
+    let mut rows = Vec::new();
+    append_composer_visual_rows(&mut rows, 0, line, width);
+    let final_width = rows.last().map_or(0, |row| row.text.width());
+    (
+        rows.len(),
+        final_width,
+        crate::prompt_editor::display_width(line),
+    )
 }
 
 fn cursor_needs_continuation_row(projection: &PromptProjection<'_>, width: usize) -> bool {
@@ -1643,49 +1658,77 @@ fn append_composer_visual_rows(
     line: &str,
     width: usize,
 ) {
+    fn push_row(
+        rows: &mut Vec<ComposerVisualRow>,
+        logical_row: usize,
+        column_start: usize,
+        text: String,
+    ) {
+        rows.push(ComposerVisualRow {
+            logical_row,
+            column_start,
+            text,
+        });
+    }
+
+    let width = width.max(1);
     let mut column_start = 0_usize;
     let mut source_column = 0_usize;
     let mut used = 0_usize;
     let mut text = String::new();
-    for grapheme in line.graphemes(true) {
-        let mut remaining = source_grapheme_display_width(grapheme, source_column);
-        if grapheme == "\t" {
-            while remaining > 0 {
-                if used == width {
-                    rows.push(ComposerVisualRow {
-                        logical_row,
-                        column_start,
-                        text: std::mem::take(&mut text),
-                    });
-                    column_start = source_column;
+    // Keep whitespace on the preceding visual row so every wrapped row retains
+    // exact source display columns for cursor movement, selection, and mouse hits.
+    // The tuple is the rendered byte and display-column boundary after that space.
+    let mut word_break = None::<(usize, usize)>;
+    let mut has_word = false;
+
+    {
+        let mut append_piece = |rendered: &str, piece_width: usize, whitespace: bool| {
+            while used > 0 && used.saturating_add(piece_width) > width {
+                if let Some((byte, columns)) = word_break.filter(|(byte, _)| *byte > 0) {
+                    let remainder = text.split_off(byte);
+                    push_row(rows, logical_row, column_start, std::mem::take(&mut text));
+                    text = remainder;
+                    column_start = column_start.saturating_add(columns);
+                    used = used.saturating_sub(columns);
+                    has_word = !text.is_empty();
+                    word_break = None;
+                } else {
+                    push_row(rows, logical_row, column_start, std::mem::take(&mut text));
+                    column_start = column_start.saturating_add(used);
                     used = 0;
+                    has_word = false;
+                    word_break = None;
                 }
-                let take = remaining.min(width - used);
-                text.extend(std::iter::repeat_n(' ', take));
-                used += take;
-                source_column += take;
-                remaining -= take;
             }
-            continue;
+
+            text.push_str(rendered);
+            used = used.saturating_add(piece_width);
+            if whitespace {
+                if has_word {
+                    word_break = Some((text.len(), used));
+                }
+            } else {
+                has_word = true;
+            }
+        };
+        for grapheme in line.graphemes(true) {
+            let grapheme_width = source_grapheme_display_width(grapheme, source_column);
+            if grapheme == "\t" {
+                for _ in 0..grapheme_width {
+                    append_piece(" ", 1, true);
+                }
+            } else {
+                append_piece(
+                    grapheme,
+                    grapheme_width,
+                    grapheme.chars().all(char::is_whitespace),
+                );
+            }
+            source_column = source_column.saturating_add(grapheme_width);
         }
-        if used > 0 && used.saturating_add(remaining) > width {
-            rows.push(ComposerVisualRow {
-                logical_row,
-                column_start,
-                text: std::mem::take(&mut text),
-            });
-            column_start = source_column;
-            used = 0;
-        }
-        text.push_str(grapheme);
-        used = used.saturating_add(remaining);
-        source_column = source_column.saturating_add(remaining);
     }
-    rows.push(ComposerVisualRow {
-        logical_row,
-        column_start,
-        text,
-    });
+    push_row(rows, logical_row, column_start, text);
 }
 
 pub(crate) struct SourceDisplayColumnWindow {
@@ -3516,6 +3559,7 @@ mod tests {
             ("ab界c", 4, vec!["ab界", "c"]),
             ("abc\tz", 4, vec!["abc ", "z"]),
             ("abc界xyz", 4, vec!["abc", "界xy", "z"]),
+            ("alpha beta tail", 10, vec!["alpha ", "beta tail"]),
             ("abcd", 4, vec!["abcd", ""]),
         ] {
             let mut editor = PromptEditor::default();
@@ -3710,7 +3754,7 @@ mod tests {
             style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
         assert_eq!(pending_fg, Palette::default().accent);
         assert_eq!(
-            style_at_text(pending.backend(), "•").unwrap().0,
+            style_at_text(pending.backend(), "●").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
@@ -3728,7 +3772,7 @@ mod tests {
             style_at_text(complete.backend(), "Read  README.md").unwrap();
         assert_eq!(success_fg, Palette::default().accent);
         assert_eq!(
-            style_at_text(complete.backend(), "•").unwrap().0,
+            style_at_text(complete.backend(), "●").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
@@ -3761,12 +3805,14 @@ mod tests {
         state.transcript.observe_tool_result(completed);
 
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
-        assert!(collapsed.contains("file.txt"));
-        assert!(!collapsed.contains("+ new value"));
+        assert!(collapsed.contains("M file.txt  +1 -1"));
+        assert!(collapsed.contains("- old�[2J"));
+        assert!(collapsed.contains("+ new value"));
+        assert!(collapsed.contains("F6 browse · Enter details"));
         assert!(collapsed.contains("Ctrl+G help"));
         assert!(!collapsed.contains('\u{1b}'));
 
-        let backend = TestBackend::new(60, 10);
+        let backend = TestBackend::new(60, 20);
         let mut browse_terminal = Terminal::new(backend).unwrap();
         let mut browse_viewport = TranscriptViewport::default();
         let mut browse_cache = TranscriptRowCache::default();
@@ -3800,6 +3846,14 @@ mod tests {
         let (_, selected_background, _) =
             style_at_text(browse_terminal.backend(), &visible_text).unwrap();
         assert_eq!(selected_background, Palette::default().primary);
+        let (added_fg, added_background, _) =
+            style_at_text(browse_terminal.backend(), "+ new value").unwrap();
+        let (deleted_fg, deleted_background, _) =
+            style_at_text(browse_terminal.backend(), "- old�[2J").unwrap();
+        assert_eq!(added_fg, Palette::default().addition);
+        assert_eq!(added_background, Palette::default().addition_background);
+        assert_eq!(deleted_fg, Palette::default().deletion);
+        assert_eq!(deleted_background, Palette::default().deletion_background);
 
         let card = state
             .transcript
@@ -3883,6 +3937,7 @@ mod tests {
                         Rect::new(0, 0, 30, 1),
                         row.clone(),
                         Some(anchor),
+                        false,
                         palette,
                         None,
                     )
@@ -4315,14 +4370,14 @@ mod tests {
                             let dot = dim
                                 .content
                                 .iter()
-                                .find(|cell| cell.symbol() == "•")
+                                .find(|cell| cell.symbol() == "●")
                                 .unwrap();
                             assert!(dot.modifier.contains(Modifier::DIM));
                         }
                         for (a, b) in bright.content.iter().zip(&dim.content) {
                             assert_eq!(a.symbol(), b.symbol());
                             if a != b {
-                                assert!(matches!(a.symbol(), "•" | " "));
+                                assert!(matches!(a.symbol(), "●" | " "));
                             }
                         }
                         let mut result = tool_result("pulse", "finished");

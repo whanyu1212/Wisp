@@ -1092,7 +1092,7 @@ fn preferred_result_detail(result: &ToolResultInput, preview: &str, status: Tool
 fn action_verb(name: &str, status: ToolStatus) -> &'static str {
     let words = match name {
         "bash" => [
-            "Run",
+            "Running",
             "Awaiting approval to run",
             "Running",
             "Ran",
@@ -1513,6 +1513,12 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
         }
+    }
+
+    #[test]
+    fn requested_bash_action_uses_active_wording() {
+        assert_eq!(action_verb("bash", ToolStatus::Requested), "Running");
+        assert_eq!(action_verb("bash", ToolStatus::Done), "Ran");
     }
 
     #[test]
