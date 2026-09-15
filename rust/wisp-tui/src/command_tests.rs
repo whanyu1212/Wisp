@@ -399,6 +399,111 @@ async fn compact_preflight_preserves_input_and_bare_command_cancels_its_own_id()
 }
 
 #[tokio::test]
+async fn init_is_discovered_preflighted_and_cancels_its_own_command() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut ui = ui("/init", false);
+
+    ui.handle_input(key(KeyCode::Enter), &writer, 1)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/init");
+    assert!(ui.state.current_command.is_none());
+    assert!(ui.notice.is_some());
+    assert!(receiver.try_recv().is_err());
+
+    let init_limit = serde_json::to_vec(
+        &WispTypedClientRpcCommands::init(&ui.ids.peek_id(CommandKind::Init)).unwrap(),
+    )
+    .unwrap()
+    .len();
+    ui.handle_input(key(KeyCode::Enter), &writer, init_limit)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/init");
+    assert!(ui.state.current_command.is_none());
+    assert!(
+        ui.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("cancellation encoded RPC frame"))
+    );
+    assert!(receiver.try_recv().is_err());
+
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let command = frame(&mut receiver);
+    assert_eq!(command["type"], "init");
+    assert!(ui.editor.text().is_empty());
+    assert_eq!(
+        ui.state.current_command,
+        Some(ActiveCommand {
+            id: command["id"].as_str().unwrap().into(),
+            command_type: ActiveCommandType::Init,
+        })
+    );
+    assert_eq!(ui.state.transcript.latest_user_text(), Some("/init"));
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let cancel = frame(&mut receiver);
+    assert_eq!(cancel["type"], "cancel");
+    assert_eq!(cancel["target_id"], command["id"]);
+}
+
+#[tokio::test]
+async fn init_unavailable_or_busy_never_dispatches_and_preserves_the_draft() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    let mut unavailable = ui("/init", false);
+    unavailable.state.command_catalog = Some(
+        commands::tests::catalog()
+            .into_iter()
+            .filter(|command| command.name != "init")
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    unavailable
+        .handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(unavailable.editor.text(), "/init");
+    assert_eq!(
+        unavailable.notice.as_deref(),
+        Some("/init is not available from this backend.")
+    );
+    assert!(receiver.try_recv().is_err());
+
+    unavailable.editor.clear();
+    unavailable.editor.insert_paste("/init extra");
+    unavailable
+        .handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(unavailable.editor.text(), "/init extra");
+    assert_eq!(unavailable.notice.as_deref(), Some("Usage: /init"));
+    assert!(receiver.try_recv().is_err());
+
+    let mut busy = ui("/init", true);
+    busy.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(busy.editor.text(), "/init");
+    assert_eq!(
+        busy.state.current_command,
+        Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        })
+    );
+    assert!(busy.notice.is_some());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn partial_enter_completes_then_exact_enter_opens_help() {
     let (writer, mut receiver) = mpsc::channel(8);
     let mut ui = ui("/he", false);

@@ -110,6 +110,12 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         serde_json::json!({"type": "prompt", "id": "prompt-1", "prompt": "hello"})
     );
 
+    let init = commands::WispTypedClientRpcCommands::init("init-1")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(init, serde_json::json!({"type": "init", "id": "init-1"}));
+
     let steer = commands::WispTypedClientRpcCommands::steer("steer-1", "change course")
         .unwrap()
         .into_value()
@@ -463,6 +469,7 @@ fn approval_builder_rejects_denied_scopes_and_invalid_ids() {
         .is_err()
     );
     assert!(commands::WispTypedClientRpcCommands::prompt("", "hello").is_err());
+    assert!(commands::WispTypedClientRpcCommands::init("").is_err());
     assert!(commands::WispTypedClientRpcCommands::steer("", "hello").is_err());
     assert!(commands::WispTypedClientRpcCommands::follow_up(&"x".repeat(257), "hello").is_err());
     assert!(commands::WispTypedClientRpcCommands::get_queue_state("").is_err());

@@ -269,6 +269,7 @@ noncritical** work can wait after stage 3.
 | Live RPC v8 / event schema v39 lockstep | Enforced at handshake | [Current contract](../reference/compatibility.md#live-jsonl-rpc-protocol); no older live-contract negotiation |
 | Model/provider/effort selection | Backend-driven picker, typed commands, saved defaults | Implemented in [#538](https://github.com/whanyu1212/Wisp/pull/538) |
 | `/help`, slash completion, `/plan`, `/build`, `/quit` | Backend command discovery, confirmed mode display, graceful exit | Implemented in [#539](https://github.com/whanyu1212/Wisp/pull/539) |
+| `/init` project guidance | Discovered command dispatches the typed backend initialization workflow; Rust reuses normal trust, approval, cancellation, and transcript lifecycle | Implemented for [#569](https://github.com/whanyu1212/Wisp/issues/569); project inspection and create-only write policy remain Python-owned |
 | Context/cost visibility and compaction | `/context`, automatic-compaction controls, `/compact` | Implemented in [#540](https://github.com/whanyu1212/Wisp/pull/540) |
 | Skills and MCP status | Typed backend catalogs, skill insertion/completion, MCP status and refresh | Implemented in [#541](https://github.com/whanyu1212/Wisp/pull/541); MCP reconnect controls are outside this slice |
 | Prompt-history search | `/history` and Ctrl+R restore exact prompts; bounded and process-local | Implemented in [#542](https://github.com/whanyu1212/Wisp/pull/542); not persisted history or transcript search |

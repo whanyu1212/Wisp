@@ -1100,7 +1100,7 @@ impl LiveUi {
         let blocked_context = self.unsendable_response_context.clone();
         let follow_after_update = matches!(
             &action,
-            UiAction::Submit(_) | UiAction::SubmitPresented { .. }
+            UiAction::Init | UiAction::Submit(_) | UiAction::SubmitPresented { .. }
         );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
@@ -1890,6 +1890,29 @@ impl LiveUi {
         )))
     }
 
+    fn init_frame_limit_notice(&self, limit: usize) -> Result<Option<String>, Error> {
+        if !self.state.can_select_model() {
+            return Ok(None);
+        }
+        let id = self.ids.peek_id(CommandKind::Init);
+        let command = WispTypedClientRpcCommands::init(&id)?;
+        let encoded_len = serde_json::to_vec(&command)?.len();
+        if encoded_len > limit {
+            return Ok(Some(format!(
+                "Project initialization encoded RPC frame is {encoded_len} bytes, exceeding the negotiated {limit}-byte limit; the command was not sent."
+            )));
+        }
+        let cancel_id = self.ids.peek_following_prefixed_id("cancel");
+        let cancel = WispTypedClientRpcCommands::cancel(&cancel_id, &id)?;
+        let cancel_len = serde_json::to_vec(&cancel)?.len();
+        if cancel_len > limit {
+            return Ok(Some(format!(
+                "Project initialization cancellation encoded RPC frame is {cancel_len} bytes, exceeding the negotiated {limit}-byte limit; cannot safely start initialization."
+            )));
+        }
+        Ok(None)
+    }
+
     fn visible_foldable_entries(&mut self) -> Vec<TranscriptEntryId> {
         let rows = self
             .transcript_viewport
@@ -2085,6 +2108,24 @@ impl LiveUi {
         self.completion.dismiss();
         match command {
             Command::Quit => Ok(LoopControl::Exit),
+            Command::Init => {
+                if let Some(notice) = self.init_frame_limit_notice(limit)? {
+                    self.notice = Some(notice);
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                let was_idle = self.state.current_command.is_none();
+                self.notice = None;
+                let control = self.dispatch(UiAction::Init, writer, limit).await?;
+                if was_idle
+                    && self.state.current_command.as_ref().is_some_and(|command| {
+                        command.command_type == reducer::ActiveCommandType::Init
+                    })
+                {
+                    self.editor.clear();
+                }
+                Ok(control)
+            }
             Command::UpdateGuidance => {
                 if !self.unsendable_current_response() {
                     self.notice = Some(

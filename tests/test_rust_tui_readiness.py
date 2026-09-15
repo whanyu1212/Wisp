@@ -114,11 +114,13 @@ class _TuiProcess:
         os.close(self.fd)
 
 
-def _launch(tmp_path: Path, *, home: Path) -> tuple[_TuiProcess, Path]:
+def _launch(tmp_path: Path, *, home: Path, cwd: Path | None = None) -> tuple[_TuiProcess, Path]:
     session_dir = tmp_path / "sessions"
     binary = _rust_binary()
     child_pid, terminal_fd = pty.fork()
     if child_pid == 0:
+        if cwd is not None:
+            os.chdir(cwd)
         environment = {
             **os.environ,
             "WISP_RUST_TUI_BINARY": str(binary),
@@ -170,6 +172,52 @@ def _conversation_messages(session_dir: Path) -> list[tuple[str, str]]:
 def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
     phase_output = output[offset:]
     return all(fragment in phase_output for fragment in fragments)
+
+
+@pytest.mark.process
+def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "README.md").write_text("# Fixture project\n", encoding="utf-8")
+    _write_user_settings(home, provider="fake")
+    tui, session_dir = _launch(tmp_path, home=home, cwd=project)
+    try:
+        tui.wait_ready()
+
+        offset = len(tui.output)
+        tui.send(b"/init extra\r")
+        tui.wait_for(
+            b"Usage: /init",
+            since=offset,
+            failure="Rust TUI did not reject /init arguments",
+        )
+
+        offset = len(tui.output)
+        tui.send(b"\x15/init\r")
+        tui.wait_until(
+            lambda output: (
+                _has_fragments(output, offset, b"fake", b"response", b"/init", b"failed")
+                and output.rfind(b"idle") > output.rfind(b"working")
+            ),
+            failure="Rust TUI did not settle the backend-owned initialization lifecycle",
+        )
+
+        offset = len(tui.output)
+        tui.send(b"after init")
+        tui.wait_for(
+            b"after init",
+            since=offset,
+            failure="Rust TUI did not restore composer editing after initialization failed",
+        )
+        tui.quit()
+    finally:
+        tui.close()
+
+    messages = _conversation_messages(session_dir)
+    assert messages[0] == ("user", "/init")
+    assert messages[1][0] == "assistant"
+    assert not (project / "AGENTS.md").exists()
 
 
 @pytest.mark.process
