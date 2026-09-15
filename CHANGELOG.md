@@ -12,8 +12,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
-- Added the shared Glass TUI theme, combining smoky graphite surfaces with luminous ice, lilac, and
-  mint accents derived from translucent terminal palettes.
+- Added the shared Glass TUI theme, which exposes the terminal's default background for real
+  emulator-controlled opacity or blur while retaining readable graphite surfaces and luminous accents.
 - Refreshed both bundled Agent Skills with current dual-frontend, generated-catalog, verification,
   and post-merge follow-up guidance.
 - Restored visible working activity after the final tool result while the next model step is pending,

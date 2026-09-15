@@ -50,6 +50,8 @@ pub(crate) struct Palette {
     pub deletion_background: Color,
     #[serde(skip)]
     monochrome: bool,
+    #[serde(skip)]
+    terminal_background: bool,
 }
 
 impl Palette {
@@ -78,7 +80,20 @@ impl Palette {
     }
 
     pub fn base(self) -> Style {
-        Style::default().fg(self.foreground).bg(self.background)
+        let style = Style::default().fg(self.foreground);
+        if self.terminal_background {
+            style
+        } else {
+            style.bg(self.background)
+        }
+    }
+
+    pub fn overlay(self) -> Style {
+        self.base().bg(if self.terminal_background {
+            self.surface
+        } else {
+            self.background
+        })
     }
 
     pub fn border(self) -> Style {
@@ -125,6 +140,7 @@ impl Palette {
             deletion: gray(self.deletion),
             deletion_background: gray(self.deletion_background),
             monochrome: true,
+            terminal_background: self.terminal_background,
         };
         let backgrounds = [palette.background, palette.surface];
         for foreground in [
@@ -200,16 +216,20 @@ pub(crate) struct Theme {
     pub label: String,
     pub description: String,
     pub dark: bool,
+    #[serde(default)]
+    terminal_background: bool,
     colors: Palette,
 }
 
 impl Theme {
     pub fn palette(&self, no_color: bool) -> Palette {
-        if no_color {
+        let mut palette = if no_color {
             self.colors.without_color()
         } else {
             self.colors
-        }
+        };
+        palette.terminal_background = self.terminal_background;
+        palette
     }
 }
 

@@ -67,6 +67,7 @@ class WispThemeSpec:
     label: str
     description: str
     theme: Theme
+    terminal_background: bool = False
 
     @property
     def name(self) -> str:
@@ -96,8 +97,9 @@ WISP_THEME_DARK = Theme(
 
 WISP_THEME_GLASS = Theme(
     name="wisp-glass",
-    # A Ghostty/WezTerm graphite base meets Otty's Glass Dark elevation
-    # ladder and luminous pastel terminal colors.
+    # The graphite base is a contrast fallback for semantic calculations and
+    # covered surfaces. Glass leaves the main canvas to the terminal so emulator
+    # opacity, wallpaper, and blur remain visible.
     primary="#b2ccff",
     secondary="#e0c2ff",
     accent="#a3e6d8",
@@ -245,7 +247,13 @@ WISP_THEME_DAWN = Theme(
 
 WISP_THEME_SPECS = (
     WispThemeSpec("vapor", "Vapor", "Quiet blue and spectral teal", WISP_THEME_DARK),
-    WispThemeSpec("glass", "Glass", "Smoky graphite with luminous ice and mint", WISP_THEME_GLASS),
+    WispThemeSpec(
+        "glass",
+        "Glass",
+        "Terminal-backed glass with luminous ice and mint",
+        WISP_THEME_GLASS,
+        terminal_background=True,
+    ),
     WispThemeSpec("orchid", "Orchid", "Mauve, periwinkle, and soft pink", WISP_THEME_ORCHID),
     WispThemeSpec("ember", "Ember", "Peach and coral on warm charcoal", WISP_THEME_EMBER),
     WispThemeSpec("storm", "Storm", "Tokyo Night blues and violet", WISP_THEME_STORM),

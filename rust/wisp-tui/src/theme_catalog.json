@@ -16,6 +16,7 @@
       "label": "Vapor",
       "description": "Quiet blue and spectral teal",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#18181e",
         "foreground": "#d4d4d4",
@@ -38,8 +39,9 @@
       "name": "wisp-glass",
       "slug": "glass",
       "label": "Glass",
-      "description": "Smoky graphite with luminous ice and mint",
+      "description": "Terminal-backed glass with luminous ice and mint",
       "dark": true,
+      "terminal_background": true,
       "colors": {
         "background": "#16181a",
         "foreground": "#f7f8ff",
@@ -64,6 +66,7 @@
       "label": "Orchid",
       "description": "Mauve, periwinkle, and soft pink",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#181926",
         "foreground": "#cad3f5",
@@ -88,6 +91,7 @@
       "label": "Ember",
       "description": "Peach and coral on warm charcoal",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#100f0f",
         "foreground": "#eeeeee",
@@ -112,6 +116,7 @@
       "label": "Storm",
       "description": "Tokyo Night blues and violet",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#1a1b26",
         "foreground": "#c0caf5",
@@ -136,6 +141,7 @@
       "label": "Grove",
       "description": "Forest green and warm parchment",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#2d353b",
         "foreground": "#d3c6aa",
@@ -160,6 +166,7 @@
       "label": "Wave",
       "description": "Ink blue, violet, and sakura",
       "dark": true,
+      "terminal_background": false,
       "colors": {
         "background": "#1f1f28",
         "foreground": "#dcd7ba",
@@ -184,6 +191,7 @@
       "label": "Paper",
       "description": "Warm paper and crisp blue ink",
       "dark": false,
+      "terminal_background": false,
       "colors": {
         "background": "#fffcf0",
         "foreground": "#100f0f",
@@ -208,6 +216,7 @@
       "label": "Dawn",
       "description": "Blush canvas and muted berry",
       "dark": false,
+      "terminal_background": false,
       "colors": {
         "background": "#faf4ed",
         "foreground": "#575279",

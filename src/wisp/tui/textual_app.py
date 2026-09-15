@@ -796,6 +796,17 @@ class TextualTui(App[None]):
         layout: vertical;
     }
 
+    /* Glass delegates the canvas to the terminal's default background. The
+       emulator remains responsible for opacity, wallpaper, and blur; elevated
+       interaction surfaces keep their explicit theme colors for readability. */
+    Screen.-terminal-background {
+        background: ansi_default;
+    }
+
+    Screen.-terminal-background #status {
+        background: ansi_default;
+    }
+
     #transcript {
         height: 1fr;
         border: none;
@@ -1352,6 +1363,7 @@ class TextualTui(App[None]):
             valid_dark_themes=WISP_DARK_THEME_NAMES,
         )
         self.theme = preference.active_theme or DEFAULT_THEME_NAME
+        self._refresh_terminal_background(self.theme)
         self._last_dark_theme = preference.last_dark_theme or (
             self.theme if self.theme in WISP_DARK_THEME_NAMES else DEFAULT_THEME_NAME
         )
@@ -1420,10 +1432,20 @@ class TextualTui(App[None]):
         # Theme variables recolor mounted CSS-owned content atomically. Widgets
         # with cached theme-derived Rich content refresh their own presentation.
         if self.is_running:
+            self._refresh_terminal_background(theme_name)
             if self._status is not None:
                 self._status.refresh_theme()
             if self._composer is not None:
                 self._composer.refresh_theme()
+
+    def _refresh_terminal_background(self, theme_name: str) -> None:
+        """Expose the terminal background when the active theme requests it."""
+
+        spec = WISP_THEME_BY_NAME.get(theme_name)
+        self.screen.set_class(
+            bool(spec is not None and spec.terminal_background),
+            "-terminal-background",
+        )
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         if self._block_submission_while_starting():

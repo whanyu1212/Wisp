@@ -207,23 +207,24 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             ui.theme.active = selected;
             ui.no_color = no_color;
             let palette = ui.palette();
+            let canvas = palette.base().bg.unwrap_or(Color::Reset);
             let buffer = draw(&mut ui, 100, 30);
             let user = row_containing(&buffer, "Review the startup");
             let label = row_containing(&buffer, "you");
             assert_eq!(buffer[(3, label - 1)].symbol(), " ");
             assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
             assert_eq!(buffer[(97, label - 1)].bg, palette.panel);
-            assert_eq!(buffer[(3, label - 2)].bg, palette.background);
+            assert_eq!(buffer[(3, label - 2)].bg, canvas);
             assert_eq!(buffer[(2, user)].bg, palette.panel);
             assert_eq!(buffer[(97, user)].bg, palette.panel);
-            assert_eq!(buffer[(1, user)].bg, palette.background);
-            assert_eq!(buffer[(98, user)].bg, palette.background);
+            assert_eq!(buffer[(1, user)].bg, canvas);
+            assert_eq!(buffer[(98, user)].bg, canvas);
             assert_eq!(buffer[(3, user)].fg, palette.foreground);
             assert!(!buffer[(3, user)].modifier.contains(Modifier::BOLD));
             assert_eq!(buffer[(3, user + 1)].symbol(), " ");
             assert_eq!(buffer[(2, user + 1)].bg, palette.panel);
             assert_eq!(buffer[(97, user + 1)].bg, palette.panel);
-            assert_eq!(buffer[(3, user + 2)].bg, palette.background);
+            assert_eq!(buffer[(3, user + 2)].bg, canvas);
             let code = row_containing(&buffer, "let ready");
             for y in code..=code + 2 {
                 for x in 3..97 {
@@ -234,7 +235,7 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
                         selected.slug
                     );
                 }
-                assert_eq!(buffer[(2, y)].bg, palette.background);
+                assert_eq!(buffer[(2, y)].bg, canvas);
             }
             let table = row_containing(&buffer, "┌");
             assert_eq!(buffer[(3, table)].fg, palette.muted);

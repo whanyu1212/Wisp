@@ -205,7 +205,7 @@ pub fn clear_overlay(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
         }
     }
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(palette.base()), area);
+    frame.render_widget(Block::default().style(palette.overlay()), area);
 }
 
 #[cfg(test)]
@@ -816,15 +816,11 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
         let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
         cell.set_symbol(if thumb { "┃" } else { "│" });
-        cell.set_style(
-            Style::default()
-                .fg(if thumb {
-                    palette.primary
-                } else {
-                    palette.muted
-                })
-                .bg(palette.background),
-        );
+        cell.set_style(palette.base().fg(if thumb {
+            palette.primary
+        } else {
+            palette.muted
+        }));
     }
 }
 
