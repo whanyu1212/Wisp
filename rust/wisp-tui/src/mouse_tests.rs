@@ -248,6 +248,47 @@ async fn clicking_a_soft_wrapped_row_maps_back_to_the_logical_line() {
 }
 
 #[tokio::test]
+async fn clicking_blank_cells_after_a_word_wrap_stays_at_that_rows_source_end() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui =
+        ui("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron");
+    draw(&mut ui, 30, 12);
+    let mapping = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap();
+    let area = mapping.area;
+    let (visual_row, row) = mapping
+        .rows
+        .windows(2)
+        .enumerate()
+        .find(|(_, rows)| {
+            rows[0].logical_row == rows[1].logical_row
+                && rows[0].column_end.saturating_sub(rows[0].column_start) < usize::from(area.width)
+        })
+        .map(|(index, rows)| (index, rows[0]))
+        .expect("word wrapping should leave a shortened non-final row");
+
+    ui.handle_input(
+        click(
+            area.right() - 1,
+            area.y + u16::try_from(visual_row).unwrap(),
+        ),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.cursor_row(), row.logical_row);
+    assert_eq!(ui.editor.cursor_column(), row.column_end);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn clicking_the_current_position_resets_vertical_column_intent() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("abcdefghijklmnop\nxy");

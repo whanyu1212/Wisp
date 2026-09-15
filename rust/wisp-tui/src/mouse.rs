@@ -108,6 +108,7 @@ impl Rows {
 pub(crate) struct EditorRow {
     pub logical_row: usize,
     pub column_start: usize,
+    pub column_end: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +127,9 @@ impl Editor {
         let row = self.rows.get(visual_row)?;
         Some((
             row.logical_row,
-            row.column_start + usize::from(event.column - self.area.x),
+            row.column_start
+                .saturating_add(usize::from(event.column - self.area.x))
+                .min(row.column_end),
         ))
     }
 
@@ -397,6 +400,7 @@ mod tests {
             rows: vec![EditorRow {
                 logical_row: 0,
                 column_start: 0,
+                column_end: 60,
             }],
         };
 
@@ -404,6 +408,24 @@ mod tests {
         assert_eq!(editor.text(), raw);
         assert_eq!(editor.compact_text(), raw);
         assert_eq!(editor.cursor_offset(), 0);
+    }
+
+    #[test]
+    fn painted_editor_mapping_clamps_clicks_to_the_visual_row_end() {
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("alpha beta tail");
+        let mapping = Editor {
+            area: Rect::new(2, 3, 10, 1),
+            revision: editor.revision(),
+            rows: vec![EditorRow {
+                logical_row: 0,
+                column_start: 0,
+                column_end: 6,
+            }],
+        };
+
+        assert!(mapping.place_cursor(click(10, 3), &mut editor));
+        assert_eq!(editor.cursor_column(), 6);
     }
 
     #[test]
@@ -416,6 +438,7 @@ mod tests {
             rows: vec![EditorRow {
                 logical_row: 0,
                 column_start: 0,
+                column_end: 60,
             }],
         };
         editor.restore_prompt(&"y".repeat(2_001));

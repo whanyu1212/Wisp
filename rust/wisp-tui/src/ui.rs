@@ -1298,6 +1298,7 @@ fn render_composer(
                 .map(|row| mouse::EditorRow {
                     logical_row: row.logical_row,
                     column_start: row.column_start,
+                    column_end: row.column_start.saturating_add(row.text.width()),
                 })
                 .collect(),
         });
