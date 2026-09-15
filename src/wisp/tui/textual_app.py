@@ -803,7 +803,8 @@ class TextualTui(App[None]):
         background: ansi_default;
     }
 
-    Screen.-terminal-background #status {
+    Screen.-terminal-background #status,
+    Screen.-terminal-background OperationIndicator.-covers-transcript {
         background: ansi_default;
     }
 

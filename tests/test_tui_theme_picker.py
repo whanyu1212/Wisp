@@ -80,6 +80,32 @@ def test_glass_uses_terminal_background_and_restores_opaque_canvas(
     assert restored_alpha == 1
 
 
+def test_glass_keeps_transcript_cover_terminal_backed_and_panel_opaque(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wisp.tui.textual_app import TextualTui
+    from wisp.tui.widgets import OperationIndicator
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    async def scenario() -> tuple[int | None, str]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.submit_command_line("/theme glass")
+            await pilot.pause()
+            indicator = app.query_one(OperationIndicator)
+            indicator.show_operation("Loading session…", cover_transcript=True)
+            await pilot.pause()
+            return (
+                indicator.styles.background.ansi,
+                app.query_one("#operation-indicator-panel").styles.background.hex,
+            )
+
+    cover_ansi, panel_background = anyio.run(scenario)
+    assert cover_ansi == -1
+    assert panel_background == "#40434B"
+
+
 def test_theme_selection_persists_and_ctrl_t_returns_to_most_recent_dark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
