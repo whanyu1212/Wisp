@@ -4188,6 +4188,7 @@ fn handle_backend_event(
                 .is_some_and(|command| command.command_type == ActiveCommandType::Compact)
             {
                 state.context.compaction_notice = Some(message);
+                state.context.compaction_notice_is_warning = true;
                 return Ok(vec![UiEffect::RequestRender]);
             }
             Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
@@ -4387,6 +4388,7 @@ fn handle_backend_event(
                     error.as_deref().unwrap_or("Compaction finished."),
                     SESSION_NOTICE_MAX_BYTES,
                 ));
+                state.context.compaction_notice_is_warning = !ok;
             }
             state.current_command = None;
             state.pending_approval = None;

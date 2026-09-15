@@ -30,6 +30,41 @@ pub(crate) fn contains(area: Rect, event: MouseEvent) -> bool {
     area.contains(Position::new(event.column, event.row))
 }
 
+/// One directional run at a fixed hit-test location from the terminal input reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Scroll {
+    pub event: MouseEvent,
+    pub lines: i32,
+}
+
+impl Scroll {
+    pub fn from_event(event: MouseEvent) -> Option<Self> {
+        if !event.modifiers.is_empty() {
+            return None;
+        }
+        let lines = match event.kind {
+            MouseEventKind::ScrollUp => -1,
+            MouseEventKind::ScrollDown => 1,
+            _ => return None,
+        };
+        Some(Self { event, lines })
+    }
+
+    pub fn merge(&mut self, event: MouseEvent) -> bool {
+        let Some(next) = Self::from_event(event) else {
+            return false;
+        };
+        if self.lines.signum() != next.lines.signum()
+            || (self.event.column, self.event.row) != (event.column, event.row)
+        {
+            return false;
+        }
+        self.lines = self.lines.saturating_add(next.lines);
+        self.event = event;
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Layer {
     #[default]
@@ -141,6 +176,32 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        self.handle_mouse_input(
+            event,
+            Scroll::from_event(event).map(|scroll| scroll.lines),
+            writer,
+            limit,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_scroll(
+        &mut self,
+        scroll: Scroll,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.handle_mouse_input(scroll.event, Some(scroll.lines), writer, limit)
+            .await
+    }
+
+    async fn handle_mouse_input(
+        &mut self,
+        event: MouseEvent,
+        scroll_lines: Option<i32>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         if !self.mouse_enabled
             || !supported(event)
             || self.unsendable_current_response()
@@ -158,11 +219,14 @@ impl LiveUi {
         else {
             return Ok(LoopControl::Continue);
         };
-        let wheel = match event.kind {
-            MouseEventKind::ScrollUp => Some(KeyCode::Up),
-            MouseEventKind::ScrollDown => Some(KeyCode::Down),
-            _ => None,
-        };
+        let wheel = scroll_lines.map(|lines| {
+            if lines < 0 {
+                KeyCode::Up
+            } else {
+                KeyCode::Down
+            }
+        });
+        let wheel_steps = scroll_lines.map_or(0, i32::unsigned_abs);
         match frame.layer {
             Layer::Overlay(kind) => {
                 let Some(area) = frame.popup else {
@@ -179,25 +243,30 @@ impl LiveUi {
                             )
                             .await;
                     }
-                } else if let Some(code) = wheel {
-                    let code = if kind == OverlayKind::SessionTree
-                        && code == KeyCode::Down
-                        && self
-                            .session_tree_picker
-                            .as_ref()
-                            .is_some_and(|picker| picker.at_page_end())
-                    {
-                        KeyCode::PageDown
-                    } else {
-                        code
-                    };
-                    return self
-                        .handle_focused_input(
-                            Input::Key(KeyEvent::new(code, KeyModifiers::NONE)),
-                            writer,
-                            limit,
-                        )
-                        .await;
+                } else if let Some(mut code) = wheel {
+                    let mut control = LoopControl::Continue;
+                    for _ in 0..wheel_steps {
+                        if kind == OverlayKind::SessionTree
+                            && code == KeyCode::Down
+                            && self
+                                .session_tree_picker
+                                .as_ref()
+                                .is_some_and(|picker| picker.at_page_end())
+                        {
+                            code = KeyCode::PageDown;
+                        }
+                        control = self
+                            .handle_focused_input(
+                                Input::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                                writer,
+                                limit,
+                            )
+                            .await?;
+                        if control == LoopControl::Exit {
+                            break;
+                        }
+                    }
+                    return Ok(control);
                 } else if self.rendered_overlay == Some(kind) {
                     if let Some(index) = frame.rows.hit(event) {
                         if self.select_mouse_row(kind, index) {
@@ -219,7 +288,9 @@ impl LiveUi {
                         ));
                     }
                 } else if let Some(code) = wheel {
-                    self.handle_file_picker_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    for _ in 0..wheel_steps {
+                        self.handle_file_picker_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    }
                 } else if let Some(index) = frame.rows.hit(event) {
                     if self.file_picker.select_mouse(index) {
                         self.render_pending = true;
@@ -227,12 +298,13 @@ impl LiveUi {
                 }
             }
             Layer::Conversation => {
-                if let Some(code) = wheel {
+                if wheel.is_some() {
                     if contains(frame.conversation.transcript, event) {
-                        let lines = if code == KeyCode::Up { -1 } else { 1 };
                         let control = self
                             .navigate_transcript_action(
-                                TranscriptViewAction::ScrollLines(lines),
+                                TranscriptViewAction::ScrollLines(
+                                    scroll_lines.expect("wheel input has a row delta"),
+                                ),
                                 writer,
                                 limit,
                             )

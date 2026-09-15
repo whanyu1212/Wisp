@@ -11,6 +11,7 @@ pub(crate) struct ContextState {
     pub error: Option<String>,
     pub compaction: Option<CompactionReason>,
     pub compaction_notice: Option<String>,
+    pub compaction_notice_is_warning: bool,
     generation: u64,
     refresh_needed: bool,
     read: Option<StatsRead>,
@@ -47,6 +48,7 @@ impl ContextState {
         self.error = None;
         self.compaction = None;
         self.compaction_notice = None;
+        self.compaction_notice_is_warning = false;
         self.refresh_needed = true;
     }
 
@@ -54,6 +56,7 @@ impl ContextState {
         self.stats_stale = true;
         self.compaction = None;
         self.compaction_notice = None;
+        self.compaction_notice_is_warning = false;
     }
 
     pub(super) fn close(&mut self) {
@@ -283,6 +286,7 @@ pub(super) fn observe(
             if compaction_matches(state, &started.session_id, started.reason) {
                 state.context.compaction = Some(started.reason);
                 state.context.compaction_notice = None;
+                state.context.compaction_notice_is_warning = false;
                 if let Some(budget) = &started.trigger_budget {
                     state.context.budget = Some(budget.clone());
                 }
@@ -313,6 +317,8 @@ pub(super) fn observe(
                 }
                 state.context.compaction_notice =
                     Some(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES));
+                state.context.compaction_notice_is_warning =
+                    completed.outcome != CompactionOutcome::Completed || completed.error.is_some();
                 state.context.stats_stale = true;
             }
             return Ok(Some(vec![UiEffect::RequestRender]));
@@ -698,6 +704,7 @@ mod tests {
                 .unwrap()
                 .contains("backend failure")
         );
+        assert!(state.context.compaction_notice_is_warning);
         let mut state = super::tests::state();
         let mut ids = Ids::default();
         reduce(&mut state, UiAction::Compact(None), &mut ids).unwrap();
@@ -821,6 +828,7 @@ mod tests {
                 .unwrap()
                 .contains("2 entries replaced")
         );
+        assert!(!state.context.compaction_notice_is_warning);
         let effects = reduce(&mut state, finish("compact-1", "compact", true), &mut ids).unwrap();
         assert!(state.current_command.is_none());
         assert_eq!(commands(&effects)[0]["type"], "get_session_stats");
