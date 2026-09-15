@@ -712,6 +712,11 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}))
         }
 
+        /// Initialize project guidance through the backend-owned workflow.
+        pub fn init(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "init", "id": id}))
+        }
+
         /// Queue text after the active run's current assistant/tool batch.
         pub fn steer(id: &str, content: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "steer", "id": id, "content": content}))

@@ -854,6 +854,7 @@ impl UiState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandKind {
     Prompt,
+    Init,
     Compact,
     Steer,
     FollowUp,
@@ -891,6 +892,7 @@ impl CommandKind {
     pub fn prefix(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
+            Self::Init => "init",
             Self::Compact => "compact",
             Self::Steer => "steer",
             Self::FollowUp => "follow_up",
@@ -1103,6 +1105,7 @@ pub enum UiAction {
         content: String,
         presentation: String,
     },
+    Init,
     LoadSkills,
     LoadMcpStatus,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
@@ -1277,7 +1280,8 @@ pub fn reduce(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     let enforce_retention = matches!(
         &action,
-        UiAction::Submit(_)
+        UiAction::Init
+            | UiAction::Submit(_)
             | UiAction::SubmitPresented { .. }
             | UiAction::BackendEvent(
                 BackendEvent::MessageCompleted { .. }
@@ -1307,6 +1311,7 @@ pub fn reduce(
             content,
             presentation,
         } => submit(state, content, Some(presentation), ids),
+        UiAction::Init => init_project(state, ids),
         UiAction::Steer(content) => {
             queue_submission(state, QueueKind::Steering, content, None, ids)
         }
@@ -1470,6 +1475,36 @@ fn submit(
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
+        UiEffect::RequestRender,
+    ])
+}
+
+fn init_project(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if !state.can_select_model() {
+        return Ok(vec![
+            UiEffect::Notice(
+                "Wait for the current operation before initializing the project.".into(),
+            ),
+            UiEffect::RequestRender,
+        ]);
+    }
+    let id = ids.next_id(CommandKind::Init);
+    let command = WispTypedClientRpcCommands::init(&id)?;
+    state.view_status = ViewStatus::Running;
+    state.interaction_status = InteractionStatus::Running;
+    state.current_command = Some(ActiveCommand {
+        id,
+        command_type: ActiveCommandType::Init,
+    });
+    state.pending_approval = None;
+    state.cancel_requested = false;
+    state.context.operation_started();
+    state.transcript.append_prompt("/init".into());
+    Ok(vec![
+        UiEffect::SendCommand(command),
         UiEffect::RequestRender,
     ])
 }
@@ -4346,7 +4381,6 @@ fn handle_backend_event(
             if !matches_current {
                 return Ok(Vec::new());
             }
-            state.post_prompt_session_sync_pending = true;
             state.context.compaction = None;
             if command_type == "compact" && (!ok || state.context.compaction_notice.is_none()) {
                 state.context.compaction_notice = Some(bounded_session_text(
@@ -4375,12 +4409,30 @@ fn handle_backend_event(
                 && error
                     .as_deref()
                     .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
-            state.view_status = if ok || was_cancelled || command_type == "compact" {
-                ViewStatus::Idle
-            } else {
-                ViewStatus::Error
-            };
-            context::start_refresh(state, true, ids)
+            let history_sync_follows =
+                !(command_type == "init" && !ok && history_session_id(state).is_none());
+            state.post_prompt_session_sync_pending = history_sync_follows;
+            let init_failure = (command_type == "init" && !ok && !was_cancelled).then(|| {
+                bounded_session_text(
+                    &format!(
+                        "Project initialization failed: {}",
+                        error.as_deref().unwrap_or("unknown backend error")
+                    ),
+                    SESSION_NOTICE_MAX_BYTES,
+                )
+            });
+            state.view_status =
+                if ok || was_cancelled || matches!(command_type.as_str(), "compact" | "init") {
+                    ViewStatus::Idle
+                } else {
+                    ViewStatus::Error
+                };
+            let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
+            if let Some(message) = init_failure {
+                effects.push(UiEffect::Notice(message));
+                effects.push(UiEffect::RequestRender);
+            }
+            Ok(effects)
         }
     }
 }
@@ -4475,6 +4527,86 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.latest_assistant_text(), Some("authoritative"));
+    }
+
+    #[test]
+    fn project_initialization_uses_its_typed_lifecycle_without_prompt_history() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(&mut state, UiAction::Init, &mut ids).unwrap();
+
+        assert_eq!(
+            command_value(&effects[0]).unwrap(),
+            serde_json::json!({"type": "init", "id": "init-1"})
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::RecordPromptHistory(_)))
+        );
+        assert_eq!(
+            state.current_command,
+            Some(ActiveCommand {
+                id: "init-1".into(),
+                command_type: ActiveCommandType::Init,
+            })
+        );
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
+        assert_eq!(state.transcript.latest_user_text(), Some("/init"));
+
+        let completion_effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "init-1".into(),
+                command_type: "init".into(),
+                ok: false,
+                error: Some("initialization failed".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.current_command.is_none());
+        assert_eq!(state.view_status, ViewStatus::Idle);
+        assert!(state.editor_editable());
+        assert!(!state.post_prompt_session_sync_pending);
+        assert_eq!(state.transcript.latest_user_text(), Some("/init"));
+        assert!(completion_effects.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(message) if message == "Project initialization failed: initialization failed")
+        ));
+        let refresh_effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "get_session_stats-1".into(),
+                command_type: "get_session_stats".into(),
+                ok: false,
+                error: Some("statistics unavailable".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            !refresh_effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SendPostPromptSessionSync(_)))
+        );
+
+        let mut success = UiState::new("fake".into(), None, None);
+        reduce(&mut success, UiAction::Init, &mut ids).unwrap();
+        reduce(
+            &mut success,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "init-2".into(),
+                command_type: "init".into(),
+                ok: true,
+                error: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(success.current_command.is_none());
+        assert_eq!(success.view_status, ViewStatus::Idle);
+        assert_eq!(success.transcript.latest_user_text(), Some("/init"));
     }
 
     #[test]

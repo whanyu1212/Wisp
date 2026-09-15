@@ -20,6 +20,7 @@ use wisp_protocol::{
 
 pub(crate) enum Command {
     Help,
+    Init,
     History,
     UpdateGuidance,
     Theme(Option<&'static theme::Theme>),
@@ -40,6 +41,7 @@ pub(crate) enum Command {
 fn usage(name: &str) -> Option<&'static str> {
     Some(match name {
         "help" => "/help",
+        "init" => "/init",
         "history" => "/history",
         "update" => "/update [check|install]",
         "theme" => "/theme [name]",
@@ -77,7 +79,7 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let name = lower.strip_prefix('/').unwrap_or(&lower);
     let canonical = if matches!(lower.as_str(), "/exit" | ":q") {
         "quit"
-    } else if lower.starts_with('/') && usage(name).is_some() {
+    } else if lower.starts_with('/') && usage(name).is_some() && name != "init" {
         name
     } else if let Some(descriptor) = command_descriptors(catalog).into_iter().find(|descriptor| {
         descriptor.slash_command.eq_ignore_ascii_case(token)
@@ -87,6 +89,13 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
                 .any(|alias| alias.eq_ignore_ascii_case(token))
     }) {
         &descriptor.name
+    } else if lower.starts_with('/') && name == "init" {
+        let message = if trimmed[token.len()..].trim().is_empty() {
+            "/init is not available from this backend."
+        } else {
+            "Usage: /init"
+        };
+        return Some(Command::Invalid(message.into()));
     } else {
         let bare_word = trimmed == token
             && lower.starts_with('/')
@@ -103,12 +112,13 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let tail = &trimmed[token.len()..];
     let normalized = format!("/{canonical}{tail}");
     Some(match canonical {
-        "help" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
+        "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
         }
         "help" => Command::Help,
+        "init" => Command::Init,
         "history" => Command::History,
         "update" => match tail.trim() {
             "" | "check" | "install" => Command::UpdateGuidance,
@@ -533,8 +543,8 @@ pub(crate) mod tests {
 
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [
-            "help", "plan", "build", "model", "provider", "connect", "resume", "new", "name",
-            "clone", "tree", "unrevert", "context", "compact", "skills", "mcp", "history",
+            "help", "init", "plan", "build", "model", "provider", "connect", "resume", "new",
+            "name", "clone", "tree", "unrevert", "context", "compact", "skills", "mcp", "history",
             "update", "quit",
         ]
         .into_iter()
@@ -647,6 +657,8 @@ pub(crate) mod tests {
             "/todo remember \"this",
             "/ note",
             "/model\nexplain this",
+            "/init\nexplain the initialization plan",
+            "/initiate a discussion",
             "/help\r",
             "/skill:review",
         ] {
@@ -664,6 +676,22 @@ pub(crate) mod tests {
         assert!(
             matches!(classify("/compact instructions", Some(&catalog())), Some(Command::Compact(Some(instructions))) if instructions == "instructions")
         );
+        assert!(matches!(
+            classify("/init", Some(&catalog())),
+            Some(Command::Init)
+        ));
+        assert!(matches!(
+            classify("/init extra", Some(&catalog())),
+            Some(Command::Invalid(message)) if message == "Usage: /init"
+        ));
+        assert!(matches!(
+            classify("/init", None),
+            Some(Command::Invalid(message)) if message == "/init is not available from this backend."
+        ));
+        assert!(matches!(
+            classify("/init extra", None),
+            Some(Command::Invalid(message)) if message == "Usage: /init"
+        ));
         assert!(
             matches!(classify("/name  release  候選", None), Some(Command::Session(SessionCommand::Name(name))) if name == "release  候選")
         );
@@ -720,6 +748,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("/connect\n"));
+        assert!(text.contains("/init\n"));
         assert!(!text.contains("/connect ["));
         assert!(text.contains("/compact [instructions]"));
         assert!(text.contains("/context [auto on|off]"));
@@ -743,5 +772,25 @@ pub(crate) mod tests {
         let local = completion.view(None, None).unwrap();
         assert_eq!(local.items.len(), 1);
         assert_eq!(local.items[0].spelling(), "/theme");
+
+        let without_init = catalog
+            .iter()
+            .filter(|command| command.name != "init")
+            .cloned()
+            .collect::<Vec<_>>();
+        let rows = help_rows(
+            Some(&without_init),
+            Palette::default(),
+            &crate::keybindings::Bindings::default(),
+        );
+        assert!(!rows.iter().any(|row| row.to_string() == "/init"));
+        assert!(
+            completion
+                .view(Some(&without_init), None)
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.spelling() != "/init")
+        );
     }
 }

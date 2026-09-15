@@ -1446,6 +1446,7 @@ mode = "plan"
 active = None
 auto_compaction = True
 refresh_after_cancel = False
+refresh_after_auto_configure = False
 
 def emit(event):
     print(event.model_dump_json(), flush=True)
@@ -1472,6 +1473,11 @@ for line in sys.stdin:
             # Expose the interval between cancellation and input readiness.
             time.sleep(0.1)
         report_stats(command, "context-session", auto_compaction)
+        if refresh_after_auto_configure:
+            # This diagnostic is emitted only after the refreshed snapshot and
+            # command completion have reached the frontend event stream.
+            emit(ErrorEvent(message="AUTOREADY"))
+            refresh_after_auto_configure = False
         continue
     elif kind == "get_skills":
         report_skills(command)
@@ -1513,6 +1519,7 @@ for line in sys.stdin:
     elif kind == "configure":
         mode = command.get("mode", mode)
         auto_compaction = command.get("auto_compaction_enabled", auto_compaction)
+        refresh_after_auto_configure = "auto_compaction_enabled" in command
     elif kind == "compact":
         active = command
         emit(CompactionStarted(session_id="context-session", source_entry_count=4))
@@ -1658,11 +1665,17 @@ for line in sys.stdin:
                 command["type"] == "configure" and command.get("auto_compaction_enabled") is False
                 for command in commands
             ):
+                phase = "auto disabled ready"
+            elif phase == "auto disabled ready" and b"AUTOREADY" in b"".join(
+                re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output).split()
+            ):
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
             elif phase == "compacting" and b"compacting" in output:
-                os.write(terminal_fd, b"\x03")
+                # Escape exercises the same cancellation action without relying
+                # on platform PTY signal handling for the Ctrl-C byte.
+                os.write(terminal_fd, b"\x1b")
                 phase = "cancelled"
                 output.clear()
             elif (

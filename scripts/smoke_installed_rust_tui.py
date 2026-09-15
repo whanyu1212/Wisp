@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import resource
 import select
 import signal
@@ -60,6 +61,7 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 81, 0, 0))
     initial_terminal = termios.tcgetattr(terminal_fd)
     output = bytearray()
+    startup_redraw_offset: int | None = None
     prompt_sent = False
     response_seen = False
     quit_sent = False
@@ -74,7 +76,22 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not prompt_sent and b"Type a prompt or / for commands." in output:
+            if startup_redraw_offset is None and re.search(rb"ctx [~]?[0-9]", output):
+                # The empty-transcript hint can appear before startup metadata
+                # hydration finishes. Request a complete frame after the context
+                # snapshot lands, then submit only from that settled frame.
+                startup_redraw_offset = len(output)
+                fcntl.ioctl(
+                    terminal_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 24, 82, 0, 0),
+                )
+                continue
+            if (
+                not prompt_sent
+                and startup_redraw_offset is not None
+                and b"Type a prompt or / for commands." in output[startup_redraw_offset:]
+            ):
                 ready_seconds = time.monotonic() - started
                 os.write(terminal_fd, b"installed wheel smoke\r")
                 prompt_sent = True

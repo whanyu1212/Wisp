@@ -428,7 +428,9 @@ fullscreen steering and restoration keybindings.
 `/init` asks the active model to inspect repository documentation, manifests, CI configuration, and
 source layout before creating project-specific guidance. It only works in build mode, uses the normal
 project-trust and write-approval flow, and refuses to replace an existing `AGENTS.md` or `AGENTS.MD`.
-The final write is create-only, so a file that appears during inspection is preserved.
+The final write is create-only, so a file that appears during inspection is preserved. The Rust TUI
+offers `/init` only when the backend includes it in command discovery and delegates the complete
+workflow to that backend.
 
 ## Completions and the file picker
 
