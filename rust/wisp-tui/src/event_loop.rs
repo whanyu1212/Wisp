@@ -4,8 +4,9 @@ use crate::{
     ACTIVITY_INTERVAL, BackendEvent, ConnectionInfo, Error, FRAME_INTERVAL, Input, LiveUi,
     LoopControl, OverlayKind, QueuedEvent, ReaderTermination, RenderedDecisionContext, UiAction,
     WriterMessage, is_ctrl_c, is_escape, mouse, printable_char, receive_reader_outcome,
+    terminal::FrameBackend,
 };
-use ratatui::{Terminal, backend::Backend};
+use ratatui::Terminal;
 use tokio::{
     sync::{mpsc, oneshot},
     time::Instant,
@@ -56,6 +57,7 @@ struct ActivationTarget {
     rendered_theme: Option<usize>,
     rendered_history: Option<u64>,
     rendered_skill: Option<String>,
+    composer_copy: bool,
     mouse_frame: Option<mouse::Frame>,
 }
 
@@ -88,6 +90,9 @@ impl ActivationTarget {
                 .as_ref()
                 .and_then(|view| view.rendered_selection())
                 .map(str::to_owned),
+            composer_copy: matches!(input, Input::Key(key) if is_ctrl_c(*key)
+                && ui.composer_clipboard_action(*key)
+                    == Some(crate::clipboard::ClipboardAction::Copy)),
             mouse_frame: matches!(input, Input::Mouse(_))
                 .then(|| ui.mouse_frame.clone())
                 .flatten(),
@@ -149,7 +154,8 @@ impl PendingInput {
         let current = ActivationTarget::capture(ui, &self.input);
         // A negative decision may deny a replacement decision, but must never
         // become literal text after the waiting workflow has finished.
-        let recovery = matches!(&self.input, Input::Key(key) if is_ctrl_c(*key) || is_escape(*key)
+        let recovery = matches!(&self.input, Input::Key(key) if (is_ctrl_c(*key)
+            && !self.target.composer_copy) || is_escape(*key)
             || (self.target.decision.is_some() && current.decision.is_some()
                 && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
         let same_editor = self.editor_input
@@ -249,7 +255,7 @@ fn poll_outcomes(sources: &mut Sources<'_>, eof: &mut bool) -> Result<(), Error>
     Ok(())
 }
 
-pub(super) async fn run<B: Backend>(
+pub(super) async fn run<B: FrameBackend>(
     ui: &mut LiveUi,
     terminal: &mut Terminal<B>,
     connection: &ConnectionInfo,
@@ -272,7 +278,7 @@ pub(super) async fn run<B: Backend>(
     .await
 }
 
-async fn run_with_interrupts<B: Backend>(
+async fn run_with_interrupts<B: FrameBackend>(
     ui: &mut LiveUi,
     terminal: &mut Terminal<B>,
     connection: &ConnectionInfo,

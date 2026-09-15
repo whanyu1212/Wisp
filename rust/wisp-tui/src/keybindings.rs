@@ -499,7 +499,13 @@ fn parse_key(name: &str) -> Result<KeyCode, &'static str> {
 }
 
 fn validate_chord(code: &KeyCode, modifiers: KeyModifiers) -> Result<(), &'static str> {
-    if crate::prompt_editor::is_extended_edit_key(KeyEvent::new(*code, modifiers)) {
+    let key = KeyEvent::new(*code, modifiers);
+    if crate::clipboard::ClipboardAction::for_key(key).is_some()
+        && !matches!(code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&'c'))
+    {
+        return Err("copy, cut, and paste keys are reserved for the composer");
+    }
+    if crate::prompt_editor::is_extended_edit_key(key) {
         return Err(
             "selection, word/line editing, and undo/redo keys are reserved for the composer",
         );

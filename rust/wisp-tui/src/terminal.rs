@@ -1,11 +1,12 @@
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
-use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
+use crossterm::{ExecutableCommand, QueueableCommand, execute};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use std::io::{self, Stdout, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::{
@@ -16,6 +17,42 @@ use std::sync::{
 use crate::Error;
 
 type Hook = dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Send + Sync + 'static;
+
+pub(crate) trait FrameBackend: Backend {
+    fn begin_frame(&mut self) -> io::Result<()>;
+    fn end_frame(&mut self) -> io::Result<()>;
+}
+
+impl<W: Write> FrameBackend for CrosstermBackend<W> {
+    fn begin_frame(&mut self) -> io::Result<()> {
+        self.queue(BeginSynchronizedUpdate).map(drop)
+    }
+
+    fn end_frame(&mut self) -> io::Result<()> {
+        self.execute(EndSynchronizedUpdate).map(drop)
+    }
+}
+
+impl FrameBackend for ratatui::backend::TestBackend {
+    fn begin_frame(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn end_frame(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn draw_frame<B: FrameBackend>(
+    terminal: &mut Terminal<B>,
+    render: impl FnOnce(&mut ratatui::Frame<'_>),
+) -> io::Result<()> {
+    terminal.backend_mut().begin_frame()?;
+    let draw_result = terminal.draw(render).map(drop);
+    let end_result = terminal.backend_mut().end_frame();
+    draw_result?;
+    end_result
+}
 
 // A panic may occur between requesting capture and constructing the terminal guard.
 // Both restoration paths must observe ownership of that partially applied request.
@@ -120,6 +157,7 @@ fn restore_terminal() {
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
     let _ = execute!(
         io::stdout(),
+        EndSynchronizedUpdate,
         Show,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -138,6 +176,18 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::ErrorKind::BrokenPipe.into())
         }
+    }
+
+    #[test]
+    fn crossterm_frames_use_synchronized_updates_to_avoid_tearing() {
+        let mut output = Vec::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut output);
+            backend.begin_frame().unwrap();
+            backend.end_frame().unwrap();
+        }
+
+        assert_eq!(output, b"\x1b[?2026h\x1b[?2026l");
     }
 
     #[test]

@@ -187,44 +187,203 @@ async fn composer_undo_bypasses_and_restores_visible_completion() {
 }
 
 #[tokio::test]
-async fn selected_draft_submits_in_full_and_ctrl_c_keeps_cancellation_precedence() {
-    for cancel in [false, true] {
-        let mut ui = LiveUi::default();
-        let (writer, mut received) = mpsc::channel(8);
-        ui.editor.insert_paste("whole draft");
-        ui.handle_input(
-            Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)),
-            &writer,
-            MAX_APPLICATION_FRAME_BYTES,
-        )
+async fn selected_draft_submits_in_full() {
+    let mut ui = LiveUi::default();
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("whole draft");
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.selection_range(), Some(10..11));
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let WriterMessage::Frame { payload, .. } = received.try_recv().unwrap() else {
+        panic!("prompt frame")
+    };
+    let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(value["prompt"], "whole draft");
+    assert!(ui.editor.selection_range().is_none());
+}
+
+#[tokio::test]
+async fn ctrl_c_copies_a_composer_selection_and_otherwise_keeps_interrupt_behavior() {
+    let (clipboard, state) = crate::clipboard::test_clipboard();
+    let mut ui = LiveUi {
+        clipboard,
+        ..LiveUi::default()
+    };
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("copy 🙂");
+    ui.editor.handle_key(KeyEvent::new(
+        KeyCode::Home,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+
+    let control = ui
+        .handle_input(ctrl('c'), &writer, MAX_APPLICATION_FRAME_BYTES)
         .await
         .unwrap();
-        assert_eq!(ui.editor.selection_range(), Some(10..11));
-        let input = if cancel {
-            ctrl('c')
-        } else {
-            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    assert_eq!(control, LoopControl::Continue);
+    assert_eq!(ui.editor.text(), "copy 🙂");
+    assert_eq!(ui.editor.selection_range(), Some(0..9));
+    assert_eq!(state.lock().unwrap().copied, ["copy 🙂"]);
+    assert!(received.try_recv().is_err());
+
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let control = ui
+        .handle_input(ctrl('c'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Exit);
+    assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn focused_composer_popups_keep_ctrl_c_interrupt_precedence_over_hidden_selection() {
+    let selected_ui = || {
+        let (clipboard, state) = crate::clipboard::test_clipboard();
+        let mut ui = LiveUi {
+            clipboard,
+            ..LiveUi::default()
         };
-        let outcome = ui
-            .handle_input(input, &writer, MAX_APPLICATION_FRAME_BYTES)
-            .await
-            .unwrap();
-        if cancel {
-            assert_eq!(outcome, LoopControl::Exit);
-            assert!(received.try_recv().is_err());
-        } else {
-            let WriterMessage::Frame { payload, .. } = received.try_recv().unwrap() else {
-                panic!("prompt frame")
-            };
-            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-            assert_eq!(value["prompt"], "whole draft");
-            assert!(ui.editor.selection_range().is_none());
-        }
+        ui.editor.insert_paste("@selected");
+        (ui, state)
+    };
+
+    let (mut help_ui, help_clipboard) = selected_ui();
+    help_ui
+        .editor
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    help_ui.state.view_status = ViewStatus::Running;
+    help_ui.state.interaction_status = InteractionStatus::Running;
+    help_ui.state.current_command = Some(crate::reducer::ActiveCommand {
+        id: "prompt-help".into(),
+        command_type: crate::reducer::ActiveCommandType::Prompt,
+    });
+    let (help_writer, mut help_received) = mpsc::channel(8);
+    help_ui
+        .handle_input(ctrl('g'), &help_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(help_ui.key_help.is_some());
+    let control = help_ui
+        .handle_input(ctrl('c'), &help_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Continue);
+    assert!(help_ui.key_help.is_none());
+    assert!(help_clipboard.lock().unwrap().copied.is_empty());
+    let WriterMessage::Frame { payload, .. } = help_received.try_recv().unwrap() else {
+        panic!("cancel frame")
+    };
+    let cancel: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(cancel["type"], "cancel");
+    assert_eq!(cancel["target_id"], "prompt-help");
+
+    let (mut file_ui, file_clipboard) = selected_ui();
+    file_ui.file_picker.sync_editor(&file_ui.editor);
+    // Build the selection after opening file completion to exercise a stale
+    // hidden editor selection behind the focused popup.
+    file_ui
+        .editor
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    assert!(file_ui.file_picker.is_open());
+    let (file_writer, mut file_received) = mpsc::channel(8);
+    let control = file_ui
+        .handle_input(ctrl('c'), &file_writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Exit);
+    assert!(file_clipboard.lock().unwrap().copied.is_empty());
+    assert!(file_received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn clipboard_cut_and_paste_are_selection_aware_and_undoable() {
+    let (clipboard, state) = crate::clipboard::test_clipboard();
+    let mut ui = LiveUi {
+        clipboard,
+        ..LiveUi::default()
+    };
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("keep CUT");
+    for _ in 0..3 {
+        ui.editor
+            .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
     }
+
+    ui.handle_input(ctrl('x'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep ");
+    assert_eq!(state.lock().unwrap().copied, ["CUT"]);
+    ui.handle_input(ctrl('z'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep CUT");
+
+    state
+        .lock()
+        .unwrap()
+        .pastes
+        .push_back(Ok("paste\u{1b}\ntext".into()));
+    ui.handle_input(ctrl('v'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep paste\ntext");
+    assert!(
+        ui.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Ignored 1 unsafe"))
+    );
+    assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn failed_cut_preserves_the_selected_draft() {
+    let (clipboard, state) = crate::clipboard::test_clipboard();
+    state.lock().unwrap().copy_error = Some(crate::clipboard::ClipboardError::CopyFailed);
+    let mut ui = LiveUi {
+        clipboard,
+        ..LiveUi::default()
+    };
+    let (writer, mut received) = mpsc::channel(8);
+    ui.editor.insert_paste("preserve");
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+
+    ui.handle_input(ctrl('x'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "preserve");
+    assert_eq!(ui.editor.selection_range(), Some(0..8));
+    let control = ui
+        .handle_input(ctrl('c'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Continue);
+    assert_eq!(ui.editor.text(), "preserve");
+    assert_eq!(ui.editor.selection_range(), Some(0..8));
+    assert!(
+        ui.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Could not copy selection"))
+    );
+    assert!(received.try_recv().is_err());
 }
 
 #[test]
-fn application_bindings_cannot_shadow_composer_selection_and_word_editing() {
+fn application_bindings_cannot_shadow_fixed_composer_editing() {
     for chord in [
         "Shift+Left",
         "Ctrl+Shift+Home",
@@ -236,6 +395,9 @@ fn application_bindings_cannot_shadow_composer_selection_and_word_editing() {
         "Ctrl+Z",
         "Ctrl+Y",
         "Ctrl+Shift+Z",
+        "Ctrl+X",
+        "Ctrl+V",
+        "Shift+Delete",
     ] {
         let json = serde_json::json!({"history.open": [chord]}).to_string();
         assert!(Bindings::from_json(&json).is_err(), "{chord}");

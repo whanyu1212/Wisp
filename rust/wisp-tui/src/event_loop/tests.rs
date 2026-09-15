@@ -360,6 +360,71 @@ async fn selection_with_file_completion_survives_workflow_revision_changes() {
 }
 
 #[tokio::test]
+async fn selected_ctrl_c_copies_during_an_active_run_but_stale_copy_is_dropped() {
+    let (clipboard, state) = crate::clipboard::test_clipboard();
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.clipboard = clipboard;
+    ui.editor.insert_paste("active selection");
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+
+    PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &ui,
+        0,
+    )
+    .apply(&mut ui, &writer, 8192)
+    .await
+    .unwrap();
+    assert_eq!(state.lock().unwrap().copied, ["n"]);
+    assert!(!ui.state.cancel_requested);
+    assert!(commands.try_recv().is_err());
+
+    let stale = PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &ui,
+        16,
+    );
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    stale.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert_eq!(state.lock().unwrap().copied, ["n"]);
+    assert!(!ui.state.cancel_requested);
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_hidden_composer_selection_cannot_swallow_decision_cancellation() {
+    let (clipboard, state) = crate::clipboard::test_clipboard();
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.clipboard = clipboard;
+    ui.editor.insert_paste("stale selection");
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    ui.dispatch(approval("approval-copy"), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(state.lock().unwrap().copied.is_empty());
+    let WriterMessage::Frame { payload, .. } = commands.try_recv().unwrap() else {
+        panic!("approval denial frame")
+    };
+    let command: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(command["type"], "approval");
+    assert_eq!(command["approved"], false);
+}
+
+#[tokio::test]
 async fn pending_browse_activation_cannot_fall_through_to_the_editor() {
     let (writer, mut commands) = mpsc::channel(16);
     let mut ui = LiveUi::default();

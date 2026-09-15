@@ -44,7 +44,7 @@ const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
 const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
 const COMPOSER_PREFIX: &str = "› ";
 const CONTENT_PADDING: u16 = 1;
-const ACTIVITY_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -2746,12 +2746,12 @@ mod tests {
         state.interaction_status = InteractionStatus::Running;
         let first = render_to_string_with_activity(80, 18, &state, 0);
         let second = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(first.contains("working ⠋"), "{first}");
-        assert!(second.contains("working ⠙"), "{second}");
+        assert!(first.contains("working ◐"), "{first}");
+        assert!(second.contains("working ◓"), "{second}");
 
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(compacting.contains("compacting ⠹"), "{compacting}");
+        assert!(compacting.contains("compacting ◑"), "{compacting}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -2767,8 +2767,8 @@ mod tests {
         state.view_status = ViewStatus::Running;
         for width in [30, 60] {
             for (interaction, label) in [
-                (InteractionStatus::Running, "working ⠋"),
-                (InteractionStatus::Compacting, "compacting ⠋"),
+                (InteractionStatus::Running, "working ◐"),
+                (InteractionStatus::Compacting, "compacting ◐"),
             ] {
                 state.interaction_status = interaction;
                 let rendered = render_to_string_with_notice(
@@ -4175,7 +4175,7 @@ mod tests {
         state.interaction_status = crate::reducer::InteractionStatus::Running;
         state.transcript.append_prompt("check this".into());
         let waiting = render_to_string_with_activity(80, 18, &state, 0);
-        assert!(waiting.contains("working ⠋"));
+        assert!(waiting.contains("working ◐"));
         state
             .transcript
             .append_message_delta(1, "I will check that.");
@@ -4195,8 +4195,8 @@ mod tests {
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
             assert!(running.contains("check 19"), "{running}");
-            assert!(!running.contains("working ⠙"), "{running}");
-            assert!(!running.contains('⠙'), "{running}");
+            assert!(!running.contains("working ◓"), "{running}");
+            assert!(!running.contains('◓'), "{running}");
         }
         for status in [
             ViewStatus::Idle,
@@ -4207,7 +4207,7 @@ mod tests {
             state.view_status = status;
             state.interaction_status = crate::reducer::InteractionStatus::Idle;
             let done = render_to_string_with_activity(80, 18, &state, 1);
-            assert!(!done.contains("⠙"), "{done}");
+            assert!(!done.contains("◓"), "{done}");
         }
     }
 }

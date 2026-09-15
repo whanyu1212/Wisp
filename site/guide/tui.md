@@ -45,7 +45,8 @@ prepares their production distribution follow-up. A default switch requires a ne
 
 The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
 model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
-completion, themes, mouse navigation, configurable bindings, and compact paste presentation.
+completion, themes, mouse navigation, configurable bindings, keyboard selection, undo/redo, composer
+clipboard actions, and compact paste presentation.
 Rust uses external update instructions instead of Textual's install/restart flow, as described below.
 Published native artifacts, rollout feedback, and a new explicit support decision remain required before supported opt-in.
 
@@ -130,8 +131,8 @@ history loads. Navigating to a user-message node likewise restores its editable 
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
 This is still experimental and source-build only: current Python distributions do not include the Rust
-binary. Native text selection/copy and transcript search remain unavailable; mouse navigation is
-experimental opt-in as described below.
+binary. Native transcript selection/copy and transcript search remain unavailable; composer selection
+and clipboard actions are keyboard-driven. Mouse navigation is experimental opt-in as described below.
 Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
 Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
 enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
@@ -242,8 +243,8 @@ setting or persisted preference.
 
 Approvals and project-trust decisions remain **keyboard-only**; mouse input is ignored during those
 decisions and when a failed cancellation response requires keyboard recovery. Drag selection,
-clipboard copy, horizontal wheel actions, and middle/right-click actions
-are not implemented. Capture can interfere with terminal-native text selection: set
+transcript clipboard copy, horizontal wheel actions, and middle/right-click actions are not implemented.
+Capture can interfere with terminal-native text selection: set
 `WISP_TUI_MOUSE=0` for that workflow, or use your terminal's documented modifier override where
 supported. Only button and
 SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
@@ -293,7 +294,7 @@ the entire default keymap; other valid user settings still apply.
 
 Chords accept case-insensitive `Ctrl`, `Alt` and `Shift`, an ASCII character, Enter, navigation keys,
 or F1–F12, for example `Ctrl+F`, `Alt+Enter`, or `Ctrl+Shift+F3`. Printable keys require Ctrl or Alt.
-Escape, Ctrl+C, Ctrl+G, Ctrl+A/E, editor selection and word/line editing keys listed below,
+Escape, Ctrl+C, Ctrl+G, Ctrl+A/E, editor selection, clipboard, and word/line editing keys listed below,
 unmodified editor arrows/Home/End, and Tab/BackTab/Backspace/Delete are reserved.
 Default Ctrl+Enter submits; other combined Enter modifiers preserve legacy newline
 behavior. Default Ctrl+J and Ctrl+navigation accept extra modifiers, except that Shift+navigation
@@ -315,6 +316,9 @@ The Rust composer supports these fixed editing keys:
 | Ctrl+U/K | Delete to line start/end; at that edge, remove the adjacent newline |
 | Ctrl+Z | Undo the latest edit group |
 | Ctrl+Y, Ctrl+Shift+Z | Redo the latest undone edit group |
+| Ctrl+C, Ctrl+Insert | Copy selected composer text |
+| Ctrl+X, Shift+Delete | Cut selected composer text as one undoable edit |
+| Ctrl+V, Shift+Insert | Paste system-clipboard text, replacing the selection |
 
 Undo and redo retain at most 100 states and 4 MiB of draft text in each direction. Consecutive
 typing and repeated character deletion are grouped; paste, completion, file insertion, prompt-history
@@ -325,9 +329,12 @@ Typing, pasting, Tab, and newline insertion replace the selection. Backspace and
 Unmodified Left/Right collapse the selection to its start/end; a composer click clears it.
 Explicitly selecting a folded paste selects its exact underlying text, and replacement removes that
 selected text in one edit. Without a selection, a destructive edit into a paste marker expands it first.
-Rejected oversized edits preserve the draft and selection. Submission sends the entire draft;
-Ctrl+C and Escape retain cancellation behavior. Clipboard copy/cut and mouse drag selection
-remain separate work.
+Rejected oversized edits preserve the draft and selection. Submission sends the entire draft.
+Ctrl+C copies when the composer owns a non-empty selection; without one it retains run-cancellation
+and idle-exit behavior. A failed cut preserves the selected draft, and clipboard paste follows the
+same control-character filtering, size limits, compact-fold handling, and undo behavior as bracketed
+paste. Native desktop clipboard access supports copy, cut, and paste; copy also emits an OSC52 fallback
+for remote terminals. Mouse drag selection and transcript clipboard copy remain separate work.
 
 Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing
 Tab/Shift+Tab/Enter/Space, decision approval/denial, and editor navigation. They take precedence over

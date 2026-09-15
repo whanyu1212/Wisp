@@ -128,9 +128,10 @@ impl KeyHelp {
                 "Words: Ctrl/Alt+Left/Right or Alt+B/F move; add Shift to extend selection.",
                 "Delete: Ctrl+W / Alt+Backspace backward word, Alt+D / Ctrl+Delete forward word, Ctrl+U/K to line edges.",
                 "Undo: Ctrl+Z. Redo: Ctrl+Y or Ctrl+Shift+Z.",
+                "Clipboard: Ctrl+C/X/V copy, cut, or paste; Ctrl+Insert, Shift+Insert, and Shift+Delete are alternatives.",
                 "Typing, paste, Tab, newline and deletion replace selected text. Plain arrows collapse selection.",
                 "Large-paste markers expand on first cursor/edit interaction; an explicit selection replaces its raw text.",
-                "Esc cancels active work; Ctrl+C cancels or exits when idle.",
+                "Esc cancels active work; Ctrl+C cancels or exits when no composer text is selected.",
             ],
         };
         rows.extend(fixed.iter().map(|text| Line::raw(*text)));

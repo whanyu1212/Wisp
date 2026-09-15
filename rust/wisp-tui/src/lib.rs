@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod clipboard;
 #[cfg(test)]
 mod command_tests;
 mod commands;
@@ -56,6 +57,7 @@ mod visual_tests;
 use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
+use clipboard::{ClipboardAction, ClipboardBackend, SystemClipboard};
 #[cfg(test)]
 use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
@@ -77,6 +79,7 @@ use prompt_editor::{EditOutcome, EditorAction, PromptEditor};
 use prompt_history::PromptHistory;
 use prompt_history_view::{HistoryAction, PromptHistoryView};
 use ratatui::Terminal;
+#[cfg(test)]
 use ratatui::backend::Backend;
 use reducer::{
     BackendEvent, CommandIdSource, CommandKind, InteractionStatus, PendingApproval, UiAction,
@@ -90,7 +93,7 @@ use std::future::pending;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use terminal::{PanicHookGuard, TerminalGuard};
+use terminal::{FrameBackend, PanicHookGuard, TerminalGuard};
 use theme::Palette;
 use theme_picker::{ThemePicker, ThemePickerAction};
 use theme_preferences::{ThemePreferences, ThemeSelection};
@@ -530,6 +533,7 @@ struct LiveUi {
     detail_view: DetailView,
     browse_selected: Option<TranscriptEntryId>,
     editor: PromptEditor,
+    clipboard: Box<dyn ClipboardBackend>,
     composer_layout_cache: ComposerLayoutCache,
     prompt_history: PromptHistory,
     prompt_history_view: Option<PromptHistoryView>,
@@ -573,6 +577,7 @@ impl Default for LiveUi {
             detail_view: DetailView::default(),
             browse_selected: None,
             editor: PromptEditor::default(),
+            clipboard: Box::new(SystemClipboard::default()),
             composer_layout_cache: ComposerLayoutCache::default(),
             prompt_history: PromptHistory::default(),
             prompt_history_view: None,
@@ -1362,7 +1367,7 @@ impl LiveUi {
         }
     }
 
-    fn draw<B: Backend>(
+    fn draw<B: FrameBackend>(
         &mut self,
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
@@ -1390,7 +1395,7 @@ impl LiveUi {
         if let Some(view) = &mut self.prompt_history_view {
             view.invalidate_selection();
         }
-        terminal.draw(|frame| {
+        terminal::draw_frame(terminal, |frame| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
                     self.completion.view(
@@ -1646,7 +1651,7 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
-    async fn close_transport<B: Backend>(
+    async fn close_transport<B: FrameBackend>(
         &mut self,
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
@@ -1840,6 +1845,72 @@ impl LiveUi {
 
     fn editor_editable(&self) -> bool {
         self.state.editor_editable()
+    }
+
+    fn composer_owns_clipboard(&self) -> bool {
+        self.editor_editable()
+            && self.key_help.is_none()
+            && !self.file_picker.is_open()
+            && self.active_overlay().is_none()
+            && self.current_decision_context().is_none()
+            && self.browse_selected.is_none()
+    }
+
+    fn composer_clipboard_action(&self, key: KeyEvent) -> Option<ClipboardAction> {
+        let action = ClipboardAction::for_key(key)?;
+        if !self.composer_owns_clipboard()
+            || (is_ctrl_c(key)
+                && action == ClipboardAction::Copy
+                && self.editor.selection_range().is_none())
+        {
+            return None;
+        }
+        Some(action)
+    }
+
+    fn handle_composer_clipboard(&mut self, action: ClipboardAction) {
+        match action {
+            ClipboardAction::Copy | ClipboardAction::Cut => {
+                let Some(range) = self.editor.selection_range() else {
+                    return;
+                };
+                let selected = self.editor.text()[range.clone()].to_owned();
+                let characters = selected.chars().count();
+                if let Err(error) = self.clipboard.copy(&selected) {
+                    self.notice = Some(format!("Could not copy selection: {error}."));
+                    self.render_pending = true;
+                    return;
+                }
+                if action == ClipboardAction::Cut {
+                    let outcome = self.editor.replace_range(range, "");
+                    self.update_edit_notice(outcome);
+                    self.completion.sync(&self.editor);
+                    self.file_picker.sync_editor(&self.editor);
+                }
+                let verb = if action == ClipboardAction::Cut {
+                    "Cut"
+                } else {
+                    "Copied"
+                };
+                self.notice = Some(format!("{verb} {characters} chars to clipboard."));
+                self.render_pending = true;
+            }
+            ClipboardAction::Paste => match self.clipboard.paste() {
+                Ok(pasted) => {
+                    let outcome = self.editor.insert_paste(&pasted);
+                    let notice_changed = self.update_edit_notice(outcome);
+                    self.completion.sync(&self.editor);
+                    self.file_picker.sync_editor(&self.editor);
+                    if outcome.changed || notice_changed {
+                        self.render_pending = true;
+                    }
+                }
+                Err(error) => {
+                    self.notice = Some(format!("Could not paste: {error}."));
+                    self.render_pending = true;
+                }
+            },
+        }
     }
 
     fn update_edit_notice(&mut self, outcome: EditOutcome) -> bool {
@@ -2989,6 +3060,12 @@ impl LiveUi {
                 _ => {}
             }
             return Ok(LoopControl::Continue);
+        }
+        if let Input::Key(key) = &input {
+            if let Some(action) = self.composer_clipboard_action(*key) {
+                self.handle_composer_clipboard(action);
+                return Ok(LoopControl::Continue);
+            }
         }
         self.sync_file_picker(writer, limit).await?;
         let control = match input {

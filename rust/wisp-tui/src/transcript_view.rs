@@ -2626,8 +2626,17 @@ impl TranscriptViewport {
             }
             return 0;
         };
+        let tail = rejoin_tail
+            .then(|| self.tail_top(transcript, cache))
+            .flatten();
         let mut moved = 0;
         for _ in 0..amount {
+            if Some(top) == tail {
+                self.follow_tail = true;
+                self.unseen_output = false;
+                self.top = None;
+                return moved;
+            }
             let Some(cached) = cache.row_at(transcript, top, self.width) else {
                 break;
             };
@@ -2644,15 +2653,9 @@ impl TranscriptViewport {
             top = next;
             moved += 1;
         }
-        // The live view may start at the latest prompt even when older turns
-        // would also fit. Rejoin only after scrolling into that live interval.
-        let reaches_tail = rejoin_tail
-            && self.tail_top(transcript, cache).is_some_and(|tail| {
-                collect_rows(transcript, cache, tail, self.width, self.height)
-                    .iter()
-                    .any(|row| row.anchor == top)
-            });
-        if reaches_tail {
+        // Cap multi-row gestures at the live top. Overshooting and then snapping
+        // backward to this anchor makes PageDown and batched wheel input jitter.
+        if Some(top) == tail {
             self.follow_tail = true;
             self.unseen_output = false;
             self.top = None;
@@ -3184,6 +3187,31 @@ mod tests {
             &mut cache,
         );
 
+        assert!(viewport.follows_tail());
+        assert_eq!(viewport.visible_rows(&transcript, &mut cache), tail);
+    }
+
+    #[test]
+    fn multi_row_scroll_stops_at_the_live_top_without_snapping_backward() {
+        let transcript = transcript_with(30);
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 20, 6);
+        let tail = viewport.visible_rows(&transcript, &mut cache);
+
+        let up = viewport.reduce(
+            TranscriptViewAction::ScrollLines(-2),
+            &transcript,
+            &mut cache,
+        );
+        assert_eq!(up.consumed_rows, 2);
+        let down = viewport.reduce(
+            TranscriptViewAction::ScrollLines(5),
+            &transcript,
+            &mut cache,
+        );
+
+        assert_eq!(down.consumed_rows, 2);
         assert!(viewport.follows_tail());
         assert_eq!(viewport.visible_rows(&transcript, &mut cache), tail);
     }
