@@ -4381,7 +4381,6 @@ fn handle_backend_event(
             if !matches_current {
                 return Ok(Vec::new());
             }
-            state.post_prompt_session_sync_pending = true;
             state.context.compaction = None;
             if command_type == "compact" && (!ok || state.context.compaction_notice.is_none()) {
                 state.context.compaction_notice = Some(bounded_session_text(
@@ -4410,6 +4409,9 @@ fn handle_backend_event(
                 && error
                     .as_deref()
                     .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
+            let history_sync_follows =
+                !(command_type == "init" && !ok && history_session_id(state).is_none());
+            state.post_prompt_session_sync_pending = history_sync_follows;
             let init_failure = (command_type == "init" && !ok && !was_cancelled).then(|| {
                 bounded_session_text(
                     &format!(
@@ -4425,7 +4427,7 @@ fn handle_backend_event(
                 } else {
                     ViewStatus::Error
                 };
-            let mut effects = context::start_refresh(state, true, ids)?;
+            let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
             if let Some(message) = init_failure {
                 effects.push(UiEffect::Notice(message));
                 effects.push(UiEffect::RequestRender);
@@ -4567,10 +4569,27 @@ mod tests {
         assert!(state.current_command.is_none());
         assert_eq!(state.view_status, ViewStatus::Idle);
         assert!(state.editor_editable());
+        assert!(!state.post_prompt_session_sync_pending);
         assert_eq!(state.transcript.latest_user_text(), Some("/init"));
         assert!(completion_effects.iter().any(
             |effect| matches!(effect, UiEffect::Notice(message) if message == "Project initialization failed: initialization failed")
         ));
+        let refresh_effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "get_session_stats-1".into(),
+                command_type: "get_session_stats".into(),
+                ok: false,
+                error: Some("statistics unavailable".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            !refresh_effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SendPostPromptSessionSync(_)))
+        );
 
         let mut success = UiState::new("fake".into(), None, None);
         reduce(&mut success, UiAction::Init, &mut ids).unwrap();
