@@ -376,6 +376,10 @@ impl Transcript {
             .is_some_and(|binding| !binding.resolved)
     }
 
+    pub(crate) fn has_unresolved_tool_calls(&self) -> bool {
+        self.call_entries.values().any(|binding| !binding.resolved)
+    }
+
     pub(crate) fn tool_entry_for_call(&self, call_id: &str) -> Option<TranscriptEntryId> {
         self.call_entries
             .get(call_id)

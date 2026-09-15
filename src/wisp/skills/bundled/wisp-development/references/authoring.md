@@ -26,4 +26,6 @@ development environment.
 - Add deterministic fake/scripted-provider tests for provider-facing behavior.
 - Keep provider behavior behind provider interfaces and tool execution separate.
 - Bump event schemas with named breadcrumbs for serialized contract changes.
-- Update README documentation when user-visible behavior changes.
+- Change authoritative catalogs or schemas first, then run their checked-in generators rather than
+  hand-editing generated artifacts.
+- Update the relevant site guide or reference when user-visible behavior changes.

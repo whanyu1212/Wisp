@@ -35,6 +35,30 @@
       }
     },
     {
+      "name": "wisp-glass",
+      "slug": "glass",
+      "label": "Glass",
+      "description": "Smoky graphite with luminous ice and mint",
+      "dark": true,
+      "colors": {
+        "background": "#16181a",
+        "foreground": "#f7f8ff",
+        "primary": "#b2ccff",
+        "secondary": "#e0c2ff",
+        "accent": "#a3e6d8",
+        "success": "#c8ea90",
+        "warning": "#f2da9a",
+        "error": "#ffb0a8",
+        "surface": "#252a35",
+        "panel": "#40434b",
+        "muted": "#aab1c2",
+        "addition": "#b5bd68",
+        "addition_background": "#16241e",
+        "deletion": "#cc6666",
+        "deletion_background": "#241a1d"
+      }
+    },
+    {
       "name": "wisp-orchid",
       "slug": "orchid",
       "label": "Orchid",

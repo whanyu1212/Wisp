@@ -3953,6 +3953,11 @@ class TextualTui(App[None]):
 
         self._transcript_controller.renew_working_indicator()
 
+    def has_pending_tool_calls(self) -> bool:
+        """Return whether any live tool call still awaits a terminal result."""
+
+        return self._transcript_controller.pending_tool_count > 0
+
     def show_retry_indicator(self, label: str) -> None:
         self._transcript_controller.show_retry_indicator(label)
 

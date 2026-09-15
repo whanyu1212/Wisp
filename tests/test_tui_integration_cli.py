@@ -5043,6 +5043,7 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
     ("theme", "foreground", "primary"),
     [
         ("wisp", "#d4d4d4", "#81a2be"),
+        ("wisp-glass", "#f7f8ff", "#b2ccff"),
         ("wisp-orchid", "#cad3f5", "#c6a0f6"),
         # Textual's color round-trip resolves source #fab283 to #f9b283.
         ("wisp-ember", "#eeeeee", "#f9b283"),
@@ -6343,6 +6344,68 @@ def test_textual_working_status_persists_after_tool_card_mount() -> None:
     remained_at_tail, removed_on_completion = anyio.run(scenario)
     assert remained_at_tail
     assert removed_on_completion
+
+
+def test_textual_working_status_returns_after_final_parallel_tool_result() -> None:
+    async def scenario() -> tuple[bool, bool, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(MessageStarted(turn=1))
+            renderer.token_delta("I will inspect both files.")
+            await app_instance.wait_for_stream_idle()
+            renderer.end_token_stream_with_content("I will inspect both files.")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            retired_for_visible_text = _working_activity(app_instance) == ""
+
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            renderer.event(ToolCallRequested(call_id="c2", name="read", arguments={}))
+            renderer.event(ToolResultReady(call_id="c1", name="read", output="one", is_error=False))
+            hidden_while_parallel_call_runs = _working_activity(app_instance) == ""
+            renderer.event(ToolResultReady(call_id="c2", name="read", output="two", is_error=False))
+            resumed_after_final_result = _working_activity(app_instance)
+
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="failed"))
+            await pilot.pause()
+            stopped_at_terminal = _working_activity(app_instance) == ""
+            return (
+                retired_for_visible_text,
+                hidden_while_parallel_call_runs,
+                resumed_after_final_result,
+                stopped_at_terminal,
+            )
+
+    retired, parallel_hidden, resumed, stopped = anyio.run(scenario)
+    assert retired
+    assert parallel_hidden
+    assert "Working" in resumed
+    assert stopped
+
+
+def test_textual_final_tool_result_outlives_delayed_stream_retirement() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.running()
+            indicator = app_instance._transcript_controller.working_indicator
+            renderer.token_delta("I will inspect that.")
+            renderer.end_token_stream_with_content("I will inspect that.")
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            renderer.event(
+                ToolResultReady(call_id="c1", name="read", output="done", is_error=False)
+            )
+            resumed = app_instance._transcript_controller.working_indicator
+            await app_instance.wait_for_stream_idle()
+            return (
+                resumed is indicator,
+                app_instance._transcript_controller.working_indicator is resumed,
+            )
+
+    reused_same_widget, retained_after_stream = anyio.run(scenario)
+    assert reused_same_widget
+    assert retained_after_stream
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:

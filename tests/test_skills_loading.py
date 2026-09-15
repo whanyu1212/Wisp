@@ -90,18 +90,36 @@ def test_loads_all_bundled_skill_resources(
         assert resource.truncated is False
 
 
-def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts() -> None:
+def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: Path) -> None:
     root = bundled_skills_root()
+    catalog = discover_skills(
+        home_dir=tmp_path,
+        project_root=None,
+        protected_paths=(),
+        package_root=root,
+    )
     extension_api = (root / "wisp-development" / "references" / "extension-api.md").read_text(
         encoding="utf-8"
     )
     architecture = (root / "wisp-development" / "references" / "architecture.md").read_text(
         encoding="utf-8"
     )
+    verification = (root / "wisp-development" / "references" / "verification.md").read_text(
+        encoding="utf-8"
+    )
+    delivery = (
+        root / "github-pr-delivery" / "references" / "preflight-and-packaging.md"
+    ).read_text(encoding="utf-8")
     skills_guide = (Path(__file__).parents[1] / "site" / "guide" / "skills.md").read_text(
         encoding="utf-8"
     )
 
+    development_entry = catalog.get("wisp-development")
+    delivery_entry = catalog.get("github-pr-delivery")
+    assert development_entry is not None
+    assert delivery_entry is not None
+    assert dict(development_entry.metadata)["version"] == "1.3"
+    assert dict(delivery_entry.metadata)["version"] == "1.2"
     for method in (
         "register_provider",
         "register_provider_factory",
@@ -115,7 +133,10 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts() -> None:
     assert "execution=None" in extension_api
     assert "Textual remains the default supported" in architecture
     assert "Rust failures do not select it automatically" in architecture
+    assert "scripts/generate_tui_themes.py" in architecture
     assert "Textual remains a supported fallback" not in architecture
+    assert "Python/Rust\nhandoff tests" in verification
+    assert "already-merged feature branch" in delivery
     assert "`wisp-development`" in skills_guide
     assert "`github-pr-delivery`" in skills_guide
 

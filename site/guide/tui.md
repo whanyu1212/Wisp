@@ -9,8 +9,9 @@ wisp
 ```
 
 A fullscreen Textual TUI built on the same RPC controller other integrations use. While a command is
-active, a spinning `Working…` row stays at the live transcript tail as assistant output and tool
-cards appear, and changes labels for retries, approvals, trust, or compaction.
+active, a spinning `Working…` row stays at the live transcript tail until visible assistant output
+begins. It remains through tool-only work, returns after the final tool result while the next model
+step is pending, and changes labels for retries, approvals, trust, or compaction.
 
 ::: info Two terminal frontends
 Wisp maintains two terminal clients over the same Python runtime. Textual is the default and
@@ -98,7 +99,9 @@ pane until you scroll away. The live view contains only that prompt and the repl
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
 Before reply text arrives, a working row animates below the transcript. Once text starts
 streaming, the working row and spinner disappear. The `wisp` label stays visible at the live tail
-during intervening tool calls.
+during intervening tool calls, and the working row returns after the final result while another
+model step is pending. A completed poll whose background process remains alive does not suppress
+this separate model activity.
 Compaction keeps its separate activity row. Active tool cards use a prominent solid-dot marker that
 pulses gently in brightness and active shell calls say `Running`;
 completed, failed, denied, cancelled, and approval-waiting calls stay steady. In monochrome mode,
@@ -197,8 +200,10 @@ it can cover the header or upper composer rows rather than rearranging the conve
 trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse selection is
 opt-in, and modified submission shortcuts retain their existing meanings.
 
-Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Orchid, Ember, Storm, Grove,
-Wave, Paper, and Dawn palettes as Textual. The picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
+Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Glass, Orchid, Ember, Storm,
+Grove, Wave, Paper, and Dawn palettes as Textual. Glass combines a smoky graphite elevation ladder
+with luminous ice, lilac, and mint accents; terminal opacity and blur remain emulator-owned. The
+picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
 or `Home`/`End`; `Enter` applies the displayed choice, while `Escape` or `Ctrl+C` restores the
 committed theme. Streaming continues behind it. A new approval, trust request, or presented workflow
 cancels the preview without saving it. `Ctrl+T` switches between Paper and the last committed dark
@@ -520,8 +525,8 @@ same transcript is not held twice in memory. An on-demand detail load returns th
 JSONL; it cannot recover bytes that the tool itself truncated before persistence, and those cards stay
 marked as truncated.
 
-Run `/theme` to preview Vapor, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one of
-those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
+Run `/theme` to preview Vapor, Glass, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one
+of those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
 from Dawn it returns to that dark palette too. The choice is written to `~/.wisp/tui.json` and
 restored on the next run. It is presentation state owned by the TUI client, so it is kept out of
 `settings.json` and never reaches the agent subprocess; an unreadable or unrecognized value falls

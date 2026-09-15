@@ -5,7 +5,7 @@ license: MIT
 compatibility: Git repositories hosted on GitHub; adapts to the GitHub tools and CLI available in the active Wisp runtime.
 metadata:
   author: Wisp
-  version: "1.1"
+  version: "1.2"
 ---
 
 # GitHub PR Delivery
@@ -98,6 +98,9 @@ after the compact state identifies the specific failure or new review item that 
    comment with actionable unresolved threads is not a clean result.
 8. **Verify final readiness:** refresh PR metadata and separately report CI, review, thread state,
    mergeability, and caveats. Merge only when explicitly requested, then verify the merged state.
+9. **Start follow-up work cleanly:** when separately authorized after a merge, fetch the remote base,
+   verify the merge commit is its ancestor, fast-forward the local base, and branch from that exact
+   tip rather than continuing on the merged head branch.
 
 Load only the reference needed for the active phase:
 

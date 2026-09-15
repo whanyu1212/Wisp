@@ -735,18 +735,18 @@ fn waiting_for_output(state: &UiState) -> bool {
     if state.configuration_active() || state.view_status != ViewStatus::Running {
         return false;
     }
-    !state
+    let visible_assistant_stream = state
         .transcript
         .entries()
         .iter()
         .rev()
         .take_while(|entry| entry.role != TranscriptRole::User)
         .any(|entry| {
-            (entry.role == TranscriptRole::Assistant
+            entry.role == TranscriptRole::Assistant
                 && entry.state == crate::transcript::TranscriptEntryState::Streaming
-                && !entry.content.is_empty())
-                || tool_in_progress(entry)
-        })
+                && !entry.content.is_empty()
+        });
+    !visible_assistant_stream && !state.transcript.has_unresolved_tool_calls()
 }
 
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
@@ -4434,6 +4434,31 @@ mod tests {
         }
         let between_steps = render_to_string_with_activity(80, 18, &state, 2);
         assert!(between_steps.contains("working ◑"), "{between_steps}");
+
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "process-poll".into(),
+                name: "bash".into(),
+                arguments: json!({"operation": "poll", "process_id": "process-1"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let polling = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(!polling.contains("working ◒"), "{polling}");
+        let mut process_result = tool_result("process-poll", "still running");
+        process_result.name = "bash".into();
+        process_result.process_id = Some("process-1".into());
+        process_result.process_state = Some("running".into());
+        state.transcript.observe_tool_result(process_result);
+        let process_between_steps = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(
+            process_between_steps.contains("Running process"),
+            "{process_between_steps}"
+        );
+        assert!(
+            process_between_steps.contains("working ◒"),
+            "{process_between_steps}"
+        );
 
         for status in [
             ViewStatus::Idle,

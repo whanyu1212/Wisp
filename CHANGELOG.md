@@ -12,6 +12,12 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Added the shared Glass TUI theme, combining smoky graphite surfaces with luminous ice, lilac, and
+  mint accents derived from translucent terminal palettes.
+- Refreshed both bundled Agent Skills with current dual-frontend, generated-catalog, verification,
+  and post-merge follow-up guidance.
+- Restored visible working activity after the final tool result while the next model step is pending,
+  including parallel tools, delayed stream paints, and still-running background processes.
 - Rust TUI: match the composer background to the transcript and provide a four-choice permission
   dialog. `/permissions` manages project defaults saved outside the repository; once/session
   approvals remain temporary.

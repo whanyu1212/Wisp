@@ -94,6 +94,28 @@ WISP_THEME_DARK = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a0a0a8"),
 )
 
+WISP_THEME_GLASS = Theme(
+    name="wisp-glass",
+    # A Ghostty/WezTerm graphite base meets Otty's Glass Dark elevation
+    # ladder and luminous pastel terminal colors.
+    primary="#b2ccff",
+    secondary="#e0c2ff",
+    accent="#a3e6d8",
+    warning="#f2da9a",
+    error="#ffb0a8",
+    success="#c8ea90",
+    foreground="#f7f8ff",
+    background="#16181a",
+    surface="#252a35",
+    panel="#40434b",
+    dark=True,
+    variables={
+        **_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aab1c2"),
+        # The shared Pi-red count misses AA on this lighter glass panel.
+        "diff-del-count-fg": "#ffb0a8",
+    },
+)
+
 WISP_THEME_ORCHID = Theme(
     name="wisp-orchid",
     # Catppuccin Macchiato's mauve family, rearranged onto Wisp's elevation order.
@@ -223,6 +245,7 @@ WISP_THEME_DAWN = Theme(
 
 WISP_THEME_SPECS = (
     WispThemeSpec("vapor", "Vapor", "Quiet blue and spectral teal", WISP_THEME_DARK),
+    WispThemeSpec("glass", "Glass", "Smoky graphite with luminous ice and mint", WISP_THEME_GLASS),
     WispThemeSpec("orchid", "Orchid", "Mauve, periwinkle, and soft pink", WISP_THEME_ORCHID),
     WispThemeSpec("ember", "Ember", "Peach and coral on warm charcoal", WISP_THEME_EMBER),
     WispThemeSpec("storm", "Storm", "Tokyo Night blues and violet", WISP_THEME_STORM),
@@ -274,6 +297,7 @@ __all__ = [
     "WISP_THEME_DARK",
     "WISP_THEME_EMBER",
     "WISP_THEME_GROVE",
+    "WISP_THEME_GLASS",
     "WISP_THEME_LIGHT",
     "WISP_THEME_NAMES",
     "WISP_THEME_ORCHID",

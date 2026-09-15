@@ -34,8 +34,8 @@ Wisp ships two read-only package skills:
 
 | Skill | Purpose |
 |---|---|
-| `wisp-development` | Wisp architecture, implementation, extension surfaces, safety, and local verification |
-| `github-pr-delivery` | Focused GitHub PR packaging, current-head CI, review threads, re-review, and merge readiness |
+| `wisp-development` | Wisp architecture, dual-frontend boundaries, generated catalogs, extension surfaces, safety, and verification |
+| `github-pr-delivery` | Focused GitHub PR packaging, current-head CI, review threads, re-review, merge readiness, and post-merge follow-up |
 
 They are available from source checkouts and installed wheels, including in untrusted projects.
 Package skills have the lowest precedence; higher-precedence project or user skills may shadow them

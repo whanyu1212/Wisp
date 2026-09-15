@@ -40,7 +40,7 @@ def test_bare_theme_command_previews_then_escape_restores_without_queueing(
 
     preview, restored, opened, queued, draft = anyio.run(scenario)
     assert opened
-    assert preview == "wisp-orchid"
+    assert preview == "wisp-glass"
     assert restored == "wisp"
     assert queued == 0
     assert draft == ""
@@ -139,7 +139,7 @@ def test_ctrl_t_does_not_commit_while_picker_owns_a_preview(
             return preview, app.theme
 
     preview, restored = anyio.run(scenario)
-    assert preview == "wisp-orchid"
+    assert preview == "wisp-glass"
     assert restored == "wisp"
     assert load_theme_state(home_dir=tmp_path).active_theme is None
 
@@ -165,7 +165,7 @@ def test_replacing_picker_with_another_overlay_rolls_back_preview(
             return preview, app.theme, app._theme_picker_original
 
     preview, restored, original = anyio.run(scenario)
-    assert preview == "wisp-orchid"
+    assert preview == "wisp-glass"
     assert restored == "wisp"
     assert original is None
     assert load_theme_state(home_dir=tmp_path).active_theme is None
@@ -233,7 +233,7 @@ def test_theme_picker_commit_preserves_viewport_and_uses_latest_preview(
             before = transcript.scroll_y
             app.submit_command_line("/theme")
             await pilot.pause()
-            await pilot.press("down", "down")
+            await pilot.press("down", "down", "down")
             await pilot.pause()
             preview = app.theme
             await pilot.press("enter")
