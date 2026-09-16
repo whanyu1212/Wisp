@@ -283,8 +283,11 @@ class _TuiProcess:
         )
 
     def wait_ready(self) -> None:
-        self.wait_for(
-            b"Type a prompt or / for commands.",
+        self.wait_until(
+            lambda output: (
+                b"Type a prompt or / for commands." in output
+                or b"/connect to add a provider" in output
+            ),
             failure="Rust TUI did not finish startup",
         )
 

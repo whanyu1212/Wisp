@@ -50,6 +50,13 @@ def report_stats(command, session_id=None, enabled=True):
 """
 
 
+def _welcome_ready(output: bytes | bytearray) -> bool:
+    """Recognize the hydrated welcome screen with or without a provider."""
+    emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
+    rendered = b"".join(emitted.split())
+    return b"Typeapromptor/forcommands." in rendered or b"/connecttoaddaprovider" in rendered
+
+
 def _complete_logged_commands(path: Path) -> list[dict[str, object]]:
     """Ignore a final record until the backend finishes writing its newline."""
     if not path.exists():
@@ -129,8 +136,8 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     # differential writes can omit letters shared by the two hints.
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 121, 0, 0))
                     context_redrawn = True
-                # Hydration can show the prompt hint before the startup reads finish.
-                ready = context_redrawn and b"Type a prompt or / for commands." in output
+                # Wait for welcome copy after hydration; the composer appears earlier.
+                ready = context_redrawn and _welcome_ready(output)
                 if picker_phase == "startup" and ready and b"fake/fake" in output:
                     os.write(terminal_fd, b"/model\r")
                     picker_phase = "loading"
@@ -196,7 +203,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     quit_frame_requested = True
                 elif (
                     quit_frame_requested
-                    and b"Type a prompt or / for commands." in output
+                    and _welcome_ready(output)
                     and (picker_only or (b"custom-model" in output and b"effort" in output))
                     and not quit_sent
                 ):
@@ -316,11 +323,7 @@ def test_rust_tui_cross_language_smoke(
                 context_redrawn = True
                 output.clear()
                 continue
-            if (
-                context_redrawn
-                and not prompt_sent
-                and b"Type a prompt or / for commands." in output
-            ):
+            if context_redrawn and not prompt_sent and _welcome_ready(output):
                 if not exercise_prompt:
                     rust_process_group = os.tcgetpgrp(terminal_fd)
                     os.kill(rust_process_group, signal.SIGKILL)
@@ -571,7 +574,7 @@ for line in sys.stdin:
             if (
                 not prompt_sent
                 and startup_redraw_offset is not None
-                and b"Type a prompt or / for commands." in output[startup_redraw_offset:]
+                and _welcome_ready(output[startup_redraw_offset:])
             ):
                 os.write(terminal_fd, b"tools\r")
                 prompt_sent = True
@@ -825,7 +828,7 @@ for line in sys.stdin:
             command_types = [command["type"] for command in commands]
             if (
                 phase == "startup"
-                and b"Type a prompt or / for commands." in output
+                and _welcome_ready(output)
                 and command_types[:7]
                 == [
                     "get_messages",
@@ -1275,7 +1278,9 @@ for line in sys.stdin:
             # Observe a fresh ready frame after each operation. Backend receipt
             # of get_messages does not mean the frontend has finished hydration.
             emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output[phase_output_offset:])
-            ready = b"Typeapromptor/forcommands." in b"".join(emitted.split())
+            ready = _welcome_ready(output[phase_output_offset:]) and any(
+                marker in emitted for marker in (b"3.0k", b"10.0k", b"30%")
+            )
             commands = []
             if command_log.exists():
                 for line in command_log.read_text().splitlines():
@@ -1303,7 +1308,7 @@ for line in sys.stdin:
                 ]
                 # A fresh welcome after the context result excludes the earlier
                 # editable frame while metadata hydration was still pending.
-                and b"Type a prompt" in output[context_redraw_offset:]
+                and _welcome_ready(output[context_redraw_offset:])
             ):
                 os.write(terminal_fd, b"/name client-requested\r")
                 phase = "name"
@@ -1605,11 +1610,7 @@ for line in sys.stdin:
                     if exc.errno != errno.EIO:
                         raise
             commands = _complete_logged_commands(command_log)
-            if (
-                phase == "startup"
-                and b"Type a prompt or / for commands." in output
-                and b"plan" in output
-            ):
+            if phase == "startup" and _welcome_ready(output) and b"plan" in output:
                 os.write(terminal_fd, b"/he")
                 phase = "prefix"
                 output.clear()
@@ -1637,7 +1638,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "closed"
                 output.clear()
-            elif phase == "closed" and b"Type a prompt or / for commands." in output:
+            elif phase == "closed" and _welcome_ready(output):
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()
@@ -1647,11 +1648,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
                 phase = "build ready"
                 output.clear()
-            elif (
-                phase == "build ready"
-                and b"3.0k" in output
-                and b"Type a prompt or / for commands." in output
-            ):
+            elif phase == "build ready" and b"3.0k" in output and _welcome_ready(output):
                 # Mode changes are rejected while the post-configure stats refresh
                 # is in flight. Wait for the snapshot before sending /plan.
                 os.write(terminal_fd, b"/plan\r")
@@ -1675,7 +1672,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
                 phase = "context closed"
                 output.clear()
-            elif phase == "context closed" and b"Type a prompt or / for commands." in output:
+            elif phase == "context closed" and _welcome_ready(output):
                 os.write(terminal_fd, b"/context auto off\r")
                 phase = "auto disabled"
                 output.clear()
@@ -1887,11 +1884,7 @@ SKILL_EXPANSION_MARKER
                 context_redrawn = True
                 output.clear()
                 continue
-            if (
-                phase == "startup"
-                and context_redrawn
-                and b"Type a prompt or / for commands." in output
-            ):
+            if phase == "startup" and context_redrawn and _welcome_ready(output):
                 os.write(terminal_fd, b"/skills\r")
                 phase = "browser"
                 output.clear()
@@ -2039,11 +2032,7 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
                 context_redrawn = True
                 output.clear()
                 continue
-            if (
-                phase == "startup"
-                and context_redrawn
-                and b"Type a prompt or / for commands." in output
-            ):
+            if phase == "startup" and context_redrawn and _welcome_ready(output):
                 os.write(terminal_fd, b"Explain @")
                 phase = "all files"
                 output.clear()
@@ -2237,7 +2226,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
                 output.clear()
                 phase = "ready"
-            elif phase == "ready" and b"Type a prompt or / for commands." in output:
+            elif phase == "ready" and _welcome_ready(output):
                 os.write(terminal_fd, b"long history\r")
                 output.clear()
                 phase = "streaming"
