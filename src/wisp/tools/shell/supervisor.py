@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -24,6 +25,7 @@ from wisp.tools.shell.process import (
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+_PendingTextBackend = Literal["auto", "python", "native"]
 _T = TypeVar("_T")
 
 DEFAULT_MAX_MANAGED_PROCESSES = 8
@@ -72,7 +74,7 @@ class _PendingLine:
 
 
 @dataclass
-class _PendingText:
+class _PythonPendingText:
     max_bytes: int
     max_lines: int
     dropped_bytes: int = 0
@@ -251,12 +253,76 @@ class _PendingText:
         return text, dropped_bytes, retained_source_bytes, source_byte_lengths
 
 
+class _PendingTextLike(Protocol):
+    """State and operations consumed by the managed-process supervisor."""
+
+    @property
+    def dropped_bytes(self) -> int: ...
+
+    @property
+    def retained_source_bytes(self) -> int: ...
+
+    @property
+    def has_text(self) -> bool: ...
+
+    @property
+    def text(self) -> str: ...
+
+    def append(self, value: str) -> None: ...
+
+    def append_bytes(self, value: bytes, *, final: bool = False) -> None: ...
+
+    def drain(self) -> tuple[str, int, int, tuple[int, ...]]: ...
+
+
+_PendingTextFactory = Callable[[int, int], _PendingTextLike]
+
+
+def _load_native_pending_text() -> _PendingTextFactory | None:
+    try:
+        native_module = import_module("wisp._native")
+    except ModuleNotFoundError as exc:
+        if exc.name == "wisp._native":
+            return None
+        raise
+    return cast(_PendingTextFactory, native_module.PendingText)
+
+
+_NativePendingText = _load_native_pending_text()
+
+
+def _pending_text_class(backend: _PendingTextBackend = "auto") -> _PendingTextFactory:
+    """Resolve a pending-text implementation for production or controlled tests."""
+
+    if backend == "python":
+        return _PythonPendingText
+    if backend == "native":
+        if _NativePendingText is None:
+            raise RuntimeError("the native pending-text backend is not installed")
+        return _NativePendingText
+    if backend == "auto":
+        return _NativePendingText or _PythonPendingText
+    raise ValueError(f"unknown pending-text backend: {backend}")
+
+
+def _pending_text_backends() -> tuple[tuple[str, _PendingTextFactory], ...]:
+    """Return concrete backends available to conformance tests."""
+
+    backends: list[tuple[str, _PendingTextFactory]] = [("python", _PythonPendingText)]
+    if _NativePendingText is not None:
+        backends.append(("native", _NativePendingText))
+    return tuple(backends)
+
+
+_PendingText = _pending_text_class()
+
+
 @dataclass
 class _ManagedProcess:
     process_id: str
     process: asyncio.subprocess.Process
-    stdout: _PendingText
-    stderr: _PendingText
+    stdout: _PendingTextLike
+    stderr: _PendingTextLike
     state: ProcessState = "running"
     exit_code: int | None = None
     terminal_override: ProcessState | None = None
@@ -282,10 +348,16 @@ class _ManagedProcess:
 class ProcessSupervisor:
     """Own bounded shell-process handles and terminate them on shutdown."""
 
-    def __init__(self, *, max_processes: int = DEFAULT_MAX_MANAGED_PROCESSES) -> None:
+    def __init__(
+        self,
+        *,
+        max_processes: int = DEFAULT_MAX_MANAGED_PROCESSES,
+        _pending_text_backend: _PendingTextBackend = "auto",
+    ) -> None:
         if max_processes < 1:
             raise ValueError("max_processes must be greater than or equal to 1")
         self._max_processes = max_processes
+        self._pending_text_class = _pending_text_class(_pending_text_backend)
         self._managed: dict[str, _ManagedProcess] = {}
         self._one_shot: dict[
             asyncio.subprocess.Process,
@@ -431,13 +503,15 @@ class ProcessSupervisor:
                 raise ToolError(
                     f"Cannot start command: managed process limit ({self._max_processes}) reached"
                 )
+            stdout = self._pending_text_class(max_retained_bytes, max_retained_lines)
+            stderr = self._pending_text_class(max_retained_bytes, max_retained_lines)
             process = await self._spawn(command, cwd=cwd)
             process_id = uuid4().hex
             managed = _ManagedProcess(
                 process_id=process_id,
                 process=process,
-                stdout=_PendingText(max_retained_bytes, max_retained_lines),
-                stderr=_PendingText(max_retained_bytes, max_retained_lines),
+                stdout=stdout,
+                stderr=stderr,
             )
             managed.stdout_task = asyncio.create_task(
                 self._read_stream(managed, process.stdout, managed.stdout)
@@ -733,7 +807,7 @@ class ProcessSupervisor:
         self,
         managed: _ManagedProcess,
         stream: asyncio.StreamReader | None,
-        output: _PendingText,
+        output: _PendingTextLike,
     ) -> None:
         if stream is None:
             return

@@ -12,7 +12,7 @@ title: Rust terminal frontend boundary
 
 In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
 on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
 other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
 which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
 macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
@@ -263,7 +263,7 @@ support. **Deferred noncritical** features do not block this RC trial.
 | Composer clipboard | Native copy/cut/paste with an OSC52 copy fallback; selected Ctrl+C copies and otherwise retains cancellation | Clipboard failures preserve the draft; pasted text keeps editor sanitization and size limits |
 | Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Accepted RC difference; validate accessibility and copying workflows during the RC trial |
 | Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | The #468 implementation is closed; newly reproduced safety/cleanup failures block RC acceptance. Broader field and platform evidence remains part of stable promotion. |
-| Prebuilt binary distribution and install lifecycle | The tag-gated release flow assembles one pure fallback wheel plus native manylinux x86_64 and macOS x86_64/arm64 wheels; installed Wisp resolves Rust only from its active Python environment | #566 adds post-download release-set verification, provenance, installed fake-provider smoke, native/pure replacement, offline reinstall, corruption and uninstall evidence; publication still requires an approved tag release |
+| Prebuilt binary distribution and install lifecycle | The tag-gated release flow assembles one pure fallback wheel plus native manylinux x86_64 and macOS arm64 wheels; installed Wisp resolves Rust only from its active Python environment | #566 adds post-download release-set verification, provenance, installed fake-provider smoke, native/pure replacement, offline reinstall, corruption and uninstall evidence; publication still requires an approved tag release |
 | Windows | Rejected before binary resolution | Accepted RC difference; not a claimed Rust target |
 | No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
 | Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Remaining stable-promotion evidence under [#456](https://github.com/whanyu1212/Wisp/issues/456); RC2 is an explicitly authorized trial |

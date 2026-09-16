@@ -77,14 +77,40 @@ The native boundary should contain only incremental UTF-8 decoding, logical-line
 bounded tail retention, and source-byte provenance. Python should continue to own process creation,
 pipe tasks, polling, cancellation, timeouts, cleanup, policy, and `ProcessUpdate` construction.
 
-This PR deliberately leaves `_PendingText` as the production implementation. The next PR should add
-a PyO3 wrapper and wheel packaging, retain the Python fallback, and run the existing process-manager
-suite against both implementations. It should then repeat the managed-process benchmark with each
-backend selected in the same installed build. The direct speedup establishes the value of the
-kernel; that end-to-end comparison will measure the cost of crossing the extension boundary and the
-actual user-visible gain before Rust becomes the preferred backend.
+The prototype PR deliberately left `_PendingText` as the production implementation. The follow-up
+integration described below adds the PyO3 wrapper and wheel packaging, retains the Python fallback,
+runs the process-manager suite against both implementations, and repeats the managed-process
+benchmark through an installed native wheel before selecting Rust automatically when available.
 
-This evidence covers a macOS arm64 development machine and synthetic stdout workloads. It does not
-measure stderr contention, sustained concurrent children, cancellation during continuous output,
-other platforms, extension-call overhead, or packaged-wheel behavior. Those remain integration and
-release gates rather than reasons to widen the Rust ownership boundary.
+The direct-kernel evidence covers a macOS arm64 development machine and synthetic stdout workloads.
+It does not measure stderr contention, sustained concurrent children, cancellation during continuous
+output, or other platforms. Those remain release evidence limits rather than reasons to widen the
+Rust ownership boundary.
+
+## Installed extension integration
+
+The follow-up integration used the packaged `cp312-abi3` extension from an installed macOS arm64
+candidate wheel and repeated the complete managed-process benchmark with `--iterations 3`. Both
+backends ran through the same Python supervisor, child process, 8 KiB pipe reads, polling, source-byte
+accounting, and cleanup. These measurements were recorded on September 16, 2026 on the same macOS
+arm64 machine with CPython 3.12.2.
+
+| Workload | Python wall ms | Native wall ms | Wall speedup | Python CPU ms | Native CPU ms | CPU reduction |
+|---|---:|---:|---:|---:|---:|---:|
+| ASCII lines | 408.76 | 411.76 | 0.99x | 249.16 | 29.10 | 8.6x |
+| Unicode | 1,177.90 | 403.60 | 2.92x | 999.68 | 38.66 | 25.9x |
+| Short lines | 1,484.66 | 406.95 | 3.65x | 1,323.06 | 69.51 | 19.0x |
+| Long line | 400.39 | 411.58 | 0.97x | 235.03 | 27.02 | 8.7x |
+| Mixed newlines | 738.61 | 413.00 | 1.79x | 579.21 | 51.05 | 11.3x |
+| Invalid UTF-8 | 1,558.22 | 405.14 | 3.85x | 1,396.77 | 46.16 | 30.3x |
+
+The native backend removes most retention CPU cost. Wall time becomes approximately 400 ms across
+the matrix because child startup, pipe scheduling, and the benchmark's 100 ms polling window become
+the remaining floor. ASCII and long-line wall time therefore stay flat even though their CPU cost
+falls sharply. The Unicode, short-line, mixed-newline, and invalid-byte conditions improve end to
+end because retention previously exceeded that floor.
+
+The native wheel now selects this backend automatically. Pure wheels and unsupported platforms keep
+the Python implementation. Native-wheel CI runs the shared conformance corpus and complete process
+manager suite against the installed extension, then verifies that replacing it with the pure wheel
+removes `wisp._native` and restores the Python fallback.

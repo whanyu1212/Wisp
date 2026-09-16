@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 import anyio
 
@@ -24,6 +25,7 @@ from wisp.tools.process_manager import (
 )
 
 _MEBIBYTE = 1024 * 1024
+_Backend = Literal["auto", "python", "native"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class BenchmarkConfig:
     max_retained_lines: int = DEFAULT_MAX_RETAINED_LINES
     iterations: int = 1
     track_memory: bool = False
+    backend: _Backend = "auto"
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,8 @@ def _validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("retained output limits must be non-negative")
     if config.iterations < 1:
         raise ValueError("iterations must be positive")
+    if config.backend not in ("auto", "python", "native"):
+        raise ValueError("backend must be auto, python, or native")
 
 
 async def _run_sample(
@@ -136,7 +141,10 @@ async def _run_sample(
 
     async def invoke() -> _RunResult:
         nonlocal observed_max_poll_ms
-        supervisor = ProcessSupervisor(max_processes=1)
+        supervisor = ProcessSupervisor(
+            max_processes=1,
+            _pending_text_backend=config.backend,
+        )
         poll_count = 0
         retained_source_bytes = 0
         dropped_bytes = 0
@@ -249,6 +257,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--iterations", type=int, default=BenchmarkConfig.iterations)
     parser.add_argument("--track-memory", action="store_true")
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "python", "native"),
+        default=BenchmarkConfig.backend,
+        help="pending-text implementation used by the managed process supervisor",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -262,6 +276,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             child_chunk_bytes=parsed.child_chunk_bytes,
             iterations=parsed.iterations,
             track_memory=parsed.track_memory,
+            backend=parsed.backend,
         )
     )
     print(report.to_json())

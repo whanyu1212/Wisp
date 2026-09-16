@@ -12,12 +12,16 @@ on:
       - "Cargo.toml"
       - "hatch_build.py"
       - "pyproject.toml"
+      - "rust/wisp-process-text/**"
       - "rust/wisp-protocol/**"
+      - "rust/wisp-python/**"
       - "rust/wisp-tui/**"
       - "scripts/smoke_installed_rust_tui.py"
       - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"
       - "src/wisp/**"
+      - "tests/test_pending_text_conformance.py"
+      - "tests/test_process_manager.py"
       - "tests/test_rust_tui_wheel.py"
 
 permissions:
@@ -34,7 +38,7 @@ jobs:
     timeout-minutes: 30
     container: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
     env:
-      WISP_RUST_TUI_WHEEL_TAG: py3-none-manylinux_2_28_x86_64
+      WISP_RUST_TUI_WHEEL_TAG: cp312-abi3-manylinux_2_28_x86_64
 
     steps:
       - name: Check out repository
@@ -70,11 +74,20 @@ jobs:
           cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
             --format json --describe binaries --spec-version 1.5 --quiet
           mv rust/wisp-tui/wisp-tui_bin.cdx.json candidate-dist/wisp-tui.cdx.json
+          cargo cyclonedx --manifest-path rust/wisp-python/Cargo.toml \
+            --format json --describe crate --spec-version 1.5 --quiet
+          mv rust/wisp-python/wisp-python.cdx.json candidate-dist/wisp-python.cdx.json
           cargo_version="$("$python" scripts/verify_rust_tui_wheel.py --print-cargo-version)"
           "$python" -c 'import json, sys; d=json.load(open("candidate-dist/wisp-tui.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-tui" and c["version"] == sys.argv[1]' "$cargo_version"
+          "$python" -c 'import json, sys; d=json.load(open("candidate-dist/wisp-python.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-python" and c["version"] == sys.argv[1]' "$cargo_version"
           "$python" -m venv /tmp/wisp-wheel
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pip install --quiet "${wheel[0]}"
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python -m pip install --quiet pytest==9.1.1 pytest-asyncio==1.4.0
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python -m pytest -q \
+              "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
@@ -107,6 +120,40 @@ jobs:
           path: candidate-dist/
           if-no-files-found: error
 
+  linux-x86-64-installed-tests:
+    name: Installed wheel tests (manylinux_2_28 x86_64)
+    needs: linux-x86-64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version-file: .python-version
+
+      - name: Download candidate wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rust-tui-wheel-manylinux-x86-64
+          path: candidate-dist
+
+      - name: Test installed native backend
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/wisp-wheel"
+          python="$RUNNER_TEMP/wisp-wheel/bin/python"
+          wheel=(candidate-dist/*.whl)
+          test "${#wheel[@]}" -eq 1
+          "$python" -m pip install --quiet "${wheel[0]}"
+          "$python" -m pip install --quiet pytest==9.1.1 pytest-asyncio==1.4.0
+          (cd "$RUNNER_TEMP" && "$python" -m pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py" \
+            "$GITHUB_WORKSPACE/tests/test_process_manager.py")
+
   macos:
     name: Candidate wheel (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
@@ -115,14 +162,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS x86_64
-            runner: macos-15-intel
-            architecture: x86_64
-            tag: py3-none-macosx_11_0_x86_64
           - name: macOS arm64
             runner: macos-15
             architecture: arm64
-            tag: py3-none-macosx_11_0_arm64
+            tag: cp312-abi3-macosx_11_0_arm64
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       WISP_RUST_TUI_WHEEL_TAG: ${{ matrix.tag }}
@@ -168,12 +211,23 @@ jobs:
           cargo cyclonedx --manifest-path rust/wisp-tui/Cargo.toml \
             --format json --describe binaries --spec-version 1.5 --quiet
           mv rust/wisp-tui/wisp-tui_bin.cdx.json candidate-dist/wisp-tui.cdx.json
+          cargo cyclonedx --manifest-path rust/wisp-python/Cargo.toml \
+            --format json --describe crate --spec-version 1.5 --quiet
+          mv rust/wisp-python/wisp-python.cdx.json candidate-dist/wisp-python.cdx.json
           cargo_version="$(python scripts/verify_rust_tui_wheel.py --print-cargo-version)"
           python -c 'import json, sys; d=json.load(open("candidate-dist/wisp-tui.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-tui" and c["version"] == sys.argv[1]' "$cargo_version"
+          python -c 'import json, sys; d=json.load(open("candidate-dist/wisp-python.cdx.json")); c=d["metadata"]["component"]; assert d["bomFormat"] == "CycloneDX" and d["specVersion"] == "1.5" and c["name"] == "wisp-python" and c["version"] == sys.argv[1]' "$cargo_version"
           uv_bin="$(command -v uv)"
           uv venv /tmp/wisp-wheel
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python "${wheel[0]}"
+          PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            "$uv_bin" pip install --python /tmp/wisp-wheel/bin/python \
+              pytest==9.1.1 pytest-asyncio==1.4.0
+          (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
+            /tmp/wisp-wheel/bin/python -m pytest -q \
+              "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py" \
+              "$GITHUB_WORKSPACE/tests/test_process_manager.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")

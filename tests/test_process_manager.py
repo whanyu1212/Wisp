@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -16,7 +17,7 @@ from wisp.tools.process_manager import (
     ProcessSupervisor,
     ProcessUpdate,
     _bounded_text_tail,
-    _PendingText,
+    _pending_text_backends,
 )
 from wisp.tools.result import ToolError
 
@@ -100,9 +101,16 @@ async def _poll_until_terminal(
                 return tuple(updates)
 
 
-def test_managed_process_polling_delivers_incremental_output_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "pending_text_backend",
+    [name for name, _pending_text_type in _pending_text_backends()],
+)
+def test_managed_process_polling_delivers_incremental_output_once(
+    tmp_path: Path,
+    pending_text_backend: Any,
+) -> None:
     async def run() -> tuple[ProcessUpdate, ...]:
-        supervisor = ProcessSupervisor()
+        supervisor = ProcessSupervisor(_pending_text_backend=pending_text_backend)
         try:
             process_id = await supervisor.start(
                 _python_command(
@@ -380,12 +388,19 @@ def test_retention_counts_unterminated_trailing_logical_line(separator: str) -> 
         ((b"discard",), 10, 0),
     ],
 )
+@pytest.mark.parametrize(
+    ("_backend_name", "pending_text_type"),
+    _pending_text_backends(),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
 def test_pending_text_incrementally_matches_tail_retention(
     chunks: tuple[bytes, ...],
     max_bytes: int,
     max_lines: int,
+    _backend_name: str,
+    pending_text_type: type[Any],
 ) -> None:
-    pending = _PendingText(max_bytes=max_bytes, max_lines=max_lines)
+    pending = pending_text_type(max_bytes=max_bytes, max_lines=max_lines)
     source = b"".join(chunks)
 
     for chunk in chunks:
@@ -405,8 +420,16 @@ def test_pending_text_incrementally_matches_tail_retention(
     assert dropped_bytes + retained_source_bytes == len(source)
 
 
-def test_pending_text_applies_byte_cap_to_malformed_utf8() -> None:
-    pending = _PendingText(max_bytes=1, max_lines=10)
+@pytest.mark.parametrize(
+    ("_backend_name", "pending_text_type"),
+    _pending_text_backends(),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_pending_text_applies_byte_cap_to_malformed_utf8(
+    _backend_name: str,
+    pending_text_type: type[Any],
+) -> None:
+    pending = pending_text_type(max_bytes=1, max_lines=10)
 
     pending.append_bytes(b"\xff", final=True)
     text, dropped_bytes, retained_source_bytes, source_byte_lengths = pending.drain()

@@ -1,4 +1,4 @@
-"""Candidate platform-wheel hook for the optional Rust TUI."""
+"""Candidate platform-wheel hook for Wisp's optional native components."""
 
 from __future__ import annotations
 
@@ -10,13 +10,14 @@ from typing import Any
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 _WHEEL_TAG_ENV = "WISP_RUST_TUI_WHEEL_TAG"
+_EXTENSION_DESTINATION = "wisp/_native.abi3.so"
 
 
 class CustomBuildHook(BuildHookInterface):
-    """Build and package the lockstep Rust TUI candidate binary."""
+    """Build and package the lockstep Rust TUI and Python extension."""
 
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
-        """Build the Rust frontend and add it to the wheel scripts directory.
+        """Build the Rust components and add them to the platform wheel.
 
         Args:
             version: Hatch wheel build version.
@@ -50,11 +51,38 @@ class CustomBuildHook(BuildHookInterface):
             cwd=self.root,
             check=True,
         )
+        subprocess.run(
+            [
+                "cargo",
+                "rustc",
+                "--release",
+                "--locked",
+                "--package",
+                "wisp-python",
+                "--lib",
+                "--",
+                "-C",
+                "strip=symbols",
+            ],
+            cwd=self.root,
+            check=True,
+        )
         target_dir = Path(os.environ.get("CARGO_TARGET_DIR", Path(self.root, "target")))
         binary = target_dir / "release" / "wisp-tui"
         if not binary.is_file():
             raise RuntimeError(f"Rust TUI build did not produce {binary}")
+        extension_candidates = [
+            target_dir / "release" / "lib_native.so",
+            target_dir / "release" / "lib_native.dylib",
+        ]
+        extension = next((path for path in extension_candidates if path.is_file()), None)
+        if extension is None:
+            raise RuntimeError(
+                "Rust Python build did not produce "
+                + " or ".join(str(path) for path in extension_candidates)
+            )
 
         build_data["pure_python"] = False
         build_data["tag"] = tag
-        build_data["shared_scripts"][str(binary)] = "wisp-tui"
+        build_data.setdefault("shared_scripts", {})[str(binary)] = "wisp-tui"
+        build_data.setdefault("force_include", {})[str(extension)] = _EXTENSION_DESTINATION

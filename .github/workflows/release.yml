@@ -181,12 +181,6 @@ jobs:
           name: rust-tui-wheel-manylinux-x86-64
           path: native-artifacts/manylinux-x86-64
 
-      - name: Download macOS x86_64 Rust TUI wheel
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: rust-tui-wheel-x86_64-macos
-          path: native-artifacts/macos-x86-64
-
       - name: Download macOS arm64 Rust TUI wheel
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -196,12 +190,14 @@ jobs:
       - name: Assemble and verify native artifacts
         run: |
           mkdir -p release-assets
-          for target in manylinux-x86-64 macos-x86-64 macos-arm64; do
+          for target in manylinux-x86-64 macos-arm64; do
             directory="native-artifacts/${target}"
             (cd "$directory" && sha256sum --check SHA256SUMS)
             cp "$directory"/*.whl dist/
             cp "$directory/SHA256SUMS" "release-assets/wisp-tui-${target}.sha256"
             cp "$directory/wisp-tui.cdx.json" "release-assets/wisp-tui-${target}.cdx.json"
+            cp "$directory/wisp-python.cdx.json" \
+              "release-assets/wisp-python-${target}.cdx.json"
             cp "$directory/install-evidence.json" \
               "release-assets/wisp-tui-${target}-install.json"
           done

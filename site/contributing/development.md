@@ -63,7 +63,7 @@ Candidate native wheels use pinned Hatchling with `hatch_build.py`; ordinary PEP
 builds remain on `uv_build`. Set `WISP_RUST_TUI_WHEEL_TAG` only when reproducing a candidate wheel:
 
 ```bash
-WISP_RUST_TUI_WHEEL_TAG=py3-none-macosx_11_0_arm64 \
+WISP_RUST_TUI_WHEEL_TAG=cp312-abi3-macosx_11_0_arm64 \
   uvx --from hatchling==1.27.0 hatchling build -t wheel -d candidate-dist
 ```
 

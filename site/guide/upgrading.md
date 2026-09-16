@@ -12,7 +12,7 @@ This guide describes the RC2 changes and the checks required before stable promo
 
 In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
 on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
 other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
 which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
 macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
