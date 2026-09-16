@@ -1,7 +1,3 @@
----
-title: Architecture
----
-
 # Architecture
 
 How Wisp is put together, and why. This section explains design decisions; the

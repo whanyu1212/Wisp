@@ -1,0 +1,27 @@
+[book]
+title = "Wisp"
+description = "Documentation for Wisp, a coding agent that stays in sync with you."
+authors = ["Wisp contributors"]
+language = "en"
+src = "site"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+theme = "theme"
+default-theme = "light"
+preferred-dark-theme = "navy"
+no-section-label = true
+git-repository-url = "https://github.com/whanyu1212/Wisp"
+git-repository-icon = "fab-github"
+edit-url-template = "https://github.com/whanyu1212/Wisp/edit/main/{path}"
+site-url = "/Wisp/"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.playground]
+runnable = false

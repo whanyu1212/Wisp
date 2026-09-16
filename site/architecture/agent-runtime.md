@@ -1,7 +1,3 @@
----
-title: Agent runtime
----
-
 # Agent runtime
 
 Wisp separates the stateful agent harness from the provider-neutral agent loop. The split keeps

@@ -1,7 +1,3 @@
----
-title: Installation
----
-
 # Installation
 
 Wisp is published on PyPI as [`wisp-ai`](https://pypi.org/project/wisp-ai/), installs a `wisp`

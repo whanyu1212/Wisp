@@ -1,7 +1,3 @@
----
-title: Compatibility & versioning
----
-
 # Compatibility & versioning
 
 Wisp has separate version domains for the Python package, streamed events, and persisted session
@@ -119,17 +115,18 @@ A security, data-loss, legal, or ecosystem failure that cannot be mitigated may 
 removal. Such an exception must be called out prominently in release notes with the safest available
 migration or containment advice.
 
-::: warning 0.2 agent API cleanup exception
-The agent module reorganization removes the deprecated `wisp.agent.messages.SessionEntry(...)`
-factory before the normal deprecation window, at the 0.2 minor-release boundary. This is a specific
-early-removal exception for the agent API cleanup; the normal policy continues to apply to other
-public APIs. The [0.2 upgrade guide](../guide/upgrading) tracks candidate availability and migration.
-
-Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
-instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.
-The removal changes Python construction only: existing JSONL session files and supported event
-schemas remain readable without migration.
-:::
+> [!WARNING]
+> **0.2 agent API cleanup exception**
+>
+> The agent module reorganization removes the deprecated `wisp.agent.messages.SessionEntry(...)`
+> factory before the normal deprecation window, at the 0.2 minor-release boundary. This is a specific
+> early-removal exception for the agent API cleanup; the normal policy continues to apply to other
+> public APIs. The [0.2 upgrade guide](../guide/upgrading) tracks candidate availability and migration.
+>
+> Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
+> instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.
+> The removal changes Python construction only: existing JSONL session files and supported event
+> schemas remain readable without migration.
 
 ## Event schemas
 

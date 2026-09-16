@@ -1,7 +1,3 @@
----
-title: Configuration
----
-
 # Configuration
 
 Wisp reads configuration from CLI flags, environment variables, and JSON settings files.
@@ -60,11 +56,12 @@ rewrite these preferences.
 
 Never commit auth files or real API keys.
 
-::: warning Migration note
-Wisp no longer reads a project `.env` file. Move any values you kept there into your shell
-environment or `~/.wisp/settings.json`. A project `.env` on disk is still treated as a secret and is
-never surfaced to the model.
-:::
+> [!WARNING]
+> **Migration note**
+>
+> Wisp no longer reads a project `.env` file. Move any values you kept there into your shell
+> environment or `~/.wisp/settings.json`. A project `.env` on disk is still treated as a secret and is
+> never surfaced to the model.
 
 See also [Environment variables](./environment) and
 [Tools & safety](../guide/tools-and-safety#project-trust).

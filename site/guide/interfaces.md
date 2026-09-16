@@ -1,7 +1,3 @@
----
-title: Interfaces
----
-
 # Interfaces
 
 Every interface drives the same RPC command host, `CodingSession`, `AgentHarness`, and

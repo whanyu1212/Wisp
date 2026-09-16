@@ -1,7 +1,3 @@
----
-title: Environment variables
----
-
 # Environment variables
 
 | Variable | Purpose |

@@ -1,7 +1,3 @@
----
-title: Contributing
----
-
 # Contributing
 
 Wisp welcomes focused bug fixes, documentation improvements, tests, and features that preserve its

@@ -1,7 +1,3 @@
----
-title: SDK capability audit
----
-
 # SDK capability audit
 
 This audit compares Wisp's supported Python embedding surface with a fixed Pi SDK reference. It is a

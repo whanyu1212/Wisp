@@ -1,7 +1,3 @@
----
-title: CLI
----
-
 # CLI
 
 The `wisp` executable selects an interface from its arguments and terminal state. Run

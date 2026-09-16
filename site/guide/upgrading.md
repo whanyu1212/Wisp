@@ -1,7 +1,3 @@
----
-title: Upgrading to Wisp 0.2
----
-
 # Upgrading to Wisp 0.2
 
 **0.2.0rc2 is being prepared; this PR does not publish it.** The latest published candidate is

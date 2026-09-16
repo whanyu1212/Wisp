@@ -1,7 +1,3 @@
----
-title: Providers & auth
----
-
 # Providers & auth
 
 | Provider | Credentials |
