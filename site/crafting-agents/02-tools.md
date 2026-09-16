@@ -88,6 +88,12 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext,
         return ToolResult(text=f"Internal tool error in {tool.name}: {exc}",
                           data={"retryable": False})
     # Bound the wire: truncate runaway output before it reaches history.
+    # Enforce both budgets, since many short lines can fit in few bytes.
+    lines = result.text.splitlines()
+    if len(lines) > ctx.max_output_lines:
+        kept = "\n".join(lines[:ctx.max_output_lines])
+        return ToolResult(text=kept + "\n[truncated]",
+                          data=result.data, truncated=True)
     encoded = result.text.encode("utf-8")
     if len(encoded) > ctx.max_output_bytes:
         cut = ctx.max_output_bytes
@@ -144,18 +150,18 @@ Errors are typed, not stringly: `ToolError(message, failure_code, retryable, rec
 On top of that, `src/wisp/tools/files/operations.py` adds:
 
 - `read` with 1-indexed offset/limit slicing done inside the secured open, so paging a 10,000-line file never loads it whole.
-- `write` via temp-file plus atomic rename, preserving mode/ownership/xattrs, snapshotting the prior text (capped at 1M chars so the diff does not flood the TUI event wire), and refusing symlinks, hard-link surprises, and mid-write replacements detected via version checks.
+- `write` via temp-file plus atomic rename in the common case, preserving mode/ownership/xattrs, snapshotting the prior text (capped at 1M chars so the diff does not flood the TUI event wire), and refusing symlinks and mid-write replacements detected via version checks. One deliberate exception: when the destination has multiple hard links (or a permission fallback forces it), the write goes in place, truncating the existing inode, so readers can observe a partial write and every hard-link alias sees the change.
 - `edit` requiring every `oldText` to match exactly once, with replacements applied only if they do not overlap. Concurrent modification between open and replace aborts instead of silently merging.
 
 The cost is visible in the line count: the file tools are an order of magnitude larger than their schemas suggest. Most of those lines are Windows branches, metadata preservation, and race handling. That ratio is normal for this layer.
 
 ### Shell: background by default
 
-`BashTool` (`src/wisp/tools/shell/tool.py`) supports `run`, `start`, `poll`, and `cancel` against a shared `ProcessSupervisor`. A bare `run` gets a 30-second default timeout; `start` launches a resumable process with a lifetime cap and yields incremental bounded output on each `poll`. Every response reports `exit_code`, separate stdout/stderr truncation flags, and dropped-byte counts so the model can tell a complete log from a prefix. Output retention itself lives partly in Rust (see below).
+`BashTool` (`src/wisp/tools/shell/tool.py`) supports `run`, `start`, `poll`, and `cancel` against a shared `ProcessSupervisor`. A bare `run` gets a 30-second default timeout; `start` launches a resumable process with a lifetime cap and yields incremental bounded output on each `poll`. Every response reports `process_state` plus separate stdout/stderr truncation flags and dropped-byte counts so the model can tell a complete log from a prefix; `exit_code` appears only after termination, so `start` and `poll`-while-running carry state without one. Output retention itself lives partly in Rust (see below).
 
 ### Search: two engines, one policy
 
-`GrepTool`/`FindTool`/`LsTool` (`src/wisp/tools/search/tools.py`) walk with open directory descriptors, skip hidden names and symlinks, honor `.gitignore`/`.ignore`/`.rgignore` plus `.git/info/exclude`, and cap directories at 100,000 entries and ignore files at 1M bytes / 10,000 patterns. Binary detection (NUL bytes), incremental UTF-8 decoding, a 1M-character per-line ceiling, and a 50ms per-pattern regex timeout keep one bad file or pattern from stalling the walk.
+`GrepTool`/`FindTool` (`src/wisp/tools/search/tools.py`) walk recursively with open directory descriptors, skip hidden names and symlinks, honor `.gitignore`/`.ignore`/`.rgignore` plus `.git/info/exclude`, and cap directories at 100,000 entries and ignore files at 1M bytes / 10,000 patterns. `LsTool` is narrower: it lists a single directory (showing hidden entries only when `all=true`), without ignore-file filtering or the recursive walker's entry guard. Binary detection (NUL bytes), incremental UTF-8 decoding, a 1M-character per-line ceiling, and a 50ms per-pattern regex timeout keep one bad file or pattern from stalling the walk.
 
 Literal case-sensitive grep can dispatch per-file scanning to the optional native `wisp-search` Rust extension (`scan_literal_fd` over an already-open descriptor, so the security properties do not change). Anything else (regex, case-insensitive, unrepresentable inputs) stays on the Python engine, and sandbox failures fall back transparently. Protected-path filtering then runs on every emitted record regardless of engine, failing closed on ambiguous parses.
 
