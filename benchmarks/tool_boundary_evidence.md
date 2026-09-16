@@ -165,8 +165,41 @@ is the largest individual grep cost (1.81 seconds), while secure opens and path 
 substantial.
 
 This follow-up does not justify moving tool policy or filesystem authority into Rust. It does
-justify a separate bounded scanner prototype: Python should authorize the root and search request,
-while a native kernel traverses and scans through one batched call, returns bounded matches, and
-preserves Python-owned cancellation, protected-path, symlink, ordering, and result policy. The
-prototype must beat the optimized Python path on both synthetic and representative repositories
-before integration is considered.
+justify a separate bounded scanner prototype under Python-owned authorization, protected-path,
+symlink, ordering, and result policy. The prototype must beat the optimized Python path on both
+synthetic and representative repositories before integration is considered.
+
+## Native literal scanner follow-up
+
+The next experiment narrowed the boundary further after inspecting the secure walk. Python still
+traverses the repository, applies ignore and protected-path policy, and opens every regular file
+through the descriptor-relative no-follow path. Rust receives that live authorized descriptor and
+performs only the streaming literal scan. On Linux it duplicates the descriptor through
+`/proc/self/fd`; on macOS it uses `/dev/fd`. It never reopens the original repository pathname.
+
+The scanner uses 64 KiB reads, strict UTF-8, Python-compatible `splitlines()` boundaries, bounded
+context retention, one-match truncation lookahead, and an atomic cancellation flag. Regex searches
+and case-insensitive literals keep using Python because Rust engines do not exactly reproduce the
+existing Python `regex` and Unicode `casefold` contracts. Pure Python wheels also keep the existing
+scanner as their automatic fallback.
+
+Both backends were measured from the same checkout and optional extension, selecting the scanner
+with `--grep-backend`. Runs used warm filesystem caches on the same Apple Silicon machine and
+CPython 3.12.2. The existing-repository samples used seven iterations on Wisp's 216-file `src/wisp`
+tree; the synthetic samples used five direct-tool iterations over 1,000 files of 4 KiB each.
+
+| Workload | Python wall ms | Native wall ms | Change | Native CPU ms |
+|---|---:|---:|---:|---:|
+| Wisp literal miss | 633.09 | 365.39 | -42.3% | 364.57 |
+| Wisp capped literal | 65.78 | 56.87 | -13.5% | 56.72 |
+| 1,000-file literal miss | 998.51 | 744.30 | -25.5% | 742.08 |
+| 1,000-file capped literal | 118.63 | 82.04 | -30.8% | 81.81 |
+
+Counts, truncation flags, and output byte sizes matched for every paired sample. Native/Python
+conformance also covers Unicode literals, every supported split-line boundary, context groups,
+binary and invalid UTF-8 rejection, long-line limits, output bounds, and exact-limit lookahead.
+
+These results clear the 25% adoption threshold for exhaustive and synthetic workloads. The shipped
+boundary remains per-file scanning rather than native repository traversal: Python owns authority,
+ignore precedence, glob selection, secure opening, global ordering, and final `ToolResult`
+assembly. Moving traversal or regex matching needs separate compatibility and performance evidence.

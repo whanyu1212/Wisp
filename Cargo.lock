@@ -2561,7 +2561,12 @@ dependencies = [
  "pyo3",
  "pyo3-build-config",
  "wisp-process-text",
+ "wisp-search",
 ]
+
+[[package]]
+name = "wisp-search"
+version = "0.1.0"
 
 [[package]]
 name = "wisp-tui"

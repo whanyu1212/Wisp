@@ -3403,6 +3403,57 @@ def test_exec_helper_delays_repeated_cancellation_until_cleanup_finishes(
     assert retained == 0
 
 
+def test_native_grep_loader_only_falls_back_for_absent_extension(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def missing_extension(_name: str) -> object:
+        raise ModuleNotFoundError("No module named 'wisp._native'", name="wisp._native")
+
+    monkeypatch.setattr(search_tools_module, "import_module", missing_extension)
+    assert search_tools_module._load_native_grep() is None
+
+    def broken_dependency(_name: str) -> object:
+        raise ModuleNotFoundError("No module named 'broken'", name="broken")
+
+    monkeypatch.setattr(search_tools_module, "import_module", broken_dependency)
+    with pytest.raises(ModuleNotFoundError, match="broken"):
+        search_tools_module._load_native_grep()
+
+
+def test_native_grep_selection_preserves_python_only_matching_modes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(search_tools_module, "_NATIVE_GREP", sentinel)
+
+    assert (
+        search_tools_module._select_native_grep("auto", literal=True, ignore_case=False) is sentinel
+    )
+    assert (
+        search_tools_module._select_native_grep("python", literal=True, ignore_case=False) is None
+    )
+    assert (
+        search_tools_module._select_native_grep("native", literal=False, ignore_case=False) is None
+    )
+    assert search_tools_module._select_native_grep("native", literal=True, ignore_case=True) is None
+
+
+def test_native_grep_explicit_backend_requires_installed_extension(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(search_tools_module, "_NATIVE_GREP", None)
+
+    with pytest.raises(RuntimeError, match="native grep backend is not installed"):
+        search_tools_module._select_native_grep("native", literal=True, ignore_case=False)
+
+
+def test_native_grep_rejects_inputs_that_pyO3_cannot_represent() -> None:
+    assert search_tools_module._native_arguments_supported("needle", 0, sys.maxsize)
+    assert not search_tools_module._native_arguments_supported("\udcff", 1)
+    assert not search_tools_module._native_arguments_supported("needle", -1)
+    assert not search_tools_module._native_arguments_supported("needle", sys.maxsize + 1)
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -4494,16 +4545,27 @@ def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
         text: str,
         line_parts: list[str],
         *,
+        max_line_chars: int,
         final: bool = False,
     ) -> object:
         nonlocal scanned_chars
         scanned_chars += len(text)
-        return original(text, line_parts, final=final)
+        return original(text, line_parts, max_line_chars=max_line_chars, final=final)
 
     monkeypatch.setattr(search_tools_module, "_yield_splitline_chunk", tracking_chunk)
 
     assert list(search_tools_module._iter_utf8_splitlines(path)) == ["x" * 100]
     assert scanned_chars == 100
+
+
+def test_python_grep_splitlines_bounds_a_line_ending_in_the_current_chunk(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_text("x" * 11 + "\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match="line longer than 10 characters"):
+        list(search_tools_module._iter_utf8_splitlines(path, max_line_chars=10))
 
 
 def test_find_tool_python_fallback_bounds_retained_matches(

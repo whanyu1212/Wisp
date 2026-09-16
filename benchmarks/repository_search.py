@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 import anyio
 
@@ -33,6 +34,7 @@ class BenchmarkConfig:
     common_token: str = "def "
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
+    grep_backend: Literal["auto", "python", "native"] = "auto"
 
 
 @dataclass(frozen=True)
@@ -87,7 +89,7 @@ async def run_benchmark_async(config: BenchmarkConfig | None = None) -> Benchmar
     )
     root = secure_tool_path(str(selected.root), context)
     find = FindTool()
-    grep = GrepTool()
+    grep = GrepTool(_scanner_backend=selected.grep_backend)
     try:
         discovered = await find.run(
             {"path": str(root.path), "pattern": "*.py", "max_results": _DISCOVERY_LIMIT},
@@ -183,6 +185,12 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--common-token", default="def ")
+    parser.add_argument(
+        "--grep-backend",
+        choices=("auto", "python", "native"),
+        default="auto",
+        help="grep scanner used for controlled Python/native comparisons",
+    )
     parser.add_argument("--output", type=Path)
     parsed = parser.parse_args(arguments)
     report = run_benchmark(
@@ -191,6 +199,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             iterations=parsed.iterations,
             max_results=parsed.max_results,
             common_token=parsed.common_token,
+            grep_backend=parsed.grep_backend,
         )
     )
     payload = report.to_json()

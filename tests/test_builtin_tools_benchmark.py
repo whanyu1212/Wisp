@@ -18,7 +18,7 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
         )
     )
 
-    assert len(report.samples) == 12
+    assert len(report.samples) == 14
     assert {sample.layer for sample in report.samples} == {"tool.run", "executor"}
     assert {sample.scenario for sample in report.samples} == {
         "read_first_page",
@@ -26,6 +26,7 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
         "ls_sorted_prefix",
         "find_sorted_prefix",
         "grep_literal_miss",
+        "grep_literal_capped",
         "grep_regex_capped",
     }
     assert all(sample.file_count == 8 for sample in report.samples)
@@ -39,6 +40,7 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
     assert direct["ls_sorted_prefix"].result_count == 8
     assert direct["find_sorted_prefix"].result_count == 8
     assert direct["grep_literal_miss"].result_count == 0
+    assert direct["grep_literal_capped"].result_count == 8
     assert direct["grep_regex_capped"].result_count == 8
     assert not any(sample.truncated for sample in report.samples)
     assert '"scenario": "grep_literal_miss"' in report.to_json()

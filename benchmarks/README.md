@@ -400,6 +400,12 @@ To compare search changes on an existing checkout, run the public direct `find` 
 ```bash
 uv run python -m benchmarks.repository_search --root . --iterations 3 \
   --output profiles/repository-search.json
+
+# In a native wheel or development environment with wisp._native installed:
+uv run python -m benchmarks.repository_search --root . --iterations 7 \
+  --grep-backend python --output profiles/repository-search-python.json
+uv run python -m benchmarks.repository_search --root . --iterations 7 \
+  --grep-backend native --output profiles/repository-search-native.json
 ```
 
 `--root` must be inside the current working directory. The tool's normal protected-path,
@@ -421,9 +427,11 @@ uv run python -m benchmarks.builtin_tools \
 
 Fixture construction and one warmup call per path happen outside the measured interval. The read
 cases compare a first page with a page near end-of-file; `ls` and `find` retain sorted prefixes;
-grep covers both a full-tree literal miss and a result-capped regular expression. All files live in
-a temporary directory. Every direct result is checked against the fixture; executor samples also
-reject tool errors and unexpected truncation before they are reported.
+grep covers a full-tree literal miss plus result-capped literal and regular-expression searches.
+Use `--grep-backend python|native` for a controlled scanner comparison when the native extension is
+installed. All files live in a temporary directory. Every direct result is checked against the
+fixture; executor samples also reject tool errors and unexpected truncation before they are
+reported.
 
 The executor layer includes registry lookup, policy, approval bypass for pre-approved read tools,
 result copying, normalization, promotion, summary generation, and construction of the terminal

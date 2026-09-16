@@ -3,6 +3,7 @@ members = [
     "rust/wisp-process-text",
     "rust/wisp-protocol",
     "rust/wisp-python",
+    "rust/wisp-search",
     "rust/wisp-tui",
 ]
 resolver = "2"
