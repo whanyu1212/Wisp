@@ -213,14 +213,13 @@ cancels the preview without saving it. `Ctrl+T` switches between Paper and the l
 theme, including when starting from Dawn; it is ignored while the theme picker owns a preview.
 These are local presentation actions, never prompts or runtime configuration commands.
 
-Run `/logo` to preview and select Random, Classic WISP, Wisp Braille, Adal Blocks, Adal Braille, or
-Adal Mark Braille. You can also select one directly, such as `/logo wisp-braille` or
+Run `/logo` to preview and select Random, Classic WISP, Wisp Braille, Adal Braille, or Adal Mark
+Braille. You can also select one directly, such as `/logo wisp-braille` or
 `/logo adal-mark-braille`. Arrow, Page, Home, and End keys move through the
 picker; `Enter` applies the displayed logo, and `Escape` or `Ctrl+C` closes it. The choice updates an
 empty welcome screen immediately and applies to later new-session welcome screens. Random chooses
-one named logo once per process, so terminal redraws and resizes do not change it.
-Adal Blocks keeps its black-on-pink panel; the other Adal variants render as pink artwork over the
-terminal background.
+one named logo once per process, so terminal redraws and resizes do not change it. The Adal variants
+render as pink artwork over the terminal background.
 
 Both frontends share `~/.wisp/tui.json` (`theme` and `last_dark_theme`). Choosing a theme in Rust also
 sets the next Textual launch's preference, and vice versa. Rust preserves unrelated keys and writes

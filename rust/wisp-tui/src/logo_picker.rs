@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn enter_only_applies_the_choice_that_was_painted() {
-        let mut picker = LogoPicker::new(LogoChoice::AdalBlocks, LogoChoice::AdalBlocks);
+        let mut picker = LogoPicker::new(LogoChoice::AdalBraille, LogoChoice::AdalBraille);
 
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
@@ -221,8 +221,8 @@ mod tests {
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
             LogoPickerAction::Apply {
-                choice: LogoChoice::AdalBlocks,
-                resolved: LogoChoice::AdalBlocks,
+                choice: LogoChoice::AdalBraille,
+                resolved: LogoChoice::AdalBraille,
             }
         ));
     }

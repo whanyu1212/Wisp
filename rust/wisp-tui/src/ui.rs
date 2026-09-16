@@ -228,7 +228,7 @@ pub fn render(
         0,
         Palette::default(),
         &Bindings::default(),
-        LogoChoice::AdalBlocks,
+        LogoChoice::AdalBraille,
     );
 }
 
@@ -2620,7 +2620,7 @@ mod tests {
                     0,
                     Palette::default(),
                     bindings,
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
             })
             .unwrap();
@@ -2655,7 +2655,7 @@ mod tests {
                     activity_frame,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
             })
             .unwrap();
@@ -2763,15 +2763,17 @@ mod tests {
             14,
             80,
             &bindings,
-            LogoChoice::AdalBlocks,
+            LogoChoice::AdalBraille,
         );
         let mark = lines
             .iter()
             .flat_map(|line| line.spans.iter())
-            .find(|span| span.style.bg == Some(monochrome.primary))
+            .find(|span| {
+                span.style.fg == Some(monochrome.primary) && !span.content.trim().is_empty()
+            })
             .expect("monochrome mark row");
-        assert_eq!(mark.style.fg, Some(monochrome.background));
-        assert_eq!(mark.style.bg, Some(monochrome.primary));
+        assert_eq!(mark.style.fg, Some(monochrome.primary));
+        assert_eq!(mark.style.bg, None);
     }
 
     #[test]
@@ -2790,7 +2792,7 @@ mod tests {
                         height,
                         width,
                         &Bindings::default(),
-                        LogoChoice::AdalBlocks,
+                        LogoChoice::AdalBraille,
                     );
                     assert!(lines.len() <= height);
                     assert!(lines.iter().all(|line| line.width() <= width));
@@ -3610,7 +3612,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
             })
             .unwrap();
@@ -3656,7 +3658,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
             })
             .unwrap();
@@ -4053,7 +4055,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
             })
             .unwrap();
@@ -4108,7 +4110,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBlocks,
+                    LogoChoice::AdalBraille,
                 );
                 let area = overlay_area(frame.area()).unwrap();
                 clear_overlay(frame, area, Palette::default());
@@ -4559,7 +4561,7 @@ mod tests {
                         tick,
                         palette,
                         &Bindings::default(),
-                        LogoChoice::AdalBlocks,
+                        LogoChoice::AdalBraille,
                     );
                 })
                 .unwrap();
