@@ -824,7 +824,27 @@ class JsonlSession:
         complete_structure: bool = False,
         full_content: bool = False,
     ) -> SessionMessagePage:
-        """Read a bounded active-path transcript page in chronological order."""
+        """Read an active-path transcript page in chronological order.
+
+        Complete-structure readers receive the original text and tool arguments;
+        pagination bounds the number of messages without discarding their content.
+
+        Args:
+            limit (int): Maximum number of messages in this page.
+            before_entry_id (str | None): Exclusive cursor for an older page.
+            after_entry_id (str | None): Exclusive cursor for a newer page.
+            entry_ids (tuple[str, ...]): Exact active-path entries to retrieve instead
+                of a cursor-based page.
+            complete_structure (bool): Preserve all tool calls, text, and arguments.
+            full_content (bool): Retrieve one exact entry without preview limits.
+
+        Returns:
+            SessionMessagePage: Chronological messages and continuation cursors.
+
+        Raises:
+            ValueError: Pagination bounds or selectors are invalid.
+            SessionError: The session or requested active-path entry cannot be read.
+        """
 
         _validate_message_page_limit(limit)
         with self._file_state.lock:
@@ -1867,15 +1887,10 @@ def _message_page_from_index(
             candidates = active_messages[:cursor_index]
         truncated = len(candidates) > limit
         selected = candidates[-limit:]
-    structural_argument_bytes = (
-        _complete_structure_argument_bytes(selected) if complete_structure else 0
-    )
     text_budget = (
         None
-        if full_content
-        else _MessagePageTextBudget(
-            remaining=max(MESSAGE_PAGE_TEXT_BYTE_LIMIT - structural_argument_bytes, 0)
-        )
+        if full_content or complete_structure
+        else _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
     )
     newest_first_messages = tuple(
         _rpc_message_snapshot(
@@ -2087,17 +2102,6 @@ def _rpc_tool_call_snapshot(
         arguments_original_bytes=original_bytes,
         arguments_truncated=truncated,
         parse_error=tool_call.parse_error,
-    )
-
-
-def _complete_structure_argument_bytes(entries: Sequence[MessageSessionEntry]) -> int:
-    """Reserve the bounded process keys needed to group complete-history rows."""
-
-    return sum(
-        _json_object_byte_count(identity)
-        for entry in entries
-        for tool_call in entry.message.tool_calls or ()
-        if (identity := _process_tool_identity_arguments(tool_call)) is not None
     )
 
 

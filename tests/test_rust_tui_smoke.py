@@ -2122,7 +2122,7 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
 
 
 @pytest.mark.process
-def test_rust_tui_recovers_evicted_live_history_over_pty(tmp_path: Path) -> None:
+def test_rust_tui_retains_complete_live_history_over_pty(tmp_path: Path) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
@@ -2262,20 +2262,13 @@ for line in sys.stdin:
                     recovered = True
                     phase = "quitting"
                 elif time.monotonic() >= next_input:
-                    if any(
-                        item.get("before_entry_id")
-                        for item in _complete_logged_commands(command_log)
-                    ):
-                        # Request a complete frame after recovery so text checks
-                        # do not depend on which cells the differential renderer writes.
-                        fcntl.ioctl(
-                            terminal_fd,
-                            termios.TIOCSWINSZ,
-                            struct.pack("HHHH", 24, redraw_width, 0, 0),
-                        )
-                        redraw_width = 104 if redraw_width == 103 else 103
-                    else:
-                        os.write(terminal_fd, b"\x1b[5~")
+                    # Force a complete frame without fetching any history from the backend.
+                    fcntl.ioctl(
+                        terminal_fd,
+                        termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 24, redraw_width, 0, 0),
+                    )
+                    redraw_width = 104 if redraw_width == 103 else 103
                     next_input = time.monotonic() + 0.2
             if phase == "quitting" and time.monotonic() >= next_input:
                 os.write(terminal_fd, b"\x03")
@@ -2293,10 +2286,8 @@ for line in sys.stdin:
         ]
         exact = [item for item in requests if item.get("entry_ids")]
         older = [item for item in requests if item.get("before_entry_id")]
-        assert len(exact) == 1, requests
-        assert len(older) == 1, requests
-        assert older[0]["before_entry_id"] == exact[0]["entry_ids"][0]
-        assert older[0]["limit"] == 75
+        assert exact == [], requests
+        assert older == [], requests
         assert os.waitstatus_to_exitcode(status) == 0
         assert termios.tcgetattr(terminal_fd) == initial_terminal
     finally:

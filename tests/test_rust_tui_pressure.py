@@ -386,7 +386,7 @@ def test_finite_burst_beyond_event_queue_capacity_drains_in_order(tmp_path: Path
 
 
 @pytest.mark.process
-def test_long_session_bounds_live_transcript_and_remains_responsive(tmp_path: Path) -> None:
+def test_long_session_retains_live_transcript_and_remains_responsive(tmp_path: Path) -> None:
     tui, backend_pid_path, release, burst_done = _launch(tmp_path, mode="long-session")
     try:
         tui.wait_ready()

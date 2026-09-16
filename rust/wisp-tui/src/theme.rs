@@ -75,6 +75,79 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn tool_argument(self) -> Style {
+        Style::default().fg(self.secondary)
+    }
+
+    pub fn tool_command(self) -> Style {
+        self.semantic_command()
+    }
+
+    pub fn tool_path(self) -> Style {
+        self.semantic_path(true)
+    }
+
+    pub fn semantic_command(self) -> Style {
+        Style::default()
+            .fg(self.primary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn semantic_path(self, resolved: bool) -> Style {
+        if resolved {
+            Style::default()
+                .fg(self.success)
+                .add_modifier(Modifier::UNDERLINED)
+        } else {
+            let modifier = if self.monochrome {
+                Modifier::UNDERLINED | Modifier::DIM
+            } else {
+                Modifier::UNDERLINED
+            };
+            Style::default().fg(self.warning).add_modifier(modifier)
+        }
+    }
+
+    pub fn semantic_heading(self, level: u8) -> Style {
+        Style::default()
+            .fg(if level <= 2 {
+                self.primary
+            } else {
+                self.secondary
+            })
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn semantic_list_marker(self) -> Style {
+        Style::default()
+            .fg(self.primary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn semantic_inline_code(self) -> Style {
+        Style::default().fg(self.warning).bg(self.panel)
+    }
+
+    pub fn semantic_code_delimiter(self) -> Style {
+        Style::default().fg(self.muted).add_modifier(Modifier::DIM)
+    }
+
+    pub fn semantic_fence_delimiter(self) -> Style {
+        Style::default()
+            .fg(self.secondary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn semantic_fence_info(self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::ITALIC)
+    }
+
+    pub fn semantic_fence_body(self) -> Style {
+        Style::default().fg(self.secondary)
+    }
+
     pub fn composer(self) -> Style {
         self.base().bg(self.surface)
     }

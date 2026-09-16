@@ -1084,25 +1084,21 @@ fn detail_line(row: DetailViewRow, palette: Palette) -> Line<'static> {
 fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Palette) -> Style {
     let mut style = match semantic.block {
         BlockStyle::Normal => base,
-        BlockStyle::Heading(level) => {
-            let color = if level <= 2 {
-                palette.primary
-            } else {
-                palette.secondary
-            };
-            base.fg(color).add_modifier(Modifier::BOLD)
-        }
+        BlockStyle::Heading(level) => base.patch(palette.semantic_heading(level)),
         BlockStyle::Code => base.fg(palette.foreground).bg(palette.surface),
         BlockStyle::RawHtml => base.fg(palette.muted),
     };
     style = match semantic.inline {
         InlineStyle::Normal => style,
-        InlineStyle::Code => style.fg(palette.warning).bg(palette.panel),
+        InlineStyle::Code => style.patch(palette.semantic_inline_code()),
         InlineStyle::Link => style.fg(palette.primary).add_modifier(Modifier::UNDERLINED),
         InlineStyle::QuoteMarker => style.fg(palette.muted),
-        InlineStyle::ListMarker => style.fg(palette.primary),
+        InlineStyle::ListMarker => style.patch(palette.semantic_list_marker()),
         InlineStyle::TableBorder => style.fg(palette.muted),
         InlineStyle::ToolName => style.patch(palette.tool_name()),
+        InlineStyle::ToolCommand => style.patch(palette.tool_command()),
+        InlineStyle::ToolPath => style.patch(palette.tool_path()),
+        InlineStyle::ToolArgument => style.patch(palette.tool_argument()),
         InlineStyle::ToolStatus => style,
     };
     style = match semantic.syntax {
@@ -1257,12 +1253,16 @@ fn render_composer(
                 .map(|row| {
                     if highlighted_line != Some(row.logical_row) {
                         let line = &layout.lines[row.logical_row];
-                        highlights = prompt_highlighting::line_highlights(
-                            &line.text,
-                            line.truncated,
-                            row.logical_row,
-                            layout.raw_line_count,
-                            &context,
+                        highlights = prompt_highlighting::merge_highlights(
+                            line.markdown_highlights.clone(),
+                            prompt_highlighting::line_highlights(
+                                &line.text,
+                                line.truncated,
+                                row.logical_row,
+                                layout.raw_line_count,
+                                &context,
+                            ),
+                            prompt_highlighting::MAX_HIGHLIGHTS_PER_LINE,
                         );
                         highlighted_line = Some(row.logical_row);
                     }
@@ -1393,6 +1393,7 @@ struct ComposerLogicalLine {
     text: String,
     truncated: bool,
     selection: Option<std::ops::Range<usize>>,
+    markdown_highlights: Vec<Highlight>,
 }
 
 struct ComposerLayout {
@@ -1484,7 +1485,7 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     let projection = editor.projection();
     let selection = projection.selection();
     let mut line_start = 0;
-    let lines = projection
+    let mut lines = projection
         .text()
         .split('\n')
         .map(|line| {
@@ -1511,9 +1512,21 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
                 text: line[..end].to_owned(),
                 truncated: end < line.len(),
                 selection: selected_columns,
+                markdown_highlights: Vec::new(),
             }
         })
         .collect::<Vec<_>>();
+    let document_lines = lines
+        .iter()
+        .map(|line| prompt_highlighting::DocumentLine {
+            text: &line.text,
+            truncated: line.truncated,
+        })
+        .collect::<Vec<_>>();
+    let markdown_highlights = prompt_highlighting::document_highlights(&document_lines, None);
+    for (line, highlights) in lines.iter_mut().zip(markdown_highlights) {
+        line.markdown_highlights = highlights;
+    }
     let mut rows = Vec::new();
     let mut cursor_row = 0_usize;
     let mut cursor_column = 0_usize;
@@ -1580,20 +1593,16 @@ fn styled_composer_line(
             spans.push(Span::raw(row.text[byte_start..start_byte].to_owned()));
         }
         let style = match highlight.kind {
-            PromptHighlightKind::Command => Style::default()
-                .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
-            PromptHighlightKind::ResolvedPath => Style::default()
-                .fg(palette.success)
-                .add_modifier(Modifier::UNDERLINED),
-            PromptHighlightKind::UnresolvedPath => {
-                let modifier = if palette.is_monochrome() {
-                    Modifier::UNDERLINED | Modifier::DIM
-                } else {
-                    Modifier::UNDERLINED
-                };
-                Style::default().fg(palette.warning).add_modifier(modifier)
-            }
+            PromptHighlightKind::Command => palette.semantic_command(),
+            PromptHighlightKind::ResolvedPath => palette.semantic_path(true),
+            PromptHighlightKind::UnresolvedPath => palette.semantic_path(false),
+            PromptHighlightKind::MarkdownHeading => palette.semantic_heading(1),
+            PromptHighlightKind::MarkdownListMarker => palette.semantic_list_marker(),
+            PromptHighlightKind::MarkdownInlineCodeDelimiter => palette.semantic_code_delimiter(),
+            PromptHighlightKind::MarkdownInlineCode => palette.semantic_inline_code(),
+            PromptHighlightKind::MarkdownFenceDelimiter => palette.semantic_fence_delimiter(),
+            PromptHighlightKind::MarkdownFenceInfo => palette.semantic_fence_info(),
+            PromptHighlightKind::MarkdownFenceBody => palette.semantic_fence_body(),
         };
         spans.push(Span::styled(
             row.text[start_byte..end_byte].to_owned(),
@@ -3509,6 +3518,58 @@ mod tests {
     }
 
     #[test]
+    fn composer_styles_markdown_structure_without_changing_source() {
+        let state = UiState::new("fake".into(), None, None);
+        let source = "# Heading\n- list with `code`\n```rust\nfn main() {}\n```";
+        let mut editor = PromptEditor::default();
+        editor.restore_prompt(source);
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut row_cache = TranscriptRowCache::default();
+        let mut composer_cache = ComposerLayoutCache::default();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut viewport,
+                    &mut row_cache,
+                    &mut composer_cache,
+                    &editor,
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                );
+            })
+            .unwrap();
+
+        let heading = style_at_text(terminal.backend(), "# Heading").unwrap();
+        let marker = style_at_text(terminal.backend(), "-").unwrap();
+        let inline = style_at_text(terminal.backend(), "code").unwrap();
+        let fence = style_at_text(terminal.backend(), "```").unwrap();
+        let info = style_at_text(terminal.backend(), "rust").unwrap();
+        let body = style_at_text(terminal.backend(), "fn main() {}").unwrap();
+        let palette = Palette::default();
+        assert_eq!(heading.0, palette.primary);
+        assert!(heading.2.contains(Modifier::BOLD));
+        assert_eq!(marker.0, palette.primary);
+        assert!(marker.2.contains(Modifier::BOLD));
+        assert_eq!(inline.0, palette.warning);
+        assert_eq!(fence.0, palette.secondary);
+        assert!(fence.2.contains(Modifier::BOLD));
+        assert_eq!(info.0, palette.accent);
+        assert!(info.2.contains(Modifier::ITALIC));
+        assert_eq!(body.0, palette.secondary);
+        assert_eq!(editor.text(), source);
+    }
+
+    #[test]
     fn monochrome_and_wrapped_composer_highlights_keep_non_color_semantics() {
         let row = ComposerVisualRow {
             logical_row: 0,
@@ -3799,9 +3860,33 @@ mod tests {
         );
         assert_eq!(
             style_at_text(complete.backend(), "README.md").unwrap().0,
-            Palette::default().muted
+            Palette::default().success
+        );
+        assert!(
+            style_at_text(complete.backend(), "README.md")
+                .unwrap()
+                .2
+                .contains(Modifier::UNDERLINED)
         );
         assert!(success_modifiers.contains(Modifier::BOLD));
+
+        let mut shell = UiState::unconfigured();
+        shell.transcript.append_prompt("build".into());
+        shell
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "shell-1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test --workspace"}),
+            });
+        let mut shell_result = tool_result("shell-1", "ok");
+        shell_result.name = "bash".into();
+        shell.transcript.observe_tool_result(shell_result);
+        let shell = draw(&shell);
+        let command = style_at_text(shell.backend(), "cargo test --workspace").unwrap();
+        assert_eq!(command.0, Palette::default().primary);
+        assert!(command.2.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -4238,6 +4323,38 @@ mod tests {
             palette,
         );
         assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+
+        let tool_command = markdown_span_style(
+            Style::default().fg(palette.muted),
+            TranscriptSpanStyle {
+                inline: InlineStyle::ToolCommand,
+                ..TranscriptSpanStyle::default()
+            },
+            palette,
+        );
+        assert_eq!(tool_command.fg, Some(palette.primary));
+        assert!(tool_command.add_modifier.contains(Modifier::BOLD));
+
+        let tool_path = markdown_span_style(
+            Style::default().fg(palette.muted),
+            TranscriptSpanStyle {
+                inline: InlineStyle::ToolPath,
+                ..TranscriptSpanStyle::default()
+            },
+            palette,
+        );
+        assert_eq!(tool_path.fg, Some(palette.success));
+        assert!(tool_path.add_modifier.contains(Modifier::UNDERLINED));
+
+        let tool_argument = markdown_span_style(
+            Style::default().fg(palette.muted),
+            TranscriptSpanStyle {
+                inline: InlineStyle::ToolArgument,
+                ..TranscriptSpanStyle::default()
+            },
+            palette,
+        );
+        assert_eq!(tool_argument.fg, Some(palette.secondary));
 
         let uniform_code = markdown_span_style(
             Style::default(),

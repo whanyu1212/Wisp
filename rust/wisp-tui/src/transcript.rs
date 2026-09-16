@@ -17,8 +17,11 @@ const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_DISPLAY_ENTRIES: usize = 32;
 const MAX_LOCAL_DISPLAY_BYTES: usize = 4 * 1024 * 1024;
 const THINKING_MAX_BYTES: usize = 64 * 1024;
+#[cfg(test)]
 const LIVE_TRANSCRIPT_ENTRY_LIMIT: usize = 1_200;
+#[cfg(test)]
 const LIVE_TRANSCRIPT_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(test)]
 const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries omitted]";
 
 use crate::tool_cards::{
@@ -149,6 +152,7 @@ impl TranscriptEntry {
         }
     }
 
+    #[cfg(test)]
     fn retained_bytes(&self) -> usize {
         let kind_bytes = match &self.kind {
             TranscriptEntryKind::Message => 0,
@@ -1192,6 +1196,7 @@ impl Transcript {
         self.insert_history_page(page, index)
     }
 
+    #[cfg(test)]
     pub(crate) fn enforce_live_retention(
         &mut self,
         protected_entry: Option<TranscriptEntryId>,
@@ -1268,6 +1273,7 @@ impl Transcript {
         true
     }
 
+    #[cfg(test)]
     fn live_retained_entry_count(&self) -> usize {
         self.entries
             .iter()
@@ -1276,6 +1282,7 @@ impl Transcript {
             .sum()
     }
 
+    #[cfg(test)]
     fn live_retained_bytes(&self) -> usize {
         self.entries
             .iter()
@@ -1656,6 +1663,7 @@ impl Transcript {
         self.retain_historical_entries_in_order(limit, evict_newest, &durable_entry_order)
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_historical_entries_in_order(
         &mut self,
         limit: usize,

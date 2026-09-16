@@ -15,7 +15,6 @@ use crate::transcript::{SharedTranscript, TranscriptEntryId};
 
 pub const HISTORY_MESSAGE_LIMIT: usize = 200;
 pub const HISTORY_PAGE_LIMIT: usize = 75;
-const HISTORY_TOOL_CALL_LIMIT: usize = 128;
 const HISTORY_ENTRY_ID_MAX_BYTES: usize = 4 * 1024;
 const HISTORY_PROCESS_CALL_LIMIT: usize = 1024;
 const CONTENT_TRUNCATED_MARKER: &str = "[content truncated]";
@@ -26,7 +25,7 @@ const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
 pub enum HistoryProjectionError {
     #[error("history page has more than {HISTORY_MESSAGE_LIMIT} messages")]
     TooManyMessages,
-    #[error("history message {index} has more than {HISTORY_TOOL_CALL_LIMIT} tool calls")]
+    #[error("history message {index} has incomplete tool calls")]
     TooManyToolCalls { index: usize },
     #[error("history message {index} has an invalid {field} field")]
     InvalidField { index: usize, field: &'static str },
@@ -169,9 +168,7 @@ fn project_assistant(
         .get("tool_calls_truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if tool_calls.len() > HISTORY_TOOL_CALL_LIMIT
-        || tool_calls_truncated
-        || original_count > u64::try_from(tool_calls.len()).unwrap_or(u64::MAX)
+    if tool_calls_truncated || original_count > u64::try_from(tool_calls.len()).unwrap_or(u64::MAX)
     {
         return Err(HistoryProjectionError::TooManyToolCalls { index });
     }
@@ -486,11 +483,14 @@ fn historical_process_streams(output: &str) -> Option<(Option<&str>, Option<&str
 }
 
 fn content_for_history(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
-    Ok(bounded_content(
-        string(message, index, "content")?,
-        bool(message, index, "content_truncated")?,
-    )
-    .0)
+    let mut content = string(message, index, "content")?.to_owned();
+    if bool(message, index, "content_truncated")? {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(CONTENT_TRUNCATED_MARKER);
+    }
+    Ok(content)
 }
 
 fn bounded_content(source: &str, backend_truncated: bool) -> (String, bool) {
@@ -746,6 +746,19 @@ mod tests {
                 .contains(CONTENT_TRUNCATED_MARKER)
         );
         assert_eq!(transcript.entries()[2].content, EMPTY_ASSISTANT_MESSAGE);
+    }
+
+    #[test]
+    fn conversation_history_preserves_large_and_multiline_messages() {
+        let content = format!(
+            "HEAD\n{}TAIL",
+            "界".repeat(80_000) + &"\nline".repeat(1_000)
+        );
+        let transcript =
+            project_rpc_messages(&[message("user", &content), message("assistant", &content)])
+                .unwrap();
+        assert_eq!(transcript.entries()[0].content, content);
+        assert_eq!(transcript.entries()[1].content, content);
     }
 
     #[test]
@@ -1655,10 +1668,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_schema_valid_tool_call_overflow_truthfully() {
+    fn projects_every_tool_call_in_a_large_message() {
         let mut assistant = message("assistant", "");
         assistant["tool_calls"] = Value::Array(
-            (0..=HISTORY_TOOL_CALL_LIMIT)
+            (0..129)
                 .map(|index| {
                     json!({
                         "call_id": format!("call-{index}"),
@@ -1669,9 +1682,7 @@ mod tests {
                 .collect(),
         );
 
-        assert!(matches!(
-            project_rpc_messages(&[assistant]),
-            Err(HistoryProjectionError::TooManyToolCalls { index: 0 })
-        ));
+        let transcript = project_rpc_messages(&[assistant]).unwrap();
+        assert_eq!(transcript.entries().len(), 129);
     }
 }
