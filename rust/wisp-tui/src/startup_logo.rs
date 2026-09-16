@@ -1,7 +1,7 @@
 use crate::theme::Palette;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
@@ -66,12 +66,13 @@ impl LogoChoice {
     }
 
     pub(crate) fn choose_random() -> Self {
-        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos() as usize);
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        Self::NAMED[time.wrapping_add(sequence) % Self::NAMED.len()]
+        static PROCESS_LOGO: OnceLock<LogoChoice> = OnceLock::new();
+        *PROCESS_LOGO.get_or_init(|| {
+            let time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos() as usize);
+            Self::NAMED[time % Self::NAMED.len()]
+        })
     }
 }
 
@@ -451,5 +452,14 @@ mod tests {
         assert_eq!(LogoChoice::resolve("adal-mark-blocks"), None);
         assert_eq!(LogoChoice::resolve("wisp-color"), None);
         assert_eq!(LogoChoice::resolve("unknown"), None);
+    }
+
+    #[test]
+    fn random_logo_is_stable_for_the_process() {
+        let selected = LogoChoice::choose_random();
+        assert_ne!(selected, LogoChoice::Random);
+        for _ in 0..LogoChoice::NAMED.len() * 2 {
+            assert_eq!(LogoChoice::choose_random(), selected);
+        }
     }
 }
