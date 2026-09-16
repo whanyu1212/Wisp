@@ -450,23 +450,30 @@ def _python_grep(
                         )
                     except ValueError as exc:
                         raise ToolError(str(exc)) from exc
-                    if native_result.status == "cancelled":
-                        return ToolResult(
-                            text="Search cancelled",
-                            data={"count": 0, "matches": []},
-                        )
-                    if native_result.status == "binary":
-                        continue
-                    if native_result.status != "complete":
-                        raise RuntimeError(
-                            f"native grep returned unknown status: {native_result.status}"
-                        )
-                    match_count += native_result.match_count
-                    file_had_extra_match = native_result.had_extra_match
-                    file_buffer.lines = list(native_result.lines)
-                    file_buffer.byte_count = native_result.byte_count
-                    file_buffer.exhausted = native_result.exhausted
-                else:
+                    except (OSError, RuntimeError):
+                        # Some Linux sandboxes do not mount /proc, and unsupported
+                        # targets cannot duplicate a descriptor for Rust. Keep the
+                        # optional accelerator transparent in those environments.
+                        file_native_module = None
+                        matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+                    if file_native_module is not None:
+                        if native_result.status == "cancelled":
+                            return ToolResult(
+                                text="Search cancelled",
+                                data={"count": 0, "matches": []},
+                            )
+                        if native_result.status == "binary":
+                            continue
+                        if native_result.status != "complete":
+                            raise RuntimeError(
+                                f"native grep returned unknown status: {native_result.status}"
+                            )
+                        match_count += native_result.match_count
+                        file_had_extra_match = native_result.had_extra_match
+                        file_buffer.lines = list(native_result.lines)
+                        file_buffer.byte_count = native_result.byte_count
+                        file_buffer.exhausted = native_result.exhausted
+                if file_native_module is None:
                     if matcher is None:  # pragma: no cover - internal invariant
                         raise RuntimeError("Python grep matcher was not initialized")
                     preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)

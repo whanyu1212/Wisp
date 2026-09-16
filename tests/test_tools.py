@@ -3454,6 +3454,43 @@ def test_native_grep_rejects_inputs_that_pyO3_cannot_represent() -> None:
     assert not search_tools_module._native_arguments_supported("needle", sys.maxsize + 1)
 
 
+@pytest.mark.parametrize(
+    "native_error", [OSError("/proc unavailable"), RuntimeError("unsupported")]
+)
+def test_native_grep_falls_back_when_descriptor_scanning_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    native_error: Exception,
+) -> None:
+    class Cancellation:
+        def cancel(self) -> None:
+            pass
+
+    class UnavailableNative:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def GrepCancellation(self) -> Cancellation:
+            return Cancellation()
+
+        def scan_literal_fd(self, *_args: object, **_kwargs: object) -> object:
+            self.calls += 1
+            raise native_error
+
+    native = UnavailableNative()
+    monkeypatch.setattr(search_tools_module, "_NATIVE_GREP", native)
+    (tmp_path / "data.txt").write_text("before\nneedle\nafter\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="native"),
+        {"pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert native.calls == 1
+    assert result.text == "data.txt:2:needle"
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
