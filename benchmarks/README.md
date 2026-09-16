@@ -363,6 +363,35 @@ newline-heavy output, long lines, mixed line endings, and invalid UTF-8:
 uv run python -m benchmarks.process_output --sizes 1048576 --track-memory
 ```
 
+Measure the complete managed-process path, including child startup, pipe reads, retention, polling,
+and cleanup:
+
+```bash
+uv run python -m benchmarks.managed_process_output \
+  --sizes 1048576 --iterations 1 \
+  --output profiles/managed-process-output.json
+```
+
+The child reads a fixture prepared outside the timed interval and writes it in configurable chunks.
+The report includes process wall and CPU time, throughput, poll count, maximum poll duration, and
+exact retained-plus-dropped source-byte accounting. With multiple iterations, the maximum poll spans
+all measured runs while the count and byte totals describe the final run. This is a lifecycle
+measurement; use the direct benchmark above to attribute time to the retention kernel.
+
+Benchmark the conforming Rust retention kernel in a release build with the same input size, chunk
+size, workloads, and production limits:
+
+```bash
+cargo run --release -p wisp-process-text \
+  --example process_output_benchmark -- \
+  --size 1048576 --chunk 8192 --iterations 5
+```
+
+Python and Rust both execute `tests/fixtures/pending_text_conformance.json`. The fixture checks text,
+dropped and retained source bytes, and per-character source-byte provenance at every drain. Current
+comparison results and the integration boundary are recorded in
+`benchmarks/pending_text_rust_evidence.md`.
+
 ## Built-in Tools
 
 Measure deterministic read, directory listing, find, and grep workloads through both the public
