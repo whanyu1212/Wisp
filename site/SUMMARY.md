@@ -2,6 +2,11 @@
 
 [Wisp](index.md)
 
+# Crafting Coding Agents
+
+- [Overview & Curriculum](crafting-agents/index.md)
+- [1. The Core Loop](crafting-agents/01-core-loop.md)
+
 # Using Wisp
 
 - [Introduction](guide/index.md)

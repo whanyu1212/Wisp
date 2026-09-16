@@ -22,6 +22,7 @@ git-repository-icon = "fab-github"
 edit-url-template = "https://github.com/whanyu1212/Wisp/edit/main/{path}"
 site-url = "/Wisp/"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-css = ["theme/custom.css"]
 
 [output.html.playground]
 runnable = false
