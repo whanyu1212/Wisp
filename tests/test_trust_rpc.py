@@ -112,7 +112,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
     async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
         return runtime
 
-    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
             await send.send(
                 rpc._RpcInputCommand(
@@ -185,7 +185,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
     async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
         return runtime
 
-    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
             await send.send(
                 rpc._RpcInputCommand(_parsed_input({"id": "p1", "type": "prompt", "prompt": "hi"}))
@@ -289,7 +289,7 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
     session_dir = project / "sessions"
     config = WispConfig.from_env(session_dir=session_dir, trusted=False)
 
-    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
             await send.send(rpc._RpcInputCommand(_parsed_input(configure_command)))
             await send.send(
@@ -366,7 +366,7 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
         "effort": "custom-tier",
     }
 
-    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
             await send.send(rpc._RpcInputCommand(_parsed_input(configure_command)))
             await send.send(
