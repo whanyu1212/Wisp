@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from queue import Queue
 from threading import Thread
@@ -29,6 +29,7 @@ from wisp.rpc.protocol import (
 from wisp.runtime.api import WispRuntime
 
 from . import output as _cli_output
+from . import rpc_output as _rpc_output
 from . import rpc_transport as _rpc_transport
 
 _RPC_CAPABILITIES: tuple[str, ...] = ()
@@ -57,8 +58,12 @@ def _write_startup_error(message: str) -> None:
     _write_json_event(ErrorEvent(message=message))
 
 
-async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
-    await _cli_output._render_json_events(events, write_event=_write_json_event)
+async def _render_json_events(
+    events: AsyncIterator[WispEvent],
+    *,
+    write_event: Callable[[WispEvent], None] = _write_json_event,
+) -> None:
+    await _cli_output._render_json_events(events, write_event=write_event)
 
 
 async def _run_rpc(
@@ -126,49 +131,69 @@ async def _run_rpc_with_runtime(
 ) -> None:
     """Run the CLI's stdin/stdout adapter over the shared RPC host."""
 
-    host = await RpcHost.create(
-        config,
-        runtime,
-        options=InProcessOptions(
-            all_tools=all_tools,
-            allow_read_tools=allow_read_tools,
-            allowed_tools=allowed_tools,
-            resume=resume,
-            continue_latest=continue_latest,
-            approve_unsafe_tools=approve_unsafe_tools,
-            max_tool_iterations=max_tool_iterations,
-            startup_trusted=startup_trusted,
-            project_context_root=project_context_root,
-            cwd=Path.cwd(),
-        ),
-        write_event=_write_json_event,
-        render_events=_render_json_events,
-        config_overrides=config_overrides,
-        runtime_builder=build_runtime_for_config,
-    )
-    send, receive = anyio.create_memory_object_stream[_RpcControlEvent](
-        _RPC_CONTROL_STREAM_BUFFER_SIZE
-    )
-    stop_reader = anyio.Event()
+    startup_error: Exception | None = None
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(_read_rpc_stdin, send.clone(), stop_reader)
-        async with send, receive:
-            await host.run_with_streams(receive, send=send, task_group=task_group)
-        stop_reader.set()
-        task_group.cancel_scope.cancel()
+        event_writer = _rpc_output.RpcEventWriter(_write_json_event, task_group)
+
+        async def render_events(events: AsyncIterator[WispEvent]) -> None:
+            await _render_json_events(events, write_event=event_writer)
+
+        stop_reader: anyio.Event | None = None
+        try:
+            host = await RpcHost.create(
+                config,
+                runtime,
+                options=InProcessOptions(
+                    all_tools=all_tools,
+                    allow_read_tools=allow_read_tools,
+                    allowed_tools=allowed_tools,
+                    resume=resume,
+                    continue_latest=continue_latest,
+                    approve_unsafe_tools=approve_unsafe_tools,
+                    max_tool_iterations=max_tool_iterations,
+                    startup_trusted=startup_trusted,
+                    project_context_root=project_context_root,
+                    cwd=Path.cwd(),
+                ),
+                write_event=event_writer,
+                render_events=render_events,
+                config_overrides=config_overrides,
+                runtime_builder=build_runtime_for_config,
+            )
+            send, receive = anyio.create_memory_object_stream[_RpcControlEvent](
+                _RPC_CONTROL_STREAM_BUFFER_SIZE
+            )
+            stop_reader = anyio.Event()
+            task_group.start_soon(_read_rpc_stdin, send.clone(), stop_reader, event_writer)
+            async with send, receive:
+                await host.run_with_streams(receive, send=send, task_group=task_group)
+        except Exception as exc:
+            # Startup validation must reach the CLI as its original error type,
+            # not be wrapped in a task-group ExceptionGroup.
+            startup_error = exc
+        finally:
+            event_writer.close()
+            if stop_reader is not None:
+                stop_reader.set()
+            task_group.cancel_scope.cancel()
+    if startup_error is not None:
+        raise startup_error
 
 
 async def _read_rpc_stdin(
     send: MemoryObjectSendStream[_RpcControlEvent],
     stop_reader: anyio.Event,
+    write_event: Callable[[WispEvent], None] = _write_json_event,
 ) -> None:
-    await _rpc_stdin_transport().read(send, stop_reader)
+    await _rpc_stdin_transport(write_event=write_event).read(send, stop_reader)
 
 
-def _rpc_stdin_transport() -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]:
+def _rpc_stdin_transport(
+    *, write_event: Callable[[WispEvent], None] = _write_json_event
+) -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]:
     return _rpc_transport.RpcStdinTransport(
         stdin=_rpc_binary_stdin(),
-        write_event=_write_json_event,
+        write_event=write_event,
         input_command_factory=_RpcInputCommand,
         input_closed_factory=_RpcInputClosed,
         queue_factory=lambda maxsize: Queue(maxsize=maxsize),

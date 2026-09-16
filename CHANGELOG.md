@@ -21,6 +21,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   post-scanner `find` and literal `grep` time while retaining symlink-target checks.
 - Reused authorized directory descriptors when opening files for `grep`, avoiding a second
   component-by-component filesystem walk while preserving no-follow and replacement checks.
+- Coalesced adjacent compatible `message.delta` events at the JSONL-RPC output boundary, reducing
+  framing and parsing work for the Rust TUI while preserving bounded streaming latency and exact
+  text, thinking, turn, content-index, and event-order boundaries.
 
 ## 0.2.0rc2 — release preparation
 

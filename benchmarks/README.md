@@ -8,6 +8,21 @@ These scenarios answer two separate questions:
 Generate profile artifacts under the ignored `profiles/` directory. Compare absolute timings only
 on the same machine, with the same Python build and benchmark arguments.
 
+Measure JSONL-RPC framing and client-side typed parsing with raw one-byte provider deltas and the
+production RPC coalescer:
+
+```bash
+uv run python -m benchmarks.rpc_delta_egress \
+  --response-bytes 262144 --chunk-bytes 1 --iterations 3 \
+  --output profiles/rpc-delta-egress.json
+```
+
+The workload preconstructs identical typed events for both modes, then measures the RPC frame
+encoder, byte sink, and normal event parser. It reports frame and wire-byte counts plus exact
+reconstructed-content validation. It does not include provider latency, operating-system pipe
+writes, or terminal rendering. The current decision evidence is recorded in
+`benchmarks/rpc_delta_coalescing_evidence.md`.
+
 Run the complete-history hydration scenario:
 
 ```bash

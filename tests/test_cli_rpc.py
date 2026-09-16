@@ -1268,9 +1268,6 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "context.estimated",
         "message.started",
         "message.delta",
-        "message.delta",
-        "message.delta",
-        "message.delta",
         "message.completed",
         "turn.completed",
         "session.saved",
@@ -1281,7 +1278,8 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
-    assert records[-5]["content"] == "fake response to: hello"
+    assert records[5]["delta"] == "fake response to: hello"
+    assert records[6]["content"] == "fake response to: hello"
     assert records[-1]["command_id"] == "cmd-1"
     assert records[-1]["command_type"] == "prompt"
     assert records[-1]["ok"] is True
