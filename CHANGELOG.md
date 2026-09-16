@@ -12,6 +12,20 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+## 0.2.0rc2 — release preparation
+
+RC2 trials Rust as the default on native-wheel installations. Publication is a separate step.
+
+- Added automatic renderer selection shared by `wisp`, `wisp tui`, and `wisp --mode tui`.
+  macOS/Linux installations with a declared native binary prefer Rust; pure/source installations
+  and other platforms use Textual. Explicit flags and `WISP_TUI_RENDERER` override this choice.
+- Retained `wisp tui --renderer textual` as a maintained fallback. Rust startup/runtime failures
+  remain visible errors with recovery guidance, never a silent renderer switch.
+- Integrated verified native wheels for macOS arm64/x86_64 and Linux glibc 2.28+ x86_64 with the
+  release workflow, including installation, native/pure replacement, offline reinstall and cleanup.
+- Added Rust composer keyboard selection, word/line editing, undo/redo, clipboard actions, alongside backend-owned project initialization through `/init`.
+- Preserved package/native version lockstep at Python `0.2.0rc2` / Cargo `0.2.0-rc.2`.
+
 - Added the shared Glass TUI theme, which exposes the terminal's default background for real
   emulator-controlled opacity or blur while retaining readable graphite surfaces and luminous accents.
 - Refreshed both bundled Agent Skills with current dual-frontend, generated-catalog, verification,

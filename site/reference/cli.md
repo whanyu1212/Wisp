@@ -11,14 +11,14 @@ The `wisp` executable selects an interface from its arguments and terminal state
 
 | Command | Behavior |
 |---|---|
-| `wisp` | Launch the Textual TUI when stdin and stdout are interactive |
-| `wisp tui` | Launch the dedicated Textual TUI command |
-| `wisp tui --renderer rust` | Launch the experimental Rust frontend (source-build, macOS/Linux) |
+| `wisp` | Launch the automatically selected TUI when stdin and stdout are interactive |
+| `wisp tui` | Prefer installed Rust on macOS/Linux; otherwise Textual |
+| `wisp tui --renderer rust` | Explicitly launch Rust (macOS/Linux; native wheel or source override) |
 | `wisp tui --line` | Launch the simple line renderer |
 | `wisp -p "PROMPT"` | Run one prompt and print assistant text |
 | `wisp -p "PROMPT" --mode json` | Emit one typed `WispEvent` JSON object per line |
 | `wisp --mode rpc` | Start the long-lived JSONL RPC command host |
-| `wisp --mode tui --tui-renderer RENDERER` | Compatibility TUI entry point (`line`, `fullscreen`, `textual`, or `rust`) |
+| `wisp --mode tui --tui-renderer RENDERER` | Compatibility TUI entry point (`auto`, `line`, `fullscreen`, `textual`, or `rust`) |
 
 A prompt is invalid with `--mode rpc` or `--mode tui`. A non-interactive invocation with neither a
 prompt nor an explicit RPC/TUI mode prints help and exits.
@@ -37,7 +37,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
 | `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
-| `--tui-renderer line\|fullscreen\|textual\|rust` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
+| `--tui-renderer auto\|line\|fullscreen\|textual\|rust` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
 | `--no-synchronized-output` | Disable capability-gated synchronized frames in the Textual TUI | — |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
@@ -61,12 +61,12 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 
 ## `wisp tui`
 
-`wisp tui` defaults to the Textual renderer and the full tool registry.
+`wisp tui` defaults to `auto` renderer selection and the full tool registry.
 
 | Option | Meaning |
 |---|---|
 | `--line` | Use the simple line renderer instead of Textual |
-| `--renderer textual\|rust\|fullscreen\|line` | Select the terminal frontend; defaults to Textual |
+| `--renderer auto\|textual\|rust\|fullscreen\|line` | Select the terminal frontend; defaults to auto |
 | `--no-synchronized-output` | Disable capability-gated synchronized frames in Textual |
 | `--session-dir PATH` | Override the JSONL session directory |
 | `--auth-file PATH` | Override the provider auth file |
@@ -82,18 +82,17 @@ Provider and model defaults for the dedicated command come from configuration an
 `WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
 
-`rust` is an experimental, macOS/Linux-only frontend. [#470](https://github.com/whanyu1212/Wisp/issues/470)
-closed with Textual as the default; Rust remains opt-in and is not a supported or shipped product
-path. It requires the Python package version, Rust crate version, live RPC v8, and event schema v39
-to match exactly. Selecting it by flag or `WISP_TUI_RENDERER=rust` never falls back to Textual when
-the executable is absent or startup, negotiation, or supervision fails. Current Python distributions
-do not include the executable; see [Development setup](../contributing/development#rust-tui-scaffold)
-for source use. Stage 3 (supported opt-in with binaries) remains blocked on
-[#468](https://github.com/whanyu1212/Wisp/issues/468), and
-[#469](https://github.com/whanyu1212/Wisp/issues/469).
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
 
-`WISP_TUI_RENDERER` participates in top-level TUI selection, including bare interactive `wisp` and
-the compatibility `--mode tui` form. The dedicated `wisp tui` command uses its `--renderer` option.
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
 
 ## Maintenance and inspection commands
 

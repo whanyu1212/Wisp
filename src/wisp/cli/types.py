@@ -20,6 +20,7 @@ class OutputMode(StrEnum):
 class TuiFrontendKind(StrEnum):
     """Terminal frontends selectable from the command line."""
 
+    auto = "auto"
     line = "line"
     fullscreen = "fullscreen"
     textual = "textual"

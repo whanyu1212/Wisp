@@ -24,13 +24,14 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
-To try the published **0.2.0rc1** release candidate, follow the opt-in commands in the
+**0.2.0rc2 is being prepared**, with Rust preferred on native-wheel installs and Textual retained.
+The latest published candidate is still **0.2.0rc1**. Follow release status and opt-in commands in the
 [0.2 upgrade guide](./upgrading). Read its Python API changes and external RPC-client requirements
 before updating. The commands above continue to install the published stable release.
 
 ## Updates
 
-Installed builds check PyPI at most once every six hours after TUI startup. When a newer applicable
+Textual builds check PyPI at most once every six hours after TUI startup. When a newer applicable
 release is available, the check never blocks startup:
 
 - The Textual TUI waits until the session is safely idle and the composer is empty, then offers
@@ -52,6 +53,9 @@ skipped-version preference.
 
 Automatic installation is available only when Wisp is running from a persistent `uv tool`
 installation. `uvx`, local-source, and other package-manager installs are never replaced.
+
+Rust users run `wisp update --check` or `wisp update` outside the TUI; `/update` displays
+those instructions. Rust does not provide Textual's automatic update/restart dialog.
 
 ## Next steps
 

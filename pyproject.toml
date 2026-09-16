@@ -1,6 +1,6 @@
 [project]
 name = "wisp-ai"
-version = "0.2.0rc1"
+version = "0.2.0rc2"
 description = "Terminal-first coding agent with typed CLI, TUI, RPC, and SDK interfaces"
 readme = "README.md"
 license = "MIT"
@@ -66,8 +66,8 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "wisp"
 
-# Candidate native wheels are built explicitly with Hatchling. The ordinary
-# PEP 517 and release path remains uv_build until #469 lifecycle work lands.
+# Native wheels are built explicitly with Hatchling by the release workflow.
+# Ordinary PEP 517 builds retain uv_build for the pure fallback wheel and sdist.
 [tool.hatch.build.targets.wheel]
 packages = ["src/wisp"]
 

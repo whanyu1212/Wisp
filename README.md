@@ -111,18 +111,27 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 
 | Mode | Command | Output | Best for |
 |------|---------|--------|----------|
-| **TUI** | `wisp` (or `wisp tui`) | Fullscreen Textual UI | Interactive development. Experimental `wisp tui --renderer rust` is source-build only and is not the default. |
+| **TUI** | `wisp` (or `wisp tui`) | Fullscreen terminal UI | RC2 prefers installed Rust; Textual remains available. |
 | **Print** | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and scripts |
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
-Wisp currently ships two terminal frontends over the same Python runtime. `wisp` launches Textual,
-the default and supported TUI. `wisp tui --renderer rust` is an experimental source-build client for
-presentation performance on macOS and Linux; it never silently falls back to Textual, and it does
-not replace the agent. A later default switch would be an explicit decision, not implied by new
-Rust features. See the [TUI guide](https://whanyu1212.github.io/Wisp/guide/tui).
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
 
-The experimental Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
+
+This is the RC2 release policy; stable 0.1.0 and published RC1 retain their existing defaults.
+See the [TUI guide](https://whanyu1212.github.io/Wisp/guide/tui).
+
+The Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,
 and compaction details; during a run, session totals show the last refreshed snapshot.
 When idle, `/context auto on|off` changes automatic compaction for the current process,
 and `/compact [instructions]` compacts the selected session. Ctrl-C cancels manual compaction.

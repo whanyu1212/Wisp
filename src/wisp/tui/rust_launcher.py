@@ -12,7 +12,6 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from importlib import metadata
 from pathlib import Path
 from types import FrameType
 
@@ -21,10 +20,10 @@ import anyio
 from wisp import __version__
 from wisp.settings import resolve_settings
 from wisp.tui.launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
+from wisp.tui.rust_binary import installed_rust_tui_binary
 
 _BINARY_ENV = "WISP_RUST_TUI_BINARY"
 _BINDINGS_ENV = "WISP_RUST_TUI_BINDINGS_JSON"
-_BINARY_NAME = "wisp-tui"
 _GRACE_SECONDS = 1.0
 _TERM_SECONDS = 1.0
 _KILL_SECONDS = 1.0
@@ -67,22 +66,13 @@ def resolve_rust_tui_binary() -> Path:
             raise RustTuiLaunchError(f"{_BINARY_ENV} must be an absolute executable path")
         source = _BINARY_ENV
     else:
-        try:
-            distribution = metadata.distribution("wisp-ai")
-        except metadata.PackageNotFoundError as exc:
-            raise RustTuiLaunchError(
-                "the active Python environment has no Wisp installation"
-            ) from exc
-        binary = next(
-            (entry for entry in distribution.files or () if entry.name == _BINARY_NAME),
-            None,
-        )
-        if binary is None:
+        installed_binary = installed_rust_tui_binary()
+        if installed_binary is None:
             raise RustTuiLaunchError(
                 "the active Python environment has no installed Rust TUI binary; "
                 "use `wisp tui --renderer textual`"
             )
-        path = Path(binary.locate())
+        path = installed_binary
         source = "the active Python environment"
 
     try:

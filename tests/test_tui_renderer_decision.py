@@ -1,4 +1,4 @@
-"""Keep the #470 renderer decision synchronized across architecture and user docs."""
+"""Keep the RC2 renderer decision synchronized across architecture and user docs."""
 
 from __future__ import annotations
 
@@ -18,40 +18,44 @@ _ENVIRONMENT = (_REPOSITORY_ROOT / "site" / "reference" / "environment.md").read
 )
 
 
-def test_architecture_records_textual_default_and_rust_experimental_opt_in() -> None:
-    assert "Textual remains the default and the supported product frontend." in _ARCHITECTURE
-    assert "Rust is an experimental opt-in" in _ARCHITECTURE
-    closed = "[#470](https://github.com/whanyu1212/Wisp/issues/470) is the closed renderer decision"
-    assert closed in _ARCHITECTURE
-    assert "Textual remains the default and supported frontend." in _ARCHITECTURE_INDEX
-    assert "Rust is an experimental" in _ARCHITECTURE_INDEX
+def test_architecture_records_rc2_trial_and_maintained_textual_fallback() -> None:
+    assert "RC2 Rust-default trial" in _ARCHITECTURE
+    assert "#470" in _ARCHITECTURE
+    assert "supersedes the default hold" in _ARCHITECTURE
+    for document in (_ARCHITECTURE, _ARCHITECTURE_INDEX):
+        assert "maintained Python" in document
+        assert "Pure/source installs" in document
+        assert "macOS arm64/x86_64 and Linux glibc 2.28+ x86_64" in document
 
 
-def test_architecture_does_not_describe_current_rust_tui_as_promptless_scaffold() -> None:
+def test_architecture_describes_a_frontend_over_the_python_runtime() -> None:
     assert "diagnostic transport scaffold" not in _ARCHITECTURE
     assert "does not accept prompts" not in _ARCHITECTURE
-    assert "The current experimental frontend accepts" in _ARCHITECTURE
-    assert "prompts, approvals, trust answers" in _ARCHITECTURE
+    assert "prompts" in _ARCHITECTURE
+    assert "approvals" in _ARCHITECTURE
+    assert "Python decides what is allowed" in _ARCHITECTURE
 
 
-def test_cli_and_environment_docs_do_not_call_rust_a_transport_scaffold() -> None:
-    assert "transport-diagnostic scaffold" not in _CLI
-    assert "transport scaffold" not in _CLI
-    assert "transport scaffold" not in _ENVIRONMENT
-    assert "experimental Rust frontend" in _CLI
-    assert "experimental macOS/Linux Rust" in _ENVIRONMENT
+def test_cli_and_environment_docs_explain_automatic_selection() -> None:
+    for document in (_CLI, _ENVIRONMENT):
+        assert "transport scaffold" not in document
+        assert "`auto`" in document
+        assert "`WISP_TUI_RENDERER`" in document
+        assert "Explicit CLI selection takes precedence" in document
 
 
-def test_docs_record_that_rust_selection_does_not_fall_back_to_textual() -> None:
-    assert "does not fall back to Textual" in _ARCHITECTURE
-    assert "never falls back to Textual" in _TUI_GUIDE
-    assert "never falls back to Textual" in _CLI
-    assert "never falls back to Textual" in _ENVIRONMENT
-
-
-def test_docs_name_stage_three_blockers_and_closed_decision() -> None:
+def test_docs_preserve_explicit_textual_recovery_without_silent_fallback() -> None:
     for document in (_ARCHITECTURE, _TUI_GUIDE, _CLI, _ENVIRONMENT, _ARCHITECTURE_INDEX):
-        assert "#470" in document
-        assert "#468" in document
-        assert "#469" in document
-        assert "stage 3" in document.lower() or "stage-3" in document
+        normalized = " ".join(document.split())
+        assert "they never silently switch frontends" in normalized
+        assert "wisp tui --renderer textual" in normalized
+
+
+def test_rc2_decision_keeps_publication_and_stable_promotion_separate() -> None:
+    release = (_REPOSITORY_ROOT / "site/contributing/rc2-release.md").read_text(encoding="utf-8")
+    architecture = " ".join(_ARCHITECTURE.split())
+    assert "this candidate" in architecture
+    assert "stable promotion require separate decisions" in architecture
+    assert "does not create a" in release
+    assert "Before stable promotion" in release
+    assert "postpublication acceptance" in release

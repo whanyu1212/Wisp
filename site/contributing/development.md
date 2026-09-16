@@ -29,10 +29,10 @@ internal value objects, and Pydantic models for serialized boundaries.
 
 ## Experimental Rust TUI {#rust-tui-scaffold}
 
-The experimental Rust frontend is a Cargo workspace member and remains available for source
-development on macOS and Linux. It is not the default renderer. Existing published distributions do
-not bundle it; #566 prepares verified native wheels for a later approved release without changing
-[#470](https://github.com/whanyu1212/Wisp/issues/470)'s renderer decision. The repository pins Rust
+The Rust frontend is a Cargo workspace member and remains available for source
+development on macOS and Linux. RC2 native-wheel installations prefer Rust automatically; pure/source
+installs keep Textual unless a renderer or development binary override selects Rust. RC1 did not
+bundle Rust. See the [RC2 decision](../architecture/rust-tui-boundary). The repository pins Rust
 1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
 the workspace package settings.
 
@@ -50,8 +50,8 @@ never searches `PATH`. Source development still uses the explicit override below
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 
-The experimental frontend is exact-lockstep with the Python runtime. The current package and crate
-versions are `0.2.0rc1` (Python) and `0.2.0-rc.1` (Cargo); only the prerelease spelling differs.
+The Rust frontend is exact-lockstep with the Python runtime. The current package and crate
+versions are `0.2.0rc2` (Python) and `0.2.0-rc.2` (Cargo); only the prerelease spelling differs.
 Rust translates `-alpha.N`, `-beta.N`, and `-rc.N` to Python's `aN`, `bN`, and `rcN` before the
 exact version comparison. The only accepted transport is live RPC v8 with event schema v39.
 Python's models and committed schemas remain authoritative, and `wisp-protocol` generates its

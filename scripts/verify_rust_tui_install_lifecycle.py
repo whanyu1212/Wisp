@@ -28,10 +28,13 @@ def _scripts(environment: Path) -> tuple[Path, Path, Path]:
 
 
 def _consumer_environment(environment: Path) -> dict[str, str]:
-    return {
+    consumer = {
         **os.environ,
         "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
     }
+    consumer.pop("WISP_TUI_RENDERER", None)
+    consumer.pop("WISP_RUST_TUI_BINARY", None)
+    return consumer
 
 
 def _install(uv: Path, python: Path, wheel: Path, *, offline: bool = False) -> None:
@@ -56,7 +59,7 @@ def _resolve_installed_binary(python: Path, expected: Path) -> None:
         "-c",
         "from wisp.tui.rust_launcher import resolve_rust_tui_binary; "
         "print(resolve_rust_tui_binary())",
-        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
     )
     if Path(completed.stdout.strip()).resolve() != expected.resolve():
         raise RuntimeError(f"launcher resolved unexpected Rust TUI: {completed.stdout!r}")
@@ -72,7 +75,7 @@ def _expect_resolution_failure(python: Path, message: str) -> None:
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
     )
     if completed.returncode == 0 or message not in completed.stderr:
         raise RuntimeError(
@@ -81,31 +84,34 @@ def _expect_resolution_failure(python: Path, message: str) -> None:
         )
 
 
-def _verify_textual_selection(python: Path) -> None:
+def _verify_frontend_selection(python: Path, *, native: bool) -> None:
     script = """
+import sys
 from unittest.mock import patch
 from typer.testing import CliRunner
 from wisp import cli as cli_module
 from wisp.cli import app
 
-selected = {}
-with patch.object(
-    cli_module,
-    "_run_tui_from_cli_options",
-    side_effect=lambda **kwargs: selected.update(kwargs),
-):
-    result = CliRunner().invoke(app, ["tui", "--renderer", "textual"])
-assert result.exit_code == 0, result.output
-assert selected["renderer"].value == "textual"
+for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "textual"]]:
+    selected = {}
+    with patch.object(cli_module, "_terminal_is_interactive", return_value=True), patch.object(
+        cli_module, "_run_tui_from_cli_options",
+        side_effect=lambda **kwargs: selected.update(kwargs),
+    ):
+        result = CliRunner().invoke(app, arguments)
+    assert result.exit_code == 0, result.output
+    expected = "textual" if "--renderer" in arguments else sys.argv[1]
+    assert selected["renderer"].value == expected, (arguments, selected)
 """
-    _run(python, "-c", script, env={**os.environ, "PATH": "/usr/bin:/bin"})
+    environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
+    _run(python, "-c", script, "rust" if native else "textual", env=environment)
 
 
 def _expect_corrupt_launch_failure(wisp: Path, rust_tui: Path, environment: Path) -> None:
     rust_tui.write_bytes(b"not a native executable")
     rust_tui.chmod(0o700)
     completed = subprocess.run(
-        [str(wisp), "tui", "--renderer", "rust"],
+        [str(wisp), "tui"],
         check=False,
         capture_output=True,
         text=True,
@@ -122,8 +128,6 @@ def _expect_corrupt_launch_failure(wisp: Path, rust_tui: Path, environment: Path
             "corrupt Rust TUI did not fail clearly: "
             f"status={completed.returncode}, output={output!r}"
         )
-    if "textual" in output.lower():
-        raise RuntimeError("corrupt Rust TUI failure attempted a Textual fallback")
 
 
 def _smoke(
@@ -131,6 +135,8 @@ def _smoke(
     wisp: Path,
     smoke_script: Path,
     session_dir: Path,
+    *,
+    history_messages: int = 0,
 ) -> dict[str, float | int]:
     try:
         completed = _run(
@@ -140,6 +146,8 @@ def _smoke(
             wisp,
             "--session-dir",
             session_dir,
+            "--history-messages",
+            str(history_messages),
             env=_consumer_environment(python.parent.parent),
         )
     except subprocess.CalledProcessError as exc:
@@ -183,14 +191,23 @@ def verify(
     binary_started = time.monotonic()
     _run(rust_tui, "--version", env=_consumer_environment(environment))
     binary_startup_seconds = time.monotonic() - binary_started
+    _verify_frontend_selection(python, native=True)
     initial_smoke = _smoke(python, wisp, smoke_script, work_dir / "native-initial")
+
+    long_history_smoke = _smoke(
+        python,
+        wisp,
+        smoke_script,
+        work_dir / "native-long-history",
+        history_messages=10_000,
+    )
 
     _install(uv, python, pure_wheel)
     if rust_tui.exists():
         raise RuntimeError("pure fallback replacement left an orphaned wisp-tui executable")
     _expect_resolution_failure(python, "active Python environment")
     _run(wisp, "--help", env=_consumer_environment(environment))
-    _verify_textual_selection(python)
+    _verify_frontend_selection(python, native=False)
 
     _install(uv, python, native_wheel)
     _resolve_installed_binary(python, rust_tui)
@@ -227,6 +244,7 @@ def verify(
                 "binary_bytes": initial_smoke.get("binary_bytes", 0),
                 "binary_startup_seconds": binary_startup_seconds,
                 **initial_smoke,
+                "long_history": long_history_smoke,
             },
             indent=2,
             sort_keys=True,

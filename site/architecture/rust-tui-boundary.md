@@ -6,56 +6,36 @@ title: Rust terminal frontend boundary
 
 | Field | Decision |
 |---|---|
-| Status | Accepted; experimental opt-in frontend, Textual remains default |
-| Date | 2026-09-03 (renderer decision); boundary accepted 2026-08-24 |
-| Tracking | [#456](https://github.com/whanyu1212/Wisp/issues/456), [#457](https://github.com/whanyu1212/Wisp/issues/457), [#463](https://github.com/whanyu1212/Wisp/issues/463), [#470](https://github.com/whanyu1212/Wisp/issues/470) |
-| Renderer decision | Closed by [#470](https://github.com/whanyu1212/Wisp/issues/470): Textual remains the default; Rust remains experimental opt-in |
+| Status | RC2 Rust-default trial on native-wheel installations; Textual maintained |
+| Date | 2026-09-16; supersedes the September 3 #470 hold for this RC |
+| Tracking | [#456](https://github.com/whanyu1212/Wisp/issues/456); [RC2 decision and release checklist](https://github.com/whanyu1212/Wisp/blob/main/site/contributing/rc2-release.md) |
 
-Wisp currently ships two terminal frontends over the existing Python JSONL-RPC runtime. That is a
-dual-frontend period, not a transition of the product from Python to Rust. The language boundary is
-fixed: Rust does not become the default, Textual is not removed, and the agent runtime stays in
-Python.
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
 
-The #463 slice started as a transport-only experiment. The current experimental frontend accepts
-prompts, approvals, trust answers, cancellation, steering and follow-up queues, bounded session
-history, and provider connection flows. It does not claim Textual workflow or product parity.
-Textual remains the default and the supported product frontend. Rust is an experimental opt-in;
-the native-wheel release work does not promote it.
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
 
-The governing rule is:
+The governing rule remains:
 
 > Rust decides how frontend state is presented. Python decides what is allowed, what is durable,
 > and what commands and events mean.
 
-## Renderer decision (#470)
+## RC2 renderer decision
 
-[#470](https://github.com/whanyu1212/Wisp/issues/470) is the closed renderer decision, not a deferred
-gate.
-
-1. Textual remains the default and the supported product frontend.
-2. Rust remains an experimental opt-in on macOS and Linux. Current published Python distributions
-   do not include the binary; #566 prepares verified native wheels for the next approved release.
-3. Rollout stage remains **2** (explicit experimental renderer flag). Stages 3–5 — supported opt-in,
-   a default switch, and Textual deprecation — are not authorized by packaging work alone.
-4. Explicit Rust selection does not fall back to Textual. A missing, non-executable, incompatible,
-   or failing binary is an actionable non-zero error. Users who want Textual pass
-   `--renderer textual` or unset `WISP_TUI_RENDERER`.
-5. Line and legacy fullscreen remain Python-only debug and compatibility paths. They have no Rust
-   parity requirement.
-6. Both frontends remain until a later explicit issue. [#418](https://github.com/whanyu1212/Wisp/issues/418)
-   stays in scope because Textual remains supported.
-7. Two-language lockstep cost is accepted only while Rust stays experimental. Supported opt-in
-   (stage 3) requires [#467](https://github.com/whanyu1212/Wisp/issues/467),
-   [#468](https://github.com/whanyu1212/Wisp/issues/468), and
-   [#469](https://github.com/whanyu1212/Wisp/issues/469).
-8. Rollback triggers for this decision: silent fallback to Textual, flipping the default without a
-   new issue, or docs that recast Rust as supported or default.
-
-A later default switch or Textual removal must be filed as a **new** issue. Completing #467, #468, or
-#469 does not itself change the default.
-
-Evidence for this hold, including measurements that could not run, is recorded in
-`benchmarks/rust_tui_acceptance_evidence.md`.
+The RC2 release PR records explicit authorization to trial Rust as the installed-native default.
+It supersedes the default hold in [#470](https://github.com/whanyu1212/Wisp/issues/470) for this
+candidate only. Historical measurements in `benchmarks/rust_tui_acceptance_evidence.md` remain dated
+evidence, not fresh performance claims. Platform installation checks, realistic long-session
+measurements, terminal/accessibility feedback, and rollback remain part of release acceptance.
+Textual removal and stable promotion require separate decisions. Packaging alone never authorized
+this change; the release decision does.
 
 ## Context
 
@@ -111,8 +91,8 @@ flowchart LR
 
 The Python launcher remains the trusted entrypoint. It resolves the selected renderer and Rust
 executable, supplies the exact Python interpreter and opaque `wisp --mode rpc` backend command, and
-runs preflight before terminal handoff. The experimental frontend does not ship a Rust binary in
-Wisp's Python distributions; source development therefore supplies an absolute `WISP_RUST_TUI_BINARY`.
+runs preflight before terminal handoff. RC2 native wheels include the executable; pure/source
+installations can supply an absolute `WISP_RUST_TUI_BINARY` for development.
 
 On macOS and Linux, the launcher starts Rust in a new process group and transfers the foreground
 terminal to it. Rust spawns the Python backend in that inherited group, owns negotiated protocol
@@ -153,7 +133,7 @@ Textual. #470 closed without authorizing automatic fallback.
 | Themes, keymaps, layout, and other presentation preferences | Rust | Preferences cannot alter backend behavior or become session authority. |
 | Rust binary selection and backend command construction | Python launcher | Rust does not discover an arbitrary interpreter or rebuild trusted arguments. |
 | Invocation supervision and fail-safe cleanup | Python launcher and OS supervision primitive | Rust attempts graceful shutdown; the launcher terminates the shared process group or job when Rust cannot unwind. |
-| Textual TUI | Python default frontend | It remains the default and supported frontend; Rust failures do not select it automatically. Removal requires a new explicit issue. |
+| Textual TUI | Maintained Python fallback | Default without a native binary; explicitly selectable everywhere. Rust failures do not select it automatically. |
 
 ## Migration map for the current TUI
 
@@ -176,7 +156,7 @@ module graph or translate Textual widgets line by line.
 | Themes, theme persistence, keybindings, prompt-history search | TUI preference and input modules | Keep frontend-local and disposable. Any new persistent prompt-history policy requires separate privacy and lifecycle design. |
 | Privacy-safe render and input-latency diagnostics | `tui/diagnostics.py` and benchmarks | Implement frontend-specific instrumentation with comparable scenarios, never content-bearing telemetry. |
 | Line and legacy fullscreen renderers | `tui/rendering.py`, `tui/live.py` | Keep Python-only. No Rust parity requirement is implied. |
-| Textual implementation and regression suite | `src/wisp/tui`, TUI tests | Retain as the default frontend and behavioral evidence. Removal requires a new explicit issue; #470 did not authorize it. |
+| Textual implementation and regression suite | `src/wisp/tui`, TUI tests | Retain as a maintained fallback and behavioral evidence. Removal requires a separate decision. |
 
 ## Wire-boundary rules
 
@@ -204,12 +184,12 @@ in fixtures, or written to logs and diagnostics.
 ## Live protocol and durable compatibility
 
 The live frontend protocol and durable session formats are separate compatibility domains. The
-experimental frontend is exact-lockstep rather than range-compatible:
+Rust frontend is exact-lockstep rather than range-compatible:
 
 - Python models are the source of truth for the live command and event schema.
 - The committed schemas generate Rust data-transfer types at compile time; Rust types are not a
   handwritten second schema.
-- The Python package/runtime is `0.2.0rc1` and the `wisp-tui` crate is `0.2.0-rc.1`. The launcher
+- The Python package/runtime is `0.2.0rc2` and the `wisp-tui` crate is `0.2.0-rc.2`. The launcher
   passes the Python version to Rust, which translates Cargo prerelease spelling to Python spelling
   and checks exact equality before spawning the backend. The backend repeats its Python package
   version in the handshake. This spelling conversion does not permit different release versions.
@@ -217,7 +197,7 @@ experimental frontend is exact-lockstep rather than range-compatible:
   capabilities. The frontend consumes current live event output, including backend-owned
   connection-catalog snapshots, and never reads credential files itself.
 - A package, protocol, or event-schema mismatch fails before ordinary terminal interaction. The
-  experimental frontend does not negotiate older live contracts.
+  Rust frontend does not negotiate older live contracts.
 - Python retains backward parsing, migration, and replay of persisted session and event versions.
 - Rust receives current-version snapshots after Python has loaded historical data. It never needs
   implementations for old persisted schemas.
@@ -240,7 +220,7 @@ frame limits, strict event variants, and UTF-8 JSON representation. See
 | Failed update or restart | Python reports failure without leaving a mixed-version process pair. The user retains an explicit Textual path. |
 | Textual failure | Existing Python cleanup and RPC ownership remain unchanged by the Rust experiment. |
 
-The experimental frontend implements bounded handshake, graceful shutdown, task join, and
+The Rust frontend implements bounded handshake, graceful shutdown, task join, and
 signal-escalation deadlines. It does not rely on frontend destructors or backend EOF for fail-safe
 cleanup, transfer semantic authority, or permit unbounded cleanup.
 
@@ -254,10 +234,9 @@ focused evidence and remaining gates; it is not a comparative benchmark or broad
 `benchmarks/rust_tui_acceptance_evidence.md` remain historical evidence.
 
 **Implemented** means the feature and its focused regression coverage are present in this tree; it does not
-certify every acceptance criterion in #467 or #468. **Blocker for stage 3** means the owning
-readiness work must be completed before supported opt-in. **Acceptable while experimental** records
-a current limitation without approving it for a default switch or Textual removal. **Deferred
-noncritical** work can wait after stage 3.
+certify every terminal or workload. **Accepted RC difference** records a limitation with the
+Textual fallback available. **Stable-promotion evidence** remains required before declaring broad
+support. **Deferred noncritical** features do not block this RC trial.
 
 | Surface | Current Rust behavior | Evidence / remaining gate |
 |---|---|---|
@@ -276,25 +255,25 @@ noncritical** work can wait after stage 3.
 | Transcript-preserving popups | Conversation drawn first, focused popup last; decisions preempt popups | Implemented in [#545](https://github.com/whanyu1212/Wisp/pull/545); minimum-size popups can cover the conversation |
 | Protected-path-aware file suggestions | Python snapshot RPC; Rust fuzzy/tree picker inserts references without reading files | Implemented in [#544](https://github.com/whanyu1212/Wisp/pull/544) and [#546](https://github.com/whanyu1212/Wisp/pull/546); [#462](https://github.com/whanyu1212/Wisp/issues/462) is closed |
 | Themes and presentation preferences | Shared palettes and `tui.json`, preview/apply/cancel, Ctrl+T, `NO_COLOR` | Implemented in [#547](https://github.com/whanyu1212/Wisp/pull/547); does not implement configurable bindings |
-| Mouse navigation | Opt-in wheel scrolling, row selection, outside-click dismissal, composer cursor positioning | Implemented in [#548](https://github.com/whanyu1212/Wisp/pull/548); off by default; approval/trust decisions remain keyboard-only |
+| Mouse navigation | Wheel scrolling, row selection, outside-click dismissal, composer cursor positioning | Implemented in [#548](https://github.com/whanyu1212/Wisp/pull/548); enabled by default; approval/trust decisions remain keyboard-only |
 | Configurable actions and keybindings | Implemented in Rust; stable IDs, user-only overrides, resolved hints and Ctrl+G help | #445 / #467; Textual retains its existing binding engine |
 | Update notice/install/restart UX | Rust `/update [check\|install]` provides external instructions; Textual retains its integrated flow | Explicit alternative for #467; automatic notices and coordinated binary install/update/rollback remain [#469](https://github.com/whanyu1212/Wisp/issues/469) |
 | Essential layout, editing, and focus acceptance | Consolidated feature regressions plus configured-input/help/paste launcher PTYs | #467 acceptance inventory; broad adversarial and terminal coverage remains #468; decorative polish is deferred noncritical |
 | Large-paste presentation | Compact markers with bounded display metadata; exact raw submission/history/queues | #467 editor, reducer, rendering and PTY regressions; historical replay stays raw |
 | Composer clipboard | Native copy/cut/paste with an OSC52 copy fallback; selected Ctrl+C copies and otherwise retains cancellation | Clipboard failures preserve the draft; pasted text keeps editor sanitization and size limits |
-| Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Acceptable while experimental; assess accessibility and copying workflows before a default switch |
-| Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | Secret lifecycle, remaining recovery races, platform limits and dependency policy remain blockers for stage 3 ([#468](https://github.com/whanyu1212/Wisp/issues/468)) |
+| Transcript search and built-in drag selection/clipboard copy | Not implemented; terminal-native selection depends on terminal and mouse capture | Accepted RC difference; validate accessibility and copying workflows during the RC trial |
+| Fuzz, backpressure, terminal/secret hygiene, fault recovery | Deadline-based FIFO admission, fair event/input turns, deferred-activation guards, bounded pressure/PTY cases, generated terminal-control properties, hostile live-payload PTY coverage, sanitization and shared traces | The #468 implementation is closed; newly reproduced safety/cleanup failures block RC acceptance. Broader field and platform evidence remains part of stable promotion. |
 | Prebuilt binary distribution and install lifecycle | The tag-gated release flow assembles one pure fallback wheel plus native manylinux x86_64 and macOS x86_64/arm64 wheels; installed Wisp resolves Rust only from its active Python environment | #566 adds post-download release-set verification, provenance, installed fake-provider smoke, native/pure replacement, offline reinstall, corruption and uninstall evidence; publication still requires an approved tag release |
-| Windows | Rejected before binary resolution | Acceptable while experimental; not a claimed Rust target |
+| Windows | Rejected before binary resolution | Accepted RC difference; not a claimed Rust target |
 | No automatic fallback to Textual | Explicit Rust failures remain errors; Textual is explicitly selectable | Intentional policy from [#470](https://github.com/whanyu1212/Wisp/issues/470) |
-| Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Gates against a default switch under [#456](https://github.com/whanyu1212/Wisp/issues/456); in-process frame timings do not satisfy them |
+| Comparative PTY input-to-frame vs Textual and supported opt-in feedback | No matched dual-renderer PTY evidence or supported rollout recorded | Remaining stable-promotion evidence under [#456](https://github.com/whanyu1212/Wisp/issues/456); RC2 is an explicitly authorized trial |
 
 Transport pressure evidence is recorded in
 [`benchmarks/rust_tui_transport_pressure.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_transport_pressure.md).
-The transport budgets cover queued encoded bytes and a bounded pending frame. Completed live
-transcript presentation has separate 1,200-entry and 16-MiB retained-payload limits, with active
-responses, unresolved tool/process lifecycles and active exact detail protected until they settle.
-These logical limits do not establish an exact whole-process RSS ceiling.
+The transport budgets cover queued encoded bytes and a bounded pending frame. RC2 retains all
+conversation entries and loads complete saved history. It collects raw pages, then projects them
+once with temporary historical correlation indexes; live indexes and rendering caches remain
+bounded. Total transcript memory grows with history size. There is no whole-process RSS ceiling.
 
 Protocol hardening also includes fixed-seed raw-wire and JSONL framing properties, canonical
 fixture/seed replay, and bounded AddressSanitizer fuzz campaigns for client and server wire
@@ -302,7 +281,8 @@ decoding. See the [fuzzing instructions](https://github.com/whanyu1212/Wisp/blob
 for budgets, manual extended runs, and failure reproduction. These checks cover protocol parsing
 and logical frame buffering. Deterministic renderer properties and a built-binary hostile-payload
 PTY cover representative terminal/Unicode injection paths; secret lifecycle, recovery races,
-dependency auditing and broader process-memory evidence remain separate #468 acceptance work.
+dependency auditing and broader process-memory evidence remain part of the RC2 and stable-promotion
+checklist.
 
 #468 and #469 are closed; #566 carries the production distribution follow-up. Completing release
 integration does not itself authorize supported opt-in, a default switch, or Textual deprecation. Optional
@@ -320,7 +300,7 @@ stash, activity views, and the separate image-attachment roadmap, are not automa
 - [#409](https://github.com/whanyu1212/Wisp/issues/409) coordinates package boundaries and any
   evidence-based lightweight distribution decision.
 - [#418](https://github.com/whanyu1212/Wisp/issues/418) keeps Textual reliable as the supported
-  default and explicit fallback; broad Textual-only restructuring is deferred.
+  fallback; broad Textual-only restructuring is deferred.
 - [#442](https://github.com/whanyu1212/Wisp/issues/442) supplies the near-term Textual input-latency
   baseline used for a later comparison.
 - [#443](https://github.com/whanyu1212/Wisp/issues/443) remains a Textual synchronized-frame
@@ -335,26 +315,16 @@ stash, activity views, and the separate image-attachment roadmap, are not automa
 
 ## Consequences and reconsideration
 
-The experiment adds a second frontend language, cross-language fixtures, and a lockstep compatibility
-obligation. #469 selected a single-distribution platform-wheel candidate; #566 integrates verified
-native artifacts with the tag-gated release flow and records lifecycle evidence. Published binaries
-still require an approved release, and these costs are accepted only while Rust stays experimental. They do not justify
-moving unrelated Python systems.
+RC2 accepts the maintenance cost of two frontend languages and exact package/protocol lockstep.
+The release pipeline verifies native and pure artifacts, provenance, and installation lifecycle;
+publication and installation from PyPI must still be verified after tagging. Local and candidate CI
+checks cannot establish published availability.
 
-#470 closed as a stage-2 hold. After the daily-use readiness work, the remaining reconsideration conditions are:
-
-- there is no comparative PTY input-to-frame measurement against Textual;
-- [#468](https://github.com/whanyu1212/Wisp/issues/468) is closed with bounded transport,
-  retention, fuzzing and terminal-safety evidence; its documented limitations remain inputs to a
-  later support decision;
-- no approved release has yet published the verified native artifacts prepared by
-  [#566](https://github.com/whanyu1212/Wisp/issues/566).
-
-Supported opt-in feedback and an explicit support/accessibility/rollback decision remain required
-before default promotion. The latest merged feature checks do not replace those rollout gates.
-
-A default-renderer proposal remains out of scope until those conditions are re-measured. Textual
-removal always requires a separate explicit issue; #470 did not file one.
+The [release checklist](https://github.com/whanyu1212/Wisp/blob/main/site/contributing/rc2-release.md)
+records the remaining platform, long-session, comparative-performance, accessibility, and feedback
+work. Regressions in startup, terminal restoration, session integrity, or critical controls block
+promotion. Users can select Textual explicitly while failures are investigated. Textual removal and
+stable promotion remain separate decisions.
 
 ### Rust command interaction
 

@@ -48,10 +48,19 @@ def _resolve_tui_renderer(
     renderer_was_provided: bool,
     console: Console,
 ) -> TuiFrontendKind:
-    if renderer_was_provided:
-        return renderer
-    env_renderer = _tui_renderer_from_env(console)
-    return env_renderer or renderer
+    selected = renderer if renderer_was_provided else (_tui_renderer_from_env(console) or renderer)
+    if selected is not TuiFrontendKind.auto:
+        return selected
+    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+        return TuiFrontendKind.textual
+
+    from wisp.tui.rust_binary import installed_rust_tui_binary
+
+    # An override is an explicit development choice, including an invalid path. Let
+    # launch validation report damage or configuration errors instead of hiding them.
+    if "WISP_RUST_TUI_BINARY" in os.environ or installed_rust_tui_binary() is not None:
+        return TuiFrontendKind.rust
+    return TuiFrontendKind.textual
 
 
 def _output_mode_from_env(console: Console) -> OutputMode | None:

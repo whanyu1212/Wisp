@@ -144,9 +144,9 @@ def cli_callback(
         TuiFrontendKind,
         typer.Option(
             "--tui-renderer",
-            help="Terminal frontend to use with --mode tui.",
+            help="Terminal frontend for TUI mode: auto prefers installed Rust, otherwise Textual.",
         ),
-    ] = TuiFrontendKind.line,
+    ] = TuiFrontendKind.auto,
     no_synchronized_output: Annotated[
         bool,
         typer.Option(
@@ -219,7 +219,7 @@ def cli_callback(
         mode_was_provided=mode_was_provided,
         console=console,
     )
-    resolved_tui_renderer = TuiFrontendKind.textual if bare_interactive_invocation else tui_renderer
+    resolved_tui_renderer = tui_renderer
     resolved_all_tools = all_tools
     if resolved_mode is OutputMode.tui:
         resolved_tui_renderer = _resolve_tui_renderer(
@@ -375,15 +375,15 @@ def tui_command(
     ctx: typer.Context,
     line: Annotated[
         bool,
-        typer.Option("--line", help="Use the simple line renderer instead of the Textual TUI."),
+        typer.Option("--line", help="Use the simple line renderer instead of the fullscreen TUI."),
     ] = False,
     renderer: Annotated[
         TuiFrontendKind,
         typer.Option(
             "--renderer",
-            help="Terminal frontend to use: textual, rust, fullscreen, or line.",
+            help="Terminal frontend: auto prefers installed Rust, otherwise Textual.",
         ),
-    ] = TuiFrontendKind.textual,
+    ] = TuiFrontendKind.auto,
     no_synchronized_output: Annotated[
         bool,
         typer.Option(
@@ -462,7 +462,11 @@ def tui_command(
         mode=OutputMode.text,
         console=console,
     )
-    selected_renderer = TuiFrontendKind.line if line else renderer
+    selected_renderer = _resolve_tui_renderer(
+        TuiFrontendKind.line if line else renderer,
+        renderer_was_provided=line or _option_was_provided(ctx, "renderer"),
+        console=console,
+    )
     try:
         config = WispConfig.from_env(
             session_dir=session_dir,
@@ -574,9 +578,17 @@ def _run_tui_from_cli_options(
             )
         except RustTuiLaunchError as exc:
             typer.echo(f"error: {exc}", err=True)
+            if "--renderer textual" not in str(exc):
+                typer.echo(
+                    "Select the Python frontend with `wisp tui --renderer textual`.", err=True
+                )
             raise typer.Exit(1) from exc
         if status != 0:
-            typer.echo(f"error: Rust TUI exited with status {status}", err=True)
+            typer.echo(
+                f"error: Rust TUI exited with status {status}; "
+                "use `wisp tui --renderer textual` to select the Python frontend",
+                err=True,
+            )
             raise typer.Exit(status if 1 <= status <= 255 else 1)
         return
 
