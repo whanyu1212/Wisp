@@ -94,6 +94,14 @@ impl PendingText {
         self.append_units(units);
     }
 
+    /// Appends valid Unicode text without consuming a pending raw UTF-8 suffix.
+    pub fn append(&mut self, value: &str) {
+        self.append_units(value.chars().map(|character| DecodedUnit {
+            source_bytes: character.len_utf8(),
+            character,
+        }));
+    }
+
     /// Returns whether decoded text is currently retained.
     #[must_use]
     pub fn has_text(&self) -> bool {
@@ -106,13 +114,30 @@ impl PendingText {
         self.retained_source_bytes
     }
 
-    /// Removes retained text and accounting while preserving an incomplete UTF-8 suffix.
-    pub fn drain(&mut self) -> Drain {
+    /// Returns original input bytes discarded since the last drain.
+    #[must_use]
+    pub fn dropped_bytes(&self) -> usize {
+        self.dropped_bytes
+    }
+
+    /// Returns the currently retained decoded text.
+    #[must_use]
+    pub fn text(&self) -> String {
         let mut text = String::with_capacity(self.retained_encoded_bytes);
-        let mut source_byte_lengths = Vec::new();
         for line in &self.lines {
             for fragment in &line.fragments {
                 text.push_str(&fragment.text);
+            }
+        }
+        text
+    }
+
+    /// Removes retained text and accounting while preserving an incomplete UTF-8 suffix.
+    pub fn drain(&mut self) -> Drain {
+        let text = self.text();
+        let mut source_byte_lengths = Vec::new();
+        for line in &self.lines {
+            for fragment in &line.fragments {
                 source_byte_lengths.extend(fragment.source_byte_lengths.iter().copied());
             }
         }

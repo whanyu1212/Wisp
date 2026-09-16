@@ -13,7 +13,7 @@ Wisp's fullscreen terminal clients share the same Python RPC controller.
 ::: info RC2 frontend selection
 In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
 on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
 other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
 which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
 macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
@@ -139,7 +139,7 @@ starts again from the first page. Forking restores the selected prompt after the
 history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
-RC2 prepares native wheels for the three packaged targets. Transcript search and arbitrary drag
+RC2 prepares native wheels for the two packaged targets. Transcript search and arbitrary drag
 selection remain follow-ups; composer selection and clipboard actions are keyboard-driven.
 See the mouse controls below; transcript copying still relies on terminal-native selection.
 Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.

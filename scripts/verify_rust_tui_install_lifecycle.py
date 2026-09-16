@@ -65,6 +65,62 @@ def _resolve_installed_binary(python: Path, expected: Path) -> None:
         raise RuntimeError(f"launcher resolved unexpected Rust TUI: {completed.stdout!r}")
 
 
+def _verify_native_extension(python: Path) -> Path:
+    script = r"""
+from pathlib import Path
+from wisp._native import PendingText
+
+pending = PendingText(100, 10)
+assert not pending.has_text
+pending.append("prefix:")
+pending.append_bytes(b"\xe2")
+pending.append_bytes(b"\x82\xac\xff", final=True)
+assert pending.text == "prefix:\u20ac\ufffd"
+assert pending.has_text
+assert pending.retained_source_bytes == 11
+assert pending.dropped_bytes == 0
+assert pending.drain() == (
+    "prefix:\u20ac\ufffd",
+    0,
+    11,
+    (1, 1, 1, 1, 1, 1, 1, 3, 1),
+)
+assert pending.text == ""
+assert not pending.has_text
+assert pending.retained_source_bytes == 0
+assert pending.dropped_bytes == 0
+import wisp._native as native
+print(Path(native.__file__).resolve())
+"""
+    completed = _run(
+        python,
+        "-c",
+        script,
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
+    )
+    extension = Path(completed.stdout.strip())
+    if extension.name != "_native.abi3.so" or not extension.is_file():
+        raise RuntimeError(f"native extension resolved unexpected file: {extension}")
+    return extension
+
+
+def _expect_native_import_failure(python: Path) -> None:
+    script = """
+try:
+    import wisp._native
+except ModuleNotFoundError as exc:
+    assert exc.name == "wisp._native", exc
+else:
+    raise AssertionError("pure fallback unexpectedly imports wisp._native")
+"""
+    _run(
+        python,
+        "-c",
+        script,
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
+    )
+
+
 def _expect_resolution_failure(python: Path, message: str) -> None:
     completed = subprocess.run(
         [
@@ -188,6 +244,8 @@ def verify(
 
     python, wisp, rust_tui = _scripts(environment)
     _resolve_installed_binary(python, rust_tui)
+    extension = _verify_native_extension(python)
+    extension_bytes = extension.stat().st_size
     binary_started = time.monotonic()
     _run(rust_tui, "--version", env=_consumer_environment(environment))
     binary_startup_seconds = time.monotonic() - binary_started
@@ -205,12 +263,16 @@ def verify(
     _install(uv, python, pure_wheel)
     if rust_tui.exists():
         raise RuntimeError("pure fallback replacement left an orphaned wisp-tui executable")
+    if extension.exists():
+        raise RuntimeError("pure fallback replacement left an orphaned native extension")
+    _expect_native_import_failure(python)
     _expect_resolution_failure(python, "active Python environment")
     _run(wisp, "--help", env=_consumer_environment(environment))
     _verify_frontend_selection(python, native=False)
 
     _install(uv, python, native_wheel)
     _resolve_installed_binary(python, rust_tui)
+    extension = _verify_native_extension(python)
     _smoke(python, wisp, smoke_script, work_dir / "native-restored")
 
     original_mode = rust_tui.stat().st_mode
@@ -225,16 +287,17 @@ def verify(
     _resolve_installed_binary(python, rust_tui)
 
     _run(uv, "pip", "uninstall", "--python", python, "wisp-ai")
-    if wisp.exists() or rust_tui.exists():
-        raise RuntimeError("uninstall left an orphaned Wisp executable")
+    if wisp.exists() or rust_tui.exists() or extension.exists():
+        raise RuntimeError("uninstall left an orphaned Wisp native artifact")
 
     _install(uv, python, native_wheel, offline=True)
     _resolve_installed_binary(python, rust_tui)
+    extension = _verify_native_extension(python)
     _smoke(python, wisp, smoke_script, work_dir / "native-offline")
 
     _run(uv, "pip", "uninstall", "--python", python, "wisp-ai")
-    if wisp.exists() or rust_tui.exists():
-        raise RuntimeError("final uninstall left an orphaned Wisp executable")
+    if wisp.exists() or rust_tui.exists() or extension.exists():
+        raise RuntimeError("final uninstall left an orphaned Wisp native artifact")
 
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text(
@@ -243,6 +306,7 @@ def verify(
                 "wheel_bytes": native_wheel.stat().st_size,
                 "binary_bytes": initial_smoke.get("binary_bytes", 0),
                 "binary_startup_seconds": binary_startup_seconds,
+                "extension_bytes": extension_bytes,
                 **initial_smoke,
                 "long_history": long_history_smoke,
             },

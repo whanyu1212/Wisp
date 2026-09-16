@@ -13,7 +13,7 @@ decision under #456, not an inference from completed packaging or feature issues
 - `wisp`, `wisp tui`, and `wisp --mode tui` default to `auto`.
 - On macOS/Linux, an installed distribution declaring `wisp-tui` selects Rust. A pure wheel or
   source installation without that declaration selects Textual. No executable is discovered via PATH.
-- Native release targets are macOS arm64, macOS x86_64, and Linux glibc 2.28+ x86_64. Linux arm64,
+- Native release targets are macOS arm64 and Linux glibc 2.28+ x86_64. Intel macOS, Linux arm64,
   musl/Alpine, and Windows retain the Python route; Windows remains best-effort, not CI-certified.
 - Explicit CLI flags override `WISP_TUI_RENDERER`; the environment overrides `auto`.
   `--line` remains explicit. A development `WISP_RUST_TUI_BINARY` override selects Rust in auto mode
@@ -93,7 +93,7 @@ corrupt Rust failures, native restoration, offline reinstall, and uninstall. Uni
 cover a native distribution declaring a missing executable. Wheel metadata/content parity verification passed.
 The native wheel measured 5,703,473 bytes; its stripped binary measured 11,938,416 bytes.
 
-The PR's candidate-wheel CI supplies Linux x86_64 and macOS x86_64 evidence using the same script.
+The PR's candidate-wheel CI supplies Linux x86_64 evidence using the same script.
 Published PyPI installation and cross-version downgrade remain postpublication work.
 
 ## Publication and postpublication acceptance
@@ -101,7 +101,7 @@ Published PyPI installation and cross-version downgrade remain postpublication w
 After the release PR merges, publishing requires a separately authorized `v0.2.0rc2` tag through the
 existing release workflow. Do not manually upload partial artifacts or substitute source-build tests.
 
-- [ ] Verify exactly one sdist, one pure fallback wheel, and three native wheels were published.
+- [ ] Verify exactly one sdist, one pure fallback wheel, and two native wheels were published.
 - [ ] Verify checksums, SBOMs, provenance attestations, package/native versions, and protocol identity.
 - [ ] Install `wisp-ai==0.2.0rc2` from PyPI without Cargo on each claimed target; repeat default-launch,
   prompt, session resume, explicit Textual, and lifecycle checks outside the source checkout.

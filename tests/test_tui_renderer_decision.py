@@ -25,7 +25,7 @@ def test_architecture_records_rc2_trial_and_maintained_textual_fallback() -> Non
     for document in (_ARCHITECTURE, _ARCHITECTURE_INDEX):
         assert "maintained Python" in document
         assert "Pure/source installs" in document
-        assert "macOS arm64/x86_64 and Linux glibc 2.28+ x86_64" in document
+        assert "macOS arm64 and Linux glibc 2.28+ x86_64" in document
 
 
 def test_architecture_describes_a_frontend_over_the_python_runtime() -> None:

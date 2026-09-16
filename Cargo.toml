@@ -1,5 +1,10 @@
 [workspace]
-members = ["rust/wisp-process-text", "rust/wisp-protocol", "rust/wisp-tui"]
+members = [
+    "rust/wisp-process-text",
+    "rust/wisp-protocol",
+    "rust/wisp-python",
+    "rust/wisp-tui",
+]
 resolver = "2"
 
 [workspace.package]
@@ -22,6 +27,8 @@ clap = { version = "=4.5.32", features = ["derive"] }
 crossterm = "=0.28.1"
 nix = { version = "=0.29.0", features = ["process", "signal"] }
 pulldown-cmark = "=0.13.4"
+pyo3 = "=0.26.0"
+pyo3-build-config = "=0.26.0"
 ratatui = "=0.29.0"
 sha2 = "=0.10.9"
 similar = { version = "=3.2.0", default-features = false, features = ["text"] }

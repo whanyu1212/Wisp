@@ -99,11 +99,11 @@ A separate Rust workspace job runs the schema check, Rust formatting, check, Cli
 build, and cross-language handoff smoke test on both Linux and macOS.
 
 The reusable `Rust TUI wheel candidates` workflow builds `wisp-ai` platform wheels for manylinux
-x86_64 and macOS x86_64/arm64. It compares Python package files with the current `uv_build` wheel,
-verifies platform/native metadata and executable mode, and installs without Cargo on the consumer
-`PATH`. Each target exercises an installed fake-provider Rust TUI prompt, native/pure replacement,
-explicit Textual routing, corruption, offline reinstall, and uninstall; it uploads checksums, a
-CycloneDX SBOM, and observed size/startup/RSS evidence.
+x86_64 and macOS arm64. It compares Python package files with the current `uv_build` wheel, verifies
+the native extension and executable, and installs without Cargo on the consumer `PATH`. Each target
+exercises an installed fake-provider Rust TUI prompt, the managed-output extension, native/pure
+replacement, explicit Textual routing, corruption, offline reinstall, and uninstall; it uploads
+checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
 Pull requests and manual workflow runs only upload candidates. The tag-gated release workflow calls
 the same reusable builder, verifies the complete downloaded distribution set, and requires

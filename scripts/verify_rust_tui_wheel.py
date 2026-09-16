@@ -14,14 +14,14 @@ import zipfile
 from pathlib import Path
 
 _SCRIPT_SUFFIX = ".data/scripts/wisp-tui"
+_EXTENSION = "wisp/_native.abi3.so"
 _CARGO_PRERELEASE = re.compile(
     r"^(?P<release>\d+\.\d+\.\d+)-(?P<kind>alpha|beta|rc)\.(?P<number>\d+)$"
 )
 _CARGO_TO_PYTHON_PRERELEASE = {"alpha": "a", "beta": "b", "rc": "rc"}
 _NATIVE_RELEASE_TARGETS = {
-    "manylinux-x86-64": "py3-none-manylinux_2_28_x86_64",
-    "macos-x86-64": "py3-none-macosx_11_0_x86_64",
-    "macos-arm64": "py3-none-macosx_11_0_arm64",
+    "manylinux-x86-64": "cp312-abi3-manylinux_2_28_x86_64",
+    "macos-arm64": "cp312-abi3-macosx_11_0_arm64",
 }
 
 
@@ -41,14 +41,14 @@ def python_version(cargo_version: str) -> str:
     return f"{match['release']}{_CARGO_TO_PYTHON_PRERELEASE[match['kind']]}{match['number']}"
 
 
-def project_versions(root: Path) -> tuple[str, str, str]:
-    """Read the project, runtime, and Rust TUI versions from source files.
+def project_versions(root: Path) -> tuple[str, str, str, str]:
+    """Read the project, runtime, and native component versions from source.
 
     Args:
         root: Repository root.
 
     Returns:
-        Project, runtime, and normalized Rust TUI versions.
+        Project, runtime, normalized Rust TUI, and normalized Python extension versions.
 
     Raises:
         ValueError: If the runtime version declaration cannot be parsed.
@@ -56,6 +56,7 @@ def project_versions(root: Path) -> tuple[str, str, str]:
 
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     cargo = tomllib.loads((root / "rust/wisp-tui/Cargo.toml").read_text(encoding="utf-8"))
+    python_cargo = tomllib.loads((root / "rust/wisp-python/Cargo.toml").read_text(encoding="utf-8"))
     runtime_source = (root / "src/wisp/__init__.py").read_text(encoding="utf-8")
     runtime_match = re.search(r'^__version__ = "([^"]+)"$', runtime_source, re.MULTILINE)
     if runtime_match is None:
@@ -64,6 +65,7 @@ def project_versions(root: Path) -> tuple[str, str, str]:
         project["project"]["version"],
         runtime_match.group(1),
         python_version(cargo["package"]["version"]),
+        python_version(python_cargo["package"]["version"]),
     )
 
 
@@ -82,7 +84,7 @@ def cargo_version(root: Path) -> str:
 
 
 def verify_versions(root: Path) -> str:
-    """Require project, runtime, and Rust TUI versions to match exactly.
+    """Require project, runtime, and native component versions to match.
 
     Args:
         root: Repository root.
@@ -91,14 +93,15 @@ def verify_versions(root: Path) -> str:
         The shared Python package version.
 
     Raises:
-        ValueError: If the three versions differ.
+        ValueError: If any version differs.
     """
 
     versions = project_versions(root)
     if len(set(versions)) != 1:
         raise ValueError(
             "version mismatch: "
-            f"project={versions[0]!r}, runtime={versions[1]!r}, rust={versions[2]!r}"
+            f"project={versions[0]!r}, runtime={versions[1]!r}, "
+            f"rust_tui={versions[2]!r}, rust_python={versions[3]!r}"
         )
     return versions[0]
 
@@ -136,6 +139,8 @@ def verify_wheel(
             raise ValueError("packaged wisp-tui is not executable")
         if "wisp/__init__.py" not in names or "wisp/py.typed" not in names:
             raise ValueError("candidate wheel is missing the Python package or py.typed")
+        if names.count(_EXTENSION) != 1:
+            raise ValueError(f"candidate wheel must contain exactly one {_EXTENSION}")
         if reference_wheel is not None:
             with zipfile.ZipFile(reference_wheel) as reference:
                 reference_names = reference.namelist()
@@ -159,16 +164,17 @@ def verify_wheel(
                     for info in reference.infolist()
                     if info.filename.startswith("wisp/") and not info.is_dir()
                 }
-            if candidate_package != reference_package:
-                missing = sorted(reference_package - candidate_package)
-                extra = sorted(candidate_package - reference_package)
+            expected_candidate_package = reference_package | {_EXTENSION}
+            if candidate_package != expected_candidate_package:
+                missing = sorted(expected_candidate_package - candidate_package)
+                extra = sorted(candidate_package - expected_candidate_package)
                 raise ValueError(
                     f"candidate Python package differs from reference: missing={missing!r}, "
                     f"extra={extra!r}"
                 )
             with zipfile.ZipFile(reference_wheel) as reference:
                 changed = sorted(
-                    name for name in candidate_package if archive.read(name) != reference.read(name)
+                    name for name in reference_package if archive.read(name) != reference.read(name)
                 )
             if changed:
                 raise ValueError(
@@ -207,7 +213,8 @@ def verify_wheel(
         unexpected_native = [
             name
             for name in names
-            if name != script and name.lower().endswith((".so", ".dylib", ".dll", ".exe"))
+            if name not in {script, _EXTENSION}
+            and name.lower().endswith((".so", ".dylib", ".dll", ".exe"))
         ]
         if unexpected_native:
             raise ValueError(
@@ -248,6 +255,11 @@ def verify_release_set(distributions: Path, release_assets: Path, *, root: Path)
         verify_wheel(wheel, expected_tag=tag, root=root, reference_wheel=pure_wheel)
         _verify_checksum(release_assets / f"wisp-tui-{target}.sha256", wheel)
         _verify_sbom(release_assets / f"wisp-tui-{target}.cdx.json", cargo)
+        _verify_sbom(
+            release_assets / f"wisp-python-{target}.cdx.json",
+            cargo,
+            expected_name="wisp-python",
+        )
         _verify_install_evidence(
             release_assets / f"wisp-tui-{target}-install.json",
             wheel,
@@ -269,16 +281,16 @@ def _verify_checksum(manifest: Path, wheel: Path) -> None:
         raise ValueError(f"checksum mismatch for {wheel.name}")
 
 
-def _verify_sbom(path: Path, expected_version: str) -> None:
+def _verify_sbom(path: Path, expected_version: str, *, expected_name: str = "wisp-tui") -> None:
     document = json.loads(path.read_text(encoding="utf-8"))
     component = document.get("metadata", {}).get("component", {})
     if (
         document.get("bomFormat") != "CycloneDX"
         or document.get("specVersion") != "1.5"
-        or component.get("name") != "wisp-tui"
+        or component.get("name") != expected_name
         or component.get("version") != expected_version
     ):
-        raise ValueError(f"invalid Rust TUI SBOM: {path}")
+        raise ValueError(f"invalid native component SBOM: {path}")
 
 
 def _verify_install_evidence(path: Path, wheel: Path) -> None:
@@ -286,6 +298,7 @@ def _verify_install_evidence(path: Path, wheel: Path) -> None:
     required_positive = (
         "binary_bytes",
         "binary_startup_seconds",
+        "extension_bytes",
         "max_rss_bytes",
         "ready_frame_seconds",
         "total_seconds",
