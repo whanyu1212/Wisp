@@ -73,10 +73,10 @@ keeps the cursor's wrapped row visible. The frame
 collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
 mode, model, context, and the selected session on the right, as space permits.
-Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript
-shows a centered Wisp welcome with the installed package version, invites a prompt or `/` commands,
-and points at `/resume`, `/connect`, and `@` when there is room. It collapses to compact copy on
-short or narrow terminals.
+Live RPC and event-schema versions stay in Ctrl+G help. An empty transcript shows a centered startup
+logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
+`/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
+terminals.
 
 Assistant replies render Markdown during streaming and when loading session history: headings,
 emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
@@ -173,8 +173,8 @@ Rust pickers, help, context, skills/MCP, prompt history, and retained tool detai
 conversation. Output continues updating behind the popup; closing it preserves the draft and
 scroll intent. Keys and paste go to the focused popup, and its editor owns the cursor. Escape closes
 the popup (and cancels a device login when one is active). Existing Ctrl+C behavior remains: it
-closes theme, help, history, context, discovery, model and connection views, while session/tree/detail views
-retain the normal run-cancellation or idle-exit behavior.
+closes logo, theme, help, history, context, discovery, model and connection views, while
+session/tree/detail views retain the normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
 drawn before it can be activated. Popups are centered and capped at 100×28; at the minimum 30×8
@@ -213,12 +213,23 @@ cancels the preview without saving it. `Ctrl+T` switches between Paper and the l
 theme, including when starting from Dawn; it is ignored while the theme picker owns a preview.
 These are local presentation actions, never prompts or runtime configuration commands.
 
+Run `/logo` to preview and select Random, Classic WISP, Wisp Braille, Adal Blocks, Adal Braille, or
+Adal Mark Braille. You can also select one directly, such as `/logo wisp-braille` or
+`/logo adal-mark-braille`. Arrow, Page, Home, and End keys move through the
+picker; `Enter` applies the displayed logo, and `Escape` or `Ctrl+C` closes it. The choice updates an
+empty welcome screen immediately and applies to later new-session welcome screens. Random chooses
+one named logo once per process, so terminal redraws and resizes do not change it.
+Adal Blocks keeps its black-on-pink panel; the other Adal variants render as pink artwork over the
+terminal background.
+
 Both frontends share `~/.wisp/tui.json` (`theme` and `last_dark_theme`). Choosing a theme in Rust also
 sets the next Textual launch's preference, and vice versa. Rust preserves unrelated keys and writes
 atomically. Missing, unknown, or unusable preferences fall back to Vapor; unreadable, non-UTF-8,
 non-regular, or over-64-KiB documents are not overwritten. A save failure leaves the live selection
 active and reports a warning; critical approval/cancellation recovery notices retain priority.
 Presentation preferences never enter `settings.json`, RPC, or session history.
+Rust stores the startup-logo choice as `startup_logo` in this file; a missing or unknown value uses
+Random.
 
 Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
 The conversion starts with Textual's Rec.709 grayscale and minimally adjusts native foregrounds when
@@ -243,7 +254,7 @@ setting or persisted preference.
   It does not scroll the conversation behind the popup. The session tree requests its next page
   when wheeling past the last retained node.
 - Left-click a visible picker row to select it. **Clicks do not activate choices**: use `Enter` to
-  apply a model/theme, insert a file/skill reference, or navigate a session. Model selection remains
+  apply a model/theme/logo, insert a file/skill reference, or navigate a session. Model selection remains
   locked while an application is pending. In the file tree, select a directory and use `Enter` or
   `Right` to expand it.
 - A left click outside a popup dismisses it like `Escape`, including cancelling an active device
@@ -439,6 +450,7 @@ fullscreen steering and restoration keybindings.
 /build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run
 /theme [name]               preview or select a curated color theme
+/logo [name]                preview or select a startup logo
 /update [check|install]     check immediately or explicitly install an update
 /skills                     inspect loaded skills and discovery diagnostics
 /mcp                        show configured MCP servers and registered tools

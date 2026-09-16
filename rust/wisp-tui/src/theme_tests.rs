@@ -1,6 +1,7 @@
 //! Theme selection never owns runtime state; persistence is tested in isolated homes.
 
 use super::*;
+use crate::startup_logo::LogoChoice;
 use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
@@ -211,6 +212,62 @@ fn preferences_round_trip_dark_history_and_preserve_unrelated_fields() {
         fs::metadata(home.path()).unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn startup_logo_round_trips_without_changing_theme_or_unowned_values() {
+    let home = TestHome::new();
+    let store = home.store();
+    assert_eq!(store.load_logo().name(), "random");
+    home.write(
+        br#"{"theme":"wisp-wave","last_dark_theme":"wisp-wave","unrelated":{"large":18446744073709551617}}"#,
+    );
+    let choice = LogoChoice::resolve("adal-mark-braille").unwrap();
+    store.save_logo(choice).unwrap();
+    assert_eq!(store.load_logo().name(), "adal-mark-braille");
+    assert_eq!(store.load().active.slug, "wave");
+    assert_eq!(store.load().last_dark.slug, "wave");
+    assert!(
+        fs::read_to_string(home.path())
+            .unwrap()
+            .contains("18446744073709551617")
+    );
+
+    let mut theme = store.load();
+    theme.select(theme::resolve("paper").unwrap());
+    store.save(theme).unwrap();
+    assert_eq!(store.load_logo().name(), "adal-mark-braille");
+    assert_eq!(store.load().active.slug, "paper");
+    assert_eq!(
+        fs::read_dir(home.path().parent().unwrap()).unwrap().count(),
+        1,
+        "no staged file remains"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(home.path()).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn invalid_logo_choices_default_to_random_and_unreadable_preferences_are_preserved() {
+    let home = TestHome::new();
+    for contents in [
+        br#"{"startup_logo":"unknown"}"#.as_slice(),
+        br#"{"startup_logo":42}"#,
+        br#"{"startup_logo":null}"#,
+        br#"{bad json"#,
+    ] {
+        home.write(contents);
+        assert_eq!(home.store().load_logo().name(), "random");
+    }
+    for contents in [vec![0xff, 0xfe], vec![b' '; 70 * 1024]] {
+        home.write(&contents);
+        assert_eq!(home.store().load_logo().name(), "random");
+        assert!(home.store().save_logo(LogoChoice::Random).is_err());
+        assert_eq!(fs::read(home.path()).unwrap(), contents);
+    }
 }
 
 #[test]
@@ -701,4 +758,42 @@ async fn recoloring_during_streaming_preserves_semantic_caches_and_monochrome_is
     .unwrap();
     assert!(text(&draw(&mut ui, 80, 24)).contains("stream continues"));
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn logo_command_applies_immediately_and_persists_without_rpc() {
+    let home = TestHome::new();
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui(&home);
+    ui.editor.insert_paste("/logo adal-mark-braille");
+
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+
+    assert_eq!(ui.logo_choice, LogoChoice::AdalMarkBraille);
+    assert_eq!(ui.startup_logo, LogoChoice::AdalMarkBraille);
+    assert_eq!(home.store().load_logo(), LogoChoice::AdalMarkBraille);
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Startup logo: Adal Mark Braille")
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn random_logo_is_resolved_once_and_redraws_do_not_change_it() {
+    let home = TestHome::new();
+    let mut ui = ui(&home);
+    ui.apply_logo_choice(LogoChoice::Random);
+    let resolved = ui.startup_logo;
+
+    draw(&mut ui, 80, 24);
+    draw(&mut ui, 42, 14);
+    ui.apply_logo_choice(LogoChoice::Random);
+
+    assert_eq!(ui.logo_choice, LogoChoice::Random);
+    assert_eq!(ui.startup_logo, resolved);
+    assert_ne!(resolved, LogoChoice::Random);
+    assert_eq!(home.store().load_logo(), LogoChoice::Random);
 }

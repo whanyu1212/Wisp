@@ -1,6 +1,9 @@
 //! Bounded, presentation-only state compatible with Textual's ~/.wisp/tui.json.
 
-use crate::theme::{self, Theme};
+use crate::{
+    startup_logo::LogoChoice,
+    theme::{self, Theme},
+};
 use serde_json::value::{RawValue, to_raw_value};
 use std::{
     collections::BTreeMap,
@@ -86,6 +89,18 @@ impl ThemePreferences {
         ThemeSelection { active, last_dark }
     }
 
+    pub fn load_logo(&self) -> LogoChoice {
+        self.read_document()
+            .ok()
+            .and_then(|document| {
+                document
+                    .get("startup_logo")
+                    .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            })
+            .and_then(|name| LogoChoice::resolve(&name))
+            .unwrap_or(LogoChoice::Random)
+    }
+
     /// Missing or malformed JSON is repairable, but unreadable/non-UTF-8/oversized
     /// documents are never replaced: their unrelated preferences are unknown.
     /// Unowned values stay raw so Python-sized integers and decimal precision
@@ -121,6 +136,16 @@ impl ThemePreferences {
             "last_dark_theme".into(),
             to_raw_value(&selection.last_dark.name)?,
         );
+        self.write_document(&document)
+    }
+
+    pub fn save_logo(&self, choice: LogoChoice) -> io::Result<()> {
+        let mut document = self.read_document()?;
+        document.insert("startup_logo".into(), to_raw_value(choice.name())?);
+        self.write_document(&document)
+    }
+
+    fn write_document(&self, document: &BTreeMap<String, Box<RawValue>>) -> io::Result<()> {
         let mut bytes = serde_json::to_vec_pretty(&document)?;
         bytes.push(b'\n');
         if bytes.len() > MAX_PREFERENCE_BYTES {

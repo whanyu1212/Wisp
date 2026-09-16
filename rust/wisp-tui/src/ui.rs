@@ -5,6 +5,7 @@ use crate::mouse;
 use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::prompt_highlighting::{self, Highlight, Kind as PromptHighlightKind};
 use crate::reducer::{UiState, ViewStatus};
+use crate::startup_logo::{self, LogoChoice};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
 use crate::tool_cards::{ProcessDisplayState, ToolStatus};
@@ -31,14 +32,7 @@ const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
 pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.";
 const EMPTY_TRANSCRIPT_TAGLINE: &str = "A coding agent that stays in sync";
-const EMPTY_TRANSCRIPT_WORDMARK: [&str; 5] = [
-    "█   █  ███  ████  ████",
-    "█   █   █   █     █  █",
-    "█ █ █   █   ████  ████",
-    "██ ██   █      █  █   ",
-    "█   █  ███  ████  █   ",
-];
-const EMPTY_TRANSCRIPT_FULL_WIDTH: usize = 40;
+const EMPTY_TRANSCRIPT_PANEL_WIDTH: usize = 40;
 const PINNED_USER_ROWS: usize = 4;
 const PARKED_DECISION_HEIGHT: u16 = 5;
 const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
@@ -234,6 +228,7 @@ pub fn render(
         0,
         Palette::default(),
         &Bindings::default(),
+        LogoChoice::AdalBlocks,
     );
 }
 
@@ -253,6 +248,7 @@ pub fn render_interactive(
     activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
+    startup_logo: LogoChoice,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -327,6 +323,7 @@ pub fn render_interactive(
         activity_frame,
         palette,
         bindings,
+        startup_logo,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -531,6 +528,7 @@ fn render_transcript(
     activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
+    startup_logo: LogoChoice,
 ) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -660,6 +658,7 @@ fn render_transcript(
             visible_lines,
             content_width,
             bindings,
+            startup_logo,
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
@@ -1880,6 +1879,7 @@ fn empty_transcript_lines(
     height: usize,
     width: usize,
     bindings: &Bindings,
+    startup_logo: LogoChoice,
 ) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
     if state.context.loading() {
@@ -1915,35 +1915,7 @@ fn empty_transcript_lines(
         )
     };
 
-    if width >= EMPTY_TRANSCRIPT_FULL_WIDTH {
-        let mut panel = EMPTY_TRANSCRIPT_WORDMARK
-            .iter()
-            .map(|row| {
-                centered_welcome_line(
-                    Line::styled(
-                        *row,
-                        Style::default()
-                            .fg(palette.primary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    width,
-                )
-            })
-            .collect::<Vec<_>>();
-        panel.push(Line::default());
-        panel.push(version_line());
-        panel.push(centered_welcome_line(
-            Line::styled(
-                EMPTY_TRANSCRIPT_TAGLINE,
-                Style::default().fg(palette.foreground),
-            ),
-            width,
-        ));
-        panel.push(centered_welcome_line(
-            Line::styled(EMPTY_TRANSCRIPT_HINT, muted),
-            width,
-        ));
-
+    if width >= EMPTY_TRANSCRIPT_PANEL_WIDTH {
         let submit = primary_label(bindings, KeyAction::Submit);
         let mut actions = vec![("Ask Wisp anything", submit.as_str())];
         if state.provider.is_none() {
@@ -1954,10 +1926,54 @@ fn empty_transcript_lines(
             ("Browse commands", "/"),
             ("Mention a project file", "@"),
         ]);
+        let copy_height = 4;
+        let action_height = actions.len() + 1;
+        // The separator after the logo can be omitted at the exact-fit boundary.
+        let action_logo_height = height
+            .saturating_add(1)
+            .saturating_sub(copy_height + action_height);
+        let mut panel = startup_logo::preview_lines(
+            startup_logo,
+            u16::try_from(width).unwrap_or(u16::MAX),
+            u16::try_from(action_logo_height).unwrap_or(u16::MAX),
+            palette,
+            palette.is_monochrome(),
+        );
+        if panel.is_empty() {
+            panel = startup_logo::preview_lines(
+                startup_logo,
+                u16::try_from(width).unwrap_or(u16::MAX),
+                u16::try_from(height.saturating_sub(copy_height)).unwrap_or(u16::MAX),
+                palette,
+                palette.is_monochrome(),
+            );
+        }
+        let mark_height = panel.len();
+        panel.push(Line::default());
+        panel.push(version_line());
+        panel.push(centered_welcome_line(
+            Line::styled(
+                EMPTY_TRANSCRIPT_TAGLINE,
+                Style::default().fg(palette.foreground),
+            ),
+            width,
+        ));
+        panel.push(centered_welcome_line(
+            Line::styled(
+                if state.provider.is_none() {
+                    "/connect to add a provider"
+                } else {
+                    EMPTY_TRANSCRIPT_HINT
+                },
+                muted,
+            ),
+            width,
+        ));
+
         let mut full_height = panel.len().saturating_add(1).saturating_add(actions.len());
         if height + 1 == full_height {
             // Give the new composer padding its row without hiding connection guidance.
-            panel.remove(EMPTY_TRANSCRIPT_WORDMARK.len());
+            panel.remove(mark_height);
             full_height -= 1;
         }
         if height >= full_height {
@@ -2604,6 +2620,7 @@ mod tests {
                     0,
                     Palette::default(),
                     bindings,
+                    LogoChoice::AdalBlocks,
                 );
             })
             .unwrap();
@@ -2638,6 +2655,7 @@ mod tests {
                     activity_frame,
                     Palette::default(),
                     &Bindings::default(),
+                    LogoChoice::AdalBlocks,
                 );
             })
             .unwrap();
@@ -2720,6 +2738,43 @@ mod tests {
     }
 
     #[test]
+    fn empty_welcome_renders_selected_logo_with_its_color_treatment() {
+        let state = UiState::new("fake".into(), Some("model-x".into()), None);
+        let bindings = Bindings::default();
+        for logo in LogoChoice::ALL {
+            let lines = empty_transcript_lines(
+                &state,
+                &connection(),
+                Palette::default(),
+                35,
+                80,
+                &bindings,
+                logo,
+            );
+            assert!(lines.len() <= 35, "{}", logo.name());
+            assert!(lines.iter().all(|line| line.width() <= 80));
+        }
+
+        let monochrome = crate::theme::default_theme().palette(true);
+        let lines = empty_transcript_lines(
+            &state,
+            &connection(),
+            monochrome,
+            14,
+            80,
+            &bindings,
+            LogoChoice::AdalBlocks,
+        );
+        let mark = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.style.bg == Some(monochrome.primary))
+            .expect("monochrome mark row");
+        assert_eq!(mark.style.fg, Some(monochrome.background));
+        assert_eq!(mark.style.bg, Some(monochrome.primary));
+    }
+
+    #[test]
     fn welcome_copy_fits_supported_transcript_sizes() {
         for configured in [true, false] {
             let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
@@ -2735,10 +2790,65 @@ mod tests {
                         height,
                         width,
                         &Bindings::default(),
+                        LogoChoice::AdalBlocks,
                     );
                     assert!(lines.len() <= height);
                     assert!(lines.iter().all(|line| line.width() <= width));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn welcome_actions_survive_responsive_logo_size_transitions() {
+        let bindings = Bindings::default();
+        for logo in LogoChoice::ALL {
+            let configured = UiState::new("fake".into(), Some("model-x".into()), None);
+            for height in 13..=35 {
+                let text = empty_transcript_lines(
+                    &configured,
+                    &connection(),
+                    Palette::default(),
+                    height,
+                    80,
+                    &bindings,
+                    logo,
+                )
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<String>();
+                assert!(
+                    text.contains("Ask Wisp anything"),
+                    "{} at {height}",
+                    logo.name()
+                );
+                assert!(
+                    text.contains("Resume a session"),
+                    "{} at {height}",
+                    logo.name()
+                );
+            }
+
+            let mut disconnected = configured;
+            disconnected.provider = None;
+            for height in 14..=35 {
+                let text = empty_transcript_lines(
+                    &disconnected,
+                    &connection(),
+                    Palette::default(),
+                    height,
+                    80,
+                    &bindings,
+                    logo,
+                )
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<String>();
+                assert!(
+                    text.contains("Connect a provider"),
+                    "{} at {height}",
+                    logo.name()
+                );
             }
         }
     }
@@ -3500,6 +3610,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
+                    LogoChoice::AdalBlocks,
                 );
             })
             .unwrap();
@@ -3545,6 +3656,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
+                    LogoChoice::AdalBlocks,
                 );
             })
             .unwrap();
@@ -3941,6 +4053,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
+                    LogoChoice::AdalBlocks,
                 );
             })
             .unwrap();
@@ -3995,6 +4108,7 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
+                    LogoChoice::AdalBlocks,
                 );
                 let area = overlay_area(frame.area()).unwrap();
                 clear_overlay(frame, area, Palette::default());
@@ -4445,6 +4559,7 @@ mod tests {
                         tick,
                         palette,
                         &Bindings::default(),
+                        LogoChoice::AdalBlocks,
                     );
                 })
                 .unwrap();

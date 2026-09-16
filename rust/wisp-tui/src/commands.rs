@@ -3,6 +3,7 @@
 use crate::model_picker::{self, ModelCommand};
 use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
+use crate::startup_logo::LogoChoice;
 use crate::theme::{self, Palette};
 use ratatui::{
     Frame,
@@ -13,6 +14,7 @@ use ratatui::{
 };
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::OnceLock;
 use wisp_protocol::{
     commands::AgentMode,
     events::{CommandDescriptor, SkillCatalogEntry, SkillCatalogSnapshot},
@@ -24,6 +26,7 @@ pub(crate) enum Command {
     History,
     UpdateGuidance,
     Theme(Option<&'static theme::Theme>),
+    Logo(Option<LogoChoice>),
     Mode(AgentMode),
     Context,
     Skills,
@@ -45,6 +48,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "history" => "/history",
         "update" => "/update [check|install]",
         "theme" => "/theme [name]",
+        "logo" => "/logo [name]",
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
@@ -132,6 +136,16 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
             },
             _ => Command::Invalid("Usage: /theme [name]".into()),
         },
+        "logo" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] => Command::Logo(None),
+            [name] => match LogoChoice::resolve(name) {
+                Some(choice) => Command::Logo(Some(choice)),
+                None => Command::Invalid(
+                    "Unknown startup logo. Use /logo to browse available logos.".into(),
+                ),
+            },
+            _ => Command::Invalid("Usage: /logo [name]".into()),
+        },
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
         "permissions" => match tail.trim() {
@@ -199,8 +213,19 @@ pub(crate) struct CompletionView<'a> {
     pub selected: usize,
 }
 
-/// Backend discovery keeps runtime commands authoritative; the generated local
-/// theme descriptor is available even if backend discovery fails.
+fn logo_command() -> &'static CommandDescriptor {
+    static COMMAND: OnceLock<CommandDescriptor> = OnceLock::new();
+    COMMAND.get_or_init(|| CommandDescriptor {
+        name: "logo".into(),
+        description: "Preview or choose a startup logo".into(),
+        slash_command: "/logo".into(),
+        slash_aliases: Vec::new(),
+        order: theme::command().order + 1,
+    })
+}
+
+/// Backend discovery keeps runtime commands authoritative; generated local
+/// descriptors remain available when backend discovery omits them.
 fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDescriptor> {
     let mut commands: Vec<_> = catalog
         .unwrap_or_default()
@@ -212,6 +237,13 @@ fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDes
         .position(|command| command.order > theme::command().order)
         .unwrap_or(commands.len());
     commands.insert(position, theme::command());
+    if !commands.iter().any(|command| command.name == "logo") {
+        let position = commands
+            .iter()
+            .position(|command| command.order > logo_command().order)
+            .unwrap_or(commands.len());
+        commands.insert(position, logo_command());
+    }
     commands
 }
 
@@ -701,10 +733,37 @@ pub(crate) mod tests {
         ));
         for name in [
             "help", "plan", "build", "model", "provider", "connect", "resume", "new", "name",
-            "clone", "tree", "unrevert",
+            "clone", "tree", "unrevert", "logo",
         ] {
             assert!(classify(&format!("/{name}"), None).is_some());
         }
+    }
+
+    #[test]
+    fn logo_command_opens_the_picker_or_resolves_a_named_choice() {
+        assert!(matches!(classify("/logo", None), Some(Command::Logo(None))));
+        for name in [
+            "random",
+            "classic",
+            "adal-blocks",
+            "adal-braille",
+            "adal-mark-braille",
+            "wisp-braille",
+        ] {
+            assert!(
+                matches!(classify(&format!("/logo {name}"), None), Some(Command::Logo(Some(choice))) if choice.name() == name),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            classify("/logo unknown", None),
+            Some(Command::Invalid(message))
+                if message == "Unknown startup logo. Use /logo to browse available logos."
+        ));
+        assert!(matches!(
+            classify("/logo classic extra", None),
+            Some(Command::Invalid(message)) if message == "Usage: /logo [name]"
+        ));
     }
 
     #[test]
@@ -756,6 +815,8 @@ pub(crate) mod tests {
         assert!(text.contains("/mcp"));
         assert!(text.contains("/history"));
         assert!(text.contains("/update"));
+        assert!(text.contains("/logo [name]"));
+        assert!(text.contains("Preview or choose a startup logo"));
         assert!(text.contains("Aliases: /exit, :q"));
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
@@ -770,8 +831,9 @@ pub(crate) mod tests {
                 .any(|item| item.spelling() == "/update")
         );
         let local = completion.view(None, None).unwrap();
-        assert_eq!(local.items.len(), 1);
-        assert_eq!(local.items[0].spelling(), "/theme");
+        assert_eq!(local.items.len(), 2);
+        assert!(local.items.iter().any(|item| item.spelling() == "/theme"));
+        assert!(local.items.iter().any(|item| item.spelling() == "/logo"));
 
         let without_init = catalog
             .iter()
@@ -792,5 +854,27 @@ pub(crate) mod tests {
                 .iter()
                 .all(|item| item.spelling() != "/init")
         );
+    }
+
+    #[test]
+    fn backend_logo_descriptor_takes_precedence_over_local_metadata() {
+        let mut catalog = catalog();
+        catalog.push(CommandDescriptor {
+            name: "logo".into(),
+            description: "Backend logo description".into(),
+            slash_command: "/logo".into(),
+            slash_aliases: vec!["/mark".into()],
+            order: 2,
+        });
+        let logos = command_descriptors(Some(&catalog))
+            .into_iter()
+            .filter(|command| command.name == "logo")
+            .collect::<Vec<_>>();
+        assert_eq!(logos.len(), 1);
+        assert_eq!(logos[0].description, "Backend logo description");
+        assert!(matches!(
+            classify("/mark", Some(&catalog)),
+            Some(Command::Logo(None))
+        ));
     }
 }

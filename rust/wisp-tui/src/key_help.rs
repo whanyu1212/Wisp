@@ -98,6 +98,10 @@ impl KeyHelp {
                 "Themes: Up/Down/Page/Home/End preview; Enter applies.",
                 "Esc/Ctrl+C restores the committed theme; theme toggle is ignored during preview.",
             ],
+            Owner::Overlay(OverlayKind::Logo) => &[
+                "Startup logos: Up/Down/Page/Home/End preview; Enter applies.",
+                "Esc/Ctrl+C restores the committed logo choice.",
+            ],
             Owner::Overlay(OverlayKind::PromptHistory) => &[
                 "History: type to search; Up/Down/Page/Home/End select.",
                 "Enter restores without submitting; Esc/Ctrl+C closes.",
