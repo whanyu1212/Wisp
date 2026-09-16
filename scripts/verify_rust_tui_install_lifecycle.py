@@ -28,10 +28,13 @@ def _scripts(environment: Path) -> tuple[Path, Path, Path]:
 
 
 def _consumer_environment(environment: Path) -> dict[str, str]:
-    return {
+    consumer = {
         **os.environ,
         "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
     }
+    consumer.pop("WISP_TUI_RENDERER", None)
+    consumer.pop("WISP_RUST_TUI_BINARY", None)
+    return consumer
 
 
 def _install(uv: Path, python: Path, wheel: Path, *, offline: bool = False) -> None:
@@ -56,7 +59,7 @@ def _resolve_installed_binary(python: Path, expected: Path) -> None:
         "-c",
         "from wisp.tui.rust_launcher import resolve_rust_tui_binary; "
         "print(resolve_rust_tui_binary())",
-        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
     )
     if Path(completed.stdout.strip()).resolve() != expected.resolve():
         raise RuntimeError(f"launcher resolved unexpected Rust TUI: {completed.stdout!r}")
@@ -72,7 +75,7 @@ def _expect_resolution_failure(python: Path, message: str) -> None:
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
     )
     if completed.returncode == 0 or message not in completed.stderr:
         raise RuntimeError(
@@ -100,9 +103,7 @@ for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "textual
     expected = "textual" if "--renderer" in arguments else sys.argv[1]
     assert selected["renderer"].value == expected, (arguments, selected)
 """
-    environment = {**os.environ, "PATH": "/usr/bin:/bin"}
-    environment.pop("WISP_TUI_RENDERER", None)
-    environment.pop("WISP_RUST_TUI_BINARY", None)
+    environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
     _run(python, "-c", script, "rust" if native else "textual", env=environment)
 
 
