@@ -363,6 +363,38 @@ newline-heavy output, long lines, mixed line endings, and invalid UTF-8:
 uv run python -m benchmarks.process_output --sizes 1048576 --track-memory
 ```
 
+## Built-in Tools
+
+Measure deterministic read, directory listing, find, and grep workloads through both the public
+`tool.run` interface and `ConfiguredToolExecutor`:
+
+```bash
+uv run python -m benchmarks.builtin_tools
+uv run python -m benchmarks.builtin_tools \
+  --file-counts 1000,5000 --file-bytes 4096 --iterations 3 \
+  --output profiles/builtin-tools.json
+```
+
+Fixture construction and one warmup call per path happen outside the measured interval. The read
+cases compare a first page with a page near end-of-file; `ls` and `find` retain sorted prefixes;
+grep covers both a full-tree literal miss and a result-capped regular expression. All files live in
+a temporary directory. Every direct result is checked against the fixture; executor samples also
+reject tool errors and unexpected truncation before they are reported.
+
+The executor layer includes registry lookup, policy, approval bypass for pre-approved read tools,
+result copying, normalization, promotion, summary generation, and construction of the terminal
+event. It deliberately stops before session persistence, RPC serialization, or rendering, which
+already have separate benchmarks. To isolate tool work, use `--tool-only`.
+
+Normal timing runs leave `tracemalloc` disabled. Run allocation evidence separately:
+
+```bash
+uv run python -m benchmarks.builtin_tools --file-counts 1000 --iterations 1 --track-memory
+```
+
+The current cross-layer measurements and Python/Rust ownership decision are recorded in
+`benchmarks/tool_boundary_evidence.md`.
+
 ## Context Estimation
 
 Measure the complete transcript scans performed by context estimation and fingerprinting:
