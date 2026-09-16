@@ -1,7 +1,3 @@
----
-title: Staying in sync
----
-
 # Staying in sync
 
 Wisp keeps control and evidence in the same loop as the work. A live client can redirect an active
@@ -87,8 +83,9 @@ recovery from an interrupted process without silently rewriting earlier history.
 [Sessions](./sessions) for persistence behavior and [Architecture](../architecture/) for the event
 contract's place in the runtime.
 
-::: tip Where this is enforced
-Steering, follow-up queues, and cooperative cancellation live in `AgentHarness`, one layer below
-persistence and one above the provider-neutral loop. `CodingSession` adds durability and policy;
-frontends expose the subset of controls their transport can accept.
-:::
+> [!TIP]
+> **Where this is enforced**
+>
+> Steering, follow-up queues, and cooperative cancellation live in `AgentHarness`, one layer below
+> persistence and one above the provider-neutral loop. `CodingSession` adds durability and policy;
+> frontends expose the subset of controls their transport can accept.

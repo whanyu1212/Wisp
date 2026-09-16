@@ -1,7 +1,3 @@
----
-title: Reference
----
-
 # Reference
 
 Exact surfaces — flags, fields, schemas. Narrative explanation lives in the
@@ -15,7 +11,8 @@ Exact surfaces — flags, fields, schemas. Narrative explanation lives in the
 - [Configuration](./configuration) — settings files and precedence.
 - [Environment variables](./environment) — every `WISP_*` variable.
 
-::: warning Keep in sync with code
-These pages describe versioned surfaces. When a command, flag, environment variable, or settings
-field changes, update the corresponding page in the same change.
-:::
+> [!WARNING]
+> **Keep in sync with code**
+>
+> These pages describe versioned surfaces. When a command, flag, environment variable, or settings
+> field changes, update the corresponding page in the same change.

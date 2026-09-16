@@ -12,6 +12,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 ## Unreleased
 
+- Replaced the VitePress documentation site with an mdBook, preserving the published guide,
+  reference, architecture, and contributor routes while removing the Node and TypeScript toolchain.
+
 ## 0.2.0rc2 — release preparation
 
 RC2 trials Rust as the default on native-wheel installations. Publication is a separate step.

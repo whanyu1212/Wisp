@@ -1,7 +1,3 @@
----
-title: Rust terminal frontend boundary
----
-
 # Rust terminal frontend boundary
 
 | Field | Decision |

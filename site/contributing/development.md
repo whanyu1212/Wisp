@@ -1,7 +1,3 @@
----
-title: Development setup
----
-
 # Development setup
 
 Wisp targets Python 3.12 or newer and uses `uv` for its locked development environment. Clone the
@@ -82,9 +78,26 @@ cargo test --workspace --all-features
 
 ## Working on these docs
 
+Install the same documentation tools used in CI:
+
 ```bash
-npm install
-npm run docs:dev       # local dev server with hot reload
-npm run docs:build     # production build; fails on dead internal links
-npm run docs:preview   # serve the built output
+cargo install mdbook --version 0.5.4 --locked
+cargo install mdbook-mermaid --version 0.17.1 --locked
+```
+
+Build or serve the book from the repository root:
+
+```bash
+mdbook build
+mdbook serve --open
+```
+
+The source lives in `site/`, and `site/SUMMARY.md` controls chapter order. CI also checks links in the
+rendered `book/` directory.
+
+Mermaid's browser assets are generated vendor files. After upgrading the pinned plugin, refresh them
+instead of editing them:
+
+```bash
+mdbook-mermaid install .
 ```

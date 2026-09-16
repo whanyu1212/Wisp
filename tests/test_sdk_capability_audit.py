@@ -72,10 +72,10 @@ def test_audit_is_linked_from_sdk_reference_navigation() -> None:
     reference_index = (_REPOSITORY_ROOT / "site" / "reference" / "index.md").read_text(
         encoding="utf-8"
     )
-    vitepress = (_REPOSITORY_ROOT / "site" / ".vitepress" / "config.ts").read_text(encoding="utf-8")
+    summary = (_REPOSITORY_ROOT / "site" / "SUMMARY.md").read_text(encoding="utf-8")
     changelog = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert "[SDK capability audit](../reference/sdk-capability-audit)" in guide
     assert "[SDK capability audit](./sdk-capability-audit)" in reference_index
-    assert "{ text: 'SDK capability audit', link: '/reference/sdk-capability-audit' }" in vitepress
+    assert "[SDK capability audit](reference/sdk-capability-audit.md)" in summary
     assert f"capability audit pinned to Pi SDK {_PI_RELEASE}" in changelog

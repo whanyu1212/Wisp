@@ -1,7 +1,3 @@
----
-title: Sessions
----
-
 # Sessions
 
 Wisp persists each run as a JSONL session and can continue an existing one:
@@ -71,13 +67,14 @@ The Rust TUI also supports `/name <display name>` and `/name --clear`. Textual a
 not currently expose these direct session commands; they remain available through the typed RPC and
 SDK surfaces.
 
-::: warning Unreleased Python API change
-The deprecated `wisp.agent.messages.SessionEntry(...)` factory has been removed. Import
-`MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` and
-construct the appropriate model directly. For event entries, wrap the raw event dictionary in
-`PersistedEventEnvelope(payload=...)`, also exported by `wisp.sessions`.
-
-Existing session files need no migration. See the
-[early-removal exception](../reference/compatibility#deprecation-and-removal) for the compatibility
-policy that applies to this cleanup.
-:::
+> [!WARNING]
+> **Unreleased Python API change**
+>
+> The deprecated `wisp.agent.messages.SessionEntry(...)` factory has been removed. Import
+> `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` and
+> construct the appropriate model directly. For event entries, wrap the raw event dictionary in
+> `PersistedEventEnvelope(payload=...)`, also exported by `wisp.sessions`.
+>
+> Existing session files need no migration. See the
+> [early-removal exception](../reference/compatibility#deprecation-and-removal) for the compatibility
+> policy that applies to this cleanup.

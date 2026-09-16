@@ -1,7 +1,3 @@
----
-title: Introduction
----
-
 # Introduction
 
 Wisp is a coding agent that **stays in sync with you**. Its fullscreen TUI, RPC, and SDK surfaces

@@ -1,7 +1,3 @@
----
-title: Python SDK
----
-
 # Python SDK reference
 
 The Python SDK is part of the `wisp-ai` distribution and carries a `py.typed` marker. It requires

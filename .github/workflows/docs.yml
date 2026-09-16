@@ -6,16 +6,20 @@ on:
       - main
     paths:
       - "site/**"
-      - "package.json"
-      - "package-lock.json"
+      - "book.toml"
+      - "mermaid-init.js"
+      - "mermaid.min.js"
+      - "theme/**"
       - ".github/workflows/docs.yml"
   pull_request:
     branches:
       - main
     paths:
       - "site/**"
-      - "package.json"
-      - "package-lock.json"
+      - "book.toml"
+      - "mermaid-init.js"
+      - "mermaid.min.js"
+      - "theme/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -28,9 +32,14 @@ concurrency:
   group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_MERMAID_VERSION: "0.17.1"
+  LYCHEE_VERSION: "0.24.2"
+
 jobs:
   build:
-    name: Build site
+    name: Build book
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -38,23 +47,30 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - name: Install documentation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" |
+            tar -xz -C "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" |
+            tar -xz -C "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" |
+            tar -xz -C "$HOME/.cargo/bin" --strip-components=1 \
+              lychee-x86_64-unknown-linux-gnu/lychee
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Build book
+        run: mdbook build
 
-      - name: Build
-        run: npm run docs:build
+      - name: Check rendered links
+        run: lychee --offline --no-progress --fallback-extensions html --exclude-path 'book/404.html' book
 
       - name: Upload artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site/.vitepress/dist
+          path: book
 
   deploy:
     name: Deploy to GitHub Pages

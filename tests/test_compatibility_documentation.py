@@ -142,10 +142,10 @@ def test_compatibility_reference_is_linked_from_sdk_and_navigation() -> None:
         encoding="utf-8"
     )
     sessions = (_REPOSITORY_ROOT / "site" / "guide" / "sessions.md").read_text(encoding="utf-8")
-    vitepress = (_REPOSITORY_ROOT / "site" / ".vitepress" / "config.ts").read_text(encoding="utf-8")
+    summary = (_REPOSITORY_ROOT / "site" / "SUMMARY.md").read_text(encoding="utf-8")
 
     assert "[Compatibility & versioning](./compatibility)" in sdk
     assert "being documented separately as part of" not in sdk
     assert "[Compatibility & versioning](./compatibility)" in reference_index
     assert "[Compatibility & versioning](../reference/compatibility)" in sessions
-    assert "{ text: 'Compatibility & versioning', link: '/reference/compatibility' }" in vitepress
+    assert "[Compatibility and versioning](reference/compatibility.md)" in summary

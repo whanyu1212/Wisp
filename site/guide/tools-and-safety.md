@@ -1,7 +1,3 @@
----
-title: Tools & safety
----
-
 # Tools & safety
 
 Wisp includes built-in local tools for reading files, editing files, searching projects, and running
@@ -122,11 +118,12 @@ duplicate names, collisions, or limit violations expose none of that server's to
 Run `/mcp` in the TUI to inspect configured server status, registered tool names, and sanitized
 startup failures. The command reads the current runtime snapshot and does not reconnect servers.
 
-::: tip Why 16 servers
-Every stdio server is a separate local process, so startup time and memory use grow with the number
-and implementation of the configured servers. Wisp may revisit this limit when it can avoid eagerly
-starting every local server, rather than raising it without a lifecycle or lazy-start solution.
-:::
+> [!TIP]
+> **Why 16 servers**
+>
+> Every stdio server is a separate local process, so startup time and memory use grow with the number
+> and implementation of the configured servers. Wisp may revisit this limit when it can avoid eagerly
+> starting every local server, rather than raising it without a lifecycle or lazy-start solution.
 
 Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
 Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, custom HTTP authentication, OAuth, and

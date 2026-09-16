@@ -47,8 +47,9 @@ dist/
 # Rust
 /target/
 
-# Local code index
+# Local code index and agent worktrees
 .codegraph/
+/.agents/worktrees/
 
 # Read-only reference clones for design study (not part of the project)
 reference-apps/
@@ -63,7 +64,5 @@ docs/*
 # Local Claude instructions (shared agent guidance lives in tracked AGENTS.md)
 /CLAUDE.md
 
-# VitePress docs site (source lives in site/ and IS tracked; build output is not)
-node_modules/
-site/.vitepress/dist/
-site/.vitepress/cache/
+# mdBook output (source lives in site/ and IS tracked)
+/book/

@@ -1,7 +1,3 @@
----
-title: Context & compaction
----
-
 # Context & compaction
 
 Each turn sends an ordered system-instruction stack before the user prompt: Wisp's core coding

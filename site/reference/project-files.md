@@ -1,7 +1,3 @@
----
-title: Project file discovery
----
-
 # Project file discovery
 
 `get_project_files` returns one fresh, bounded `rpc.project_files` report between

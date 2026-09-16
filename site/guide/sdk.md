@@ -1,7 +1,3 @@
----
-title: Python SDK
----
-
 # Python SDK
 
 Use the Python SDK when an asyncio application should own Wisp in its process and consume the same

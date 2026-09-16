@@ -1,7 +1,3 @@
----
-title: Agent Skills
----
-
 # Agent Skills
 
 Wisp discovers metadata from directories that follow the
