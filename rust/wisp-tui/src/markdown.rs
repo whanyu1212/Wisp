@@ -47,6 +47,9 @@ pub enum InlineStyle {
     ListMarker,
     TableBorder,
     ToolName,
+    ToolCommand,
+    ToolPath,
+    ToolArgument,
     ToolStatus,
 }
 

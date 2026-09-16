@@ -17,8 +17,11 @@ const MAX_PENDING_DETAIL_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_DISPLAY_ENTRIES: usize = 32;
 const MAX_LOCAL_DISPLAY_BYTES: usize = 4 * 1024 * 1024;
 const THINKING_MAX_BYTES: usize = 64 * 1024;
+#[cfg(test)]
 const LIVE_TRANSCRIPT_ENTRY_LIMIT: usize = 1_200;
+#[cfg(test)]
 const LIVE_TRANSCRIPT_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(test)]
 const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries omitted]";
 
 use crate::tool_cards::{
@@ -149,6 +152,7 @@ impl TranscriptEntry {
         }
     }
 
+    #[cfg(test)]
     fn retained_bytes(&self) -> usize {
         let kind_bytes = match &self.kind {
             TranscriptEntryKind::Message => 0,
@@ -228,6 +232,7 @@ pub struct Transcript {
     resolved_call_order: VecDeque<String>,
     call_index_bytes: usize,
     process_entries: HashMap<String, TranscriptEntryId>,
+    history_projection_processes: Option<HashMap<String, TranscriptEntryId>>,
     process_order: VecDeque<String>,
     process_index_bytes: usize,
     pending_detail_sources: HashMap<TranscriptEntryId, usize>,
@@ -876,11 +881,20 @@ impl Transcript {
         }
         self.call_entries.insert(call_id, binding);
         self.evict_resolved_tool_bindings();
-        debug_assert!(self.call_entries.len() <= MAX_CALL_INDEX_ENTRIES);
-        debug_assert!(self.call_index_bytes <= MAX_CALL_INDEX_BYTES);
+        debug_assert!(
+            self.history_projection_processes.is_some()
+                || self.call_entries.len() <= MAX_CALL_INDEX_ENTRIES
+        );
+        debug_assert!(
+            self.history_projection_processes.is_some()
+                || self.call_index_bytes <= MAX_CALL_INDEX_BYTES
+        );
     }
 
     fn prepare_unresolved_tool_binding(&mut self, call_id: &str) -> bool {
+        if self.history_projection_processes.is_some() {
+            return true;
+        }
         while self.call_entries.len().saturating_add(1) > MAX_CALL_INDEX_ENTRIES
             || self.call_index_bytes.saturating_add(call_id.len()) > MAX_CALL_INDEX_BYTES
         {
@@ -904,12 +918,18 @@ impl Transcript {
     }
 
     fn touch_resolved_tool_binding(&mut self, call_id: &str) {
+        if self.history_projection_processes.is_some() {
+            return;
+        }
         self.resolved_call_order
             .retain(|candidate| candidate != call_id);
         self.resolved_call_order.push_back(call_id.to_owned());
     }
 
     fn evict_resolved_tool_bindings(&mut self) {
+        if self.history_projection_processes.is_some() {
+            return;
+        }
         while self.call_entries.len() > MAX_CALL_INDEX_ENTRIES
             || self.call_index_bytes > MAX_CALL_INDEX_BYTES
         {
@@ -942,6 +962,33 @@ impl Transcript {
     }
 
     fn process_entry_for(&mut self, process_id: &str) -> Option<TranscriptEntryId> {
+        if let Some(processes) = &self.history_projection_processes {
+            let entry_id = if let Some(entry_id) = processes.get(process_id) {
+                *entry_id
+            } else {
+                if identity_for_display(process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES {
+                    return None;
+                }
+                let entry_id = self.push_card(TranscriptEntryKind::Process(
+                    ProcessCardSnapshot::new(process_id.to_owned()),
+                ));
+                self.history_projection_processes
+                    .as_mut()
+                    .expect("history projection is active")
+                    .insert(process_id.to_owned(), entry_id);
+                entry_id
+            };
+            // Only this bounded recency queue survives projection; all historical cards
+            // remain addressable in the temporary map regardless of their last activity.
+            self.process_order
+                .retain(|candidate| candidate != process_id);
+            self.process_order.push_back(process_id.to_owned());
+            if self.process_order.len() > MAX_PROCESS_INDEX_ENTRIES {
+                self.process_order.pop_front();
+            }
+            return Some(entry_id);
+        }
+
         if let Some(entry_id) = self.process_entries.get(process_id).copied() {
             self.process_order
                 .retain(|candidate| candidate != process_id);
@@ -1025,6 +1072,64 @@ impl Transcript {
         entry_id
     }
 
+    /// Keep all historical processes addressable while projecting the saved transcript.
+    pub(crate) fn begin_history_projection(&mut self) {
+        debug_assert!(self.entries.is_empty());
+        self.history_projection_processes = Some(HashMap::new());
+    }
+
+    /// Release the temporary history index and restore bounded live process tracking.
+    pub(crate) fn finish_history_projection(&mut self, missing_result: &str) {
+        // Record only calls still missing results, once. Keeping/removing a growing
+        // per-process Vec on every call would make large parallel histories quadratic.
+        let mut unresolved = self
+            .call_entries
+            .iter()
+            .filter(|(_, binding)| !binding.resolved)
+            .map(|(call_id, binding)| (call_id.clone(), *binding))
+            .collect::<Vec<_>>();
+        unresolved.sort_unstable_by_key(|(_, binding)| binding.sequence);
+        for (call_id, binding) in unresolved {
+            self.entry_mut(binding.entry_id)
+                .history_calls
+                .push(HistoricalCall {
+                    call_id,
+                    kind: binding.kind,
+                    sequence: binding.sequence,
+                });
+        }
+        self.settle_unresolved_tools(missing_result);
+        self.complete_history_entries();
+        // All bindings are now resolved. Prune directly from the ordered queue rather
+        // than repeatedly scanning an unbounded queue through live-cache eviction.
+        while self.call_entries.len() > MAX_CALL_INDEX_ENTRIES
+            || self.call_index_bytes > MAX_CALL_INDEX_BYTES
+        {
+            let call_id = self
+                .resolved_call_order
+                .pop_front()
+                .expect("all historical calls are resolved");
+            if self.call_entries.remove(&call_id).is_some() {
+                self.call_index_bytes = self.call_index_bytes.saturating_sub(call_id.len());
+            }
+        }
+        let processes = self
+            .history_projection_processes
+            .take()
+            .expect("history projection is active");
+        // Seed live tracking by recent activity, not a card's first position in history.
+        for process_id in self.process_order.iter().rev() {
+            if self.process_index_bytes.saturating_add(process_id.len()) > MAX_PROCESS_INDEX_BYTES {
+                continue;
+            }
+            self.process_index_bytes += process_id.len();
+            self.process_entries
+                .insert(process_id.clone(), processes[process_id]);
+        }
+        self.process_order
+            .retain(|process_id| self.process_entries.contains_key(process_id));
+    }
+
     pub(crate) fn mark_history_entries(&mut self, start: usize, durable_entry_id: &str) {
         let group = self.next_history_group;
         self.next_history_group = self
@@ -1046,17 +1151,15 @@ impl Transcript {
         }
     }
 
+    /// Add origins while projecting unique persisted messages in chronological order.
+    /// Repeated additions for one message are adjacent, including multi-call messages.
     pub(crate) fn add_history_origin(
         &mut self,
         entry_id: TranscriptEntryId,
         durable_entry_id: &str,
     ) {
         let entry = self.entry_mut(entry_id);
-        if !entry
-            .durable_entry_ids
-            .iter()
-            .any(|id| id == durable_entry_id)
-        {
+        if entry.durable_entry_ids.last().map(String::as_str) != Some(durable_entry_id) {
             entry.durable_entry_ids.push(durable_entry_id.to_owned());
         }
     }
@@ -1192,6 +1295,7 @@ impl Transcript {
         self.insert_history_page(page, index)
     }
 
+    #[cfg(test)]
     pub(crate) fn enforce_live_retention(
         &mut self,
         protected_entry: Option<TranscriptEntryId>,
@@ -1268,6 +1372,7 @@ impl Transcript {
         true
     }
 
+    #[cfg(test)]
     fn live_retained_entry_count(&self) -> usize {
         self.entries
             .iter()
@@ -1276,6 +1381,7 @@ impl Transcript {
             .sum()
     }
 
+    #[cfg(test)]
     fn live_retained_bytes(&self) -> usize {
         self.entries
             .iter()
@@ -1476,7 +1582,8 @@ impl Transcript {
     }
 
     fn coalesce_historical_process_cards(&mut self, inserted_ids: &HashSet<TranscriptEntryId>) {
-        // ponytail: O(n²) is bounded by 1,200 retained rows; add an index if that limit grows.
+        // Only window/recovery insertions reconcile cards here. Full hydration projects
+        // chronological source messages once, without merging page transcripts.
         loop {
             let mut process_entries = HashMap::<String, usize>::new();
             let duplicate = self.entries.iter().enumerate().find_map(|(index, entry)| {
@@ -1656,6 +1763,7 @@ impl Transcript {
         self.retain_historical_entries_in_order(limit, evict_newest, &durable_entry_order)
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_historical_entries_in_order(
         &mut self,
         limit: usize,
@@ -3468,6 +3576,58 @@ mod tests {
         assert!(conflict.detail.contains("correlation is ambiguous"));
         assert!(!conflict.preview().contains("late duplicate"));
         assert!(!conflict.preview().contains("second lifecycle"));
+    }
+
+    #[test]
+    fn full_history_correlates_calls_beyond_live_limits_and_restores_live_bounds() {
+        const CALLS: usize = 1_100;
+        for process in [false, true] {
+            let name = if process { "bash" } else { "read" };
+            let arguments = if process {
+                serde_json::json!({"operation": "poll", "process_id": "historical-process"})
+            } else {
+                serde_json::json!({"path": "file.txt"})
+            };
+            let mut messages = (0..CALLS).map(|index| serde_json::json!({
+                "entry_id": format!("call-entry-{index}"), "role": "assistant",
+                "content": "", "content_truncated": false,
+                "tool_calls": [{"call_id": format!("call-{index}"), "name": name, "arguments": arguments}],
+            })).collect::<Vec<_>>();
+            // Missing results must not consume the live concurrency budget. The process
+            // case also exercises a large fan-out followed by all persisted results.
+            for index in if process { 0..CALLS } else { CALLS - 1..CALLS } {
+                messages.push(serde_json::json!({
+                    "entry_id": format!("result-entry-{index}"), "role": "tool",
+                    "content": if process { "Process historical-process completed with exit code 0\nstdout:\ndone" } else { "done" },
+                    "content_truncated": false, "tool_call_id": format!("call-{index}"),
+                    "tool_name": name, "tool_result": {"status": "done"},
+                }));
+            }
+            let projected = crate::history::project_chronological_history(messages.iter()).unwrap();
+            let transcript = projected.transcript;
+            assert_eq!(transcript.entries().len(), if process { 1 } else { CALLS });
+            if process {
+                let card = transcript.entries()[0].process_card().unwrap();
+                assert_eq!(card.call_count, CALLS as u32);
+                assert_eq!(
+                    card.display_state,
+                    crate::tool_cards::ProcessDisplayState::Completed
+                );
+                assert!(transcript.entries()[0].history_calls.is_empty());
+            } else {
+                assert_eq!(
+                    transcript.entries()[CALLS - 1].tool_card().unwrap().status,
+                    ToolStatus::Done
+                );
+                assert_eq!(transcript.entries()[0].history_calls.len(), 1);
+            }
+            assert!(transcript.history_projection_processes.is_none());
+            assert!(transcript.call_entries.len() <= MAX_CALL_INDEX_ENTRIES);
+            assert!(transcript.call_index_bytes <= MAX_CALL_INDEX_BYTES);
+            assert!(transcript.process_entries.len() <= MAX_PROCESS_INDEX_ENTRIES);
+            assert!(transcript.process_index_bytes <= MAX_PROCESS_INDEX_BYTES);
+            assert!(!transcript.has_unresolved_tool_calls());
+        }
     }
 
     #[test]

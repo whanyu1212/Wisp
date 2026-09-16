@@ -25,7 +25,8 @@ const MARKDOWN_CACHE_MAX_ENTRIES: usize = 128;
 const MARKDOWN_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const CARD_CACHE_MAX_ENTRIES: usize = 128;
 const CARD_CACHE_MAX_BYTES: usize = 1024 * 1024;
-const ENTRY_PRESENTATION_MAX_BYTES: usize = 64 * 1024;
+const MARKDOWN_SOURCE_MAX_BYTES: usize = 64 * 1024;
+#[cfg(test)]
 const ENTRY_PRESENTATION_CHUNK_BYTES: usize = 4 * 1024;
 const OVERSCAN_ROWS: usize = 8;
 const TOOL_CARD_MARKER: &str = "● ";
@@ -33,7 +34,6 @@ const TOOL_CARD_MARKER: &str = "● ";
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RowPosition {
     Header,
-    Omission,
     Thought,
     ThoughtContent(usize),
     Content(usize),
@@ -72,7 +72,6 @@ pub enum TranscriptRowKind {
     Header,
     Content,
     Placeholder,
-    Omission,
     Thought,
     CardAction,
     CardGroup,
@@ -156,9 +155,7 @@ impl TranscriptRow {
 
 fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
     match kind {
-        TranscriptRowKind::Placeholder
-        | TranscriptRowKind::Omission
-        | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
+        TranscriptRowKind::Placeholder | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
         TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
@@ -252,9 +249,9 @@ impl FoldState {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RowKey {
+    markdown: bool,
     entry_id: TranscriptEntryId,
     layout_epoch: u64,
-    presentation_start: usize,
     width: usize,
     position: RowPosition,
     fold_generation: u64,
@@ -285,6 +282,8 @@ struct CardDetailTone {
 struct CardProjection {
     action: String,
     action_label_end: usize,
+    action_argument_start: usize,
+    action_argument_style: crate::markdown::InlineStyle,
     detail: String,
     detail_base: usize,
     detail_tones: Vec<CardDetailTone>,
@@ -321,7 +320,6 @@ impl CardProjection {
 struct MarkdownKey {
     entry_id: TranscriptEntryId,
     layout_epoch: u64,
-    presentation_start: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -572,7 +570,7 @@ struct MarkdownCacheEntry {
 pub struct TranscriptRowCache {
     rows: HashMap<RowKey, CachedRow>,
     predecessors: HashMap<RowKey, RowAnchor>,
-    furthest_content: HashMap<(TranscriptEntryId, u64, usize, usize), RowAnchor>,
+    furthest_content: HashMap<(TranscriptEntryId, u64, bool, usize), RowAnchor>,
     insertion_order: VecDeque<RowKey>,
     retained_bytes: usize,
     markdown: HashMap<MarkdownKey, MarkdownCacheEntry>,
@@ -599,7 +597,7 @@ impl TranscriptRowCache {
         RowKey {
             entry_id: entry.id,
             layout_epoch: entry.layout_epoch(),
-            presentation_start: presentation_start(entry),
+            markdown: uses_markdown(entry),
             width: width.max(1),
             position,
             fold_generation: self.fold.generation(),
@@ -624,9 +622,7 @@ impl TranscriptRowCache {
     ) -> Option<CachedRow> {
         let entry = transcript.entry(anchor.entry_id)?;
         let key = self.row_key(entry, width, anchor.position);
-        let markdown_snapshot = (entry.role == TranscriptRole::Assistant
-            && !entry.content.is_empty())
-        .then(|| self.markdown_snapshot(entry, width));
+        let markdown_snapshot = uses_markdown(entry).then(|| self.markdown_snapshot(entry, width));
         if let Some(cached) = self.rows.get(&key).cloned() {
             if cached_row_valid(
                 transcript,
@@ -710,30 +706,14 @@ impl TranscriptRowCache {
             {
                 self.build_thought_content_row(transcript, entry, anchor, start, width)
             }
-            RowPosition::Omission if presentation_start(entry) > 0 => {
-                let omitted = presentation_start(entry);
-                ProjectedRow {
-                    row: TranscriptRow::plain(
-                        anchor,
-                        entry.role,
-                        TranscriptRowKind::Omission,
-                        format!("… {omitted} earlier bytes omitted …"),
-                        omitted,
-                    ),
-                    next: Some(RowAnchor {
-                        entry_id: entry.id,
-                        position: self.position_for_offset(entry, content_start(entry), width),
-                    }),
-                }
-            }
             RowPosition::Content(start)
-                if entry.role != TranscriptRole::Assistant
+                if !uses_markdown(entry)
                     && start <= entry.display_content().len()
                     && entry.display_content().is_char_boundary(start) =>
             {
                 self.build_content_row(transcript, entry, anchor, start, width)
             }
-            RowPosition::Markdown(position) if entry.role == TranscriptRole::Assistant => {
+            RowPosition::Markdown(position) if uses_markdown(entry) => {
                 self.build_markdown_row(transcript, entry, anchor, position.output_offset, width)
             }
             RowPosition::Card(position) if entry.role == TranscriptRole::Tool => self
@@ -772,7 +752,7 @@ impl TranscriptRowCache {
         offset: usize,
         width: usize,
     ) -> RowPosition {
-        if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
+        if uses_markdown(entry) {
             RowPosition::Markdown(self.markdown_snapshot(entry, width).position_at(offset))
         } else {
             RowPosition::Content(offset)
@@ -782,19 +762,13 @@ impl TranscriptRowCache {
     fn after_header_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
         if !entry.thinking().is_empty() {
             RowPosition::Thought
-        } else if presentation_start(entry) > 0 {
-            RowPosition::Omission
         } else {
-            self.position_for_offset(entry, content_start(entry), width)
+            self.position_for_offset(entry, 0, width)
         }
     }
 
     fn after_thought_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
-        if presentation_start(entry) > 0 {
-            RowPosition::Omission
-        } else {
-            self.position_for_offset(entry, content_start(entry), width)
-        }
+        self.position_for_offset(entry, 0, width)
     }
 
     fn build_thought_row(
@@ -827,7 +801,6 @@ impl TranscriptRowCache {
             .filter(|_| {
                 !entry.content.is_empty()
                     || entry.state != TranscriptEntryState::Complete
-                    || presentation_start(entry) > 0
                     || separator_after(transcript, entry).is_some()
             })
             .or_else(|| separator_after(transcript, entry))
@@ -1111,6 +1084,8 @@ impl TranscriptRowCache {
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
                     projection.action_label_end,
+                    projection.action_argument_start,
+                    projection.action_argument_style,
                     next,
                 ))
             }
@@ -1142,6 +1117,8 @@ impl TranscriptRowCache {
                     TranscriptRowKind::CardDetail,
                     tone,
                     0,
+                    usize::MAX,
+                    crate::markdown::InlineStyle::Normal,
                     next,
                 ))
             }
@@ -1169,6 +1146,8 @@ impl TranscriptRowCache {
                     TranscriptRowKind::CardOmission,
                     TranscriptRowTone::Warning,
                     0,
+                    usize::MAX,
+                    crate::markdown::InlineStyle::Normal,
                     next,
                 ))
             }
@@ -1189,6 +1168,8 @@ impl TranscriptRowCache {
         kind: TranscriptRowKind,
         tone: TranscriptRowTone,
         label_end: usize,
+        argument_start: usize,
+        argument_style: crate::markdown::InlineStyle,
         after_section: Option<RowAnchor>,
     ) -> ProjectedRow {
         let relative_start = absolute_start.saturating_sub(base_offset).min(source.len());
@@ -1231,6 +1212,8 @@ impl TranscriptRowCache {
                     crate::markdown::InlineStyle::ToolStatus
                 } else if relative < label_end {
                     crate::markdown::InlineStyle::ToolName
+                } else if relative >= argument_start {
+                    argument_style
                 } else {
                     crate::markdown::InlineStyle::Normal
                 };
@@ -1300,11 +1283,10 @@ impl TranscriptRowCache {
         entry: &TranscriptEntry,
         width: usize,
     ) -> Arc<MarkdownSnapshot> {
-        let start = presentation_start(entry);
+        let start = 0;
         let key = MarkdownKey {
             entry_id: entry.id,
             layout_epoch: entry.layout_epoch(),
-            presentation_start: start,
         };
         if let Some(cached) = self.markdown.get(&key) {
             if cached.entry_revision == Some(entry.revision()) && cached.layout_width == Some(width)
@@ -1711,16 +1693,8 @@ impl TranscriptRowCache {
             RowPosition::ThoughtContent(_) => {
                 self.thought_anchor_before(transcript, entry, anchor, width)
             }
-            RowPosition::Omission => Some(RowAnchor {
-                entry_id: entry.id,
-                position: if entry.thinking().is_empty() {
-                    RowPosition::Header
-                } else {
-                    RowPosition::Thought
-                },
-            }),
             RowPosition::Content(offset) => {
-                let start = content_start(entry);
+                let start = 0;
                 if offset <= start {
                     return Some(self.before_body_anchor(transcript, entry, width));
                 }
@@ -1753,19 +1727,21 @@ impl TranscriptRowCache {
         target: usize,
         width: usize,
     ) -> Option<RowAnchor> {
-        let presentation_start = presentation_start(entry);
-        let content_start = content_start(entry);
+        let content_start = 0;
         let width = width.max(1);
         let target_position = self.position_for_offset(entry, target, width);
         let target_key = self.row_key(entry, width, target_position);
         if let Some(previous) = self.predecessors.get(&target_key).copied() {
             return Some(previous);
         }
-        let furthest_key = (entry.id, entry.layout_epoch(), presentation_start, width);
+        let furthest_key = (entry.id, entry.layout_epoch(), uses_markdown(entry), width);
         let candidate_start = self
             .furthest_content
             .get(&furthest_key)
             .and_then(|anchor| {
+                if matches!(anchor.position, RowPosition::Markdown(_)) != uses_markdown(entry) {
+                    return None;
+                }
                 let offset = row_position_offset(anchor.position)?;
                 (content_start..target).contains(&offset).then_some(offset)
             })
@@ -1830,11 +1806,7 @@ impl TranscriptRowCache {
         if entry.thinking().is_empty() {
             return RowAnchor {
                 entry_id: entry.id,
-                position: if presentation_start(entry) > 0 {
-                    RowPosition::Omission
-                } else {
-                    RowPosition::Header
-                },
+                position: RowPosition::Header,
             };
         }
         if !self.fold.is_expanded(entry.id) {
@@ -1915,14 +1887,13 @@ impl TranscriptRowCache {
                 current = next;
             }
         }
-        let (target, ends_with_break) =
-            if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
-                let snapshot = self.markdown_snapshot(entry, width);
-                (snapshot.output_len, snapshot.ends_with_line_break())
-            } else {
-                let content = entry.display_content();
-                (content.len(), ends_with_line_break(content))
-            };
+        let (target, ends_with_break) = if uses_markdown(entry) {
+            let snapshot = self.markdown_snapshot(entry, width);
+            (snapshot.output_len, snapshot.ends_with_line_break())
+        } else {
+            let content = entry.display_content();
+            (content.len(), ends_with_line_break(content))
+        };
         if target == 0 || ends_with_break {
             return RowAnchor {
                 entry_id: entry.id,
@@ -1932,11 +1903,7 @@ impl TranscriptRowCache {
         self.content_anchor_before(transcript, entry, target, width)
             .unwrap_or(RowAnchor {
                 entry_id: entry.id,
-                position: if presentation_start(entry) > 0 {
-                    RowPosition::Omission
-                } else {
-                    self.position_for_offset(entry, content_start(entry), width)
-                },
+                position: self.position_for_offset(entry, 0, width),
             })
     }
 
@@ -1949,12 +1916,7 @@ impl TranscriptRowCache {
             .retained_bytes
             .saturating_add(value.row.retained_bytes());
         if let Some(offset) = row_position_offset(value.row.anchor.position) {
-            let furthest_key = (
-                key.entry_id,
-                key.layout_epoch,
-                key.presentation_start,
-                key.width,
-            );
+            let furthest_key = (key.entry_id, key.layout_epoch, key.markdown, key.width);
             let should_replace = self
                 .furthest_content
                 .get(&furthest_key)
@@ -2044,27 +2006,48 @@ impl TranscriptRowCache {
                 self.predecessors.remove(&predecessor_key);
             }
         }
-        let furthest_key = (
-            key.entry_id,
-            key.layout_epoch,
-            key.presentation_start,
-            key.width,
-        );
+        let furthest_key = (key.entry_id, key.layout_epoch, key.markdown, key.width);
         if self.furthest_content.get(&furthest_key) == Some(&cached.row.anchor) {
             self.furthest_content.remove(&furthest_key);
         }
     }
 }
 
+fn tool_action_projection(
+    card: &crate::tool_cards::ToolCardSnapshot,
+) -> (String, usize, usize, crate::markdown::InlineStyle) {
+    let label_end = TOOL_CARD_MARKER.len() + card.action_label().len();
+    let argument_start = if card.arguments_available && !card.action_arguments.is_empty() {
+        label_end.saturating_add(2)
+    } else {
+        usize::MAX
+    };
+    let argument_style = match card.name.as_str() {
+        "bash" => crate::markdown::InlineStyle::ToolCommand,
+        "read" | "ls" | "edit" | "write" => crate::markdown::InlineStyle::ToolPath,
+        _ => crate::markdown::InlineStyle::ToolArgument,
+    };
+    (
+        format!("{TOOL_CARD_MARKER}{}", card.action()),
+        label_end,
+        argument_start,
+        argument_style,
+    )
+}
+
 fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
+            let (action, action_label_end, action_argument_start, action_argument_style) =
+                tool_action_projection(card);
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let (preview, detail_tones) = structured_card_preview(detail);
                 return Some(CardProjection {
-                    action: format!("{TOOL_CARD_MARKER}{}", card.action()),
-                    action_label_end: TOOL_CARD_MARKER.len() + card.action_label().len(),
+                    action,
+                    action_label_end,
+                    action_argument_start,
+                    action_argument_style,
                     detail: preview,
                     detail_base: 0,
                     detail_tones,
@@ -2098,8 +2081,10 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .saturating_sub(shown_output_bytes);
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
             Some(CardProjection {
-                action: format!("{TOOL_CARD_MARKER}{}", card.action()),
-                action_label_end: TOOL_CARD_MARKER.len() + card.action_label().len(),
+                action,
+                action_label_end,
+                action_argument_start,
+                action_argument_style,
                 detail,
                 detail_base: if tail_preview {
                     usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
@@ -2122,6 +2107,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             Some(CardProjection {
                 action: format!("{TOOL_CARD_MARKER}{}", card.action()),
                 action_label_end: TOOL_CARD_MARKER.len() + card.action_label().len(),
+                action_argument_start: usize::MAX,
+                action_argument_style: crate::markdown::InlineStyle::Normal,
                 detail: preview.text,
                 detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
                 detail_tones: Vec::new(),
@@ -2855,7 +2842,7 @@ fn scroll_anchor_rank(
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
         RowPosition::Spacer => 1.0,
-        RowPosition::Omission | RowPosition::Thought => 0.025,
+        RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
         }
@@ -2887,7 +2874,7 @@ fn cached_row_valid(
     markdown: Option<&MarkdownSnapshot>,
 ) -> bool {
     if cached.row.kind == TranscriptRowKind::Content
-        && entry.role == TranscriptRole::Assistant
+        && uses_markdown(entry)
         && markdown.is_none_or(|snapshot| {
             cached.markdown_presentation_identity != Some(snapshot.presentation_identity)
         })
@@ -2906,11 +2893,7 @@ fn cached_row_valid(
     match cached.row.kind {
         TranscriptRowKind::Header if entry.role == TranscriptRole::Assistant => false,
         TranscriptRowKind::Header => {
-            let expected = if presentation_start(entry) > 0 {
-                RowPosition::Omission
-            } else {
-                RowPosition::Content(content_start(entry))
-            };
+            let expected = RowPosition::Content(0);
             cached
                 .next
                 .is_some_and(|next| next.entry_id == entry.id && next.position == expected)
@@ -2922,7 +2905,7 @@ fn cached_row_valid(
                     position: RowPosition::Header,
                 })
         }
-        TranscriptRowKind::Content if entry.role == TranscriptRole::Assistant => {
+        TranscriptRowKind::Content if uses_markdown(entry) => {
             let Some(snapshot) = markdown else {
                 return false;
             };
@@ -2955,7 +2938,6 @@ fn cached_row_valid(
         | TranscriptRowKind::CardDetail
         | TranscriptRowKind::CardOmission
         | TranscriptRowKind::Placeholder
-        | TranscriptRowKind::Omission
         | TranscriptRowKind::Thought => false,
     }
 }
@@ -2997,7 +2979,7 @@ fn normalize_anchor(
 ) -> Option<RowAnchor> {
     let entry = transcript.entry(anchor.entry_id)?;
     match anchor.position {
-        RowPosition::Markdown(position) if entry.role == TranscriptRole::Assistant => {
+        RowPosition::Markdown(position) if uses_markdown(entry) => {
             let snapshot = cache.markdown_snapshot(entry, width);
             let output = match normalization {
                 AnchorNormalization::Geometry if !snapshot.document.has_tables() => {
@@ -3015,11 +2997,20 @@ fn normalize_anchor(
             }
             cache.content_anchor_before(transcript, entry, snapshot.next_boundary(output), width)
         }
+        RowPosition::Markdown(position) => normalize_anchor(
+            transcript,
+            cache,
+            RowAnchor {
+                entry_id: anchor.entry_id,
+                position: RowPosition::Content(position.source_offset),
+            },
+            width,
+            normalization,
+        ),
         RowPosition::Content(offset) => {
             let content = entry.display_content();
-            let presentation_start = presentation_start(entry);
-            let mut clamped = offset.clamp(presentation_start, content.len());
-            while clamped > presentation_start && !content.is_char_boundary(clamped) {
+            let mut clamped = offset.min(content.len());
+            while clamped > 0 && !content.is_char_boundary(clamped) {
                 clamped -= 1;
             }
             let target = content[clamped..]
@@ -3105,33 +3096,17 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         RowPosition::Content(offset) => Some(offset),
         RowPosition::Markdown(position) => Some(position.output_offset),
         RowPosition::ThoughtContent(offset) => Some(offset),
-        RowPosition::Header
-        | RowPosition::Omission
-        | RowPosition::Thought
-        | RowPosition::Card(_)
-        | RowPosition::Spacer => None,
+        RowPosition::Header | RowPosition::Thought | RowPosition::Card(_) | RowPosition::Spacer => {
+            None
+        }
     }
 }
 
-fn content_start(entry: &TranscriptEntry) -> usize {
-    if entry.role == TranscriptRole::Assistant && !entry.content.is_empty() {
-        0
-    } else {
-        presentation_start(entry)
-    }
-}
-
-fn presentation_start(entry: &TranscriptEntry) -> usize {
-    let content = entry.display_content();
-    if content.len() <= ENTRY_PRESENTATION_MAX_BYTES {
-        return 0;
-    }
-    let overflow = content.len() - ENTRY_PRESENTATION_MAX_BYTES;
-    let mut start = overflow - (overflow % ENTRY_PRESENTATION_CHUNK_BYTES);
-    while start < content.len() && !content.is_char_boundary(start) {
-        start += 1;
-    }
-    start
+/// Large messages stay fully readable as plain text without building an oversized Markdown tree.
+fn uses_markdown(entry: &TranscriptEntry) -> bool {
+    entry.role == TranscriptRole::Assistant
+        && !entry.content.is_empty()
+        && entry.content.len() <= MARKDOWN_SOURCE_MAX_BYTES
 }
 
 fn push_styled_span(
@@ -3383,6 +3358,7 @@ mod tests {
             let mut cache = TranscriptRowCache::default();
             let mut offset = 0;
             let mut covered = 0;
+            let mut styles = Vec::new();
             loop {
                 let projected = cache.build_card_text_row(
                     entry,
@@ -3401,9 +3377,12 @@ mod tests {
                     TranscriptRowKind::CardAction,
                     TranscriptRowTone::Success,
                     "● Read".len(),
+                    "● Read  ".len(),
+                    crate::markdown::InlineStyle::ToolPath,
                     None,
                 );
                 for span in &projected.row.spans {
+                    styles.push(span.style.inline);
                     assert_eq!(span.affinity.source_offset, covered);
                     assert!(span.affinity.source_end > span.affinity.source_offset);
                     covered = span.affinity.source_end;
@@ -3424,6 +3403,10 @@ mod tests {
                 offset = next.absolute_byte_offset;
             }
             assert_eq!(covered, source.len());
+            assert!(styles.contains(&crate::markdown::InlineStyle::ToolStatus));
+            assert!(styles.contains(&crate::markdown::InlineStyle::ToolName));
+            assert!(styles.contains(&crate::markdown::InlineStyle::Normal));
+            assert!(styles.contains(&crate::markdown::InlineStyle::ToolPath));
         }
     }
 
@@ -4742,11 +4725,11 @@ mod tests {
     }
 
     #[test]
-    fn crossing_the_presentation_limit_invalidates_the_cached_header_link() {
+    fn large_messages_switch_to_complete_plain_text_without_an_omission() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());
         let assistant = transcript.start_message(1);
-        transcript.append_message_delta(1, &"x".repeat(ENTRY_PRESENTATION_MAX_BYTES - 1));
+        transcript.append_message_delta(1, &"x".repeat(MARKDOWN_SOURCE_MAX_BYTES - 1));
         let mut cache = TranscriptRowCache::default();
         let header = RowAnchor {
             entry_id: assistant,
@@ -4768,10 +4751,42 @@ mod tests {
         assert!(matches!(
             cache.row_at(&transcript, header, 80).unwrap().next,
             Some(RowAnchor {
-                position: RowPosition::Omission,
+                position: RowPosition::Content(0),
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn scrolled_markdown_anchor_survives_switch_to_full_plain_text() {
+        let mut transcript = Transcript::default();
+        let assistant = transcript.start_message(1);
+        transcript.append_message_delta(1, &"**界 heading**\n".repeat(1_000));
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 8);
+        viewport.reduce(TranscriptViewAction::PageUp, &transcript, &mut cache);
+        let old = viewport.top.unwrap();
+        assert!(matches!(old.position, RowPosition::Markdown(_)));
+        transcript.append_message_delta(1, &"界 tail\n".repeat(10_000));
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+        assert!(!viewport.follows_tail());
+        let anchor = viewport.top.unwrap();
+        assert_eq!(anchor.entry_id, assistant);
+        assert!(matches!(anchor.position, RowPosition::Content(_)));
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().any(|row| row.plain_text().contains("界")));
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            rows.iter()
+                .any(|row| row.plain_text().contains("**界 heading**"))
+        );
     }
 
     #[test]
@@ -5064,7 +5079,6 @@ mod tests {
         let markdown_key = MarkdownKey {
             entry_id: assistant,
             layout_epoch: transcript.entry(assistant).unwrap().layout_epoch(),
-            presentation_start: 0,
         };
         let removed = cache.markdown.remove(&markdown_key).unwrap();
         cache.markdown_retained_bytes = cache
@@ -5385,8 +5399,8 @@ mod tests {
         }));
         let work = cache.work();
         assert!(
-            work.bytes_scanned <= ENTRY_PRESENTATION_MAX_BYTES + ENTRY_PRESENTATION_CHUNK_BYTES,
-            "unbroken content exceeded the presentation budget: {work:?}"
+            work.bytes_scanned <= 2 * 1024 * 1024,
+            "unbroken content was repeatedly rescanned: {work:?}"
         );
     }
 
