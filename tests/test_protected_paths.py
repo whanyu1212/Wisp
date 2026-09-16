@@ -59,6 +59,33 @@ def test_unprotected_patterns_do_not_match(tmp_path: Path, relative: str) -> Non
     assert is_protected_path(target, _context(tmp_path)) is False
 
 
+def test_ordinary_path_matches_protected_patterns_once(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from wisp.tools.files import paths as path_helpers
+
+    root = tmp_path.resolve()
+    ordinary = root / "main.py"
+    checked: list[Path] = []
+    original = path_helpers._candidate_is_protected
+
+    def track_candidate(path: Path, patterns: tuple[str, ...], cwd: Path) -> bool:
+        checked.append(path)
+        return original(path, patterns, cwd)
+
+    monkeypatch.setattr(path_helpers, "_candidate_is_protected", track_candidate)
+
+    assert is_protected_path(ordinary, _context(root)) is False
+    assert checked == [ordinary]
+
+
+def test_normalized_path_still_matches_protected_target(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    target = tmp_path / ".wisp" / "subdir" / ".." / "auth.json"
+
+    assert is_protected_path(target, context) is True
+
+
 def test_no_patterns_means_nothing_protected(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, protected_paths=())
     assert is_protected_path(tmp_path / ".env", context) is False
