@@ -34,7 +34,8 @@ def verify_textual(wisp: Path, work: Path, environment: dict[str, str]) -> None:
     """Exercise explicit Textual startup, a fake prompt, exit, and terminal restoration."""
     master, slave = pty.openpty()
     original = termios.tcgetattr(master)
-    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    # Keep the readiness footer visible even with a long hosted-runner cwd.
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 240, 0, 0))
     child_environment = {
         **environment,
         "TERM": "xterm-256color",
@@ -54,10 +55,10 @@ def verify_textual(wisp: Path, work: Path, environment: dict[str, str]) -> None:
     )
     os.close(slave)
     output = bytearray()
-    typed_at: float | None = None
+    typed_offset: int | None = None
     submitted = False
     response_seen = False
-    quit_typed_at: float | None = None
+    quit_typed_offset: int | None = None
     quit_sent = False
     deadline = time.monotonic() + 60
     try:
@@ -69,21 +70,26 @@ def verify_textual(wisp: Path, work: Path, environment: dict[str, str]) -> None:
                     if exc.errno != errno.EIO:
                         raise
             plain = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
-            if typed_at is None and b"Ask Wisp anything" in plain:
+            if typed_offset is None and "send · / commands".encode() in plain:
+                typed_offset = len(output)
                 os.write(master, b"public fallback smoke")
-                typed_at = time.monotonic()
-            if typed_at is not None and not submitted and time.monotonic() - typed_at >= 0.3:
+            # Observe the editor update before sending a distinct Enter event.
+            if (
+                typed_offset is not None
+                and not submitted
+                and b"public fallback smoke" in output[typed_offset:]
+            ):
                 os.write(master, b"\r")
                 submitted = True
             if b"fake response to: public fallback smoke" in plain:
                 response_seen = True
-            if response_seen and quit_typed_at is None:
+            if response_seen and quit_typed_offset is None:
+                quit_typed_offset = len(output)
                 os.write(master, b"/quit")
-                quit_typed_at = time.monotonic()
             if (
-                quit_typed_at is not None
+                quit_typed_offset is not None
                 and not quit_sent
-                and time.monotonic() - quit_typed_at >= 0.3
+                and b"/quit" in output[quit_typed_offset:]
             ):
                 os.write(master, b"\r")
                 quit_sent = True
@@ -92,7 +98,12 @@ def verify_textual(wisp: Path, work: Path, environment: dict[str, str]) -> None:
                 assert response_seen, bytes(output[-4000:])
                 assert termios.tcgetattr(master) == original
                 return
-        raise RuntimeError(f"Textual public-install smoke timed out: {bytes(output[-4000:])!r}")
+        (work / "textual-terminal.bin").write_bytes(output)
+        raise RuntimeError(
+            f"Textual smoke timed out: submitted={submitted}, response={response_seen}, "
+            f"quit={quit_sent}, terminal={termios.tcgetattr(master)!r}; "
+            f"output: {work / 'textual-terminal.bin'}"
+        )
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -121,6 +132,9 @@ def main() -> None:
     environment["HOME"] = str(work / "home")
     Path(environment["HOME"]).mkdir()
     environment["UV_CACHE_DIR"] = str(work / "uv-cache")
+    # The lifecycle probe intentionally damages its installed executable.
+    # Isolate that mutation from uv's cache before testing offline reinstall.
+    environment["UV_LINK_MODE"] = "copy"
 
     def run(*command: str | Path, capture: bool = False) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
