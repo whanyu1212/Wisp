@@ -423,6 +423,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
     )
     print(report.to_json())
     if parsed.output is not None:
+        parsed.output.parent.mkdir(parents=True, exist_ok=True)
         parsed.output.write_text(f"{report.to_json()}\n", encoding="utf-8")
 
 

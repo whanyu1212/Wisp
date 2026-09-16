@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from benchmarks.builtin_tools import BenchmarkConfig, run_benchmark
+from benchmarks.builtin_tools import BenchmarkConfig, main, run_benchmark
 
 pytestmark = pytest.mark.benchmark
 
@@ -75,3 +77,24 @@ def test_builtin_tools_benchmark_accepts_expected_listing_truncation() -> None:
     listing = [sample for sample in report.samples if sample.scenario == "ls_sorted_prefix"]
     assert len(listing) == 2
     assert all(sample.truncated for sample in listing)
+
+
+def test_builtin_tools_cli_creates_output_parent(tmp_path: Path) -> None:
+    output = tmp_path / "profiles" / "builtin-tools.json"
+
+    main(
+        [
+            "--file-counts",
+            "8",
+            "--file-bytes",
+            "512",
+            "--iterations",
+            "1",
+            "--tool-only",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert output.is_file()
+    assert '"scenario": "grep_literal_miss"' in output.read_text(encoding="utf-8")
