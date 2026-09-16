@@ -203,3 +203,30 @@ These results clear the 25% adoption threshold for exhaustive and synthetic work
 boundary remains per-file scanning rather than native repository traversal: Python owns authority,
 ignore precedence, glob selection, secure opening, global ordering, and final `ToolResult`
 assembly. Moving traversal or regex matching needs separate compatibility and performance evidence.
+
+## Protected-path matching after native scanning
+
+The next profile used the shipped native scanner on Wisp's 216-file `src/wisp` tree. It showed that
+`is_protected_path` matched each ordinary path against the default 25 protected globs twice: once
+lexically and once after resolving symlinks, even when both paths were equal. Across the profiled
+benchmark invocation, matching fell from 0.842 to 0.427 cumulative seconds after skipping the
+identical second match. Resolution and target matching remain in place when a symlink changes the
+path. Ignore-rule ordering took only about 0.003 seconds, so caching that ordering would have much
+less impact on this workload.
+
+Warm-cache runs on the same macOS arm64 machine and CPython 3.12.2 used seven iterations per
+repository scenario, the same optional native extension, and matching result counts, truncation,
+and output sizes. Wall time is per public `tool.run` call:
+
+| Wisp `src/wisp` workload | Before wall ms | After wall ms | Change |
+|---|---:|---:|---:|
+| sorted Python-file `find` prefix | 99.34 | 84.79 | -14.6% |
+| native literal grep miss | 301.96 | 276.27 | -8.5% |
+| native capped literal grep | 47.79 | 39.18 | -18.0% |
+
+The existing 1,000- and 5,000-file synthetic benchmark explicitly disables protected-path rules
+to isolate other tool costs. Its measurements stayed within a few percent of baseline, as expected;
+they do not measure this optimization. The remaining expensive boundaries are secure per-file
+reopening, protected-path resolution, and ignore matching. Changing the first two requires a
+separate race and symlink safety design; this result does not support moving filesystem policy into
+Rust.

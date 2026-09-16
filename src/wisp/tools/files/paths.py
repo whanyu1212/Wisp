@@ -88,11 +88,12 @@ def is_protected_path(path: Path, context: ToolContext) -> bool:
     # Lexical form: make absolute against cwd WITHOUT dereferencing symlinks, so a
     # protected name that links elsewhere is still matched by its requested name.
     lexical = path if path.is_absolute() else cwd / path
+    if _candidate_is_protected(lexical, patterns, cwd):
+        return True
+
     resolved = path.resolve(strict=False)
-    for candidate in (lexical, resolved):
-        if _candidate_is_protected(candidate, patterns, cwd):
-            return True
-    return False
+    # Keep the target check for symlinks, but avoid matching the same path twice.
+    return resolved != lexical and _candidate_is_protected(resolved, patterns, cwd)
 
 
 def _candidate_is_protected(path: Path, patterns: tuple[str, ...], cwd: Path) -> bool:

@@ -17,6 +17,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 - Added an optional Rust scanner for case-sensitive literal `grep` searches in native-wheel
   installations, while keeping repository traversal, filesystem policy, regex matching, and a
   pure-Python fallback in Python.
+- Avoided duplicate protected-path matching when a file resolves to its lexical path, reducing
+  post-scanner `find` and literal `grep` time while retaining symlink-target checks.
 
 ## 0.2.0rc2 — release preparation
 
