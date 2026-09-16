@@ -230,3 +230,29 @@ they do not measure this optimization. The remaining expensive boundaries are se
 reopening, protected-path resolution, and ignore matching. Changing the first two requires a
 separate race and symlink safety design; this result does not support moving filesystem policy into
 Rust.
+
+## Descriptor reuse during grep traversal
+
+The follow-up kept traversal and filesystem authority in Python, but stopped reopening every grep
+candidate from the filesystem root. On POSIX, the walker now opens an eligible file relative to its
+already-authorized parent directory descriptor. It uses the same no-follow flags as the secure file
+API and compares post-open metadata with the directory entry, skipping a file that was replaced
+between enumeration and opening. The walker owns and closes the descriptor around both Python and
+native scanning. Windows and path-based traversal retain the existing secure path open.
+
+Paired warm-cache runs used the same macOS arm64 machine, CPython 3.12.2, optional native extension,
+and five iterations for each synthetic scenario. The Wisp `src/wisp` runs used seven iterations.
+Counts, truncation flags, and output sizes matched for every pair.
+
+| Workload | Before wall ms | After wall ms | Change |
+|---|---:|---:|---:|
+| 1,000-file native literal miss | 733.63 | 318.97 | -56.5% |
+| 5,000-file native literal miss | 3,345.89 | 2,042.05 | -39.0% |
+| 5,000-file capped Python regex | 122.11 | 97.36 | -20.3% |
+| 5,000-file capped native literal | 72.84 | 45.36 | -37.7% |
+| Wisp native literal miss | 346.78 | 256.28 | -26.1% |
+| Wisp capped native literal | 48.62 | 43.48 | -10.6% |
+
+The exhaustive 5,000-file workload clears the 15% adoption threshold. This result supports reusing
+Python-owned descriptors; it does not support moving traversal, ignore rules, protected-path policy,
+or regex semantics into Rust. Further search migration should wait for another measured hotspot.

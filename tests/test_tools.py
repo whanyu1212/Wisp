@@ -3526,18 +3526,18 @@ def test_grep_tool_prepares_glob_once_and_reuses_display_path(
     expanded: list[str] = []
     displayed: list[Path] = []
     original_expand = search_tools_module._expand_brace_alternatives
-    original_display = search_tools_module.display_tool_path
+    original_display = search_tools_module._display_walked_path
 
     def tracking_expand(pattern: str) -> tuple[str, ...]:
         expanded.append(pattern)
         return original_expand(pattern)
 
-    def tracking_display(candidate: Path, tool_context: ToolContext) -> str:
+    def tracking_display(candidate: Path, resolved_cwd: Path) -> str:
         displayed.append(candidate)
-        return original_display(candidate, tool_context)
+        return original_display(candidate, resolved_cwd)
 
     monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
-    monkeypatch.setattr(search_tools_module, "display_tool_path", tracking_display)
+    monkeypatch.setattr(search_tools_module, "_display_walked_path", tracking_display)
 
     result = run_tool(
         GrepTool(),
@@ -3567,10 +3567,10 @@ def test_grep_tool_no_match_without_glob_skips_display_path_work(
 ) -> None:
     (tmp_path / "alpha.txt").write_text("haystack\n", encoding="utf-8")
 
-    def unexpected_display(_candidate: Path, _context: ToolContext) -> str:
+    def unexpected_display(_candidate: Path, _resolved_cwd: Path) -> str:
         raise AssertionError("a no-match grep should not compute a display path")
 
-    monkeypatch.setattr(search_tools_module, "display_tool_path", unexpected_display)
+    monkeypatch.setattr(search_tools_module, "_display_walked_path", unexpected_display)
 
     result = run_tool(
         GrepTool(),
@@ -4138,13 +4138,13 @@ def test_grep_tool_python_fallback_stops_after_extra_match(
         _path: Path,
         _context: ToolContext,
         **_kwargs: object,
-    ) -> Iterable[Path]:
+    ) -> Iterable[search_tools_module._WalkedFile]:
         nonlocal visited_later
-        yield first
+        yield search_tools_module._WalkedFile(first)
         visited_later = True
-        yield tmp_path / "later.txt"
+        yield search_tools_module._WalkedFile(tmp_path / "later.txt")
 
-    monkeypatch.setattr(search_tools_module, "_iter_files", files)
+    monkeypatch.setattr(search_tools_module, "_iter_walked_files", files)
     result = run_tool(
         GrepTool(),
         {"pattern": "match", "literal": True, "max_results": 1},

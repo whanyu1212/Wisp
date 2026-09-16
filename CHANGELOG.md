@@ -19,6 +19,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   pure-Python fallback in Python.
 - Avoided duplicate protected-path matching when a file resolves to its lexical path, reducing
   post-scanner `find` and literal `grep` time while retaining symlink-target checks.
+- Reused authorized directory descriptors when opening files for `grep`, avoiding a second
+  component-by-component filesystem walk while preserving no-follow and replacement checks.
 
 ## 0.2.0rc2 — release preparation
 

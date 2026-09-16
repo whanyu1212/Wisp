@@ -241,6 +241,47 @@ def open_parent(path: SecureToolPath, *, create: bool = False) -> Iterator[OpenP
         os.close(current)
 
 
+def open_regular_file_at(
+    parent_descriptor: int,
+    leaf: str,
+    *,
+    display: str,
+    expected_stat: os.stat_result,
+) -> int:
+    """Open a regular file relative to an already-authorized directory.
+
+    The caller must keep ``parent_descriptor`` open, apply path policy before
+    calling this helper, and close the returned descriptor. The leaf is opened
+    without following symbolic links and checked again after opening so a
+    replacement between enumeration and ``open`` is rejected.
+
+    Args:
+        parent_descriptor: Live descriptor for the authorized parent directory.
+        leaf: Single untrusted directory-entry name to open.
+        display: Path text used in errors.
+        expected_stat: No-follow entry metadata captured during enumeration.
+
+    Returns:
+        A live descriptor for the regular file, owned by the caller.
+
+    Raises:
+        OSError: The leaf cannot be opened or changed since enumeration.
+        ToolError: The opened leaf is not a regular file.
+    """
+
+    descriptor = os.open(leaf, _FILE_FLAGS, dir_fd=parent_descriptor)
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not os.path.samestat(opened_stat, expected_stat):
+            raise FileNotFoundError(errno.ENOENT, f"File changed while opening: {display}")
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ToolError(f"Not a regular file: {display}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 @contextmanager
 def open_file(path: SecureToolPath) -> Iterator[int]:
     """Open a regular file through a stable parent descriptor."""

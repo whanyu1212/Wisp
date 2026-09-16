@@ -815,6 +815,260 @@ def test_path_fallback_propagates_nested_ignore_file_limit(
         )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_reuses_walk_descriptor_without_reopening_from_root(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "data.txt").write_text("needle\n", encoding="utf-8")
+
+    def unexpected_open_file(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("directory grep must not reopen walked files from the filesystem root")
+
+    monkeypatch.setattr(search_module, "open_file", unexpected_open_file)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "nested/data.txt:1:needle"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_skips_file_replaced_after_directory_enumeration(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    candidate = tmp_path / "data.txt"
+    secret = tmp_path / ".secret.txt"
+    candidate.write_text("ordinary\n", encoding="utf-8")
+    secret.write_text("needle\n", encoding="utf-8")
+    original = search_module.open_regular_file_at
+    replaced = False
+
+    def replace_before_open(
+        parent_descriptor: int,
+        leaf: str,
+        *,
+        display: str,
+        expected_stat: os.stat_result,
+    ) -> int:
+        nonlocal replaced
+        if leaf == candidate.name and not replaced:
+            candidate.unlink()
+            candidate.symlink_to(secret)
+            replaced = True
+        return original(
+            parent_descriptor,
+            leaf,
+            display=display,
+            expected_stat=expected_stat,
+        )
+
+    monkeypatch.setattr(search_module, "open_regular_file_at", replace_before_open)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert replaced is True
+    assert result.text == "No matches"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_skips_regular_file_replacement_after_enumeration(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    candidate = tmp_path / "data.txt"
+    candidate.write_text("ordinary\n", encoding="utf-8")
+    replacement = tmp_path / ".replacement.txt"
+    replacement.write_text("needle\n", encoding="utf-8")
+    original = search_module.open_regular_file_at
+    replaced = False
+
+    def replace_before_open(
+        parent_descriptor: int,
+        leaf: str,
+        *,
+        display: str,
+        expected_stat: os.stat_result,
+    ) -> int:
+        nonlocal replaced
+        if leaf == candidate.name and not replaced:
+            os.replace(replacement, candidate)
+            replaced = True
+        return original(
+            parent_descriptor,
+            leaf,
+            display=display,
+            expected_stat=expected_stat,
+        )
+
+    monkeypatch.setattr(search_module, "open_regular_file_at", replace_before_open)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert replaced is True
+    assert result.text == "No matches"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_uses_authorized_parent_after_directory_replacement(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    directory = tmp_path / "nested"
+    directory.mkdir()
+    (directory / "data.txt").write_text("old needle\n", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "data.txt").write_text("new needle\n", encoding="utf-8")
+    original = search_module.open_regular_file_at
+    swapped = False
+
+    def replace_parent_before_open(
+        parent_descriptor: int,
+        leaf: str,
+        *,
+        display: str,
+        expected_stat: os.stat_result,
+    ) -> int:
+        nonlocal swapped
+        if leaf == "data.txt" and not swapped:
+            directory.rename(tmp_path / "moved")
+            directory.symlink_to(replacement, target_is_directory=True)
+            swapped = True
+        return original(
+            parent_descriptor,
+            leaf,
+            display=display,
+            expected_stat=expected_stat,
+        )
+
+    monkeypatch.setattr(search_module, "open_regular_file_at", replace_parent_before_open)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"path": "nested", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert swapped is True
+    assert result.text == "nested/data.txt:1:old needle"
+    assert "new needle" not in result.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_closes_walked_file_after_early_truncation(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    (tmp_path / "data.txt").write_text("needle\nneedle\n", encoding="utf-8")
+    original = search_module.open_regular_file_at
+    opened: list[int] = []
+
+    def track_open(
+        parent_descriptor: int,
+        leaf: str,
+        *,
+        display: str,
+        expected_stat: os.stat_result,
+    ) -> int:
+        descriptor = original(
+            parent_descriptor,
+            leaf,
+            display=display,
+            expected_stat=expected_stat,
+        )
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(search_module, "open_regular_file_at", track_open)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"path": ".", "pattern": "needle", "literal": True, "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.truncated is True
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+@pytest.mark.parametrize("search_path", [".", "nested/data.txt"])
+def test_grep_closes_walked_descriptors_when_scanner_raises(
+    tmp_path: Path, monkeypatch: MonkeyPatch, search_path: str
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "data.txt").write_text("needle\n", encoding="utf-8")
+    active: list[int] = []
+
+    def fail_scanner(descriptor: int) -> Iterator[str]:
+        active.append(descriptor)
+        raise RuntimeError("scanner failed")
+        yield "unreachable"
+
+    monkeypatch.setattr(search_module, "_iter_utf8_splitlines", fail_scanner)
+
+    with pytest.raises(RuntimeError, match="scanner failed") as caught:
+        run_tool(
+            GrepTool(_scanner_backend="python"),
+            {"path": search_path, "pattern": "needle", "literal": True},
+            ToolContext(cwd=tmp_path),
+        )
+
+    assert caught.value.__traceback__ is not None
+    assert active
+    for descriptor in active:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires descriptor-relative file opens")
+def test_grep_closes_walked_descriptors_when_cancelled(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    (tmp_path / "data.txt").write_text("needle\n", encoding="utf-8")
+    cancel_event = Event()
+    active: list[int] = []
+
+    def cancel_scanner(descriptor: int) -> Iterator[str]:
+        active.append(descriptor)
+        cancel_event.set()
+        yield "needle"
+
+    monkeypatch.setattr(search_module, "_iter_utf8_splitlines", cancel_scanner)
+
+    result = search_module._python_grep(
+        pattern="needle",
+        path=secure_fs_module.secure_tool_path(".", ToolContext(cwd=tmp_path)),
+        glob=None,
+        ignore_case=False,
+        literal=True,
+        context_lines=0,
+        max_results=100,
+        context=ToolContext(cwd=tmp_path),
+        cancel_event=cancel_event,
+    )
+
+    assert result.text == "Search cancelled"
+    assert active
+    for descriptor in active:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
 def test_recursive_tools_reject_directory_over_entry_limit(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -836,15 +1090,15 @@ def test_grep_worker_stops_after_awaiting_task_is_cancelled(
         *args: object,
         cancel_event: Event | None = None,
         **kwargs: object,
-    ) -> Iterator[Path]:
+    ) -> Iterator[search_module._WalkedFile]:
         started.set()
         assert cancel_event is not None
         cancel_event.wait(2)
         stopped.set()
         if False:
-            yield tmp_path / "unreachable"
+            yield search_module._WalkedFile(tmp_path / "unreachable")
 
-    monkeypatch.setattr(search_module, "_iter_files", fake_iter_files)
+    monkeypatch.setattr(search_module, "_iter_walked_files", fake_iter_files)
 
     async def scenario() -> None:
         async def invoke() -> None:

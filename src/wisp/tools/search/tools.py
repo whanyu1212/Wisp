@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import codecs
+import errno
 import heapq
 import os
 import stat
 import sys
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
@@ -24,7 +26,13 @@ from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import display_tool_path, is_protected_path
-from wisp.tools.files.secure_fs import SecureToolPath, open_directory, open_file, secure_tool_path
+from wisp.tools.files.secure_fs import (
+    SecureToolPath,
+    open_directory,
+    open_file,
+    open_regular_file_at,
+    secure_tool_path,
+)
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.supervisor import ProcessSupervisor
 from wisp.tools.truncation import truncate_text
@@ -366,7 +374,7 @@ def _python_grep(
     output_bytes = 0
     match_count = 0
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
-    native_display_root = context.cwd.resolve(strict=False) if native_module is not None else None
+    walked_display_root = context.cwd.resolve(strict=False)
     cached_file_path: Path | None = None
     cached_display_path = ""
 
@@ -374,7 +382,7 @@ def _python_grep(
         nonlocal cached_file_path, cached_display_path
         if file_path != cached_file_path:
             cached_file_path = file_path
-            cached_display_path = display_tool_path(file_path, context)
+            cached_display_path = _display_walked_path(file_path, walked_display_root)
         return cached_display_path
 
     ignore_override_matcher: PathMatcher | None = None
@@ -386,162 +394,169 @@ def _python_grep(
         ignore_override_matcher = matches_ignore_override
 
     files = (
-        _iter_files(secure_path, context, cancel_event=cancel_event)
+        _iter_walked_files(secure_path, context, cancel_event=cancel_event)
         if ignore_override_matcher is None
-        else _iter_files(
+        else _iter_walked_files(
             secure_path,
             context,
             ignore_override_matcher=ignore_override_matcher,
             cancel_event=cancel_event,
         )
     )
-    for file_path in files:
-        if cancel_event is not None and cancel_event.is_set():
-            return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
-        file_display_path: str | None = None
-        if glob_matcher is not None:
-            file_display_path = display_path(file_path)
-            if not glob_matcher(file_display_path):
-                continue
+    with closing(files):
+        for walked_file in files:
+            file_path = walked_file.path
+            if cancel_event is not None and cancel_event.is_set():
+                return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
+            file_display_path: str | None = None
+            if glob_matcher is not None:
+                file_display_path = display_path(file_path)
+                if not glob_matcher(file_display_path):
+                    continue
 
-        file_match_start = match_count
-        file_had_extra_match = False
-        file_native_module = native_module
-        if file_native_module is not None:
-            if file_display_path is None:
-                if native_display_root is None:  # pragma: no cover - internal invariant
-                    raise RuntimeError("native grep display root was not initialized")
-                file_display_path = _display_walked_path(file_path, native_display_root)
+            file_match_start = match_count
+            file_had_extra_match = False
+            file_native_module = native_module
+            if file_native_module is not None:
+                if file_display_path is None:
+                    file_display_path = _display_walked_path(file_path, walked_display_root)
+                try:
+                    file_display_path.encode("utf-8")
+                except UnicodeEncodeError:
+                    file_native_module = None
+                    matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+            file_buffer = _BoundedGrepFileOutput(
+                prior_lines=len(output),
+                prior_bytes=output_bytes,
+                prefix_separator=bool(output and effective_context_lines),
+                max_lines=context.max_output_lines,
+                max_bytes=context.max_output_bytes,
+            )
+
             try:
-                file_display_path.encode("utf-8")
-            except UnicodeEncodeError:
-                file_native_module = None
-                matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
-        file_buffer = _BoundedGrepFileOutput(
-            prior_lines=len(output),
-            prior_bytes=output_bytes,
-            prefix_separator=bool(output and effective_context_lines),
-            max_lines=context.max_output_lines,
-            max_bytes=context.max_output_bytes,
-        )
-
-        try:
-            candidate = secure_tool_path(str(file_path), context)
-            with open_file(candidate) as descriptor:
-                if file_native_module is not None:
-                    if native_cancellation is None:  # pragma: no cover - internal invariant
-                        raise RuntimeError("native grep cancellation was not initialized")
-                    if file_display_path is None:  # pragma: no cover - internal invariant
-                        raise RuntimeError("native grep display path was not initialized")
-                    try:
-                        native_result = file_native_module.scan_literal_fd(
-                            descriptor,
-                            pattern,
-                            file_display_path,
-                            context_lines=effective_context_lines,
-                            remaining_matches=max_results - match_count,
-                            prior_lines=len(output),
-                            prior_bytes=output_bytes,
-                            prefix_separator=bool(output and effective_context_lines),
-                            max_output_lines=context.max_output_lines,
-                            max_output_bytes=context.max_output_bytes,
-                            max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
-                            cancellation=native_cancellation,
-                        )
-                    except ValueError as exc:
-                        raise ToolError(str(exc)) from exc
-                    except (OSError, RuntimeError):
-                        # Some Linux sandboxes do not mount /proc, and unsupported
-                        # targets cannot duplicate a descriptor for Rust. Keep the
-                        # optional accelerator transparent in those environments.
-                        file_native_module = None
-                        matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+                with walked_file.open(context) as descriptor:
                     if file_native_module is not None:
-                        if native_result.status == "cancelled":
-                            return ToolResult(
-                                text="Search cancelled",
-                                data={"count": 0, "matches": []},
+                        if native_cancellation is None:  # pragma: no cover - internal invariant
+                            raise RuntimeError("native grep cancellation was not initialized")
+                        if file_display_path is None:  # pragma: no cover - internal invariant
+                            raise RuntimeError("native grep display path was not initialized")
+                        try:
+                            native_result = file_native_module.scan_literal_fd(
+                                descriptor,
+                                pattern,
+                                file_display_path,
+                                context_lines=effective_context_lines,
+                                remaining_matches=max_results - match_count,
+                                prior_lines=len(output),
+                                prior_bytes=output_bytes,
+                                prefix_separator=bool(output and effective_context_lines),
+                                max_output_lines=context.max_output_lines,
+                                max_output_bytes=context.max_output_bytes,
+                                max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
+                                cancellation=native_cancellation,
                             )
-                        if native_result.status == "binary":
-                            continue
-                        if native_result.status != "complete":
-                            raise RuntimeError(
-                                f"native grep returned unknown status: {native_result.status}"
+                        except ValueError as exc:
+                            raise ToolError(str(exc)) from exc
+                        except (OSError, RuntimeError):
+                            # Some Linux sandboxes do not mount /proc, and unsupported
+                            # targets cannot duplicate a descriptor for Rust. Keep the
+                            # optional accelerator transparent in those environments.
+                            file_native_module = None
+                            matcher = _build_matcher(
+                                pattern, ignore_case=ignore_case, literal=literal
                             )
-                        match_count += native_result.match_count
-                        file_had_extra_match = native_result.had_extra_match
-                        file_buffer.lines = list(native_result.lines)
-                        file_buffer.byte_count = native_result.byte_count
-                        file_buffer.exhausted = native_result.exhausted
-                if file_native_module is None:
-                    if matcher is None:  # pragma: no cover - internal invariant
-                        raise RuntimeError("Python grep matcher was not initialized")
-                    preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
-                    group_end = 0
-                    last_emitted_line = 0
-                    lines = _iter_utf8_splitlines(descriptor)
-                    for line_number, line in enumerate(lines, start=1):
-                        if cancel_event is not None and cancel_event.is_set():
-                            return ToolResult(
-                                text="Search cancelled",
-                                data={"count": 0, "matches": []},
-                            )
-                        if file_buffer.exhausted or file_had_extra_match:
-                            break
+                        if file_native_module is not None:
+                            if native_result.status == "cancelled":
+                                return ToolResult(
+                                    text="Search cancelled",
+                                    data={"count": 0, "matches": []},
+                                )
+                            if native_result.status == "binary":
+                                continue
+                            if native_result.status != "complete":
+                                raise RuntimeError(
+                                    f"native grep returned unknown status: {native_result.status}"
+                                )
+                            match_count += native_result.match_count
+                            file_had_extra_match = native_result.had_extra_match
+                            file_buffer.lines = list(native_result.lines)
+                            file_buffer.byte_count = native_result.byte_count
+                            file_buffer.exhausted = native_result.exhausted
+                    if file_native_module is None:
+                        if matcher is None:  # pragma: no cover - internal invariant
+                            raise RuntimeError("Python grep matcher was not initialized")
+                        preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
+                        group_end = 0
+                        last_emitted_line = 0
+                        lines = _iter_utf8_splitlines(descriptor)
+                        for line_number, line in enumerate(lines, start=1):
+                            if cancel_event is not None and cancel_event.is_set():
+                                return ToolResult(
+                                    text="Search cancelled",
+                                    data={"count": 0, "matches": []},
+                                )
+                            if file_buffer.exhausted or file_had_extra_match:
+                                break
 
-                        is_match = matcher(line)
-                        if is_match:
-                            if match_count >= max_results:
-                                file_had_extra_match = True
-                            else:
-                                match_count += 1
+                            is_match = matcher(line)
+                            if is_match:
+                                if match_count >= max_results:
+                                    file_had_extra_match = True
+                                else:
+                                    match_count += 1
+                                    if file_display_path is None:
+                                        file_display_path = display_path(file_path)
+                                    if line_number > group_end:
+                                        for number, text in preceding:
+                                            if number > last_emitted_line:
+                                                file_buffer.append(
+                                                    _format_grep_record(
+                                                        file_display_path, number, text, False
+                                                    )
+                                                )
+                                                last_emitted_line = number
+                                                if file_buffer.exhausted:
+                                                    break
+                                    file_buffer.append(
+                                        _format_grep_record(
+                                            file_display_path, line_number, line, True
+                                        ),
+                                        preserve_match=True,
+                                    )
+                                    last_emitted_line = line_number
+                                    group_end = max(
+                                        group_end, line_number + effective_context_lines
+                                    )
+                            elif line_number <= group_end:
                                 if file_display_path is None:
                                     file_display_path = display_path(file_path)
-                                if line_number > group_end:
-                                    for number, text in preceding:
-                                        if number > last_emitted_line:
-                                            file_buffer.append(
-                                                _format_grep_record(
-                                                    file_display_path, number, text, False
-                                                )
-                                            )
-                                            last_emitted_line = number
-                                            if file_buffer.exhausted:
-                                                break
                                 file_buffer.append(
-                                    _format_grep_record(file_display_path, line_number, line, True),
-                                    preserve_match=True,
+                                    _format_grep_record(file_display_path, line_number, line, False)
                                 )
                                 last_emitted_line = line_number
-                                group_end = max(group_end, line_number + effective_context_lines)
-                        elif line_number <= group_end:
-                            if file_display_path is None:
-                                file_display_path = display_path(file_path)
-                            file_buffer.append(
-                                _format_grep_record(file_display_path, line_number, line, False)
-                            )
-                            last_emitted_line = line_number
-                        preceding.append((line_number, line))
-                        if file_buffer.exhausted or file_had_extra_match:
-                            break
-        except (_BinaryFileDetected, UnicodeDecodeError):
-            match_count = file_match_start
-            continue
+                            preceding.append((line_number, line))
+                            if file_buffer.exhausted or file_had_extra_match:
+                                break
+            except _WalkedFileChanged:
+                continue
+            except (_BinaryFileDetected, UnicodeDecodeError):
+                match_count = file_match_start
+                continue
 
-        if file_buffer.lines:
-            if effective_context_lines and output:
-                output.append("--")
-                output_bytes += 3  # "\n--"
-            output.extend(file_buffer.lines)
-            output_bytes += file_buffer.byte_count
+            if file_buffer.lines:
+                if effective_context_lines and output:
+                    output.append("--")
+                    output_bytes += 3  # "\n--"
+                output.extend(file_buffer.lines)
+                output_bytes += file_buffer.byte_count
 
-        if file_had_extra_match or file_buffer.exhausted:
-            return _result_from_grep_lines(
-                output,
-                max_results=max_results,
-                context=context,
-                force_truncated=True,
-            )
+            if file_had_extra_match or file_buffer.exhausted:
+                return _result_from_grep_lines(
+                    output,
+                    max_results=max_results,
+                    context=context,
+                    force_truncated=True,
+                )
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -771,6 +786,71 @@ def _iter_files(
 ) -> Iterable[Path]:
     """Yield regular files through a descriptor-relative, non-following walk."""
 
+    for walked_file in _iter_walked_files(
+        path,
+        context,
+        ignore_override_matcher=ignore_override_matcher,
+        cancel_event=cancel_event,
+    ):
+        yield walked_file.path
+
+
+@dataclass(frozen=True, slots=True)
+class _WalkedFile:
+    """A file candidate whose parent descriptor remains live until iteration resumes."""
+
+    path: Path
+    parent_descriptor: int | None = None
+    leaf: str | None = None
+    expected_stat: os.stat_result | None = None
+    opened_descriptor: int | None = None
+
+    @contextmanager
+    def open(self, context: ToolContext) -> Iterator[int]:
+        """Open this candidate through the strongest available descriptor path."""
+
+        if self.opened_descriptor is not None:
+            yield self.opened_descriptor
+            return
+        if (
+            self.parent_descriptor is not None
+            and self.leaf is not None
+            and self.expected_stat is not None
+        ):
+            try:
+                descriptor = open_regular_file_at(
+                    self.parent_descriptor,
+                    self.leaf,
+                    display=str(self.path),
+                    expected_stat=self.expected_stat,
+                )
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
+                    raise _WalkedFileChanged from exc
+                raise ToolError(f"Could not open file {self.path}: {exc}") from exc
+            try:
+                yield descriptor
+            finally:
+                os.close(descriptor)
+            return
+        candidate = secure_tool_path(str(self.path), context)
+        with open_file(candidate) as descriptor:
+            yield descriptor
+
+
+class _WalkedFileChanged(Exception):
+    """A previously eligible entry changed while it was being opened."""
+
+
+def _iter_walked_files(
+    path: Path | SecureToolPath,
+    context: ToolContext,
+    *,
+    ignore_override_matcher: PathMatcher | None = None,
+    cancel_event: Event | None = None,
+) -> Generator[_WalkedFile, None, None]:
+    """Yield grep candidates while their descriptor-relative parent stays open."""
+
     secure_path = _coerce_secure_path(path, context)
     if cancel_event is not None and cancel_event.is_set():
         return
@@ -793,9 +873,12 @@ def _iter_files(
             return
     except ToolError as directory_error:
         try:
-            with open_file(secure_path):
+            with open_file(secure_path) as descriptor:
                 if _is_path_within_tool_cwd(secure_path.path, context):
-                    yield secure_path.path
+                    yield _WalkedFile(
+                        path=secure_path.path,
+                        opened_descriptor=descriptor,
+                    )
                 return
         except ToolError:
             raise directory_error from None
@@ -859,7 +942,7 @@ def _walk_directory(
     ignore_override_matcher: PathMatcher | None,
     in_git_repository: bool = False,
     cancel_event: Event | None = None,
-) -> Iterable[Path]:
+) -> Iterable[_WalkedFile]:
     if cancel_event is not None and cancel_event.is_set():
         return
     in_git_repository = in_git_repository or _is_git_repository_root(
@@ -959,7 +1042,12 @@ def _walk_directory(
             )
             and _is_path_within_tool_cwd(candidate, context)
         ):
-            yield candidate
+            yield _WalkedFile(
+                path=candidate,
+                parent_descriptor=descriptor if isinstance(descriptor, int) else None,
+                leaf=name if isinstance(descriptor, int) else None,
+                expected_stat=info if isinstance(descriptor, int) else None,
+            )
 
 
 def _bounded_sorted_directory_entries(
