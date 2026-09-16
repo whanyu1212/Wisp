@@ -810,7 +810,7 @@ def test_path_fallback_propagates_nested_ignore_file_limit(
                 tmp_path,
                 context,
                 ignore_specs=(),
-                ignore_override_glob=None,
+                ignore_override_matcher=None,
             )
         )
 

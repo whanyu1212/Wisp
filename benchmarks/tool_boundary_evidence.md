@@ -123,3 +123,50 @@ access or symlink rules. If representative repositories remain CPU-bound, benchm
 scanner that receives a Python-authorized root and bounded search specification and returns bounded
 matches. Python should continue to own permission, protected-path, cancellation, and result-ordering
 policy even if that inner scanner eventually becomes native.
+
+## Python search optimization follow-up
+
+The September 16 follow-up measured the same synthetic workload before and after preparing glob
+matchers once per invocation and reusing each candidate's display path. Both runs used the current
+macOS arm64 machine, CPython 3.12.2, warm filesystem caches, and three iterations. The table reports
+the direct `tool.run` path; executor timings remained in the same range.
+
+| Files | Scenario | Before wall ms | After wall ms | Change | After CPU ms |
+|---:|---|---:|---:|---:|---:|
+| 1,000 | sorted-prefix `find` | 325.24 | 209.73 | -35.5% | 209.52 |
+| 1,000 | literal grep miss | 848.98 | 795.24 | -6.3% | 794.70 |
+| 1,000 | capped regex grep | 111.13 | 105.96 | -4.7% | 105.84 |
+| 5,000 | sorted-prefix `find` | 1,555.87 | 1,037.03 | -33.3% | 1,034.35 |
+| 5,000 | literal grep miss | 4,033.82 | 4,123.75 | +2.2% | 4,115.98 |
+| 5,000 | capped regex grep | 106.64 | 100.14 | -6.1% | 99.82 |
+
+The profile explains the `find` improvement: its cumulative time fell from 1.56 seconds to 1.02
+seconds in the 1,000-file profiling workload. `display_tool_path` calls fell from 4,200 to 2,200,
+and brace expansion fell from 2,000 calls to two. A no-glob grep miss deliberately performs no
+display-path conversion, so its small variation is measurement noise rather than an optimization
+claim. Its remaining cost is streamed decoding, secure per-file opening, protected-path checks, and
+matching.
+
+The new `benchmarks.repository_search` workload was also run on Wisp's `src/wisp` tree, with 216
+observable Python files and five iterations. The before run loaded the pre-change search module
+into the same public tool calls; the after run used the optimized module. Both used the same
+benchmark configuration and checked matching result counts, truncation, and output size.
+
+| Existing-repository scenario | Before wall ms | After wall ms | Change | After CPU ms |
+|---|---:|---:|---:|---:|
+| sorted Python-file `find` prefix | 112.72 | 97.53 | -13.5% | 97.42 |
+| literal grep miss | 498.62 | 496.74 | -0.4% | 495.34 |
+| capped literal grep | 59.69 | 53.17 | -10.9% | 53.03 |
+
+This project is small and the workloads were warm-cache; other repositories can have different
+ignore rules, file shapes, protected paths, and storage behavior. The exhaustive miss still takes
+about half a second here and remains CPU-bound. In the synthetic profile, streamed line splitting
+is the largest individual grep cost (1.81 seconds), while secure opens and path checks also remain
+substantial.
+
+This follow-up does not justify moving tool policy or filesystem authority into Rust. It does
+justify a separate bounded scanner prototype: Python should authorize the root and search request,
+while a native kernel traverses and scans through one batched call, returns bounded matches, and
+preserves Python-owned cancellation, protected-path, symlink, ordering, and result policy. The
+prototype must beat the optimized Python path on both synthetic and representative repositories
+before integration is considered.

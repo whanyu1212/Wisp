@@ -227,22 +227,44 @@ def _python_grep(
     output: list[str] = []
     output_bytes = 0
     match_count = 0
-    ignore_override_glob = glob if glob is not None and not _is_exclusion_glob(glob) else None
+    glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
+    cached_file_path: Path | None = None
+    cached_display_path = ""
+
+    def display_path(file_path: Path) -> str:
+        nonlocal cached_file_path, cached_display_path
+        if file_path != cached_file_path:
+            cached_file_path = file_path
+            cached_display_path = display_tool_path(file_path, context)
+        return cached_display_path
+
+    ignore_override_matcher: PathMatcher | None = None
+    if glob_matcher is not None and glob is not None and not _is_exclusion_glob(glob):
+
+        def matches_ignore_override(candidate: Path) -> bool:
+            return glob_matcher(display_path(candidate))
+
+        ignore_override_matcher = matches_ignore_override
+
     files = (
         _iter_files(secure_path, context, cancel_event=cancel_event)
-        if ignore_override_glob is None
+        if ignore_override_matcher is None
         else _iter_files(
             secure_path,
             context,
-            ignore_override_glob=ignore_override_glob,
+            ignore_override_matcher=ignore_override_matcher,
             cancel_event=cancel_event,
         )
     )
     for file_path in files:
         if cancel_event is not None and cancel_event.is_set():
             return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
-        if glob is not None and not _matches_glob(file_path, glob, context):
-            continue
+        file_display_path: str | None = None
+        if glob_matcher is not None:
+            file_display_path = display_path(file_path)
+            if not glob_matcher(file_display_path):
+                continue
+
         file_match_start = match_count
         file_had_extra_match = False
         file_buffer = _BoundedGrepFileOutput(
@@ -275,26 +297,30 @@ def _python_grep(
                             file_had_extra_match = True
                         else:
                             match_count += 1
+                            if file_display_path is None:
+                                file_display_path = display_path(file_path)
                             if line_number > group_end:
                                 for number, text in preceding:
                                     if number > last_emitted_line:
                                         file_buffer.append(
                                             _format_grep_record(
-                                                file_path, number, text, False, context
+                                                file_display_path, number, text, False
                                             )
                                         )
                                         last_emitted_line = number
                                         if file_buffer.exhausted:
                                             break
                             file_buffer.append(
-                                _format_grep_record(file_path, line_number, line, True, context),
+                                _format_grep_record(file_display_path, line_number, line, True),
                                 preserve_match=True,
                             )
                             last_emitted_line = line_number
                             group_end = max(group_end, line_number + effective_context_lines)
                     elif line_number <= group_end:
+                        if file_display_path is None:
+                            file_display_path = display_path(file_path)
                         file_buffer.append(
-                            _format_grep_record(file_path, line_number, line, False, context)
+                            _format_grep_record(file_display_path, line_number, line, False)
                         )
                         last_emitted_line = line_number
                     preceding.append((line_number, line))
@@ -429,14 +455,13 @@ def _yield_splitline_chunk(
 
 
 def _format_grep_record(
-    file_path: Path,
+    display_path: str,
     line_number: int,
     line: str,
     is_match: bool,
-    context: ToolContext,
 ) -> str:
     separator = ":" if is_match else "-"
-    return f"{display_tool_path(file_path, context)}{separator}{line_number}{separator}{line}"
+    return f"{display_path}{separator}{line_number}{separator}{line}"
 
 
 def _python_find(
@@ -453,17 +478,21 @@ def _python_find(
     # before an earlier directory prefix. Scan the streamed candidates completely
     # to preserve historical global ordering, but retain only the sorted prefix and
     # one truncation lookahead in memory.
+    glob_matcher = _prepare_glob_matcher(pattern)
+
+    def matching_display_paths() -> Iterator[str]:
+        for candidate in _iter_files(
+            secure_path,
+            context,
+            cancel_event=cancel_event,
+        ):
+            display_path = display_tool_path(candidate, context)
+            if glob_matcher(display_path):
+                yield display_path
+
     matches = heapq.nsmallest(
         max_results + 1,
-        (
-            display_tool_path(candidate, context)
-            for candidate in _iter_files(
-                secure_path,
-                context,
-                cancel_event=cancel_event,
-            )
-            if _matches_glob(candidate, pattern, context)
-        ),
+        matching_display_paths(),
     )
     return _result_from_lines(
         matches, max_results=max_results, context=context, count_label="files"
@@ -523,7 +552,7 @@ def _iter_files(
     path: Path | SecureToolPath,
     context: ToolContext,
     *,
-    ignore_override_glob: str | None = None,
+    ignore_override_matcher: PathMatcher | None = None,
     cancel_event: Event | None = None,
 ) -> Iterable[Path]:
     """Yield regular files through a descriptor-relative, non-following walk."""
@@ -543,7 +572,7 @@ def _iter_files(
                 secure_path.path,
                 context,
                 ignore_specs=ancestor_specs,
-                ignore_override_glob=ignore_override_glob,
+                ignore_override_matcher=ignore_override_matcher,
                 in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
             )
@@ -613,7 +642,7 @@ def _walk_directory(
     context: ToolContext,
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
-    ignore_override_glob: str | None,
+    ignore_override_matcher: PathMatcher | None,
     in_git_repository: bool = False,
     cancel_event: Event | None = None,
 ) -> Iterable[Path]:
@@ -661,7 +690,7 @@ def _walk_directory(
             if _is_hidden(name) or (
                 _is_ignored(candidate, is_directory=True, ignore_specs=ignore_specs)
                 and not _may_reinclude_descendant(candidate, ignore_specs)
-                and ignore_override_glob is None
+                and ignore_override_matcher is None
             ):
                 continue
             if isinstance(descriptor, Path):
@@ -673,7 +702,7 @@ def _walk_directory(
                             candidate,
                             context,
                             ignore_specs=ignore_specs,
-                            ignore_override_glob=ignore_override_glob,
+                            ignore_override_matcher=ignore_override_matcher,
                             in_git_repository=in_git_repository,
                             cancel_event=cancel_event,
                         )
@@ -694,7 +723,7 @@ def _walk_directory(
                     candidate,
                     context,
                     ignore_specs=ignore_specs,
-                    ignore_override_glob=ignore_override_glob,
+                    ignore_override_matcher=ignore_override_matcher,
                     in_git_repository=in_git_repository,
                     cancel_event=cancel_event,
                 )
@@ -712,10 +741,7 @@ def _walk_directory(
                         ignore_specs=ignore_specs,
                     )
                 )
-                or (
-                    ignore_override_glob is not None
-                    and _matches_glob(candidate, ignore_override_glob, context)
-                )
+                or (ignore_override_matcher is not None and ignore_override_matcher(candidate))
             )
             and _is_path_within_tool_cwd(candidate, context)
         ):
@@ -1053,21 +1079,6 @@ def _compiled_gitignore_glob(pattern: str) -> GitIgnoreSpec:
     return GitIgnoreSpec.from_lines((pattern,))
 
 
-def _gitignore_scope_glob_matches(path: str, pattern: str) -> bool:
-    return _compiled_gitignore_glob(pattern).check_file(path).include is True
-
-
-def _gitignore_file_glob_matches(path: str, pattern: str) -> bool:
-    for compiled_pattern in _compiled_gitignore_glob(pattern).patterns:
-        regex = compiled_pattern.regex
-        if regex is None:
-            continue
-        for match in regex.finditer(path):
-            if match.groupdict().get("ps_d") != "/":
-                return True
-    return False
-
-
 def _gitignore_glob_matches_exact(path: str, pattern: str) -> bool:
     for compiled_pattern in _compiled_gitignore_glob(pattern).patterns:
         regex = compiled_pattern.regex
@@ -1076,16 +1087,34 @@ def _gitignore_glob_matches_exact(path: str, pattern: str) -> bool:
     return False
 
 
-def _matches_glob(path: Path, pattern: str, context: ToolContext) -> bool:
+def _prepare_glob_matcher(pattern: str) -> GlobMatcher:
     exclusion = _is_exclusion_glob(pattern)
     effective_pattern = pattern[1:] if exclusion else pattern
-    display_path = Path(display_tool_path(path, context)).as_posix()
-    matcher = _gitignore_scope_glob_matches if exclusion else _gitignore_file_glob_matches
-    matched = any(
-        matcher(display_path, alternative)
-        for alternative in _expand_brace_alternatives(effective_pattern)
-    )
-    return not matched if exclusion else matched
+    alternatives = _expand_brace_alternatives(effective_pattern)
+    compiled = tuple(_compiled_gitignore_glob(alternative) for alternative in alternatives)
+
+    if exclusion:
+
+        def matches_exclusion(display_path: str) -> bool:
+            normalized = Path(display_path).as_posix()
+            matched = any(spec.check_file(normalized).include is True for spec in compiled)
+            return not matched
+
+        return matches_exclusion
+
+    def matches_inclusion(display_path: str) -> bool:
+        normalized = Path(display_path).as_posix()
+        for spec in compiled:
+            for compiled_pattern in spec.patterns:
+                regex = compiled_pattern.regex
+                if regex is None:
+                    continue
+                for match in regex.finditer(normalized):
+                    if match.groupdict().get("ps_d") != "/":
+                        return True
+        return False
+
+    return matches_inclusion
 
 
 def _build_matcher(
@@ -1129,6 +1158,8 @@ def _build_matcher(
 
 
 type CallableMatcher = Callable[[str], bool]
+type GlobMatcher = Callable[[str], bool]
+type PathMatcher = Callable[[Path], bool]
 
 
 def _normalize_rg_line(line: str) -> str:
