@@ -6,6 +6,7 @@
 
 - [Overview & Curriculum](crafting-agents/index.md)
 - [1. The Core Loop](crafting-agents/01-core-loop.md)
+- [2. Giving the Model Hands](crafting-agents/02-tools.md)
 
 # Using Wisp
 

@@ -42,7 +42,7 @@ Throughout this book, Wisp's architecture is presented not as dogmatic gospel, b
 | Chapter | Core Concept | What You Will Build |
 | :--- | :--- | :--- |
 | **[1. The Core Loop](./01-core-loop.md)** | The Model-Tool Cycle | A streaming, provider-neutral agent turn loop |
-| **2. Giving the Model Hands** | Tools, Filesystem & Safety | Safe tool execution, regex edits, and permission gates |
+| **[2. Giving the Model Hands](./02-tools.md)** | Tools, Filesystem & Safety | Safe tool execution, regex edits, and permission gates |
 | **3. Context Windows & Compaction** | Token Budgets & Memory | Budget estimation and structured compaction snapshots |
 | **4. Staying in Sync** | Steering & Interruption | Cooperative turn boundaries and priority queues |
 | **5. Resilient State** | Persistence & Replay | Append-only JSONL event sourcing and transcript hydration |
